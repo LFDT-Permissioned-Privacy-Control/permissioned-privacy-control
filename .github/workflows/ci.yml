@@ -1,0 +1,263 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - master
+      - main
+  push:
+    branches:
+      - master
+      - main
+
+env:
+  # Pinned to the patch release carrying the standard-library advisory fixes
+  # govulncheck checks for; keep this in lockstep with the go.mod toolchain.
+  GO_VERSION: '1.26.9'
+  NODE_VERSION: '20'
+  # Minimum coverage threshold (percentage).
+  # Set to 44 because explorer/store.go (954 lines of SQL queries against the
+  # block-explorer indexer DB) cannot be unit-tested in CI — the indexer DB is
+  # a separate service not provided here. Raise this threshold as coverage improves.
+  MIN_COVERAGE: 44
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Aikido: this job never pushes, so the checkout token is not needed.
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Check go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Check err.Error leaks in HTTP responses (RD-934)
+        run: bash tools/check-err-leak.sh
+
+      # RD-1166: the OpenAPI document and endpoint inventory are generated
+      # from handler annotations and committed; regenerate and fail on drift
+      # so the published spec can never fall behind the code.
+      - name: Check generated API spec is current (RD-1166)
+        run: |
+          make api-spec
+          git diff --exit-code -- internal/server/apispec site/public/openapi.json API_ENDPOINTS.md
+
+      # RD-1190: determinism guard. The step above proved run-1 == committed.
+      # Regenerate once more: if any generator (swag emission, api-inventory) is
+      # non-deterministic across process invocations, run-2 diverges, the tree
+      # goes dirty, and this git diff fails loudly — instead of leaking out as an
+      # intermittent drift flake on an unrelated PR. Tree-clean by construction
+      # when generation is deterministic. (api-inventory's in-process
+      # determinism is also unit-tested by TestBuildInventory_Deterministic.)
+      - name: Verify API spec generation is deterministic (RD-1190)
+        run: |
+          make api-spec
+          git diff --exit-code -- internal/server/apispec site/public/openapi.json API_ENDPOINTS.md
+
+  vuln:
+    name: Vulnerability Scan
+    runs-on: ubuntu-latest
+    # govulncheck reports known CVEs in Go module dependencies (and flags whether
+    # the vulnerable symbol is actually reachable). This is the gate that would
+    # have caught the golang-jwt CVE-2025-30204 exposure earlier; pairs with the
+    # gomod dependabot block that opens the bump PRs.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Aikido: this job never pushes, so the checkout token is not needed.
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install govulncheck
+        # Pinned (not @latest) to match this workflow's reproducibility policy
+        # (SHA-pinned actions, pinned GO_VERSION): a govulncheck behavior change
+        # shouldn't flip this gate on an unrelated PR. The vulnerability DATABASE
+        # is still fetched live at run time, so new advisories are still caught;
+        # only the tool version is fixed. Bump deliberately.
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  test-go:
+    name: Go Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: privacy_proxy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Aikido: this job never pushes, so the checkout token is not needed.
+        with:
+          persist-credentials: false
+          # The schema-name gate in internal/server/apispec reads the baseline as
+          # committed on the base branch, so it needs origin/main in the local
+          # history; the default shallow checkout has neither the ref nor the
+          # common ancestor. The gate fails loudly rather than skipping when the
+          # ref is missing, so dropping this would turn the Go Tests job red.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run unit tests with coverage
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/privacy_proxy_test?sslmode=disable
+        # -p 1 is required, not a tuning knob: every package here shares the ONE
+        # Postgres service above via TEST_DATABASE_URL, and fixtures clear
+        # global tables between tests — ResetTestDatabase deletes from
+        # access_logs, rbac_audit_log and friends (DELETE rather than TRUNCATE,
+        # chosen there to avoid deadlocks under concurrency; see
+        # internal/db/test_helper.go). Avoiding deadlocks does not avoid data
+        # loss: run packages concurrently and one package's cleanup deletes
+        # rows another package's test has just written, which surfaces as a
+        # random failure far from its cause. `make test-unit` has always used
+        # -p 1 for exactly this reason (Makefile); CI diverged and was flaky.
+        run: |
+          go test ./internal/... -v -race -p 1 -coverprofile=coverage.out -covermode=atomic
+
+      - name: Run every Go E2E build-tag lane through the isolated harness
+        env:
+          E2E_RUN_ID: gha-go-${{ github.run_id }}-${{ github.run_attempt }}
+          E2E_PROJECT: privacy-proxy-e2e-go-${{ github.run_id }}-${{ github.run_attempt }}
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/.tmp/e2e-runs/gha-go-${{ github.run_id }}-${{ github.run_attempt }}
+        run: make e2e-go
+
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+          echo "Total coverage: ${COVERAGE}%"
+
+          # Compare as integers (bash doesn't do float comparison well)
+          COVERAGE_INT=${COVERAGE%.*}
+          if [ "$COVERAGE_INT" -lt "$MIN_COVERAGE" ]; then
+            echo "::error::Coverage ${COVERAGE}% is below minimum threshold of ${MIN_COVERAGE}%"
+            exit 1
+          fi
+          echo "Coverage ${COVERAGE}% meets minimum threshold of ${MIN_COVERAGE}%"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  test-frontend:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Aikido: this job never pushes, so the checkout token is not needed.
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (ESLint, zero warnings)
+        # Gating lint check. Matches RD-959 acceptance criteria:
+        # `eslint . --max-warnings 0` must exit 0 from frontend/. Any error or
+        # warning fails the build. Previously the workflow had no frontend lint
+        # step at all, so lint problems landed unchallenged despite a green badge.
+        run: npx eslint . --max-warnings 0
+
+      - name: Run tests
+        run: npm run test:run
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint, test-go, test-frontend]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Aikido: this job never pushes, so the checkout token is not needed.
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build backend
+        run: go build -o bin/privacy-proxy ./cmd/server
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+  audit-buffer-volume:
+    name: Audit Buffer Volume (RD-1112)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Aikido: this job never pushes, so the checkout token is not needed.
+        with:
+          persist-credentials: false
+
+      # Regression guard for the Dockerfile pre-own step: build the image, mount a
+      # fresh named volume, and assert the non-root runtime user can write the
+      # audit buffer dir. A broken chown passes `docker build` + Go tests but
+      # would fail the async buffer in prod — only this runtime check catches it.
+      - name: Verify async audit buffer is writable by the non-root user
+        run: bash scripts/verify-audit-buffer-volume.sh

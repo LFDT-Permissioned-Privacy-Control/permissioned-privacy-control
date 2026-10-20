@@ -1,0 +1,109 @@
+# Auth Flow Demo
+# Demonstrates privacy-first authentication with ZK proofs and wallet connection
+
+version: "1"
+
+metadata:
+  name: "auth-flow"
+  title: "Privacy-First Authentication"
+  description: "ZK proof login without revealing identity"
+
+video:
+  resolution: { width: 1920, height: 1080 }
+  fps: 60
+  viewport: { width: 1920, height: 1080 }
+  quality:
+    preset: "slow"
+    crf: 15
+    bitrate: "25M"
+    audio_bitrate: "320k"
+    profile: "high"
+    level: "4.2"
+
+voice:
+  provider: "edge"
+  voice_id: "jenny"  # Friendly female voice
+  speed: "+0%"
+
+steps:
+  - id: "intro"
+    action: "navigate"
+    url: "/login"
+    wait: { selector: "[data-testid='login-page']", timeout: 15000 }
+    narration: "Welcome to Open Privacy Suite. Let's explore how we authenticate users without compromising their privacy."
+    pause: 3.0
+    screenshot: true
+
+  - id: "show_auth_card"
+    action: "wait"
+    wait: { selector: "[data-testid='auth-card']", timeout: 5000 }
+    narration: "Unlike traditional logins that expose your identity, we use zero-knowledge proofs. In production, users scan a QR code with the Privado ID app to authenticate."
+    pause: 4.0
+
+  - id: "show_qr_code"
+    action: "wait"
+    wait: { selector: "[data-testid='qr-code']", timeout: 10000 }
+    narration: "Users scan this QR code with their Privado ID wallet to authenticate using zero-knowledge proofs."
+    pause: 4.0
+    screenshot: true
+
+  - id: "wait_for_auth"
+    action: "wait"
+    wait: { selector: "[data-testid='link-wallet-page']", timeout: 15000 }
+    narration: "The proof verifies you meet the criteria without revealing who you are."
+    pause: 3.0
+    screenshot: true
+
+  - id: "wallet_page"
+    action: "wait"
+    wait: { selector: "[data-testid='wallet-connected']", timeout: 15000 }
+    narration: "Now let's link a wallet. Connect your Ethereum wallet to associate your verified identity with on-chain access control."
+    pause: 3.0
+
+  - id: "wallet_connected"
+    action: "wait"
+    wait: { timeout: 2000 }
+    narration: "Our demo wallet is already connected. Users sign a message to cryptographically link their wallet address to their identity."
+    pause: 3.0
+    screenshot: true
+
+  - id: "sign_link"
+    action: "click"
+    selector: "[data-testid='sign-link-btn']"
+    wait: { selector: "[data-testid='address-linked']", timeout: 15000 }
+    narration: "The signature proves ownership without any transaction fees. Your wallet is now linked."
+    pause: 3.0
+    screenshot: true
+
+  - id: "continue_to_success"
+    action: "click"
+    selector: "[data-testid='continue-btn']"
+    wait: { selector: "[data-testid='success-page']", timeout: 10000 }
+    narration: "Let's proceed to your dashboard."
+    pause: 2.0
+
+  - id: "success"
+    action: "wait"
+    wait: { selector: "[data-testid='rpc-card']", timeout: 10000 }
+    narration: "That's it! Your authenticated RPC endpoint is ready. Copy this URL and use it in your dApps just like any other RPC provider."
+    pause: 4.0
+    screenshot: true
+
+  - id: "copy_endpoint"
+    action: "click"
+    selector: "[data-testid='copy-rpc-btn']"
+    narration: "Privacy preserved, access granted. Welcome to the future of authenticated blockchain access."
+    pause: 3.0
+
+branding:
+  watermark:
+    position: "bottom-right"
+    opacity: 0.7
+
+captions:
+  style: "modern"
+  position: "bottom"
+  font_size: 48
+
+export:
+  - { aspect: "16:9", resolution: "1920x1080" }

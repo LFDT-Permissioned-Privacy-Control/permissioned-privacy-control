@@ -1,0 +1,16 @@
+{
+  "name": "privacy-proxy-demos",
+  "version": "1.0.0",
+  "description": "Automated demo recording for Open Privacy Suite",
+  "scripts": {
+    "test": "playwright test",
+    "record": "playwright test --project=recording",
+    "codegen": "playwright codegen"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,175 @@
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "127.0.0.1:${HOST_PORT_DB:-5432}:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=privacy_proxy
+      # RD-1147: password for the restricted runtime role provisioned by
+      # scripts/init-audit-db.sh. Dev-only fixed value, same posture as the
+      # fixed POSTGRES_PASSWORD / Redis password in this file.
+      - AUDIT_APP_PASSWORD=${AUDIT_APP_PASSWORD:-audit-dev-only}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # RD-1147: on first init the CONTAINER provisions the "<db>_audit"
+      # database (mirroring POSTGRES_DB). The backend never issues CREATE
+      # DATABASE — it connects to the already-provisioned audit DB and
+      # migrates it, and fails to start if the DB is absent. Every other
+      # compose file mounts this hook; without it here `make run` came up
+      # with a crash-looping backend on a fresh volume.
+      - ./scripts/init-audit-db.sh:/docker-entrypoint-initdb.d/10-init-audit-db.sh:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d privacy_proxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis for shared state stores (rate limiting, OAuth state, nonces)
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass devpassword123
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "devpassword123", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    ports:
+      - "127.0.0.1:${HOST_PORT_RPC:-8545}:8545"
+    # --steps-tracing enables debug_traceCall support for runtime validation
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--port", "8545", "--steps-tracing", "--block-time", "2"]
+    networks:
+      internal:
+      shared:
+        aliases:
+          - privacy-proxy-anvil
+    healthcheck:
+      test: ["CMD-SHELL", "cast block-number --rpc-url http://localhost:8545 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  proxy-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      target: dev
+      # Build identity (RD-1023). Forwarded from the environment so the
+      # binary reports a real version/commit instead of dev/none/unknown.
+      # `make run`/`dev-stack` export these; a raw `docker-compose up` falls
+      # back to the defaults declared in Dockerfile.backend.
+      args:
+        VERSION: ${VERSION:-dev}
+        GIT_COMMIT: ${GIT_COMMIT:-none}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      # Loopback-only by default. Set HOST_BIND=0.0.0.0 to reach the stack
+      # from another device on your LAN (see docs: Getting Started → LAN access).
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT_PROXY:-8080}:8080"
+    environment:
+      # Run the process in UTC (RD-1005): plain TIMESTAMP columns store
+      # wall-clock components, so a non-UTC process tz would skew RBAC
+      # expiry checks. The DB session is also pinned to UTC in code.
+      - TZ=UTC
+      - NODE_URL=${NODE_URL:-http://anvil:8545}
+      - DATABASE_URL=${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/privacy_proxy?sslmode=disable}
+      - PORT=8080
+      - ENVIRONMENT=development
+      - VERIFIER_ID=did:privado:verifier:dev-0000000000000000
+      - BASE_URL=${BASE_URL:-http://localhost:${HOST_PORT_PROXY:-8080}}
+      - JWT_SECRET=${JWT_SECRET:-dev-jwt-secret-do-not-use-in-production-1234567890}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-dev-refresh-secret-do-not-use-in-production-0987654321}
+      - ADMIN_API_TOKEN=${ADMIN_API_TOKEN}
+      - CROSS_ORG_AUTHORIZATION_ORACLE_MODE=${CROSS_ORG_AUTHORIZATION_ORACLE_MODE:-disabled}
+      - CROSS_ORG_AUTHORIZATION_ORACLE_TOKEN=${CROSS_ORG_AUTHORIZATION_ORACLE_TOKEN:-}
+      - CROSS_ORG_AUTHORIZATION_ORACLE_ORG_IDS=${CROSS_ORG_AUTHORIZATION_ORACLE_ORG_IDS:-}
+      - MOCK_SIGNATURES=true  # Allow mock signatures for demo recordings (never enable in production)
+      - ALLOW_MOCK_LOGIN=true  # Allow mock JWZ tokens for dev/testing (never enable in production)
+      - DEMO_AUTO_AUTH_DELAY=${DEMO_AUTO_AUTH_DELAY:-}  # Auto-complete auth after N seconds for demos (empty = disabled)
+      - ENABLE_TRAVEL_RULE=true  # Enable travel rule compliance enforcement (threshold-based transfer checks)
+      - ORG_ADMIN_VIEW_USER_TXS=${ORG_ADMIN_VIEW_USER_TXS:-false}  # Org-admin audit view of user↔user txs (value preserved, addresses stay [PRIVATE], reveals audit-logged). Off = strict privacy.
+      - PRIVACY_READ_PROFILE=${PRIVACY_READ_PROFILE:-}  # Read privacy profile: standard | strict (participant-only txs/receipts, indexed-self events). Empty = CONFIG_FILE value, else standard. Unknown value refuses to start.
+      - EXTRA_RPC_NAMESPACES_FILE=${EXTRA_RPC_NAMESPACES_FILE:-}  # Path to JSON file with chain-specific RPC methods
+      - DISABLE_COINGECKO=${DISABLE_COINGECKO:-false}  # Set true to disable CoinGecko price fetching
+      - EXPLORER_DATABASE_URL=${EXPLORER_DATABASE_URL:-postgres://postgres:postgres@explorer-postgres:5432/explorer?sslmode=disable}
+      - FRONTEND_URL=http://localhost:${HOST_PORT_UI:-5173}
+      - AZURE_AD_CLIENT_ID=${AZURE_AD_CLIENT_ID:-}
+      - AZURE_AD_CLIENT_SECRET=${AZURE_AD_CLIENT_SECRET:-}
+      - AZURE_AD_TENANT_ID=${AZURE_AD_TENANT_ID:-}
+      - REDIS_URL=${REDIS_URL:-redis://:devpassword123@redis:6379}
+    volumes:
+      - ./rpc-namespaces.json:/app/config/rpc-namespaces.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      anvil:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      internal:
+      shared:
+        aliases:
+          - privacy-proxy-backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  proxy-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT_UI:-5173}:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_TARGET=http://proxy-backend:8080
+      # Empty by default so the UI derives the RPC endpoint from the origin the
+      # browser actually used (config/rpc.ts). /rpc is proxied on the
+      # dashboard's own origin in every serving mode, so a hardcoded
+      # http://localhost here pointed remote browsers — and the Add-to-MetaMask
+      # network — at their own machine. Set it only for a split-origin
+      # deployment where the API is on a different host.
+      - VITE_BACKEND_URL=${VITE_BACKEND_URL:-}
+      - VITE_ALLOW_MOCK_LOGIN=true
+      # SECURITY: Do NOT pass ADMIN_API_TOKEN to the frontend — it would be
+      # visible in the browser. Use JWT-based admin auth or paste the token
+      # into the browser console / localStorage for bootstrap only.
+    depends_on:
+      proxy-backend:
+        condition: service_started
+    networks:
+      - internal
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+
+networks:
+  # Internal network — Open Privacy Suite services only (postgres, backend, anvil, frontend)
+  internal:
+    driver: bridge
+  # Shared network — block-explorer connects here to reach backend and anvil
+  shared:
+    name: ${COMPOSE_NETWORK_NAME:-privacy-proxy_proxy-network}
+    driver: bridge

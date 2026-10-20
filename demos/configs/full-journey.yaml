@@ -1,0 +1,151 @@
+# Full Journey Demo
+# Complete end-to-end walkthrough including authentication, wallet linking, and admin RBAC
+
+version: "1"
+
+metadata:
+  name: "full-journey"
+  title: "Open Privacy Suite: Complete Platform Tour"
+  description: "End-to-end journey from authentication to RBAC management"
+
+video:
+  resolution: { width: 1920, height: 1080 }
+  fps: 60
+  viewport: { width: 1920, height: 1080 }
+  quality:
+    preset: "slow"
+    crf: 15
+    bitrate: "25M"
+    audio_bitrate: "320k"
+    profile: "high"
+    level: "4.2"
+
+voice:
+  provider: "edge"
+  voice_id: "guy"  # Professional male voice
+  speed: "+0%"
+
+steps:
+  # === AUTHENTICATION FLOW ===
+  - id: "intro"
+    action: "navigate"
+    url: "/login"
+    wait: { selector: "[data-testid='login-page']", timeout: 15000 }
+    narration: "Open Privacy Suite is the complete solution for privacy-preserving blockchain access. Let me show you how it works."
+    pause: 3.0
+    screenshot: true
+
+  - id: "auth_explain"
+    action: "wait"
+    wait: { selector: "[data-testid='auth-card']", timeout: 5000 }
+    narration: "First, users authenticate using zero-knowledge proofs. No personal data is ever exposed to the service."
+    pause: 3.0
+
+  - id: "show_qr_code"
+    action: "wait"
+    wait: { selector: "[data-testid='qr-code']", timeout: 10000 }
+    narration: "Users scan this QR code with their Privado ID wallet to authenticate using zero-knowledge proofs."
+    pause: 4.0
+    screenshot: true
+
+  - id: "wait_for_auth"
+    action: "wait"
+    wait: { selector: "[data-testid='link-wallet-page']", timeout: 15000 }
+    narration: "The system verifies you meet the required criteria without learning anything else about you."
+    pause: 2.5
+
+  # === WALLET LINKING ===
+  - id: "wallet_page"
+    action: "wait"
+    wait: { selector: "[data-testid='wallet-connected']", timeout: 15000 }
+    narration: "Next, link a wallet. This creates a connection between your verified credentials and your on-chain identity."
+    pause: 3.0
+
+  - id: "wallet_connected"
+    action: "wait"
+    wait: { timeout: 2000 }
+    narration: "We support MetaMask, WalletConnect, Coinbase Wallet, and more."
+    pause: 2.5
+    screenshot: true
+
+  - id: "sign_link"
+    action: "click"
+    selector: "[data-testid='sign-link-btn']"
+    wait: { selector: "[data-testid='address-linked']", timeout: 15000 }
+    narration: "Sign a message to prove wallet ownership. No transaction fees required."
+    pause: 2.5
+
+  - id: "continue_success"
+    action: "click"
+    selector: "[data-testid='continue-btn']"
+    wait: { selector: "[data-testid='success-page']", timeout: 10000 }
+    pause: 1.5
+
+  # === SUCCESS / RPC ENDPOINT ===
+  - id: "success_page"
+    action: "wait"
+    wait: { selector: "[data-testid='rpc-card']", timeout: 10000 }
+    narration: "Your personalized RPC endpoint is ready. Use this URL in your dApps just like any other RPC provider."
+    pause: 3.5
+    screenshot: true
+
+  # === ADMIN SECTION ===
+  - id: "nav_admin"
+    action: "navigate"
+    url: "/admin/rbac/organizations"
+    wait: { selector: "[data-testid='rbac-manager']", timeout: 10000 }
+    narration: "Administrators manage access control through a dedicated interface. Let's explore the RBAC system."
+    pause: 3.0
+    screenshot: true
+
+  - id: "rbac_overview"
+    action: "wait"
+    wait: { selector: "[data-testid='rbac-tabs']", timeout: 5000 }
+    narration: "Organizations contain groups, and groups define who can access what at the contract and method level."
+    pause: 3.5
+
+  - id: "tab_groups"
+    action: "click"
+    selector: "[data-testid='tab-groups']"
+    wait: { timeout: 2000 }
+    narration: "Groups define collections of users with shared permissions, rate limits, and default claims."
+    pause: 3.0
+    screenshot: true
+
+  - id: "tab_contracts"
+    action: "click"
+    selector: "[data-testid='tab-contracts']"
+    wait: { timeout: 2000 }
+    narration: "Register smart contracts and define exactly which methods are accessible to each group."
+    pause: 3.0
+    screenshot: true
+
+  - id: "tab_users"
+    action: "click"
+    selector: "[data-testid='tab-users']"
+    wait: { timeout: 2000 }
+    narration: "View and manage users, their linked addresses, and group memberships."
+    pause: 3.0
+    screenshot: true
+
+  # === CONCLUSION ===
+  - id: "conclusion"
+    action: "navigate"
+    url: "/login"
+    wait: { selector: "[data-testid='login-page']", timeout: 10000 }
+    narration: "Open Privacy Suite: Privacy-preserving authentication, fine-grained access control, and seamless blockchain connectivity. The infrastructure Web3 deserves."
+    pause: 4.0
+    screenshot: true
+
+branding:
+  watermark:
+    position: "bottom-right"
+    opacity: 0.7
+
+captions:
+  style: "modern"
+  position: "bottom"
+  font_size: 48
+
+export:
+  - { aspect: "16:9", resolution: "1920x1080" }

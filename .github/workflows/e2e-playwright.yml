@@ -1,0 +1,135 @@
+name: E2E (Playwright)
+
+# The Playwright UI/API e2e suite brings up the full stack (docker-compose.e2e.yml:
+# postgres + anvil + proxy-backend + proxy-frontend + a browser runner) and is much
+# heavier than the unit/build gates in ci.yml. It is therefore NOT run on every PR.
+#
+# It runs:
+#   - nightly (catch drift in the shipped UI/e2e behavior),
+#   - on manual dispatch, and
+#   - on any pull request carrying the `e2e` label (add the label, or push to an
+#     already-labeled PR, to opt that PR into a full browser run).
+#
+# This is the permanent home of the RD-1159 acceptance UI coverage: the Playwright
+# `ui` specs under e2e/playwright/tests/ui/ retire the manual v0.12.0 acceptance
+# pass for the dashboard-only checks.
+on:
+  schedule:
+    - cron: '0 3 * * *' # 03:00 UTC nightly
+  workflow_dispatch:
+    inputs:
+      explorer_ref:
+        description: Explorer branch, tag, or SHA used by demo acceptance
+        required: false
+        default: main
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+# Supersede an in-progress run for the same ref when a newer commit arrives.
+concurrency:
+  group: e2e-playwright-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  playwright:
+    name: Playwright E2E
+    # Scheduled and manual runs always execute. On pull requests, gate on the
+    # `e2e` label so normal PR CI stays fast and only opted-in PRs pay the cost.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      E2E_RUN_ID: gha-playwright-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_PROJECT: privacy-proxy-e2e-gha-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_ARTIFACT_DIR: ${{ github.workspace }}/.tmp/e2e-runs/gha-playwright-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Aikido: this job never pushes, so the checkout token is not needed.
+        with:
+          persist-credentials: false
+
+      # Run the Playwright lane through the same isolated harness used on a
+      # developer machine. `make e2e` is intentionally broader (Go, browser,
+      # and privacy); chaos and soak remain explicit long-running targets.
+      - name: Run Playwright e2e suite
+        run: make e2e-playwright
+
+      - name: Ensure this E2E stack is down
+        if: always()
+        run: make e2e-down
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report
+          path: ${{ env.E2E_ARTIFACT_DIR }}/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  demo-acceptance:
+    name: Demo acceptance (proxy + explorer)
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Open Privacy Suite
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Aikido: this job never pushes, so the checkout token is not needed.
+          persist-credentials: false
+          path: privacy-proxy
+
+      - name: Initialize Foundry submodule
+        working-directory: privacy-proxy
+        run: git submodule update --init contracts/lib/forge-std
+
+      - name: Checkout block explorer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gateway-fm/ops-explorer
+          ref: ${{ inputs.explorer_ref || vars.BLOCK_EXPLORER_E2E_REF || 'main' }}
+          path: block-explorer
+          persist-credentials: false
+
+      - name: Checkout chain indexer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gateway-fm/chain-indexer
+          ref: ${{ vars.CHAIN_INDEXER_E2E_REF || 'main' }}
+          path: chain-indexer
+          persist-credentials: false
+
+      - name: Build chain-indexer image
+        working-directory: chain-indexer
+        run: docker build -t ghcr.io/gateway-fm/chain-indexer:$(grep '^INDEXER_VERSION=' ../privacy-proxy/e2e/demo.env | cut -d= -f2) .
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
+        with:
+          version: v1.7.1
+
+      - name: Run demo acceptance suite
+        working-directory: privacy-proxy
+        env:
+          BLOCK_EXPLORER_PATH: ../block-explorer
+        run: make demo-e2e
+
+      - name: Upload demo acceptance report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: demo-acceptance-report
+          path: |
+            privacy-proxy/e2e/playwright/playwright-report/
+            privacy-proxy/e2e/playwright/test-results/
+          retention-days: 14
+          if-no-files-found: ignore

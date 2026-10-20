@@ -1,0 +1,249 @@
+import { Callout } from "@/components/mdx/callout";
+
+export const metadata = {
+  title: "Block Explorer Integration",
+  description:
+    "Documentation for the centralized Block Explorer architecture and Dual-Mode data retrieval.",
+};
+
+# Block Explorer Integration
+
+The Open Privacy Suite provides a centralized, privacy-governed data gateway for the Block Explorer. This architecture ensures that all blockchain data indexed and displayed by the explorer is subject to the same RBAC and privacy policies as direct JSON-RPC traffic.
+
+## Architecture Overview
+
+The integration uses a **Dual-Mode** architecture, allowing the Block Explorer to operate either as a standalone tool or as a privacy-enhanced component of the Open Privacy Suite ecosystem.
+
+```mermaid
+graph TD
+    User["User / Frontend"]
+    BE["Block Explorer Backend<br/><small>DataProvider Abstraction</small>"]
+    Proxy["Open Privacy Suite<br/><small>Explorer API + RBAC</small>"]
+    IDX["chain-indexer<br/><small>Blocks, Txs, Stats</small>"]
+    Eth["Ethereum Node<br/><small>Erigon / Anvil</small>"]
+
+    User --> BE
+    BE -->|"Proxy Mode (REST)"| Proxy
+    BE -->|"Standalone Mode (INDEXER_URL)"| IDX
+    Proxy --> IDX
+    Proxy --> Eth
+    IDX -->|polls| Eth
+
+    style Proxy stroke:#8950FA,stroke-width:2px
+    style BE stroke:#3b82f6,stroke-width:2px
+```
+
+## Dual-Mode Operation
+
+The Block Explorer backend implements a `DataProvider` interface that abstracts data retrieval.
+
+### 1. Standalone Mode (Direct)
+In this mode, the explorer reads chain data from the **chain-indexer** (set `INDEXER_URL`), with its own PostgreSQL database as a limited direct fallback. This is suitable for development or deployments where centralized privacy enforcement is not required. (The `privacy` Go build tag compiles the chain-indexer client out of the binary entirely, so a privacy-mode build cannot use this mode.)
+
+### 2. Proxy-Mediated Mode (Centralized)
+In this mode, the explorer backend acts as a client to the Open Privacy Suite. It fetches all processed blockchain data via the **Explorer Data API**.
+
+<Callout type="important">
+  **Proxy Mode benefits**: All data is filtered according to the user's RBAC
+  permissions. Sensitive addresses can be redacted or pseudonymized before they
+  even reach the explorer frontend.
+</Callout>
+
+## Explorer Data API
+
+The Open Privacy Suite exposes a set of internal REST endpoints specifically for the explorer. These endpoints are typically protected and intended for use by the explorer backend.
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/explorer/blocks` | List recent blocks with pagination |
+| `GET /api/v1/explorer/blocks/:number` | Get detailed block information |
+| `GET /api/v1/explorer/transactions` | List recent transactions |
+| `GET /api/v1/explorer/addresses/:address/stats` | Get address-specific activity stats |
+| *(removed)* | The separate shared-logs endpoint has been replaced by `visibleTo` integration into regular views |
+| `GET /api/v1/explorer/sync/status` | Get indexer synchronization levels |
+
+## Identity Forwarding
+
+When operating in Proxy Mode, the Block Explorer forwards the user's **JWT Identity** to the Open Privacy Suite. This allows the Proxy to:
+
+1. **Identify the User**: Determine which organization and group the user belongs to.
+2. **Apply Policies**: Filter transactions or blocks that the user is not authorized to see.
+3. **Audit Access**: Log every data retrieval request for compliance reporting.
+
+## Configuration
+
+To enable Proxy Mode in the Block Explorer, set `PRIVACY_PROXY_URL` and leave `INDEXER_URL` unset — the presence of `PRIVACY_PROXY_URL` selects proxy mode (setting both, or neither, is rejected at startup):
+
+```bash
+# In Block Explorer environment
+PRIVACY_PROXY_URL=http://privacy-proxy:8080
+```
+
+To enable the Explorer API in the Open Privacy Suite:
+
+```bash
+# In Open Privacy Suite environment
+EXPLORER_DATABASE_URL=postgres://user:pass@explorer-db:5432/explorer
+```
+
+## Authentication / Login Flow
+
+When Privacy Mode is enabled, the Block Explorer uses Open Privacy Suite as its **Identity Provider** via an OAuth 2.0 authorization code flow. There is only one login page — hosted by Open Privacy Suite — and the Block Explorer simply redirects users to it.
+
+```mermaid
+sequenceDiagram
+    participant U as User Browser
+    participant BE as Block Explorer
+    participant PP as Open Privacy Suite
+
+    U->>BE: Click "Sign In"
+    BE->>U: 302 → GET /oauth/authorize (Open Privacy Suite)
+    U->>PP: GET /oauth/authorize?client_id=...&redirect_uri=...
+    PP->>U: 302 → /login?oauth_session=XXX (Open Privacy Suite frontend)
+    U->>PP: Loads login page (QR code or Mock Login in dev)
+    Note over U,PP: User scans QR with Privado wallet,<br/>or clicks Mock Login in dev mode
+    PP->>U: 302 → {redirect_uri}?code=YYY&state=ZZZ (Block Explorer callback)
+    U->>BE: GET /api/auth/callback?code=YYY&state=ZZZ
+    BE->>PP: POST /oauth/token (exchange code for JWT)
+    BE->>U: Set JWT cookie, redirect to explorer
+```
+
+The Block Explorer never handles authentication directly — all credential verification happens inside Open Privacy Suite.
+
+### Configuration
+
+| Variable (Open Privacy Suite) | Description |
+|--------------------------|-------------|
+| `FRONTEND_URL` | URL of the Open Privacy Suite frontend (e.g. `http://localhost:5173`). When set, browser OAuth requests redirect to the React login page instead of serving inline HTML. Must be HTTPS in production. |
+| `ALLOW_MOCK_LOGIN` | Set `true` in development to show a "Mock Login (Skip Wallet)" button on the login page. **Never enable in production.** |
+
+| Variable (Block Explorer) | Description |
+|---------------------------|-------------|
+| `PRIVACY_ENABLED` | Set `true` to show the Sign In button and enable SSO. |
+| `PRIVACY_PROXY_URL` | Internal URL used by the Block Explorer backend for API calls (e.g. `http://privacy-proxy-proxy-backend-1:8080`). |
+| `PRIVACY_PROXY_PUBLIC_URL` | Browser-accessible URL used to construct the OAuth redirect (e.g. `http://localhost:8080`). Defaults to `PRIVACY_PROXY_URL`. |
+| `SSO_CLIENT_ID` | OAuth client identifier sent in the authorize request. Defaults to `explorer`. In production, use the per-environment opaque ID listed in the proxy's `OAUTH_FIRST_PARTY_CLIENTS` (e.g. `explorer-prod-${random}`). |
+| `SSO_CLIENT_SECRET` | Plaintext client secret sent at `/oauth/token` via HTTP Basic (RFC 6749 `client_secret_basic`). The proxy bcrypt-verifies it against the hash stored under this `SSO_CLIENT_ID` in `OAUTH_FIRST_PARTY_CLIENTS`. Required in production; leave empty in dev only if the proxy's allowlist is also empty. |
+| `SSO_REDIRECT_URI` | Callback URL for the Block Explorer after OAuth completes (e.g. `http://localhost:3001/api/auth/callback`). |
+
+### Development Setup
+
+Start Open Privacy Suite first, then Block Explorer:
+
+```bash
+# Open Privacy Suite (with mock login enabled)
+docker compose -p privacy-proxy up -d
+
+# Block Explorer (joins privacy-proxy network)
+PRIVACY_ENABLED=true \
+PRIVACY_PROXY_URL=http://privacy-proxy-proxy-backend-1:8080 \
+PRIVACY_PROXY_PUBLIC_URL=http://localhost:8080 \
+docker compose up -d
+```
+
+<Callout type="note">
+  The `PRIVACY_PROXY_URL` and `PRIVACY_PROXY_PUBLIC_URL` serve different purposes.
+  `PRIVACY_PROXY_URL` is the Docker-internal hostname used for backend-to-backend API calls.
+  `PRIVACY_PROXY_PUBLIC_URL` is the address the **browser** uses for the OAuth redirect —
+  it must be reachable by the user's browser, typically `http://localhost:8080`.
+</Callout>
+
+## Transaction Redaction in the Explorer
+
+When the block explorer displays transaction lists, the redaction engine applies per-transaction privacy rules based on the viewer's identity:
+
+| Scenario | Result |
+|----------|--------|
+| Both `from` and `to` are visible to the viewer | Full transaction shown |
+| Both `from` and `to` are hidden | Transaction dropped entirely |
+| One side is hidden, the other is visible | Hidden side replaced with `[PRIVATE]`; `value`, `inputData`, `error`, `revertReason`, and (if sender is hidden) `nonce` stripped |
+| Sender is redacted (pseudonymous/truncated) | Address masked; `value`, `inputData`, `error`, `revertReason`, and `nonce` stripped |
+
+The `[PRIVATE]` placeholder is rendered in the frontend as a lock icon with the label "Private". Address labels ("Mine", "Disclosed", "My Org", "Public", "Private") appear next to addresses, helping users understand what they are permitted to see and why.
+
+### Strict Visibility Filtering (Pagination & Stats)
+
+To ensure that raw transaction counts never leak, the Explorer API employs SQL-level visibility filtering. When a user requests a paginated list of transactions, interactions that are completely hidden from the user are dropped *before* the results are paginated or counted. 
+
+This provides a strict **behavioral privacy guarantee**:
+- The total transaction count returned for pagination never includes transactions the user is not allowed to see.
+- Pagination works seamlessly without producing "empty" pages or revealing the presence of redacted data.
+- Global Chain Stats and Chart Data reflect only the activity the viewer is authorized to see.
+
+### Participant Visibility
+
+Transaction participants (sender or receiver) always see the counterparty's address in their own transactions, even if the counterparty is otherwise private. This override is **per-transaction only** — the counterparty stays hidden in transactions where the viewer is not a participant.
+
+For example, if Alice sends ETH to Bob and Charlie views the global transaction list, Charlie sees `[PRIVATE] → [PRIVATE]` (or the transaction is dropped entirely). But Alice sees `Alice → Bob` and Bob sees `Alice → Bob`, because both are participants.
+
+Counterparty addresses revealed this way are labeled "Private" in the UI — indicating the address is private but visible because the viewer is a transaction participant.
+
+The participant override also extends to **transaction logs**: when a viewer is the sender or receiver of a transaction, logs emitted by private contracts in that transaction are shown with full topics and data instead of being stripped. This ensures participants can see the results of their own contract calls (e.g., ERC-20 Transfer events from a token contract they interacted with).
+
+### What Grant Holders and Org Admins Can See
+
+Any user whose group has a **contract grant** on a contract sees it with **full visibility** in the explorer — the contract name, address, and all associated transaction data are shown unredacted. This aligns explorer visibility with RPC access: if you can `eth_call` on a contract, hiding its name in the explorer would be security theater.
+
+**Org admins** (`is_org_admin` group or `admin` in `group_access.claims`) see all contracts in their org with full visibility, even without explicit per-contract grants.
+
+However, **individual user wallets (EOAs) remain private** even to org admins and grant holders:
+
+| Activity | Visible to org admin? | Why |
+|---|---|---|
+| Contract calls (user → contract) | Yes, but sender shows as `[PRIVATE]` | Contract is Full, user EOA is Hidden |
+| Contract-to-contract interactions | Fully visible | Both sides are org contracts (Full) |
+| Contract deployments from user EOAs | No (dropped), unless one of the deployment's token transfers involves an org contract (last row) | Deployer EOA is Hidden, `to` is NULL |
+| User-to-user ETH transfers | No (dropped) | Both sides are Hidden EOAs |
+| Token mints to user EOAs | Visible, but recipient shows as `[PRIVATE]` | From (zero addr) is public, to (EOA) is Hidden |
+| A user's transaction with a token transfer into or out of an org contract (the transaction and that transfer) | Yes, but the sender's wallet shows as `[PRIVATE]` (so do contracts the admin cannot see, except a transfer row's token address); calldata and nonce are cleared, and value too unless `ORG_ADMIN_VIEW_USER_TXS` is on | The transaction is kept so the transfer and its transaction agree; keeping it never reveals the sender's wallet. Other transfers and internal calls in the same transaction follow the rows above. A member who is not an admin gets such a transaction only when they can see both sides of one of its transfers (for example a mint into, or a burn from, a contract they hold a grant on) and their grant on the token includes event access |
+
+To see consented user EOA activity, an org admin needs a disclosure grant and reads through the dedicated grant API. Regular Explorer and JSON-RPC endpoints ignore these grants. The Transactions page combines regular and grant-scoped transaction feeds, marks disclosed rows, and removes duplicates. This is a deliberate privacy boundary — org admins manage contracts, not user wallets.
+
+<Callout variant="info" title="Strict read profile">
+  With `PRIVACY_READ_PROFILE=strict` the explorer applies the same rule as JSON-RPC: a transaction and its internal calls reach only a transaction participant, a token transfer reaches only a viewer its Transfer event names in an indexed address parameter, and the admin rows in the table above are not shown. Transaction rows carry no token-transfer count. Lists, counts and search suggestions follow the same rule. See [Strict Read Profile](/docs/security/strict-read-profile).
+</Callout>
+
+### Known Limitations and Design Decisions
+
+**One-side-hidden metadata leakage:** When only one party in a transaction is hidden and the other is public, the transaction survives the SQL visibility filter. The hidden side is masked as `[PRIVATE]`, but the viewer still learns that *some* private party interacted with the visible address — including timing, block number, and gas used. A stricter filter (drop if ANY side is hidden unless viewer is a participant) would eliminate this leak but reduce explorer utility. This is tracked as a design tradeoff.
+
+**Mint visibility:** Token mints from the zero address (`0x000...0`) to a private recipient are visible to non-participants because the zero address is treated as public. This reveals that a private user received tokens, when, and from which contract. This could be tightened if the stricter drop rule above is adopted.
+
+### Nonce Redaction
+
+The `nonce` field reveals how many transactions a sender has submitted over their lifetime. When the sender is hidden or redacted, the backend sets `nonce` to `null` (omitted from JSON) to prevent leaking this activity count. When only the **receiver** is hidden, nonce is preserved because it belongs to the public sender.
+
+### Event Log Data Field Scanning
+
+When an event log's emitting contract has a registered and verified ABI, the redaction engine scans the non-indexed `data` field for `address`-typed parameters. Any address slot whose visibility is not Full (i.e., the address is redacted or hidden) is zeroed out before the log is returned. Indexed address parameters in `topics[1]`–`topics[3]` are always scanned regardless of ABI registration.
+
+**Limitation:** For contracts without a registered ABI, the `data` field is returned unmodified. Private addresses embedded in non-indexed parameters of unverified contracts will not be redacted from the `data` field.
+
+
+### Limitation: Value Inference from Balance History
+
+Stripping the `value` field on mixed-party transactions **does not guarantee financial privacy**. The transferred amount may still be inferable from the public address's balance deltas across adjacent blocks. See [Privacy Requirements](/docs/security/privacy-requirements) for the full analysis.
+
+<Callout type="warning">
+  **This is a partial mitigation, not a privacy guarantee.** The `value` field is
+  not shown directly, which removes the most obvious leakage path. However, any
+  observer with access to the public address's balance history can reconstruct
+  the amount. Stronger financial privacy for mixed-party transactions would require
+  hiding the public address's balance history, which conflicts with a block
+  explorer's core purpose.
+</Callout>
+
+---
+
+## Per-Transaction Visibility (`visibleTo`)
+
+When a transaction is submitted with the `visibleTo` parameter (renamed from `logVisibleTo`), the specified DIDs are stored alongside the transaction hash. Transactions shared via `visibleTo` appear in the regular Transactions and Token Transfers pages for the listed DIDs -- no separate endpoint is needed.
+
+### How it works
+
+1. A transaction sender includes `visibleTo: ["did:example:bob"]` in their transaction metadata.
+2. The proxy strips the field and stores the mapping before forwarding the transaction to the node.
+3. When Bob views the Transactions or Token Transfers pages, the visibility filter includes these shared tx hashes, so they appear alongside Bob's own transactions.
+4. Each event log from these transactions is checked against the grant and event rules of the **contract that emitted it**. On a contract Bob holds a grant for, `visibleTo` lets an allowlisted event pass a failed `must_be=self` or other parameter rule; embedded addresses Bob may not see are still zeroed.
+
+This is purely additive -- it never restricts existing event rule access. If an emitting contract opts in to `allow_visibleto_unlock`, an eligible listed Bob instead sees every log that contract emitted in that one transaction on the transaction's log view, with its full event payload -- the same result as through `eth_getLogs` and the receipt. Other contracts in the same transaction, and later transactions, are evaluated under their own settings. See [Response-Level Privacy Filtering](/docs/security/response-filtering) for the full rules and eligibility requirements.

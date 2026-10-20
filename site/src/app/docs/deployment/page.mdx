@@ -1,0 +1,201 @@
+import { Callout } from "@/components/mdx/callout";
+import { Step } from "@/components/mdx/step";
+export const metadata = {
+  title: "Contract Deployment",
+  description:
+    "How to deploy smart contracts through the Open Privacy Suite using runtime tracing.",
+};
+
+# Contract Deployment
+
+This guide is for **users deploying their own contracts through the proxy**. If you're an operator rolling out the Open Privacy Suite stack itself (compose manifests, secrets, trust zones), see [Operator Deployment](/docs/operator-deployment) instead.
+
+The proxy validates all transactions at runtime using `debug_traceCall`, so deploying is nearly identical to deploying on any public chain.
+
+### Prerequisites
+
+- User account with `deploy` permission in an organization
+- JWT access token (obtained from web UI after ZK proof authentication)
+- Foundry or Hardhat installed
+
+### Steps
+
+<Step number={1} title="Get Your Access Token">
+
+Open the Open Privacy Suite web UI (e.g., `http://localhost:5173`), authenticate with your Privado ID wallet (scan QR code), then go to **Settings** > **Developer** > **Copy Access Token**.
+
+</Step>
+
+<Step number={2} title="Configure Your Environment">
+
+```bash
+# Set the authorization header for all RPC requests
+export ETH_RPC_HEADERS="Authorization: Bearer YOUR_JWT_TOKEN_HERE"
+
+# Set the RPC URL
+export ETH_RPC_URL="http://localhost:8080/rpc"
+```
+
+</Step>
+
+<Step number={3} title="Deploy with Foundry">
+
+```bash
+# Standard Foundry deployment -- no changes needed
+forge script script/Deploy.s.sol \
+  --rpc-url $ETH_RPC_URL \
+  --broadcast \
+  --private-key $PRIVATE_KEY
+```
+
+Or with a keystore:
+
+```bash
+forge script script/Deploy.s.sol \
+  --rpc-url $ETH_RPC_URL \
+  --broadcast \
+  --account myKeystore \
+  --sender 0xYourAddress
+```
+
+</Step>
+
+### Deploy with Hardhat (Alternative)
+
+```javascript
+// hardhat.config.js
+module.exports = {
+  networks: {
+    privacy: {
+      url: process.env.ETH_RPC_URL,
+      httpHeaders: {
+        "Authorization": `Bearer ${process.env.PRIVACY_TOKEN}`
+      },
+      accounts: [process.env.PRIVATE_KEY]
+    }
+  }
+};
+```
+
+```bash
+export PRIVACY_TOKEN="YOUR_JWT_TOKEN_HERE"
+npx hardhat run scripts/deploy.js --network privacy
+```
+
+### Deploy with Cast (Alternative)
+
+```bash
+# Single contract deployment
+cast send --create \
+  --rpc-url $ETH_RPC_URL \
+  --private-key $PRIVATE_KEY \
+  $(cat out/MyContract.sol/MyContract.bin)
+```
+
+## How It Works
+
+When you send a transaction through the proxy:
+
+```mermaid
+graph TD
+    TX["Your Transaction"]
+    TX --> V
+
+    subgraph V["Open Privacy Suite"]
+        direction TB
+        S1["1. Validate JWT token"]
+        S2["2. Check user has 'deploy' claim"]
+        S3["3. Run debug_traceCall simulation"]
+        S4{"4. Verify all call targets"}
+        S5["5. Forward to node"]
+
+        S1 --> S2 --> S3 --> S4
+        S4 -->|"Your org's contracts ✓"| S5
+        S4 -->|"Precompiles ✓"| S5
+        S4 -->|"Shared infra ✓"| S5
+        S4 -->|"Other org's contracts ✗"| DENY["DENIED"]
+    end
+
+    S5 --> Node["EVM Node"]
+
+    style V stroke:#8950FA,stroke-width:2px
+    style DENY fill:#fecaca,stroke:#ef4444
+```
+
+### Auto-Registration After Deployment
+
+Contracts deployed through the proxy are **automatically registered** in the RBAC system. No manual registration step is required.
+
+**Prerequisites:** The deployer must be a member of a group with the `deploy` claim in their org. An admin creates this group and adds deployers to it before they start deploying.
+
+**Plain CREATE deployments** (`eth_sendTransaction` without `to`):
+
+1. Proxy verifies the user has the `deploy` claim (403 if not).
+2. Proxy computes the deterministic CREATE address from `keccak256(rlp([sender, nonce]))` _before_ forwarding.
+3. Address is immediately pre-registered to the deployer's org (closes the cross-org access window).
+4. Transaction is forwarded to the node.
+5. On successful mining: pre-registration is finalized as a full `Contract` record (`auto_registered: true`, `via: plain_create`). A `contract_grant` is added to the deployer's existing deploy group — no new group is created.
+6. On revert: pre-registration is cleaned up.
+
+## Token Refresh
+
+Access tokens expire after 5 minutes (production; dev/mockauth builds use 30 minutes). To refresh:
+
+```bash
+# Get a new token from the web UI, or use the refresh endpoint:
+curl -X POST http://localhost:8080/refresh \
+  -H "Content-Type: application/json" \
+  -d '{"refresh_token": "YOUR_REFRESH_TOKEN"}'
+
+# Update your environment
+export ETH_RPC_HEADERS="Authorization: Bearer NEW_ACCESS_TOKEN"
+```
+
+## Troubleshooting
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `401 Unauthorized` | Invalid or expired token | Get a new token from the web UI |
+| `403 transaction denied: runtime contract creation requires the deploy claim` | User lacks deploy permission | Ask org admin to grant `deploy` claim |
+| `403 transaction denied: cross-org access not permitted` | A transaction's runtime trace enters another org's contract | Only interact with your org's contracts |
+| `404 method not found` | Method not in user's allowlist (RBAC denials are masked as an opaque 404, not a 403) | Check group permissions |
+
+## Security Model
+
+| Layer | Check | Timing |
+|-------|-------|--------|
+| Plain CREATE Pre-reg | CREATE address pre-registered before tx forwarded | Deploy |
+| Auto-Registration | Contract added to RBAC after mine | Deploy |
+| Runtime Calls | All call targets authorized | Every tx |
+
+- **Cross-org calls**: Contract in Org A cannot call contract in Org B.
+- **Intra-org calls**: Contracts within the same org can call each other freely.
+- **Shared infrastructure**: Approved shared contracts accessible to all orgs.
+- **Precompiles**: Standard EVM precompiles (`0x01`--`0x09`) are always allowed.
+
+---
+
+## Production Deployment
+
+This section covers production hardening considerations beyond contract deployment. For the full production checklist, see [Security](/docs/security#production-checklist). For environment variable reference, see [Configuration](/docs/configuration).
+
+### HTTPS and Private Networks
+
+The proxy enforces HTTPS for the `FRONTEND_URL` in production (`ENVIRONMENT=production`). However, **private network addresses are exempt** from this requirement -- HTTP is allowed when the URL points at:
+
+- RFC1918 private addresses (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
+- Tailscale addresses (`100.64.0.0/10`)
+- IPv6 Unique Local Addresses (ULA, `fc00::/7`)
+
+This allows local and VPN-based development/staging environments to run without TLS while still enforcing HTTPS for internet-facing deployments.
+
+### Frontend in Production
+
+In production, the admin frontend is served by **nginx** (not the Vite development server). The nginx container listens on port 80 internally and serves the pre-built static assets. The production Docker Compose file configures this automatically. Do not use the Vite dev server (`proxy-frontend` on port 5173) in production -- it is not designed for production traffic and exposes debugging features.
+
+### Explorer Database Graceful Degradation
+
+The backend starts successfully even if the explorer database is unavailable. It logs a warning and continues serving all non-explorer endpoints, retrying the connection in the background. Explorer API endpoints return errors until the connection is established.
+
+This supports deployment scenarios where the explorer database is provisioned after the proxy.
+

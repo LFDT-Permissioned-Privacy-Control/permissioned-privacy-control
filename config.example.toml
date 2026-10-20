@@ -1,0 +1,131 @@
+# =============================================================================
+# Open Privacy Suite — example configuration file
+# =============================================================================
+# Point the proxy at this file with the CONFIG_FILE environment variable:
+#
+#     CONFIG_FILE=/etc/privacy-proxy/config.toml
+#
+# Precedence (highest first):  environment variable  >  this file  >  built-in
+# default. Anything set in the environment overrides the value here, so 12-factor
+# / Kubernetes overrides and secret injection keep working unchanged.
+#
+# Keys are the canonical environment-variable names (DATABASE_URL, BASE_URL, …).
+# Values are typed — strings, booleans and numbers are all accepted; e.g.
+# `ENABLE_TRAVEL_RULE = true` and `ENABLE_TRAVEL_RULE = "true"` are equivalent.
+# Nested tables and arrays are not supported.
+#
+# SECRETS ARE NOT ALLOWED HERE. Keep JWT_SECRET, JWT_REFRESH_SECRET,
+# ADMIN_API_TOKEN, OPERATOR_API_TOKEN, AZURE_AD_CLIENT_SECRET, DATABASE_URL,
+# AUDIT_DATABASE_URL, AUDIT_ADMIN_DATABASE_URL, EXPLORER_DATABASE_URL,
+# REDIS_URL / REDIS_PASSWORD, RPC_API_KEY, OAUTH_FIRST_PARTY_CLIENTS and similar in the
+# environment or your secrets manager. The proxy REFUSES TO START if it finds
+# one of these in this file.
+#
+# Copy and trim:  cp config.example.toml config.toml
+# =============================================================================
+
+# Schema version. REQUIRED. The proxy refuses to start on a missing or
+# unsupported version, so a stale file fails loudly instead of being mis-read.
+version = 1
+
+# -----------------------------------------------------------------------------
+# Core
+# -----------------------------------------------------------------------------
+ENVIRONMENT = "production"                       # "production" or "development"
+BASE_URL = "https://proxy.example.com"           # public URL (OAuth callbacks, CORS)
+NODE_URL = "http://eth-node:8545"                # upstream Ethereum JSON-RPC node
+PORT = "8080"                                    # server listen port
+# CORS_ALLOWED_ORIGINS = "https://explorer.example.com"
+# TRUSTED_INTERNAL_CIDRS = "10.100.0.0/16"       # appended to the built-in list
+
+# Database / Redis — connection STRINGS are secrets; set them in the environment:
+#   DATABASE_URL, EXPLORER_DATABASE_URL, REDIS_URL
+#
+# Separate append-only audit database for access_logs (RD-1147). access_logs
+# ALWAYS lives in its OWN Postgres database — the main database no longer has an
+# access_logs table. Set BOTH DSNs in the environment (they are secrets — DSNs
+# with passwords):
+#   AUDIT_ADMIN_DATABASE_URL — admin/owner role: runs the lean audit-DB
+#                              migrations and retention prune (DELETE).
+#   AUDIT_DATABASE_URL       — runtime role: MUST connect as the RESTRICTED
+#                              privacy_proxy_app role, or the append-only seal
+#                              won't bite.
+# If unset, both are DERIVED from DATABASE_URL as "<name>_audit" on the same
+# server (reusing DATABASE_URL's owner credentials, so the seal is NOT enforced
+# on the derived default). The app connects to an already-provisioned audit
+# database and migrates it — it NEVER runs CREATE DATABASE (infra provisions it).
+
+# -----------------------------------------------------------------------------
+# Authentication (Privado ID / Billions)
+# -----------------------------------------------------------------------------
+VERIFIER_ID = "did:privado:verifier:your-network-name"
+REQUIRE_PROOF_OF_HUMANITY = true
+# PRIVADO_RPC_URL = "https://rpc-mainnet.privado.id"
+# BILLIONS_RPC_URL has no default: set it to let Billions-app wallets sign in.
+# While unset, that network is refused with a clear message and the login page
+# advertises Privado ID only.
+# BILLIONS_RPC_URL = "https://billions-rpc.example.com"
+# BILLIONS_STATE_CONTRACT = "0x3C9acB2205Aa72A05F6D77d708b5Cf85FCa3a896"
+# BILLIONS_ISSUER_DID = "did:polygonid:polygon:main:billions-issuer-did"
+# JWT_SECRET / JWT_REFRESH_SECRET / ADMIN_API_TOKEN are secrets — set via env.
+
+# -----------------------------------------------------------------------------
+# Azure AD / Microsoft Entra ID (optional SSO + service-principal M2M login)
+# -----------------------------------------------------------------------------
+# AZURE_AD_CLIENT_ID = ""
+# AZURE_AD_TENANT_ID = "common"
+# AZURE_AD_CLIENT_SECRET is a secret — set via env.
+
+# -----------------------------------------------------------------------------
+# Runtime tracing (cross-org isolation)
+# -----------------------------------------------------------------------------
+RUNTIME_TRACING_ETH_CALL_ENABLED = true
+ETH_CALL_TRACE_TIMEOUT = "5s"
+RUNTIME_TRACING_INTRA_ORG_GRANTS_ENABLED = false
+MAX_CONCURRENT_REQUESTS = 50
+# Shared concurrency cap for ANONYMOUS /rpc traffic (requests with no JWT). The
+# per-user cap above is keyed by identity and cannot bound anonymous callers, so
+# this bounds the total in-flight work an unauthenticated flood can create.
+# Defaults to MAX_CONCURRENT_REQUESTS; set 0 to disable.
+MAX_CONCURRENT_ANONYMOUS_REQUESTS = 50
+# EXTRA_RPC_NAMESPACES_FILE = "./rpc-namespaces.json"
+
+# -----------------------------------------------------------------------------
+# Compliance & retention
+# -----------------------------------------------------------------------------
+ENABLE_TRAVEL_RULE = false
+COMPLIANCE_DEFAULT_MODE = "enforce"              # "enforce" or "monitor"
+RETENTION_ACCESS_LOGS = "2160h"                  # 90 days
+RETENTION_COMPLIANCE_LOGS = "61320h"             # ~7 years
+MAX_ACCESS_LOG_ROWS = 0                          # 0 = no FIFO cap
+ORG_ADMIN_VIEW_USER_TXS = false
+PRIVACY_READ_PROFILE = "standard"               # "standard" or "strict" (see docs: Configuration)
+
+# -----------------------------------------------------------------------------
+# Auto-KYC provisioning policy (RD-1131)
+# -----------------------------------------------------------------------------
+# When true, a NEWLY provisioned identity of that class is created already
+# KYC-verified, skipping the manual KYC gate. Default false everywhere.
+# RELAXES A COMPLIANCE CONTROL — enable only with Compliance/Legal sign-off.
+# Existing users are never affected (KYC stays admin-managed once a row exists).
+AUTO_KYC_PRIVADO = false                         # Privado ID (incl. OAuth redirect)
+AUTO_KYC_AZURE_USER = false                      # Azure AD interactive SSO users
+AUTO_KYC_AZURE_SERVICE_PRINCIPAL = false         # Azure AD M2M service principals
+
+# -----------------------------------------------------------------------------
+# Upstream RPC API keys
+# -----------------------------------------------------------------------------
+RPC_API_KEY_HEADER = "Authorization"
+# RPC_API_KEY and RPC_API_KEY_ENCRYPTION_KEY are secrets — set via env.
+# RPC_API_KEY_ENCRYPTION_KEY must be valid 32-byte hex; the proxy refuses to
+# start on an invalid value instead of silently storing keys in plaintext.
+# Rotate it with: privacy-cli reencrypt-rpc-keys --old-key ... --new-key ...
+
+# EXPLORER_PSEUDONYM_KEY (optional, recommended in production) makes explorer
+# address pseudonyms non-enumerable. It is a secret — set via env, not here.
+
+# -----------------------------------------------------------------------------
+# Audit log integrity
+# -----------------------------------------------------------------------------
+AUDIT_INTEGRITY_VERIFY_INTERVAL = "15m"          # 0 disables the scheduled verifier
+# AUDIT_TAMPER_WEBHOOK_URL — may carry a token; set via env.

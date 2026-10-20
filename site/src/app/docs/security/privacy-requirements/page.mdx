@@ -1,0 +1,323 @@
+import { Callout } from "@/components/mdx/callout";
+
+export const metadata = {
+  title: "Privacy Requirements & Guarantees",
+  description:
+    "What Open Privacy Suite protects, what it does not, and what operators must do to achieve full coverage.",
+};
+
+# Privacy Requirements & Guarantees
+
+This page describes what the Open Privacy Suite system guarantees about data visibility, what its current limitations are, and what operators must configure to achieve full protection.
+
+---
+
+## What Is Protected
+
+Private addresses and their transaction activity are hidden from unauthorized viewers. The system enforces this at two layers:
+
+1. **JSON-RPC proxy layer** — when a client queries the Ethereum node directly through the proxy (e.g. `eth_getTransactionByHash`), responses are filtered based on whether the caller is a participant in the transaction. Non-participants receive `null` or have individual entries removed from arrays.
+
+2. **Explorer API layer** — when the block explorer fetches structured data through the Open Privacy Suite's Explorer API, each entity (transaction, log, token transfer, etc.) is individually processed through the redaction engine. Addresses are replaced with `[PRIVATE]`, values zeroed, and entries dropped according to the viewer's own permissions. Consent-based [disclosure](/docs/disclosure) is available through separate grant APIs.
+
+Both layers work in concert. A viewer who bypasses the block explorer and queries the JSON-RPC endpoint directly will receive the same privacy enforcement — the proxy is the sole gateway.
+
+This page describes the default `standard` read profile. With `PRIVACY_READ_PROFILE=strict`, both layers return a transaction, receipt or internal call only to a transaction participant and an event only to a viewer named by one of its indexed address parameters; see [Strict Read Profile](/docs/security/strict-read-profile).
+
+---
+
+## Protection by Data Type
+
+### Transactions
+
+| Field | What an unauthorized viewer sees |
+|-------|----------------------------------|
+| `from` | `[PRIVATE]` |
+| `to` | `[PRIVATE]` |
+| `value` (ETH amount) | Hidden (zero / omitted) |
+| `inputData` (calldata) | Hidden (omitted) |
+| `nonce` | Hidden (omitted) — prevents transaction-count fingerprinting of the sender |
+| `error` / `revertReason` | Hidden (omitted) |
+| `contractAddress` (deploy txs) | `[PRIVATE]` (revealed only to the deployer or a viewer with access to the contract) |
+| Gas parameters (`gasUsed`, `gasPrice`, etc.) | Visible — see known limitations below |
+
+When both the sender and receiver of a transaction are private, the transaction is dropped from the response entirely. A viewer cannot determine that the transaction exists.
+
+When one side is private and the other is public, the transaction remains visible but the private party is shown as `[PRIVATE]` and all sensitive financial fields are hidden.
+
+**Coherence with token transfers.** A tx that calls a token contract has its EVM-level `to` set to the token contract address — separate from the actual recipient on the ERC-20 transfer log. When the transfer surfaces to the viewer (because one of its participants is visible to them), the parent tx row also surfaces, so `/transactions` is always a superset of `/transfers`. Field-level redaction still applies — the EVM-level `from` and `to` follow the same `[PRIVATE]` / real-address rules described above; only the row-survival decision is unified.
+
+### Token Transfers
+
+| Field | What an unauthorized viewer sees |
+|-------|----------------------------------|
+| `from` | `[PRIVATE]` |
+| `to` | `[PRIVATE]` |
+| `value` (token amount) | Hidden (zero / omitted) |
+| `tokenAddress` | Visible — the token contract itself is public infrastructure |
+
+The same drop rule applies: if both sides are private, the transfer record is removed entirely.
+
+### Event Logs
+
+Event log visibility depends on the privacy level of the **emitting contract**, not the transaction parties.
+
+| Scenario | What an unauthorized viewer sees |
+|----------|----------------------------------|
+| Emitting contract is private (Hidden) | Entire log entry removed — viewer cannot see that the log exists |
+| Emitting contract is private (Redacted) | Log kept; emitter address shown as `[PRIVATE]`; all topic slots and `data` field zeroed |
+| Emitting contract has **no registered ABI** | Entire log denied at the RPC layer regardless of `event_rules` (admin viewers excepted). Operators must register an ABI before any event becomes visible. |
+| Emitting contract is public + ABI registered | Log kept; indexed address parameters (topics[1]–topics[3]) scanned for private addresses; non-indexed address parameters in `data` decoded and zeroed |
+
+For anonymous Solidity events (declared with the `anonymous` keyword), `topics[0]` may contain an indexed address and is scanned as well.
+
+For events with a **dynamic-typed payload** (e.g. `bytes`, `string`, or dynamic arrays in `data`), the proxy cannot statically prove every embedded address has been scrubbed. The default behaviour is fail-closed — such logs are denied. Operators who explicitly accept the trade-off can opt-in **per contract** via the `events_allow_dynamic_payload` flag on the contract record (M15 follow-up). The flag is per-contract by design: it never globalises, and admin viewers still go through the contract-grant check before bypass applies.
+
+<Callout type="note">
+  ABI registration is **mandatory** for any contract whose events should be
+  visible: without one the proxy cannot decode non-indexed `address` parameters
+  and falls closed (denies all logs from that contract). Either upload a custom
+  ABI via the admin API, or set the contract's `metadata.token_type` to a
+  built-in registry value (`"ERC20"` or `"ERC721"`). The grant create/update
+  endpoints reject non-deny `event_rules` up-front when no ABI is resolvable,
+  so this constraint is surfaced at configuration time rather than at runtime.
+</Callout>
+
+### Token Holders
+
+| Scenario | What an unauthorized viewer sees |
+|----------|----------------------------------|
+| Address is Hidden | Holder entry removed from the list entirely |
+| Address is Redacted | Entry shown as `[PRIVATE]`; balance and percentage hidden |
+| Address is visible | Full holder entry shown |
+
+### Blocks
+
+Block-level data is always public. Blocks are consensus-layer infrastructure, not user activity, and there is no grant or visibility mechanism for block producers.
+
+| Field | Visibility |
+|-------|-----------|
+| `number`, `hash`, `timestamp` | Always public |
+| `gasUsed`, `gasLimit`, `baseFeePerGas` | Always public |
+| `miner` | Always public |
+| `transactions` (hashes only) | Always public |
+| `transactions` (full objects) | Per-transaction participant check applied; non-participant transactions removed |
+| `logsBloom` | Always replaced with all-zero (256 bytes) on every block-returning response, regardless of viewer |
+
+---
+
+## Disclosure Levels
+
+Disclosure grants affect only dedicated grant endpoints. They never change visibility, masking, lists, counts, or address access on regular JSON-RPC or Explorer APIs, in either read profile. The Explorer Transactions page combines the regular feed with grant-scoped transactions and labels disclosed rows.
+
+| Grant API response | Full | Pseudonymous | Redacted (including empty stored level) |
+|---|---|---|---|
+| Subject | Real address | Stable alias | `[PRIVATE]` |
+| Counterparty | Real address | Grant-specific alias, or `Mine` for the viewer | `[PRIVATE]` |
+| Transaction hash and value | Included | Withheld | Withheld |
+| Calldata and detail lookup | Full-only detail endpoint, within scope | Unavailable | Unavailable |
+| Timing, block/index, gas, status, direction | Included | Included | Included |
+
+The block/index position is disclosed at all levels so the client can order and de-duplicate rows. A viewer with raw-chain access can identify the transaction from that position. Non-Full responses omit ENS names and the subject DID. Set `EXPLORER_PSEUDONYM_KEY` in production to prevent candidate-address guessing against aliases and opaque routing identifiers.
+
+Each grant keeps its own consented dates, counterparty/contract filter, permitted data types, and disclosure level. Requester membership, grant expiry and revocation are checked on every read. Approval can narrow consent but cannot widen it. A regular row and a disclosed row may be combined for display, but a grant never changes what a regular API call returns.
+
+[Selective Disclosure](/docs/disclosure) describes the request, approval and audit workflow. View-as disables grant access and removes disclosed rows from the composed page.
+
+---
+
+## Row-survival rules per surface
+
+The matrix above describes how individual *fields* render once a row is on
+its way to the client. This section pins the orthogonal axis: which rows
+**survive at all** vs which rows are dropped before they ever reach
+field-level redaction. Confusing the two has been the root cause of every
+cross-surface coherence bug to date, so they are
+kept as separate tables.
+
+Outcomes:
+
+- **drop** — the row is removed from the response entirely; the viewer
+  cannot determine it existed.
+- **keep + `[PRIVATE]`** — row stays in the response with private addresses
+  rendered as `[PRIVATE]`; financial fields (value, calldata, error) are
+  cleared. Timing / block / gas remain visible.
+- **keep + real** — row stays with the granted-side address shown as its
+  real hex.
+
+
+| Surface | Own tx (viewer is participant) | RBAC-visible (org member sees own-org contracts) | Hidden (no relation) | Any disclosure grant |
+|---|---|---|---|---|
+| `GET /transactions` (list) | keep + real | keep + real | drop | No additional access |
+| `GET /transactions/:hash` (by-hash) | keep + real | keep + real | 404 | No additional access |
+| `GET /transactions/:hash/transfers` | keep + real | keep + real | drop | No additional access |
+| `GET /transactions/:hash/internal` | keep + real | keep + real | drop | No additional access |
+| `GET /transactions/:hash/logs` | keep (participant override) | keep (emitting-contract visible) | drop (emitting contract Hidden) | No additional access |
+| `GET /block/:n` → embedded txs | per-tx participant check | per-tx visibility check | drop | No additional access |
+
+**Where the "inherits parent" rows come from.** The internal-tx / transfer
+/ log feeds for a given `tx_hash` route their drop decision through the
+parent tx's allowlist (`VisibilityFilter.VisibleTxHashes` →
+`RedactOpts.VisibleTxHashes`). When the parent tx survives, every derived
+row for that hash survives too — see "Coherence invariants" below for
+the unified-path contract.
+
+### `ORG_ADMIN_VIEW_USER_TXS` admin flag
+
+When the deployment flag `ORG_ADMIN_VIEW_USER_TXS` is set AND the viewer
+is an org-admin, rows that would `drop` under the strict-privacy table
+above instead become **keep + `[PRIVATE]` with value preserved**. The
+goal of the flag is a volume / timing audit lens — counterparty addresses
+are NEVER revealed by the flag, only the existence and amount of the row.
+
+Under `PRIVACY_READ_PROFILE=strict` the flag has no effect: an org admin
+sees only transactions they participate in (see
+[Strict Read Profile](/docs/security/strict-read-profile)).
+
+| Row class | Flag off | `ORG_ADMIN_VIEW_USER_TXS` on (admin viewer) |
+|---|---|---|
+| `bothHidden` tx (both `from` and `to` Hidden/Redacted to admin) | drop | keep + `[PRIVATE]` / `[PRIVATE]`, value preserved, timing visible |
+| `bothHidden` token transfer | drop | keep + `[PRIVATE]` / `[PRIVATE]`, amount preserved |
+| `bothHidden` internal tx | drop | keep + `[PRIVATE]` / `[PRIVATE]`, value preserved |
+| Contract deployment by Hidden deployer | drop | keep + `[PRIVATE]` deployer, contract address `[PRIVATE]` (unless the admin has org access to it), value preserved |
+
+Field-level redaction from the earlier matrix still applies on top of the
+admin flag: addresses stay `[PRIVATE]`, calldata stays stripped, nonces
+stay zeroed. Every row kept ONLY because the flag was on increments
+`RedactStats.AdminUserTxsRevealed`, and the server emits one
+`rbac_audit_log` entry per request when the counter is non-zero so
+operators have a record of elevated views.
+
+The flag does not affect the field-rendering matrix above (`full` /
+`pseudonymous` / `redacted` substitutions are independent of the flag) —
+it only changes the row-survival decision, exactly like `VisibleTxHashes`.
+
+### Unified opts builder — list path and by-hash share the same visibility filter
+
+Every explorer handler that needs to drop or render rows for a viewer
+goes through one of two helpers, and both compose the same primitives.
+This is a contract for handler authors: **do not roll your own**
+`RedactOpts`. The current call surface, and the only shape we support
+going forward:
+
+- **List handlers** (`/transactions`, `/transfers`, …): resolve
+  `isViewerAdmin` once, call
+  `s.buildVisibilityFilter(ctx, viewerDID, isAdmin)` to get a
+  `VisibilityFilter` (used by the SQL allowlist), then derive
+  `RedactOpts` via `redactOptsFromFilter(filter)`. Set `ViewerIsAdmin`
+  to the same value and apply the `applyAdminTxView` wiring on the
+  returned opts.
+- **Single-item handlers** (`/transactions/:hash`,
+  `/transactions/:hash/internal`, …): call
+  `s.buildRedactOptsForViewer(ctx, viewerDID)`. This helper internally
+  delegates to `buildVisibilityFilter` → `redactOptsFromFilter`, then
+  applies admin-flag wiring — guaranteeing list-path and by-hash see the
+  identical `VisibleTxHashes` set, the identical `ViewerIsAdmin` value,
+  and the identical `OrgAdminViewUserTxs` flag.
+
+A handler that constructs `explorer.RedactOpts{}` by hand will silently
+skip the transfer-participant union, the `visibleTo` shares,
+and the admin-flag wiring — every cross-surface coherence invariant
+breaks. PR review must reject hand-rolled opts.
+
+### Coherence invariants
+
+The following invariants are pinned by integration tests. Failing
+any one of them is a privacy or UX regression:
+
+1. **`/transactions` ⊇ `/transfers`**.
+   If a token-transfer row with `tx_hash=X` surfaces to the viewer
+   in `/transactions/:hash/transfers` or any list-level transfer
+   feed, then `/transactions` (list) also contains a row for `X`.
+   Previously the two drop predicates evaluated `bothHidden` on
+   different address sets — `/transactions` on tx `from`/`to`,
+   `/transfers` on transfer `from`/`to` — and disagreed.
+2. **List ↔ by-hash agree on row survival**.
+   If `/transactions` (list) contains a row for `X`, then
+   `GET /transactions/:hash=X` returns 200 (not 404). And vice
+   versa: if the list drops `X`, by-hash returns 404. The single
+   shared opts builder above is the load-bearing contract.
+3. **A kept parent does not keep its derived rows.**
+   When `GET /transactions/:hash=X` returns 200, each row of
+   `GET /transactions/:hash=X/transfers`, `/internal` and `/logs` is
+   still decided by its own rules: a transfer or an internal call
+   with both sides private to the viewer is dropped (an org admin
+   with `ORG_ADMIN_VIEW_USER_TXS` keeps it, audited), and logs follow
+   the event-rule and ABI gates. The parent being visible never
+   widens what its derived rows show.
+4. **Field-rendering rules are independent of row-survival.**
+   When a row survives (under any of the above invariants), the
+   field-rendering matrix governs every field substitution. The
+   row-survival axis decides *whether* the row reaches the client;
+   the field-rendering axis decides *what shape* it takes when it
+   does. Mixing the two axes in one drop predicate is a known
+   bug class.
+5. **Disclosure grants do not affect regular rows.**
+   Full, pseudonymous, and redacted grants add no rows or private fields to
+   regular transaction, transfer, internal-call, log, block or address responses.
+   Disclosed transactions come only from the grant feed, within consented scope,
+   and grant accesses are audited separately.
+6. **A row kept for coherence reveals nothing new.**
+   When a viewer gets a transaction only because of one of its token
+   transfers (for an org admin, a transfer involving any org contract;
+   for anyone else, a transfer involving their own wallet, or a transfer whose two sides
+   they both see — such as a mint into a contract they hold a
+   grant on — on a token their grant gives event access to), the
+   transaction is **keep + `[PRIVATE]`**: every address renders at the viewer's
+   own visibility, so another user's wallet stays `[PRIVATE]` and
+   calldata and nonce are cleared beside it. Value is cleared too,
+   except under `ORG_ADMIN_VIEW_USER_TXS` (counted in the audit log)
+   . That transfer follows the normal
+   rules; other transfers and the transaction's internal calls are
+   not kept by it.
+   Only a `visibleTo` share by the sender or the viewer's own participation reveals those
+   addresses. A contract grant alone does not keep another user's
+   transaction for members who are not admins when its transfer has a
+   side they cannot see.
+
+---
+
+## Known Limitations
+
+The following limitations are known and accepted in the current release. They are documented here so operators can make informed decisions about their deployment.
+
+### 1. Contract deployment address
+
+For a top-level `CREATE` deployment, the receipt's `contractAddress` is field-level redacted: an unauthorized viewer sees `[PRIVATE]`, while the deployer (and viewers with access to the contract) see the real address. Contracts deployed through a factory or `CREATE2` do not carry a `contractAddress` on the transaction receipt — their address can instead appear in event logs or internal transactions, which apply their own field-level redaction.
+
+**Operator note:** Register deployed contracts to the deployer's organization so the contract resolves as private to outsiders and its subsequent activity is access-controlled.
+
+### 2. Gas parameters are not hidden
+
+Gas fields (`gasUsed`, `gasPrice`, `maxFeePerGas`, `maxPriorityFeePerGas`, `gasLimit`) are visible to all viewers, including those who cannot see the transaction parties. Gas parameters do not directly identify an address and are available to all participants in the network via the RPC layer regardless of this proxy.
+
+### 3. Value inference from public address balance history
+
+When a transaction has one private and one public party, stripping `value` removes the direct leak, but the amount may still be inferable by correlating the public address's balance across adjacent blocks. This is a known residual limitation for mixed-party transactions, not a complete financial-privacy guarantee.
+
+---
+
+## What Operators Must Do
+
+To achieve the maximum redaction coverage described in this document:
+
+1. **Register an ABI for every contract whose events should be visible.** Without an ABI the proxy cannot decode non-indexed `address` parameters in event `data`, so it falls closed: every log from that contract is denied at the RPC layer (admin viewers excepted). The grant create/update API also rejects non-deny `event_rules` up-front when no ABI is resolvable. Two ways to satisfy the requirement:
+   - Upload a custom ABI via the admin API (preferred for in-house contracts).
+   - Set the contract's `metadata.token_type` to a known value — currently `"ERC20"` or `"ERC721"` — to use the built-in ABI registry.
+
+   To register an ABI, use the admin API:
+   ```
+   PUT /api/v1/admin/orgs/{org_id}/contracts/{address}/abi
+   Content-Type: application/json
+   {"abi": [...]}
+   ```
+
+2. **Assign all deployed contracts to the correct organization.** The redaction engine determines visibility by checking whether a contract address is registered to an organization. Contracts that are not registered to any organization are treated as public. Register contracts with the same organization as their deployer.
+
+3. **Use consented grants for audit access.** Keep regular permissions scoped to the viewer and use the dedicated [Selective Disclosure](/docs/disclosure) APIs for approved audits.
+
+<Callout type="warning">
+  Addresses that are not registered to any organization are treated as public and
+  will not be redacted, even if they appear as counterparties in transactions
+  involving private addresses.
+</Callout>

@@ -1,0 +1,300 @@
+import { Callout } from "@/components/mdx/callout";
+
+export const metadata = {
+  title: "Troubleshooting",
+  description:
+    "Common issues and solutions for the Open Privacy Suite: Docker, database, authentication, RBAC, port conflicts, and build problems.",
+};
+
+# Troubleshooting
+
+This page consolidates common issues and solutions across the Open Privacy Suite stack.
+
+---
+
+## Docker Issues
+
+### Containers not starting
+
+```bash
+# Check container status
+docker-compose ps
+
+# View logs for a specific service
+docker-compose logs postgres
+docker-compose logs proxy-backend
+docker-compose logs anvil
+
+# Restart a specific service
+docker-compose restart proxy-backend
+
+# Full reset (destroys volumes)
+docker-compose down -v
+docker-compose up -d
+```
+
+### Container health check failing
+
+If `proxy-backend` stays in "starting" state, check that its dependencies are healthy:
+
+```bash
+docker-compose logs postgres | tail -20
+docker-compose logs anvil | tail -20
+```
+
+The backend waits for both PostgreSQL and the Ethereum node to be reachable before starting.
+
+### Docker network conflicts
+
+If port bindings fail, check for other services using the same ports:
+
+```bash
+lsof -i :8080  # Open Privacy Suite
+lsof -i :5173  # Frontend
+lsof -i :5432  # PostgreSQL
+lsof -i :8545  # Anvil / Ethereum node
+```
+
+### `block-explorer-frontend` in restart loop: `host not found in upstream "block-explorer-api"`
+
+Privacy-mode full-stack only. The `block-explorer-frontend` container is configured to attach to **both** `public` and `bff-zone` networks (`docker-compose.privacy.dev.yml`), but on rare daemon-state glitches docker connects only one of the two at startup. With `bff-zone` missing, nginx inside the container can't resolve `block-explorer-api` and the container crashes-and-restarts forever.
+
+Confirm:
+
+```bash
+docker inspect privacy-proxy-block-explorer-frontend-1 \
+  --format '{{range $net,$_ := .NetworkSettings.Networks}}{{$net}} {{end}}'
+# Expected:  privacy-proxy_bff-zone privacy-proxy_public
+# Broken:    privacy-proxy_public                          ← only one
+```
+
+Fix — force-recreate just the frontend (no data loss, the explorer postgres stays up):
+
+```bash
+set -a && source .env.privacy.dev && set +a
+docker compose -f docker-compose.privacy.dev.yml \
+  up -d --force-recreate --no-deps block-explorer-frontend
+```
+
+If the issue recurs on every `make full-stack-dev`, file a ticket — durable causes can include compose-version differences or a stale network entry left behind by a previous compose project. The compose config on `main` is correct; the symptom is daemon-side state, not config.
+
+---
+
+## Database Issues
+
+### Cannot connect to PostgreSQL
+
+```bash
+# Check if PostgreSQL container is running
+docker-compose ps postgres
+
+# Connect manually
+docker-compose exec postgres psql -U postgres -d privacy_proxy
+
+# Check connection string
+echo $DATABASE_URL
+```
+
+### Migration failures
+
+```bash
+# View migration status
+docker-compose logs proxy-backend | grep -i migrat
+
+# Reset database completely (destroys all data)
+docker-compose down -v
+docker-compose up -d
+```
+
+<Callout variant="warning" title="Data loss">
+
+Running `docker-compose down -v` destroys all database volumes. All organizations, users, policies, and audit logs will be lost.
+
+</Callout>
+
+### testcontainers failures in unit tests
+
+If unit tests fail to start PostgreSQL via testcontainers:
+
+1. Verify Docker is running: `docker info`
+2. Check Docker socket permissions
+3. Set `TEST_DATABASE_URL` to use an external PostgreSQL instead:
+
+```bash
+export TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5432/privacy_proxy_test?sslmode=disable"
+go test ./internal/...
+```
+
+---
+
+## Authentication Issues
+
+| Error | Status | Cause | Solution |
+|-------|--------|-------|----------|
+| `missing Authorization header` | 401 | No Bearer token in request | Add `Authorization: Bearer <token>` header |
+| `invalid token` | 401 | Malformed or corrupted JWT | Re-authenticate to get a new token |
+| `session not found or expired` | 401 | Auth session expired (10-min TTL) | Start a new authentication flow |
+| `JWZ verification failed` | 401 | Invalid ZK proof | Ensure wallet is using correct credentials and network |
+| `humanity_verification_required` | 403 | User lacks ProofOfHumanity credential | Complete PoH verification at [Billions](https://app.billions.network) |
+| `account is banned` | 403 | Banned user on login / refresh (on the `/rpc` data path a ban is masked as an opaque `404 method not found`) | Contact org admin to remove ban |
+| (opaque `method not found`) | 404 | On the `/rpc` path, a non-KYC'd user's call is masked as `method not found` — the proxy does not disclose the reason | Complete KYC verification |
+
+### Token expiration
+
+Access tokens expire after **5 minutes** (production; dev/mockauth builds use 30 minutes). Refresh tokens expire after **7 days**.
+
+```bash
+# Refresh an expired access token
+curl -X POST http://localhost:8080/refresh \
+  -H "Content-Type: application/json" \
+  -d '{"refresh_token": "YOUR_REFRESH_TOKEN"}'
+```
+
+If the refresh token is also expired, re-authenticate through the web UI.
+
+### Azure AD authentication failures
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| No Microsoft tab on login | Env vars missing | Check `AZURE_AD_CLIENT_ID` and `AZURE_AD_CLIENT_SECRET` in `.env` |
+| 403 "tenant is not authorized" | Tenant not in allowlist | Add tenant via `POST /api/v1/admin/azure-tenants` with `X-Admin-Token` |
+| AADSTS50011 "redirect URI mismatch" | Wrong URI in Azure Portal | Set to `http://localhost:5173/auth/azure/callback` |
+| "nonce mismatch" | State expired | Retry -- state tokens have 10-minute TTL |
+
+---
+
+## RBAC Issues
+
+| Error | Status | Cause | Solution |
+|-------|--------|-------|----------|
+| `method not found` | 404 | The JSON-RPC method is not in the user's allowlist, **or** the target contract is not owned by the user's org, **or** a call without `to` (contract-creation code) comes from a caller without the `deploy` claim or carries no creation code, **or** the call object is malformed — direct RBAC denials are masked as an opaque 404, never a 403. The same response is returned when an `eth_call`, `eth_estimateGas`, `eth_createAccessList` or `debug_traceCall` request carries [state or block overrides](/docs/security/response-filtering#state-and-block-overrides). | Check group permissions and contract grants in the admin UI. An override request is recorded with the reason "State override not allowed" in the fleet-wide Access Logs view only; remove the override arguments. |
+| `transaction denied: cross-org access not permitted` | 403 | A **send** transaction's runtime trace enters a contract owned by another org | Only interact with contracts owned by your organization. |
+| `call denied: cross-org access not permitted` | 403 | An `eth_call` resolved at runtime to an internal call into a foreign-org contract (e.g. a same-org wrapper STATICCALLing another org's contract), or the call creates a contract and the caller lacks the `deploy` claim in the request's organization (the access log records `deploy_claim_required`). | Inspect the trace; either the target contract reaches into another org or a proxy upgrade has re-targeted it. Update grants or stop calling that path. |
+| `call denied: trace depth exceeded; not provable as same-org` | 403 | The `eth_call` trace exceeded the maximum recursion depth, so deeper call targets could not be validated. Failed closed. | Reduce nesting in the called contract or split into multiple calls. |
+| `call denied: tracing temporarily unavailable` | 403 | Upstream `debug_traceCall` failed (timeout, connection refused, malformed response), or a call without `to` arrived while runtime tracing is not configured or is disabled. Failed closed. | Check upstream node health and `debug` namespace exposure. Re-try; if persistent, check the proxy logs for the underlying error. |
+| `call denied: invalid request shape` | 400 | The `to` address is malformed; the user-supplied `from` does not match any of the caller's linked Ethereum addresses (potential spoof attempt); or the request has no call object at all (no params). | Validate the request body. The proxy rebinds `from` only to JWT-linked EOAs. |
+| `transaction denied: runtime contract creation requires the deploy claim` | 403 | A sent transaction creates a contract and the user lacks the `deploy` claim (a direct deployment without the claim is refused as `method not found`) | Ask org admin to add `deploy` claim to user's group. |
+| `trace denied: unsupported tracer or trace option` | 400 | A `debug_traceCall` / `debug_traceTransaction` asked for output other than the call tree: a tracer other than `callTracer` (for example `prestateTracer` or a JavaScript tracer), `callTracer` with `withLog`, or struct-logger options such as `enableMemory`. | Omit the trace config or send `{"tracer": "callTracer"}`. The proxy returns only the call tree. |
+| `trace denied: state or block overrides are not permitted` | 400 | A `debug_traceTransaction` trace config contains `stateOverride`, `stateOverrides`, `blockOverride`, `blockOverrides` or `txIndex`. The same keys in a `debug_traceCall` config return `method not found` (404) instead; see the first row. A differently-cased `stateOverrides`, `blockOverrides` or `txIndex` is refused earlier, for both methods, with `400 invalid JSON-RPC request` (see [Security](/docs/security)). | Remove the keys. A transaction replay takes no overrides. |
+| `trace denied: invalid request shape` | 400 | Malformed trace parameters: the wrong number of parameters, a call object whose `to`, `from`, `value` or `data` is not valid hex, `data` and `input` that differ, a malformed block parameter or trace config, or a `from` that is not one of the caller's linked addresses. | Fix the request. Set `from` to one of the caller's linked addresses, or omit it. |
+| `trace access denied` | 403 | A `debug_traceTransaction` for a transaction the caller may not replay. Only its sender or recipient, an admin of the contract it called, or a recipient it was shared with may replay it, and only if they may call that contract with that function in the request's organization. A transaction that does not exist, or a failed transaction lookup, returns the same error. | Check the transaction hash and upstream node health. A user in more than one organization must call `/rpc/:org_id` for the transaction's organization. Grant access to the called contract if the caller should see it. |
+| `trace denied: access not permitted` | 403 | An internal call in the trace reaches a contract the caller cannot access in the request's organization (another organization's contract, an unregistered address, or a contract without a grant), uses a function or argument the caller's grant does not allow, or creates a contract without the `deploy` claim; or the trace is too deep to validate. The response is the same for every cause. | The Access Logs record a reason: "Cross org" for a contract outside the caller's access (including one without a grant), "Deploy claim required", "Trace depth exceeded", or "Trace access denied" for a function or argument rule. Grant access to every contract the call passes through, add the `deploy` claim, or trace a narrower call. |
+| `trace denied: tracing temporarily unavailable` | 403, 500 or 502 | The upstream trace failed or did not return a call tree, or a lookup the check needs failed. Failed closed. | Check upstream node health and that the node supports `callTracer`. If it persists, check the proxy logs for the underlying error. |
+| `admin claim required` | 403 | Operation requires admin privileges | Ask org admin to grant `admin` claim. |
+| `upgrade claim required` | 403 | Proxy upgrade requires `upgrade` permission | Ask org admin to grant `upgrade` claim. |
+
+### Claims hierarchy
+
+Remember that the `admin` claim has implied permissions:
+
+- `admin` implies `deploy` and `upgrade`
+
+The legacy `read` / `write` claims were removed — non-privileged method access is now gated solely by the per-group method allowlist (`GroupAccess.allowed_methods`). Don't try to add `read` or `write` as claims; the resolver no longer recognizes them.
+
+### Blocked methods
+
+The following method families are **always blocked** regardless of permissions:
+
+```
+debug_*    admin_*    personal_*    miner_*
+txpool_*   clique_*   les_*         eth_sign
+eth_signTransaction   eth_subscribe  eth_unsubscribe
+```
+
+The exception is `debug_traceCall` and `debug_traceTransaction`: they are allowed when listed in the group's allowed methods, and are then checked as described in [RBAC](/docs/rbac).
+
+### Multicall blocked
+
+Calls to known Multicall contract addresses are blocked because they allow batching arbitrary contract calls, bypassing method-level restrictions:
+
+- Multicall3: `0xcA11bde05977b3631167028862bE2a173976CA11`
+- Multicall2: `0x5ba1e12693dc8f9c48aad8770482f4739beed696`
+- Multicall1: `0xeefba1e63905ef1d7acba5a8513c70307c1ce441`
+
+<Callout variant="info" title="Runtime tracing as defense-in-depth">
+
+When runtime tracing is enabled, all internal calls are validated regardless of the target address, on both the write side (`eth_sendTransaction`/`eth_sendRawTransaction`) and the read side (`eth_call`). Even custom multicall contracts (not in the hardcoded list) are caught because every `CALL`, `DELEGATECALL`, and `STATICCALL` target is verified.
+
+</Callout>
+
+---
+
+## Port Conflicts
+
+| Port | Service | Resolution |
+|------|---------|------------|
+| 8080 | Open Privacy Suite | Stop other HTTP servers or change `PORT` env var |
+| 5173 | Frontend (Vite) | Stop other Vite instances or change Vite config port |
+| 5432 | PostgreSQL | Stop local PostgreSQL: `brew services stop postgresql` (macOS) or `sudo systemctl stop postgresql` (Linux) |
+| 8545 | Anvil / Ethereum node | Stop other Anvil or Hardhat instances |
+
+---
+
+## Build Issues
+
+### Go build failures
+
+```bash
+# Clean module cache
+go clean -modcache
+
+# Re-download dependencies
+go mod download
+
+# Verify dependencies
+go mod verify
+```
+
+### Frontend build failures
+
+```bash
+cd frontend
+
+# Clear node_modules and reinstall
+rm -rf node_modules
+npm install
+
+# Clear Vite cache
+rm -rf node_modules/.vite
+npm run dev
+```
+
+### Docker build failures
+
+```bash
+# Rebuild without cache
+docker-compose build --no-cache
+
+# Pull latest base images
+docker-compose pull
+```
+
+---
+
+## Rate Limiting
+
+If you are receiving `429 Too Many Requests`:
+
+- Determine whether the response is a local concurrency rejection, a
+  signed-approval simulation budget rejection, or an upstream
+  rate-limit/circuit-breaker rejection by checking proxy metrics and logs.
+- For a local concurrency rejection, reduce simultaneous in-flight requests and
+  retry after existing requests finish.
+- For `rate limit exceeded (requests per second)` on `eth_sendRawTransaction`
+  with signed approvals enabled, the identity used up its simulation budget:
+  spread submissions out, or raise `OPS_APPROVAL_PREFLIGHT_RATE` /
+  `OPS_APPROVAL_PREFLIGHT_BURST` if the workload legitimately needs more.
+- For an upstream rejection, check the rate tier associated with the group's
+  `rpc_api_key` (or the global fallback key) in the upstream RPC proxy.
+- Respect `Retry-After` when present. Changing group permissions inside
+  Open Privacy Suite does not change the upstream API key's quota.
+
+---
+
+## Getting Help
+
+If your issue is not covered here:
+
+1. Check the backend logs: `docker-compose logs -f proxy-backend`
+2. Run tests with verbose output: `go test -v ./e2e/...`
+3. Check the [GitHub Issues](https://github.com/LFDT-Permissioned-Privacy-Control/permissioned-privacy-control/issues) for known problems.

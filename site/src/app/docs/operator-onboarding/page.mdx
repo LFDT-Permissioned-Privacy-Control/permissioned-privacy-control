@@ -1,0 +1,442 @@
+import { Callout } from "@/components/mdx/callout";
+import { Step } from "@/components/mdx/step";
+
+export const metadata = {
+  title: "User Onboarding (Production)",
+  description:
+    "Day-1 runbook for a fresh production deployment: bootstrap the first org and admin with a tier-1 token, then create groups, set permissions, onboard users by DID, grant contract access, and connect Foundry tooling.",
+};
+
+# User Onboarding (Production)
+
+This is the ordered runbook for taking a **freshly deployed** Open Privacy Suite from "the stack is up" to "users can authenticate and transact with the right permissions." It assumes you have already completed [Operator Deployment](/docs/operator-deployment) and the `proxy-backend` healthcheck is green.
+
+Everything here drives the **admin REST API** with `curl`. The same operations are available in the admin dashboard UI, but the very first admin **must** be created over the API — you cannot log into the dashboard until a user exists and is in an admin group. For the concepts behind the commands (the 3-tier admin model, claims, the method allowlist), read [RBAC](/docs/rbac) first.
+
+---
+
+## Before you start
+
+<Callout variant="warning" title="The admin API requires a token AND a private-network source IP">
+Every `/api/v1/admin/*` endpoint requires a valid `X-Admin-Token` (or a JWT-admin bearer token) **and** that the request's **direct TCP peer** falls in an allowed range: loopback (`127.0.0.1`, `::1`), RFC1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), CGNAT / Tailscale (`100.64.0.0/10`), or any CIDR you add via `TRUSTED_INTERNAL_CIDRS`. A direct connection from a public IP is `403`'d before auth.
+
+This is **not** a "same host only" rule — you can call it remotely from anywhere on the private network, a VPN, or Tailscale. And the check reads the *immediate* TCP peer, **not** `X-Forwarded-For` (by design): when the backend sits behind a reverse proxy or ingress (the usual production setup), every forwarded request arrives from the proxy's private IP, so this check always passes and **the token becomes the authorization boundary**. Treat the admin API as token-gated and use network policy / ingress rules to decide who can reach it — this middleware is a backstop against the backend port being *directly* exposed to the internet, not an internet firewall sitting in front of your proxy.
+</Callout>
+
+You will need:
+
+- **A tier-1 token** — either `ADMIN_API_TOKEN` (full admin) or `OPERATOR_API_TOKEN` (restricted onboarder; preferred when a third party runs the bootstrap — see below). Both are sent as the `X-Admin-Token` header, and the Part 1 examples work with either. Source it from your secret store; never hard-code it in a script that lands in a repo.
+- The proxy backend URL as reachable from where you run `curl` — `http://127.0.0.1:8080` on the host in a default prod compose.
+
+```bash
+# Pull the token from your secret store into the shell (example shape — adapt to
+# AWS Secrets Manager / Vault / your CSI-mounted file). Do NOT echo it.
+ADMIN_API_TOKEN="$(your-secret-fetch privacy-proxy/admin-api-token)"
+PROXY=http://127.0.0.1:8080
+```
+
+### Three ways to authenticate to the admin API
+
+| Caller | Header | Can do | Cannot do |
+|---|---|---|---|
+| **Super-admin** (bootstrap / platform) | `X-Admin-Token: $ADMIN_API_TOKEN` | Everything: org lifecycle, mint each org's first `is_org_admin` group, per-org tenant data, fleet-wide maintenance config. | — |
+| **Operator** (restricted onboarder) | `X-Admin-Token: $OPERATOR_API_TOKEN` | Exactly the Part 1 bootstrap: org lifecycle, mint `is_org_admin` / `is_org_readonly_admin` groups, set their access, add their first members. | Read or manage tenant data — regular groups, members, contracts, grants, audit logs, per-org compliance all return `403`. Fleet-wide settings and `is_system` group access. |
+| **Org admin** (tier-2) | `Authorization: Bearer <session-JWT>` | Manage their own org: create non-admin groups, set access, onboard users, grant contracts. | Create orgs, create other `is_org_admin` groups (escalation-blocked). |
+
+Tier-2 org admins normally use the **dashboard UI** — they obtain their JWT by logging in through Privado or Azure SSO like any user. **Part 1 (bootstrap) needs a tier-1 token** (`X-Admin-Token`, either value); **Part 2 onward is the org admin's job** and uses their `Authorization: Bearer` token (the examples switch to it accordingly).
+
+### Which tier-1 token to hold, and who runs the bootstrap
+
+Both tier-1 credentials can run Part 1 — the operator token exists precisely so the bootstrap does not require a credential that can also read tenant data. Decide this up front, because it decides who runs **Part 1**:
+
+| Operating model | Which token, held by whom | Who runs the bootstrap (Part 1) | Who runs day-to-day onboarding (Part 2+) |
+|---|---|---|---|
+| **Operator-managed** | `OPERATOR_API_TOKEN`, held by the platform operator | The platform operator creates the org and adds its first org admin(s) by DID. | The org's own admins, in the dashboard / with their JWT. |
+| **Self-managed** | `ADMIN_API_TOKEN`, held by the deploying organization | Run Part 1 yourself against your own deployment. | Your org admins. |
+
+In both models, **Part 2 onward is identical** and is done by tier-2 org admins — the difference is only who performs the one-time bootstrap and which token they custody. The handoff point is Step 4 (the first admin is onboarded by DID; from there the org is self-sufficient and never needs `X-Admin-Token`).
+
+<Callout variant="warning" title="Prefer the operator token when a third party runs the bootstrap">
+
+If the party performing Part 1 is **not** inside your deployment's trust boundary, give them `OPERATOR_API_TOKEN`, not `ADMIN_API_TOKEN`. Both can create orgs and mint org admins, but the full admin token additionally reads and mutates every tenant's data, so handing it out grants far more than onboarding requires. See the [tier-1 credential breakdown](/docs/rbac#tier-1-token-credentials-admin--operator).
+
+</Callout>
+
+Whichever token you hold, source it from a secret store and rotate it per the [credential-lifecycle guidance](/docs/security/audit-integrity#recommended-aws-secrets-manager-via-irsa-canonical).
+
+---
+
+## Part 1 — Bootstrap (tier-1 token, one time)
+
+These four steps stand up the first tenant and hand it to a human org admin. They require a **tier-1 token** — the org-creation and `is_org_admin` endpoints reject tier-2 JWTs by design (escalation prevention). Either tier-1 credential works for the four steps themselves: the examples below show `$ADMIN_API_TOKEN`, and `$OPERATOR_API_TOKEN` is accepted on each of them. The one exception is DID *discovery* — `GET /api/v1/admin/users` is tenant-confidential and returns `403` for the operator token, so an operator-managed bootstrap must be given the new admin's DID out of band (see the callout after Step 4).
+
+<Step number={1} title="Create the organization">
+
+```bash
+curl -sS -X POST "$PROXY/api/v1/admin/orgs" \
+  -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "slug": "acme", "name": "Acme Corporation" }'
+```
+
+The response includes the org's `id` (a UUID). Capture it — every subsequent call is scoped to it.
+
+```bash
+ORG_ID="<id from the response>"
+```
+
+`slug` must be URL-safe (lowercase, hyphens). A new org starts with **no groups** — you create them explicitly in the steps below. Users who self-onboard by simply logging in (without first being onboarded by an admin) land in the single system-wide **default group** with its baseline permissions — not in an org-specific group — and gain this org's access only once an admin adds them to one of its groups.
+
+</Step>
+
+<Step number={2} title="Create the first org-admin group">
+
+```bash
+curl -sS -X POST "$PROXY/api/v1/admin/orgs/$ORG_ID/groups" \
+  -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "slug": "org-admins",
+    "name": "Organization Admins",
+    "is_org_admin": true
+  }'
+```
+
+Capture the returned group `id` as `ADMIN_GROUP_ID`. `is_org_admin: true` gives members all claims (`admin`/`deploy`/`upgrade`) on every contract in the org, plus dashboard access. Creating such a group requires a tier-1 token — either `ADMIN_API_TOKEN` or `OPERATOR_API_TOKEN`; a tier-2 org-admin JWT is refused (escalation prevention).
+
+</Step>
+
+<Step number={3} title="Give the admin group its method allowlist">
+
+Org-admin status does **not** implicitly grant RPC methods — the allowlist is still the source of truth for which methods the group can call. An org-admin group must allow at least one method, and its `claims` list must be empty (claims are implied for org admins; a non-empty list is rejected with `400`).
+
+```bash
+curl -sS -X PUT "$PROXY/api/v1/admin/orgs/$ORG_ID/groups/$ADMIN_GROUP_ID/access" \
+  -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "allowed_methods": [
+      "eth_call", "eth_sendTransaction", "eth_estimateGas",
+      "eth_getBalance", "eth_getCode", "eth_getTransactionCount",
+      "eth_getTransactionReceipt", "eth_getLogs",
+      "eth_blockNumber", "eth_chainId", "eth_gasPrice"
+    ],
+    "claims": []
+  }'
+```
+
+</Step>
+
+<Step number={4} title="Onboard your first human admin by DID">
+
+You need the admin's DID — the identifier from their Privado wallet (or their Azure-mapped identity). Add them straight into the admin group; the user row is auto-provisioned if it doesn't exist yet.
+
+```bash
+curl -sS -X POST "$PROXY/api/v1/admin/orgs/$ORG_ID/memberships/by-did" \
+  -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "did": "did:iden3:privado:main:2Sf...",
+    "group_id": "'"$ADMIN_GROUP_ID"'"
+  }'
+```
+
+That human can now log into the dashboard via Privado/Azure and run everything in Part 2 themselves. **Bootstrap is done** — after this you should rarely need the `X-Admin-Token` again (it's reserved for org creation, minting other org admins, and the fleet-wide [super-admin maintenance endpoints](/docs/operator-deployment#super-admin-maintenance-endpoints)).
+
+</Step>
+
+<Callout variant="info" title="Where DIDs come from">
+A user's DID is established the first time they authenticate. If you don't have it yet, have the user log in once (Privado QR or Azure SSO); they're auto-provisioned into the system-wide default group, and you can then read their DID/UUID from `GET /api/v1/admin/users`. That endpoint is tenant-confidential, so it works with `ADMIN_API_TOKEN` but returns `403` for `OPERATOR_API_TOKEN` — in an operator-managed bootstrap the incoming admin sends their own DID (visible on their account page after first login) to the operator instead. Privado users surface two DIDs (a genesis DID and a per-verifier profile DID) — onboard the **login DID** the user authenticates with.
+</Callout>
+
+---
+
+## Removing an org admin by DID (tier-1 token)
+
+Removal is the symmetric counterpart of bootstrap step 4 — same identifier,
+same body shape, same scope rules:
+
+```bash
+curl -sS -X DELETE "$PROXY/api/v1/admin/orgs/$ORG_ID/memberships/by-did" \
+  -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "did": "did:iden3:privado:main:2Sf...",
+    "group_id": "'"$ADMIN_GROUP_ID"'"
+  }'
+```
+
+What the operator credential can and cannot do here:
+
+- **Can:** add a DID to, and remove a DID from, `is_org_admin` groups.
+  Minting and revoking org admins deliberately requires a tier-1 token — a
+  tier-2 org-admin JWT cannot mint or remove a peer who could then ban or
+  demote them.
+- **Cannot:** manage regular-group memberships with the operator token —
+  that is per-org tenant management and is rejected; org admins do it
+  themselves (Part 2). The operator token also cannot read tenant data
+  (user lists, groups, contracts are tenant-confidential), which is why
+  removal works purely from the DID and group id you already hold — no
+  lookup step is required or possible.
+- **Opaque failures:** an unknown DID, a DID with no membership in the
+  target group, and a group belonging to a different org all return the
+  same opaque `403`. The API confirms nothing about what exists (no
+  enumeration oracle) — if a removal unexpectedly 403s, re-check the DID
+  and group id you recorded at onboarding time.
+
+**Audit attribution.** Every mint and removal lands in the RBAC audit log,
+attributed to the credential that performed it: the full super-admin token
+as `__super_admin__`, the restricted operator/bootstrap token as
+`__operator__`, and a tenant org admin's JWT as that admin's own identity.
+Access reviews can therefore separate operator lifecycle actions from
+in-tenant administration.
+
+<Callout variant="warning" title="No anti-lockout guard">
+Nothing prevents removing an organization's **last** org admin. The org
+keeps running if that happens — RPC access and existing memberships are
+unaffected — but nobody can administer it from the dashboard until you
+mint a new org admin (bootstrap step 4 with a new DID). The operator
+retains this mint/remove authority by design until a dedicated recovery
+and governance flow replaces it.
+</Callout>
+
+---
+
+## Part 2 — Day-to-day onboarding
+
+These are the **tier-2 org admin's** day-to-day operations, run with their session JWT — they manage their own org: groups, memberships, contract grants, KYC/ban. (Org creation and minting org admins are **not** here — those are the tier-1 bootstrap in Part 1.)
+
+```bash
+# The org admin's session JWT, from logging in via Privado / Azure SSO.
+# Short-lived — refresh when it expires. Sent as Authorization: Bearer below.
+ADMIN_JWT="${PRIVACY_PROXY_ADMIN_JWT}"
+```
+
+### Create the groups your users need
+
+A group bundles a **method allowlist** with **claims**. Pick claims by the role you want:
+
+These are the **role-distinguishing** methods only — every interactive group also needs the client baseline described in the callout below.
+
+| Role | `claims` | Role `allowed_methods` (**+ client baseline**) | Notes |
+|---|---|---|---|
+| Standard user | `[]` | `eth_call`, `eth_getBalance`, `eth_getTransactionReceipt` + **read baseline** | Read / interact only. No sending, no deploy. |
+| Trader / writer | `[]` | above **+** `eth_sendTransaction` + **send baseline** | Can send txs (no claim needed — just the methods). |
+| Deployer | `["deploy"]` | trader methods **+** `eth_sendRawTransaction` | `deploy` gates contract creation; a member's first deploy auto-adds a grant to this group. |
+| Org admin | `[]` (implied) | at least one method | Use `is_org_admin: true` at create time — **tier-1 token only** (see Part 1). |
+
+<Callout variant="info" title="Claims and methods must be consistent">
+The `admin` claim implies `deploy` + `upgrade`. Only those three claims gate anything; all other access — including trace methods like `debug_traceCall` / `debug_traceTransaction` — is the method allowlist's job (trace methods were decoupled from the `deploy` claim in RD-1121).
+</Callout>
+
+<Callout variant="warning" title="Interactive clients need a baseline of plumbing methods">
+The lists above are only the *business* methods. Any group whose users connect a **wallet or CLI** (MetaMask, `cast`, ethers, viem) must **also** allow the plumbing methods those tools call automatically — otherwise even a basic read or send fails before it does anything useful (the proxy returns `404 method not found` for a method that isn't allowlisted):
+
+- **Read baseline** (e.g. `cast call`): `eth_chainId`, `eth_blockNumber`, `eth_getTransactionCount` — clients fetch the nonce even for a read.
+- **Send baseline** adds: `eth_estimateGas`, `eth_getBlockByNumber`, and gas pricing — `eth_feeHistory` + `eth_maxPriorityFeePerGas` for the EIP-1559 default (MetaMask/`cast`), **or** just `eth_gasPrice` if the client sends legacy txs (`cast send --legacy`).
+
+So a working **trader** group = the trader business method **plus both baselines**; the deployer example below lists the complete set. Set any group's methods with the `PUT .../access` call shown next. (A raw-`curl` JSON-RPC integration that hand-builds requests can skip the baseline.)
+</Callout>
+
+Create a deployer group, then set its access:
+
+```bash
+# Create
+curl -sS -X POST "$PROXY/api/v1/admin/orgs/$ORG_ID/groups" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+  -d '{ "slug": "deployers", "name": "Contract Deployers" }'
+# → capture group id as DEPLOY_GROUP_ID
+
+# Set access (methods + claims)
+curl -sS -X PUT "$PROXY/api/v1/admin/orgs/$ORG_ID/groups/$DEPLOY_GROUP_ID/access" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+  -d '{
+    "allowed_methods": [
+      "eth_call", "eth_sendTransaction", "eth_sendRawTransaction",
+      "eth_estimateGas", "eth_getBalance", "eth_getCode",
+      "eth_getTransactionCount", "eth_getTransactionReceipt",
+      "eth_blockNumber", "eth_chainId", "eth_gasPrice",
+      "eth_feeHistory", "eth_maxPriorityFeePerGas", "eth_getBlockByNumber"
+    ],
+    "claims": ["deploy"]
+  }'
+```
+
+The `/access` body also accepts an optional per-group upstream `rpc_api_key` — see [RBAC → Per-Group RPC API Keys](/docs/rbac#per-group-rpc-api-keys). Which inbound header that key is read from is operator-wide (`RPC_API_KEY_HEADER`), not a per-group field. Request-rate limits are **not** set here; they come from the upstream RPC proxy's tier for that key.
+
+### Add users to groups
+
+**By DID (recommended).** One call, auto-provisions a new user, idempotent on repeat (`409` if already a member):
+
+```bash
+curl -sS -X POST "$PROXY/api/v1/admin/orgs/$ORG_ID/memberships/by-did" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+  -d '{ "did": "did:iden3:privado:main:2Sf...", "group_id": "'"$DEPLOY_GROUP_ID"'" }'
+```
+
+This is an **ADD**, not a move — it does not touch the user's default-group membership. To remove later, `DELETE /api/v1/admin/users/:user_id/memberships/:membership_id`.
+
+**By UUID (alternative).** If you already have the user's UUID (e.g. from the dashboard):
+
+```bash
+# Find the UUID
+curl -sS "$PROXY/api/v1/admin/users" -H "Authorization: Bearer $ADMIN_JWT"
+
+# Add to a group (the target user must already be in your full-admin scope)
+curl -sS -X POST "$PROXY/api/v1/admin/users/$USER_ID/memberships" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+  -d '{ "group_id": "'"$DEPLOY_GROUP_ID"'" }'
+```
+
+<Callout variant="warning" title="Refresh the user's token after a membership change">
+Permissions take effect immediately on the server, but a user holding an **already-issued JWT** keeps their old effective permissions until the token is refreshed/reissued. After changing memberships, have the user re-authenticate (or refresh) to pick up the new access.
+</Callout>
+
+### Set KYC / ban status
+
+```bash
+curl -sS -X PUT "$PROXY/api/v1/admin/users/$USER_ID" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+  -d '{ "kyc": true, "banned": false }'
+```
+
+A banned user is rejected at token-issuance time, so their memberships go dormant until the ban is lifted.
+
+---
+
+## Part 3 — Grant contract access
+
+All contracts are **private by default**. Standard users (anything but an org admin) see a registered contract only if their group has a **contract grant** for it. Contracts deployed *through* the proxy are auto-registered to the deployer's org; contracts that already exist on-chain must be registered first.
+
+```bash
+# Register an existing on-chain contract to the org (skip for proxy-deployed ones)
+curl -sS -X POST "$PROXY/api/v1/admin/orgs/$ORG_ID/contracts" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+  -d '{ "address": "0xToken...", "name": "Acme USD" }'
+
+# Grant a group access to it
+curl -sS -X POST "$PROXY/api/v1/admin/orgs/$ORG_ID/contracts/0xToken.../grants" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+  -d '{ "group_id": "'"$DEPLOY_GROUP_ID"'" }'
+```
+
+Grant body fields:
+
+- `functions` — omit / `null` for "all functions allowed", or a list of `FunctionRule` objects (with optional `param_rules`) to restrict to specific selectors.
+- `event_rules` — omit / `null` = **no events visible**; `"*"` = all events; a list = an allowlist. Anything other than "no events" requires the contract to have an ABI (uploaded or a built-in `token_type`).
+
+For the full function/event/parameter-constraint model and the two-step UI wizard, see [RBAC → Granting access](/docs/rbac#granting-access-admin-ui-walkthrough).
+
+---
+
+## Connecting tools to the proxy
+
+<Callout variant="info" title="Verified end-to-end against a live stack">
+These `cast` snippets have been run through the proxy against a live node. Two non-obvious requirements are baked into them: `cast call` needs `--from <one of the caller's linked addresses>` (the proxy rejects an unlinked or zero `from`), and `cast send` builds an EIP-1559 transaction whose fee estimation calls `eth_feeHistory` + `eth_maxPriorityFeePerGas` — so the sender's group must allowlist those (see above), or pass `--legacy`.
+</Callout>
+
+Two different surfaces, two different tools:
+
+- **The admin onboarding API in this runbook is plain REST, not JSON-RPC.** `cast` speaks JSON-RPC, so it is *not* the tool for creating orgs/groups/memberships — those stay `curl` (or the dashboard).
+- **User interaction with the chain goes through the proxy's JSON-RPC endpoint.** The proxy reads the user's session JWT from an `Authorization: Bearer` header (or the `pp_access` cookie), and for multi-org users expects the org-scoped path `/rpc/<org_id>`. Any tool that can attach that header can talk to the proxy.
+
+`cast` attaches the bearer via `--rpc-headers` (or the `ETH_RPC_HEADERS` env var):
+
+```bash
+# A user's JWT (obtained from Privado/Azure login; the same access_token the
+# dashboard uses). Source it securely — never hard-code it. Access tokens are
+# short-lived (5 min); obtain a fresh one when it expires.
+JWT="${PRIVACY_PROXY_USER_JWT}"
+RPC="$PROXY/rpc"          # or /rpc/:org_id for multi-org users
+
+# Read call through the proxy as that user. Pass --from with one of the
+# user's own linked addresses: the proxy's eth_call path rejects any other
+# `from`, and cast otherwise defaults it to the zero address — which comes
+# back as "call denied: invalid request shape".
+cast call 0xToken... "balanceOf(address)(uint256)" 0xUser... \
+  --from 0xYourLinkedAddress... \
+  --rpc-url "$RPC" --rpc-headers "Authorization: Bearer $JWT"
+
+# Send a transaction through the proxy. cast builds an EIP-1559 tx by
+# default, so it first calls eth_feeHistory + eth_maxPriorityFeePerGas to
+# estimate fees — the sender's group must allowlist those (see the deployer
+# group above). Add --legacy to price gas from eth_gasPrice and skip them.
+# The tx is signed locally, so it reaches the proxy as eth_sendRawTransaction
+# (access-checked as eth_sendTransaction).
+cast send 0xToken... "transfer(address,uint256)" 0xRecipient... 1000 \
+  --rpc-url "$RPC" --rpc-headers "Authorization: Bearer $JWT" \
+  --private-key "$PK"
+```
+
+The proxy still enforces the full RBAC pipeline on these calls (method allowlist → contract access → redaction), so the JWT's group permissions decide what succeeds and what comes back redacted.
+
+<Callout variant="info" title="Deployments via Forge scripts use privacy-cli">
+The supported Foundry **deployment** integration is the bundled `privacy-cli`, which reads a Forge broadcast file and registers the deployed addresses with the proxy (`privacy-cli prepare --broadcast-file broadcast/Deploy.s.sol/<chainid>/run-latest.json`), then `privacy-cli verify`. It is configured via a `privacy.toml` (`[proxy] rpc_url`, `[auth] token`). Prefer it over hand-rolling `cast send` for contract creation so pre-registration stays correct.
+</Callout>
+
+---
+
+## Part 4 — Verify
+
+```bash
+# Effective permissions for a user (what they can actually do)
+curl -sS "$PROXY/api/v1/admin/users/$USER_ID/effective-permissions" \
+  -H "Authorization: Bearer $ADMIN_JWT"
+
+# Simulate a specific access decision without side effects. Mind the field
+# names: the user is identified by user_external_id (their DID, not the UUID)
+# and the contract by target_address; include org_id for multi-org users.
+curl -sS -X POST "$PROXY/api/v1/admin/access/check" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+  -d '{ "user_external_id": "did:iden3:privado:main:2Sf...", "org_id": "'"$ORG_ID"'", "method": "eth_call", "target_address": "0xToken..." }'
+```
+
+Org admins can also use the [dry-run / "what would this user see"](/docs/rbac#admin-dry-run--impersonation) endpoint to validate a user's view of a real RPC call. Finally, confirm the user can authenticate end-to-end by having them log in to the dashboard or explorer — or by making a read call through the proxy with their JWT (see [Connecting tools to the proxy](#connecting-tools-to-the-proxy)).
+
+---
+
+## Day-1 checklist
+
+```
+[ ] Tier-1 token (ADMIN_API_TOKEN or OPERATOR_API_TOKEN) sourced from secret store; admin API reached from an allowed private-network source IP (token + IP gate)
+[ ] Created the organization                          (POST /orgs)
+[ ] Created the first org-admin group (is_org_admin)  (POST /orgs/:org/groups)   ← tier-1 token only
+[ ] Set the admin group's method allowlist            (PUT  .../access, claims: [])
+[ ] Onboarded the first human admin by DID            (POST .../memberships/by-did)
+[ ] Created standard / deployer / trader groups        + set each group's access
+[ ] Onboarded users into their groups                  (by-did)
+[ ] Registered pre-existing contracts + granted groups (POST .../contracts, .../grants)
+[ ] Verified effective-permissions and a live login
+[ ] Confirmed audit logs are flowing to your SIEM      (see Audit Log Integrity)
+```
+
+---
+
+## Endpoint reference
+
+All paths are prefixed `/api/v1/admin`. Day-to-day endpoints (Part 2+) are driven by the tier-2 org admin's `Authorization: Bearer <JWT>`; the platform/bootstrap endpoints (Part 1 — create org, mint org admins) use a tier-1 `X-Admin-Token` — either `ADMIN_API_TOKEN` or `OPERATOR_API_TOKEN`. The per-row **Auth** column below says which is which. All are gated to private-network source IPs (the IP check described in [Before you start](#before-you-start)).
+
+| Purpose | Method & path | Auth |
+|---|---|---|
+| Create organization | `POST /orgs` | Tier-1 token (full admin or operator) |
+| Create group | `POST /orgs/:org_id/groups` | Tier-2 OK (except `is_org_admin` → tier-1 token) |
+| Set group access (methods, claims, RPC key) | `PUT /orgs/:org_id/groups/:group_id/access` | Tier-2 OK |
+| Onboard user by DID | `POST /orgs/:org_id/memberships/by-did` | Tier-2 OK |
+| List users | `GET /users` | Scoped to caller's orgs |
+| Add membership by UUID | `POST /users/:user_id/memberships` | Tier-2 OK (target in scope) |
+| Remove membership | `DELETE /users/:user_id/memberships/:membership_id` | Tier-2 OK |
+| Update user (KYC / ban) | `PUT /users/:user_id` | Tier-2 OK |
+| Register contract | `POST /orgs/:org_id/contracts` | Tier-2 OK |
+| Grant group → contract | `POST /orgs/:org_id/contracts/:address/grants` | Tier-2 OK |
+| Effective permissions | `GET /users/:user_id/effective-permissions` | Tier-2 OK |
+| Access check (simulate) | `POST /access/check` | Tier-2 OK |
+
+---
+
+## Further reading
+
+- [RBAC](/docs/rbac) — the permission model, claims hierarchy, contract grants, and the dashboard walkthrough.
+- [Operator Deployment](/docs/operator-deployment) — bringing the stack up, required secrets (including `ADMIN_API_TOKEN`), and the super-admin maintenance endpoints.
+- [Authentication](/docs/authentication) and [Azure AD / SSO](/docs/azure-ad) — how users (and admins) obtain the session JWT referenced above.
+- [API Reference](/docs/api) — full request/response shapes for every endpoint.
+- [Audit Log Integrity](/docs/security/audit-integrity) — every onboarding writes a tamper-evident audit row; forward it to your SIEM.

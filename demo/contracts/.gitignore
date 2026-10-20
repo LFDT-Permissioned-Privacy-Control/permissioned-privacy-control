@@ -1,0 +1,4 @@
+# Foundry build artifacts (generated in temp dir, but just in case)
+/out/
+/cache/
+/lib/

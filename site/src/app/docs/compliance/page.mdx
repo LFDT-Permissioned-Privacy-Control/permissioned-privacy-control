@@ -1,0 +1,360 @@
+import { Callout } from "@/components/mdx/callout";
+
+export const metadata = {
+  title: "Travel Rule Compliance",
+  description:
+    "FATF Recommendation 16 travel rule enforcement, sanctions screening, threshold-based controls, and immutable audit logging in the Open Privacy Suite.",
+};
+
+# Travel Rule Compliance
+
+The Open Privacy Suite enforces FATF Recommendation 16, known as the "travel rule," for value transfers through the network. When a transfer's fiat value (in the organization's configured [currency](#currency)) meets or exceeds a configured threshold, the system requires pre-submitted documentation identifying both the originator (sender) and beneficiary (recipient) before allowing the transaction to proceed.
+
+This regulatory requirement applies to Virtual Asset Service Providers (VASPs) and similar entities moving customer funds across blockchain networks.
+
+<Callout variant="warning" title="Compliance is disabled by default">
+  The travel-rule pipeline is **off** unless you set `ENABLE_TRAVEL_RULE=true`. While unset, value transfers are **not** screened against thresholds or sanctions lists (the server logs this at startup). The `enforce` / `monitor` setting below only selects behaviour *once compliance is enabled*.
+</Callout>
+
+---
+
+## Enforcement Mode: Enforce vs Monitor
+
+Compliance runs in one of two modes, selectable per organization (with a cluster-wide default):
+
+| Mode | Behavior |
+|------|----------|
+| **`enforce`** (default) | A compliance violation **blocks** the transaction. The safe, fail-closed default. |
+| **`monitor`** | A would-block violation is **allowed to proceed** but is **recorded** in the compliance log, marked "would have blocked" with the reason. |
+
+Monitor mode is for phased rollouts and observation periods — running compliance for visibility before turning on hard enforcement.
+
+**Sanctions are never monitored.** A transfer involving a sanctioned address (Layer 1) is always blocked, in both modes. Monitor mode only relaxes the threshold and travel-rule-record checks (Layers 2–3) and the unknown-price control.
+
+To set the mode:
+
+- **Per organization** — set **Enforcement mode** in the compliance dashboard, or `PUT /config` with `{ "enforcement_mode": "enforce" | "monitor" }`.
+- **Cluster-wide default** — set the `COMPLIANCE_DEFAULT_MODE` environment variable (`enforce` | `monitor`, default `enforce`). A per-org setting overrides it.
+
+> **Audit / change-management note.** Monitor mode converts a *preventive* control into a *detective-only* one for the affected organization. The default is `enforce` (monitor is opt-in), every mode change is recorded in the RBAC audit log, and each monitored violation is preserved in the compliance log marked "would have blocked". Document any move to monitor mode for your ISO 27001 / SOC 2 evidence.
+
+---
+
+## 3-Layer Compliance Pipeline
+
+Every value transfer (`eth_sendTransaction` and `eth_sendRawTransaction`) passes through a 3-layer pipeline. A transfer must pass all applicable layers to be allowed.
+
+### Layer 1: Sanctions Check
+
+**Executed first, before any other checks.**
+
+This layer blocks transfers to and from sanctioned addresses regardless of transfer amount or threshold. It is the highest-priority compliance control.
+
+Addresses checked:
+
+- **Sender** (from address)
+- **Recipient** (to address)
+- **Transaction originator** (msg.sender) if different from sender (e.g., in a `transferFrom` call where delegated authority is used)
+
+If any address matches the sanctions list, the transfer is immediately denied.
+
+Sanctions lists come in two scopes:
+
+- **Global sanctions** -- maintained by the system administrator, applies to all organizations
+- **Per-organization sanctions** -- set by the org administrator, applies only to that organization
+
+### Layer 2: Threshold Check
+
+**Executes if Layer 1 passes (no sanctioned addresses).**
+
+This layer converts the transfer amount to the organization's configured [currency](#currency) and compares it against the applicable threshold. Only transfers at or above the threshold proceed to Layer 3.
+
+Conversion and threshold logic:
+
+1. Convert the transfer amount (in wei or token units) to USD using admin-configured token prices
+2. Determine the applicable threshold:
+   - Check for a per-address threshold override on the sender address
+   - Check for a per-address threshold override on the recipient address
+   - If both overrides exist, use the **lowest** threshold
+   - If neither override exists, use the organization-wide threshold
+3. Compare the transfer amount in USD against the threshold
+
+| Outcome | Result |
+|---------|--------|
+| Transfer amount **< threshold** | ALLOWED -- no documentation required |
+| Transfer amount **>= threshold** | Proceeds to Layer 3 |
+| Threshold set to **$0** | Every transfer requires documentation (strict jurisdictions) |
+| No token price configured | Transfer DENIED (fail-closed) |
+
+<Callout variant="danger" title="Fail-closed design">
+  If no token price is configured for the token being transferred, the transfer is denied. This prevents accidental bypassing of the travel rule due to misconfiguration. Administrators must explicitly configure prices for all tokens that will be transferred.
+</Callout>
+
+### Layer 3: Travel Rule Record Check
+
+**Executes only for transfers that meet or exceed the threshold.**
+
+This layer searches for a matching pre-created travel rule record authorizing the specific transfer.
+
+Search criteria:
+
+- Same organization
+- Same originator user (internal user ID)
+- Same beneficiary address
+- Same token type (ETH native or specific ERC-20 contract address)
+- Record `amount_usd` >= transfer amount in USD
+- Record not expired (24-hour TTL)
+- Record not already used
+
+| Outcome | Result |
+|---------|--------|
+| Matching record found | Transfer ALLOWED; record immediately consumed |
+| No matching record | Transfer DENIED |
+
+Each travel rule record is **single-use**. On match, the record is atomically marked as used. Used records remain in the database as part of the audit trail but cannot be matched again.
+
+---
+
+## Concepts
+
+### Travel Rule Record
+
+A travel rule record is regulatory documentation created by an administrator before a high-value transfer occurs. It represents proof that an administrator has verified the identities and legitimacy of both the originating party and the beneficiary.
+
+**Record fields:**
+
+| Field | Description |
+|-------|-------------|
+| Originator | User initiating the transfer (internal user ID, human-readable name, account reference) |
+| Beneficiary | Receiving party (name, blockchain address) |
+| Token type | Native ETH or specific ERC-20 token (identified by contract address) |
+| Amount | Specified in the token's native units (wei); USD equivalent computed server-side |
+| Expiry | 24 hours from creation (hardcoded, non-configurable) |
+| Status | `unused` (available), `used` (consumed), or `expired` (past TTL) |
+
+**Lifecycle:**
+
+1. Admin creates a record with specific originator, beneficiary, token, and amount
+2. Record is stored in the database with creation timestamp
+3. When the user initiates a transfer that exceeds the threshold, the system searches for a matching record
+4. If found, the record is atomically marked as used and the transfer is allowed
+5. Used records remain in the database as the audit trail but cannot be matched again
+
+Used records cannot be deleted (they are immutable audit records). Unused or expired records can be deleted by an administrator.
+
+### Threshold
+
+The amount — in the organization's configured [currency](#currency) — at or above which a transfer requires travel rule documentation.
+
+**Types:**
+
+- **Organization-wide threshold** -- default for all transfers in an organization (default: $1,000 when compliance is first enabled)
+- **Per-address threshold override** -- a different threshold for specific sender or recipient addresses (e.g., $100 for a known high-risk counterparty)
+
+**Resolution order:**
+
+1. Check for sender address override
+2. Check for recipient address override
+3. If both overrides exist, use the lower of the two
+4. If neither override exists, use the organization-wide threshold
+
+**Special values:**
+
+- **$0** means every transfer requires documentation (no exceptions)
+- **null / not set** means compliance is effectively disabled (not recommended for regulated entities)
+
+### Currency
+
+Each organization values transfers — and denominates its thresholds — in **its own fiat currency**. Supported: **USD, EUR, CHF, GBP, AED** (default **USD**).
+
+This is a per-organization setting: an organization admin sets it alongside the other compliance settings for their organization, and it affects that organization only. One organization's currency choice never changes how another organization's transfers are valued or enforced.
+
+- The organization-wide and per-address thresholds are amounts in the organization's currency.
+- The transfer amount is converted to the organization's currency using the token prices configured for that currency (see [Token Prices](#token-prices)). If a token has no price in the organization's currency, the transfer **fails closed**.
+- Every compliance decision records the currency it was evaluated in, so audit logs stay unambiguous after a currency change.
+
+### Sanctions List
+
+A blocklist of blockchain addresses completely prohibited from sending or receiving transfers.
+
+- Checked before any threshold or travel rule evaluation
+- Applies regardless of transfer amount
+- Can be global (all organizations) or per-organization
+
+Typical use cases: OFAC SDN List compliance, addresses associated with known fraud or theft, hacked accounts, mixer contracts.
+
+### Token Prices
+
+Compliance thresholds are denominated in fiat, so the suite needs a fiat price for every token it values. Prices come from two sources:
+
+**CoinGecko (automatic, default-on).** A background fetcher keeps system prices current. Native ETH is auto-priced from CoinGecko with no manual configuration. Individual tokens opt into automatic pricing by setting a `coingecko_id` (supported: `ethereum`, `usd-coin`, `tether`). Set `DISABLE_COINGECKO=true` to turn the fetcher off (e.g. for air-gapped deployments that have no outbound network access).
+
+**Manual prices.** Administrators can set fixed prices per token, entered per currency across the five supported fiat currencies: **USD, EUR, CHF, GBP, AED**.
+
+For a given token and the organization's currency, the price resolves in this order:
+
+1. Per-org price with a `coingecko_id` → latest CoinGecko system price
+2. Per-org price without a `coingecko_id` → the manually configured price
+3. No per-org entry, native ETH → the CoinGecko ETH price
+4. None of the above → transfer denied (fail-closed)
+
+- Prices can be updated at any time; changes apply immediately to new transfers
+- A CoinGecko price older than the configured staleness threshold is treated as unavailable and fails closed
+- A missing or zero price for any valued token results in transfer denial (fail-closed)
+
+### Compliance Logs
+
+An immutable, append-only audit trail of every compliance decision.
+
+**Each log entry contains:**
+
+- User identification (DID, internal org user ID)
+- Transfer details (from, to, amount in wei, amount in USD, token type)
+- The threshold that applied
+- Decision (allowed or denied) and reason
+- Travel rule record ID consumed (if any)
+- Timestamp
+
+<Callout variant="info" title="Compliance vs. transaction outcome">
+  Logs record the compliance decision made by the Open Privacy Suite before forwarding the transaction. The transaction may later fail at the node level (invalid nonce, revert, insufficient gas). The compliance log records the gate decision, not the final transaction outcome.
+</Callout>
+
+**Immutability guarantees:**
+
+- BIGSERIAL IDs (append-only)
+- The application database role holds only `SELECT, INSERT` on the compliance log — no `UPDATE`/`DELETE` grant — so the running proxy cannot rewrite or delete a decision (enforced by GRANT/role separation, not database triggers). Retention pruning runs under a separate privileged role.
+- Provides reliable audit trail for regulatory review
+
+---
+
+## Admin API Endpoints
+
+### Organization Compliance Endpoints
+
+All paths under `/api/v1/admin/orgs/:org_id/compliance/`:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/config` | Retrieve compliance configuration (enabled status, threshold, `currency`, enforcement mode) |
+| PUT | `/config` | Update compliance configuration (enable/disable, org-wide threshold, `currency`, `enforcement_mode`) |
+| GET | `/tokens` | List all configured token prices |
+| PUT | `/tokens/:token_address` | Create or update price for a token |
+| DELETE | `/tokens/:token_address` | Remove token price configuration |
+| GET | `/travel-rule-records` | List travel rule records (paginated, filterable by status) |
+| POST | `/travel-rule-records` | Create a new travel rule record |
+| DELETE | `/travel-rule-records/:id` | Delete an unused or expired record |
+| GET | `/address-thresholds` | List per-address threshold overrides |
+| PUT | `/address-thresholds/:address` | Create or update threshold override |
+| DELETE | `/address-thresholds/:address` | Delete threshold override |
+| GET | `/logs` | List compliance logs (paginated, filterable) |
+
+### Global Sanctions Endpoints
+
+Not organization-scoped (managed globally by the system administrator):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/admin/compliance/sanctions` | List all global sanctioned addresses |
+| POST | `/api/v1/admin/compliance/sanctions` | Add address to global sanctions list |
+| DELETE | `/api/v1/admin/compliance/sanctions/:id` | Remove address from global sanctions list |
+
+---
+
+## Admin Dashboard
+
+The Compliance section in the admin dashboard provides visual access to all compliance management functions across six tabs:
+
+### 1. Config Tab
+Enable or disable compliance for the organization. Set the organization-wide threshold in USD. The default when first enabled is $1,000.
+
+### 2. Token Prices Tab
+Configure USD prices for native ETH and any ERC-20 tokens that users may transfer. All tokens must have a price configured before they can be transferred.
+
+### 3. Travel Rules Tab
+Create new travel rule records specifying originator, beneficiary, token type, and amount. View existing records with their status, timestamps, and USD values. Delete unused or expired records (used records are immutable).
+
+### 4. Address Thresholds Tab
+Set per-address threshold overrides for specific sender or recipient addresses. Useful for known counterparties with special compliance classifications (e.g., $100 for high-risk, $10,000 for low-risk partners). Includes an optional notes field.
+
+### 5. Sanctions Tab
+Manage the organization's sanctioned address blocklist. Add addresses to immediately block them. Remove addresses to restore normal compliance status.
+
+### 6. Logs Tab
+Immutable audit trail of all compliance decisions. Filter by decision type, transfer type, token address, user DID, and date range. Logs cannot be deleted or modified.
+
+Transfers allowed under [monitor mode](#enforcement-mode-enforce-vs-monitor) that *would* have been blocked under `enforce` are tagged with a **"Would block"** marker next to the decision (and a "Would have blocked" indicator in the row detail), so a monitored allow is never mistaken for a normal one.
+
+---
+
+## Example Scenario
+
+**Setup:**
+
+1. Organization enables compliance with an organization-wide threshold of **$1,000**
+2. ETH is configured at **$2,000** per token
+3. Address `0xHighRisk` gets a **$100** threshold override
+4. Address `0xBadActor` is added to the sanctions list
+
+**Transfer scenarios:**
+
+| # | Transfer | Result | Reason |
+|---|----------|--------|--------|
+| 1 | User sends $50 ETH to `0xRegular` | **ALLOWED** | $50 < $1,000 threshold (Layer 2 pass) |
+| 2 | User sends $50 ETH to `0xHighRisk` | **ALLOWED** | $50 < $100 override for recipient (Layer 2 pass) |
+| 3 | User sends $150 ETH to `0xHighRisk` | **DENIED** | $150 >= $100 override; no travel rule record found (Layer 3 fail) |
+| 4 | Admin creates travel rule record: $200 ETH, beneficiary `0xHighRisk` | -- | Record available for matching |
+| 5 | User sends $150 ETH to `0xHighRisk` | **ALLOWED** | $150 >= $100 threshold; matching record found and consumed (Layer 3 pass) |
+| 6 | User sends $50 ETH to `0xHighRisk` again | **DENIED** | Previous record was consumed; no new record exists (Layer 3 fail) |
+| 7 | User sends $5 ETH to `0xBadActor` | **DENIED** | Sanctioned address (Layer 1 block, regardless of amount) |
+| 8 | Admin creates new record: $500 ETH, beneficiary `0xHighRisk` | -- | New record available |
+| 9 | User sends $200 ETH to `0xHighRisk` | **ALLOWED** | New record matches and is consumed (Layer 3 pass) |
+
+---
+
+## Security Properties
+
+<Callout variant="danger" title="Fail-closed design">
+  All uncertainties result in denial, protecting the organization from regulatory violations. Missing token price: denied. Database error during threshold lookup: denied. Failure to create the audit log: denied (transaction blocked rather than unlogged).
+</Callout>
+
+### Atomic Record Consumption
+
+To prevent two concurrent transfers from claiming the same travel rule record:
+
+- Database SELECT uses `FOR UPDATE SKIP LOCKED` locking
+- Record status update from unused to used is atomic in the same transaction
+- Race conditions are avoided; at most one transfer can consume each record
+
+### Single-Use Records
+
+- Each travel rule record can only satisfy one transfer
+- Even if the record amount exceeds the transfer amount, the entire record is consumed on first match
+- A new record is required for each subsequent above-threshold transfer
+- Prevents accidental reuse or multiple transfers against one authorization
+
+### Immutable Audit Trail
+
+- Compliance logs use auto-incrementing BIGSERIAL primary key
+- No `UPDATE`/`DELETE` grant on the log for the application role (GRANT/role separation, not database triggers)
+- Logs remain even after records are deleted
+- Provides immutable proof of all decisions for regulatory review
+
+### Server-Computed USD Amounts
+
+- `amount_usd` on travel rule records is computed server-side only
+- Conversion from `amount_wei * token_price` happens at server time
+- Clients cannot specify or influence the USD amount
+- Prevents manipulation of compliance decisions through client-side values
+
+### 24-Hour Expiry
+
+- Travel rule records expire 24 hours after creation (hardcoded, non-configurable)
+- Prevents stale authorizations from being used long after creation
+- Expired records cannot satisfy Layer 3 checks
+- Ensures compliance decisions reflect recent administrator review
+
+### Address and Token Specificity
+
+- Records must match the exact originator, beneficiary address, and token type
+- Prevents cross-address or cross-token substitution
+- Ensures administrator intentionality: each record authorizes one specific transfer scenario

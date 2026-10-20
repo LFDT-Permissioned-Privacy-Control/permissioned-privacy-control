@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "open-privacy-suite": {
+      "command": "go",
+      "args": ["run", "-C", "mcp", "."],
+      "env": {
+        "PRIVACY_URL": "http://localhost:8080",
+        "PRIVACY_ADMIN_TOKEN": ""
+      }
+    }
+  }
+}

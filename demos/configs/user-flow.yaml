@@ -1,0 +1,127 @@
+# User Flow Demo
+# Shows the complete user experience from login to using their RPC endpoint
+# Focused on end-user benefits: privacy, simplicity, and seamless access
+
+version: "1"
+
+metadata:
+  name: "user-flow"
+  title: "User Onboarding Experience"
+  description: "Privacy-preserving authentication and wallet linking for end users"
+
+video:
+  resolution: { width: 1920, height: 1080 }
+  fps: 60
+  viewport: { width: 1920, height: 1080 }
+  quality:
+    preset: "slow"      # High quality encoding
+    crf: 15             # Near-lossless (lower = higher quality)
+    bitrate: "25M"      # High bitrate
+    audio_bitrate: "320k"
+    profile: "high"
+    level: "4.2"
+
+voice:
+  provider: "edge"
+  voice_id: "jenny"  # Friendly, welcoming female voice
+  speed: "+0%"
+
+steps:
+  # === INTRO & LOGIN PAGE ===
+  - id: "intro"
+    action: "navigate"
+    url: "/login"
+    wait: { selector: "[data-testid='login-page']", timeout: 15000 }
+    narration: "Getting started with Open Privacy Suite is simple. Let me walk you through the user experience."
+    pause: 3.0
+    screenshot: true
+
+  - id: "explain_privacy"
+    action: "wait"
+    wait: { selector: "[data-testid='auth-card']", timeout: 5000 }
+    narration: "First, you authenticate using zero-knowledge proofs. This means the service verifies you meet the requirements without ever learning your identity."
+    pause: 4.0
+
+  - id: "show_qr"
+    action: "wait"
+    wait: { selector: "[data-testid='qr-section']", timeout: 5000 }
+    narration: "In production, users scan this QR code with the Privado ID app. The proof is generated on your device and only the result is shared."
+    pause: 4.0
+    screenshot: true
+
+  # === AUTHENTICATION ===
+  - id: "wait_for_auth"
+    action: "wait"
+    wait: { selector: "[data-testid='link-wallet-page']", timeout: 15000 }
+    narration: "Authentication completes automatically. Watch how smoothly the flow progresses."
+    pause: 2.5
+    screenshot: true
+
+  # === WALLET LINKING ===
+  - id: "wallet_intro"
+    action: "wait"
+    wait: { selector: "[data-testid='link-wallet-header']", timeout: 10000 }
+    narration: "Next, connect your Ethereum wallet. This links your verified credentials to your blockchain identity."
+    pause: 3.0
+
+  - id: "wallet_connected"
+    action: "wait"
+    wait: { selector: "[data-testid='wallet-connected']", timeout: 15000 }
+    narration: "We support MetaMask, WalletConnect, Coinbase Wallet, and other popular wallets. Our demo wallet is already connected."
+    pause: 3.5
+    screenshot: true
+
+  - id: "explain_signing"
+    action: "wait"
+    wait: { selector: "[data-testid='sign-link-btn']", timeout: 5000 }
+    narration: "To complete the link, sign a message with your wallet. This proves ownership without any transaction fees."
+    pause: 3.0
+
+  - id: "sign_message"
+    action: "click"
+    selector: "[data-testid='sign-link-btn']"
+    wait: { selector: "[data-testid='address-linked']", timeout: 15000 }
+    narration: "The signature creates a cryptographic link between your private identity and your public wallet address."
+    pause: 3.0
+    screenshot: true
+
+  # === SUCCESS PAGE ===
+  - id: "continue"
+    action: "click"
+    selector: "[data-testid='continue-btn']"
+    wait: { selector: "[data-testid='success-page']", timeout: 10000 }
+    narration: "And that's it! Your account is ready to use."
+    pause: 2.0
+
+  - id: "show_endpoint"
+    action: "wait"
+    wait: { selector: "[data-testid='rpc-card']", timeout: 10000 }
+    narration: "Here's your personalized RPC endpoint. Use this URL in any Ethereum wallet, dApp, or development tool."
+    pause: 4.0
+    screenshot: true
+
+  - id: "copy_endpoint"
+    action: "click"
+    selector: "[data-testid='copy-rpc-btn']"
+    narration: "Copy the endpoint to your clipboard with one click. It works exactly like Infura or Alchemy, but with privacy built in."
+    pause: 3.0
+
+  - id: "show_metamask"
+    action: "wait"
+    wait: { selector: "[data-testid='add-metamask-btn']", timeout: 5000 }
+    narration: "You can also add it directly to MetaMask. Your blockchain access is now private, permissioned, and ready to go."
+    pause: 4.0
+    screenshot: true
+
+branding:
+  watermark:
+    position: "bottom-right"
+    opacity: 0.7
+
+captions:
+  style: "modern"
+  position: "bottom"
+  font_size: 48
+
+export:
+  - { aspect: "16:9", resolution: "1920x1080" }

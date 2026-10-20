@@ -1,0 +1,364 @@
+import { Callout } from "@/components/mdx/callout";
+export const metadata = {
+  title: "Testing",
+  description:
+    "Testing infrastructure for the Open Privacy Suite: unit tests with testcontainers, Go-based E2E tests, and Playwright API tests.",
+};
+
+# Testing
+
+The Open Privacy Suite testbed supports three testing modes:
+
+1. **Unit / Integration Tests (Go)** -- Use mock servers and testcontainers for fast, deterministic testing.
+2. **E2E Tests (Go-based and Playwright)** -- Use real Anvil node for comprehensive API testing.
+3. **Demo acceptance E2E** -- Runs the proxy, indexer, admin UI, and privacy-mode block explorer together and verifies the demo-critical security behavior end to end.
+
+**Key design decisions:**
+
+- Mock Ethereum node for fast unit/integration tests
+- Anvil (Foundry) for realistic E2E tests
+- Mock Billions service always returns KYC=true
+- testcontainers-go for automatic PostgreSQL in unit tests
+- Docker Compose for full E2E testing
+- Playwright for parallel API test execution
+
+## Docker Compose Services
+
+| Service | Image | Port | Purpose |
+|---------|-------|------|---------|
+| `postgres` | postgres:15-alpine | 5432 | Policy and token storage |
+| `anvil` | foundry | 8545 | Local Ethereum node |
+| `proxy-backend` | Go binary | 8080 | Open Privacy Suite server |
+| `proxy-frontend` | Node.js | 5173 | Admin UI (Vite dev server) |
+| `chain-indexer` | Published image | internal only | Indexes real Anvil blocks for privacy APIs |
+| `block-explorer-api` | Sibling repository | internal only | Privacy-mode explorer BFF |
+| `block-explorer-frontend` | Sibling repository | 3001 | Explorer UI |
+
+Service dependency chain:
+
+```mermaid
+graph TD
+    PG["PostgreSQL"] --> Backend["proxy-backend"]
+    Anvil["Anvil"] --> Backend
+    Backend --> Frontend["proxy-frontend"]
+
+    style Backend stroke:#8950FA,stroke-width:2px
+```
+
+All services wait for their dependencies to be healthy before starting.
+
+## Unit Tests with testcontainers-go
+
+Unit tests use `testcontainers-go` to automatically spin up PostgreSQL containers. No manual database setup is required.
+
+```go
+func SetupTestContainer(t *testing.T) (string, func()) {
+    postgresContainer, err := postgres.RunContainer(ctx,
+        testcontainers.WithImage("postgres:15-alpine"),
+        postgres.WithDatabase("testdb"),
+        postgres.WithUsername("testuser"),
+        postgres.WithPassword("testpass"),
+    )
+
+    // If Docker unavailable, fall back to external PostgreSQL
+    if err != nil {
+        dbURL := "postgres://postgres:postgres@localhost:5432/privacy_proxy_test?sslmode=disable"
+        return dbURL, func() {}
+    }
+
+    return connStr, cleanup
+}
+```
+
+**Fallback behavior:** If testcontainers fails (Docker not available, network issues), tests fall back to external PostgreSQL at `localhost:5432`. Set `TEST_DATABASE_URL` to override.
+
+## E2E Tests (Go-based)
+
+Located in `e2e/proxy_test.go`. These tests verify the full authentication and authorization flow using a mock Privado verifier:
+
+```go
+type mockPrivadoVerifier struct {
+    userDID string
+}
+
+func (m *mockPrivadoVerifier) VerifyJWZ(...) (string, error) {
+    return m.userDID, nil  // Always succeeds with configured DID
+}
+```
+
+| Test | Description |
+|------|-------------|
+| `TestE2E_Proxy_JSONRPCWithAuth` | User with valid policy can make allowed calls |
+| `TestE2E_UnauthorizedRequest_NoToken` | Request without JWT returns an opaque 404 |
+| `TestE2E_ForbiddenRequest_DisallowedMethod` | Calling a non-allowlisted method returns an opaque 404 |
+| `TestE2E_BannedUser` | Banned user returns an opaque 404 |
+| `TestE2E_NoKYC` | User without KYC returns an opaque 404 |
+
+## E2E Tests (Playwright)
+
+Located in `e2e/playwright/`. Playwright-based E2E tests run against a real Docker environment with Anvil.
+
+### Directory Structure
+
+```
+e2e/playwright/
+├── package.json
+├── playwright.config.ts
+├── tsconfig.json
+├── Dockerfile
+├── global-setup.ts
+├── helpers/            # auth.ts, policy.ts, address.ts, rbac-api.ts, rbac-fixtures.ts, test-context.ts
+└── tests/
+    ├── ui/             # numbered specs: 01-auth, 02-navigation, 03-organizations,
+                        # 05-test-request, 06-admin-auth, 07-batch-operations,
+                        # 08-event-rules, 09-visibleto-caption, 10-disclosure-scope,
+                        # 11-compliance-unsaved-changes, 12-access-logs-denial-reasons,
+                        # 13-compliance-monitor-mode (+ compliance/03-currency-selector-ui)
+    └── demo/           # cross-product acceptance: 00-setup, 00-cleanup, 10-rbac-explorer,
+                        # 20-disclosure, 30-travel-rule, 40-view-as, 50-explorer-conformance,
+                        # 60-transaction-matrix
+
+```
+
+### Demo acceptance coverage
+
+The demo project is a cross-product privacy contract, not a presence-only smoke test. It creates two organizations and ten user personas, deploys real `Counter` and ERC-20 contracts, configures method/function/event grants, writes indexed transactions, approves full/pseudonymous/redacted disclosures, and configures travel-rule prices.
+
+Each story compares the proxy RPC result, explorer BFF JSON, and rendered browser view where applicable. It asserts exact rows, counters, labels, log counts, addresses, amounts, and disclosure representations. Protected addresses, transaction hashes, and calldata are also used as canaries: tests fail if any forbidden value appears in a raw response, search result, or page. See the [executable story catalog](https://github.com/LFDT-Permissioned-Privacy-Control/permissioned-privacy-control/blob/main/e2e/playwright/tests/demo/README.md) for the complete acceptance matrix and maintenance rules.
+
+### Test Isolation
+
+Each test gets a unique DID using `TestContext`:
+
+```typescript
+test('my test', async ({ request }) => {
+  const ctx = new TestContext();
+  // ctx.userDID = 'did:privado:test_a1b2c3d4'
+
+  await ctx.createPolicy(request, { kyc: true });
+  const token = await ctx.getToken(request);
+  // Use token for API requests...
+
+  await ctx.cleanup(request);
+});
+```
+
+## Running Tests
+
+### Unit Tests
+
+```bash
+# Run all unit tests (auto-starts PostgreSQL container)
+make test-unit
+
+# Or directly:
+go test ./internal/...
+```
+
+### E2E Tests (Go)
+
+```bash
+# Run E2E tests (requires Docker for testcontainers)
+make test-e2e
+
+# Or directly:
+go test ./e2e/...
+
+# With external PostgreSQL (for CI):
+export TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5432/test?sslmode=disable"
+go test ./e2e/...
+```
+
+### E2E Tests (Playwright)
+
+```bash
+# Run full E2E suite (starts services, runs tests, stops services)
+make e2e
+
+# Debug mode (services stay running)
+make e2e-debug
+
+# Stop E2E services
+make e2e-down
+```
+
+### Demo acceptance E2E
+
+The demo suite requires Docker, Docker Compose, Foundry, and a sibling explorer checkout. By default the explorer is resolved at `../block-explorer`; use `BLOCK_EXPLORER_PATH` for a different checkout or worktree.
+
+```bash
+# Build contracts, start the full isolated stack, run all acceptance stories,
+# and always remove containers and volumes.
+make demo-e2e
+
+# Run against an explicit explorer checkout.
+make demo-e2e BLOCK_EXPLORER_PATH=/absolute/path/to/block-explorer
+
+# Keep the stack for Playwright Inspector, then tear it down explicitly.
+make demo-e2e-debug BLOCK_EXPLORER_PATH=/absolute/path/to/block-explorer
+make demo-e2e-down BLOCK_EXPLORER_PATH=/absolute/path/to/block-explorer
+```
+
+The acceptance project is serial and has no retries. A missing service, fixture, or expected redaction is a hard failure. Its temporary scenario manifest is not retained because it contains synthetic session tokens.
+
+Test reports are generated at:
+- HTML report: `e2e/playwright/playwright-report/index.html`
+- JUnit XML: `e2e/playwright/test-results/junit.xml`
+
+### Full Docker Environment
+
+```bash
+# Start all services
+make quickstart
+
+# View logs
+docker-compose logs -f proxy-backend
+
+# Stop all services
+make quickstart-down
+```
+
+## Writing New Tests
+
+### Basic E2E Test Template (Go)
+
+```go
+func TestE2E_MyFeature(t *testing.T) {
+    userDID := "did:privado:test_user"
+
+    // Setup server with mock verifier
+    mockVerifier := &mockPrivadoVerifier{userDID: userDID}
+    srv, serverURL, cleanup := setupE2EWithVerifier(t, mockVerifier)
+    defer cleanup()
+
+    // Get database and run migrations
+    database := srv.DB()
+    database.Migrate()
+
+    // Create policy for user
+    policy := &db.AccessPolicy{
+        ExternalID:   userDID,
+        KYC:          true,
+        AllowMethods: []string{"eth_call"},
+        Banned:       false,
+    }
+    database.SetPolicy(policy)
+
+    // Get JWT token
+    accessToken := getJWTToken(t, serverURL, userDID)
+
+    // Make request
+    reqBody := map[string]interface{}{
+        "jsonrpc": "2.0",
+        "method":  "eth_call",
+        "params":  []interface{}{},
+        "id":      1,
+    }
+    jsonBody, _ := json.Marshal(reqBody)
+
+    req, _ := http.NewRequest("POST", serverURL+"/", bytes.NewReader(jsonBody))
+    req.Header.Set("Authorization", "Bearer "+accessToken)
+    req.Header.Set("Content-Type", "application/json")
+
+    client := &http.Client{Timeout: 5 * time.Second}
+    resp, err := client.Do(req)
+    if err != nil {
+        t.Fatalf("request failed: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        t.Errorf("expected 200, got %d", resp.StatusCode)
+    }
+}
+```
+
+## CI Integration
+
+### GitHub Actions Example
+
+```yaml
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Run tests
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/test?sslmode=disable
+        run: |
+          go test ./internal/...
+          go test ./e2e/...
+```
+
+## Troubleshooting
+
+### Docker Issues
+
+```bash
+# Check if containers are running
+docker-compose ps
+
+# View container logs
+docker-compose logs postgres
+docker-compose logs proxy-backend
+
+# Restart a specific service
+docker-compose restart proxy-backend
+```
+
+### Database Issues
+
+```bash
+# Connect to database
+docker-compose exec postgres psql -U postgres -d privacy_proxy
+
+# Reset database (destroys all data)
+docker-compose down -v
+docker-compose up -d
+```
+
+### Test Failures
+
+```bash
+# Run with verbose output
+go test -v ./e2e/...
+
+# Run specific test
+go test -v -run TestE2E_Proxy_JSONRPCWithAuth ./e2e/...
+```
+
+### Service URLs When Running Docker
+
+| Service | URL |
+|---------|-----|
+| Open Privacy Suite API | `http://localhost:8080` |
+| Admin UI | `http://localhost:5173` |
+| Anvil (Ethereum Node) | `http://localhost:8545` |
+| PostgreSQL | `localhost:5432` |

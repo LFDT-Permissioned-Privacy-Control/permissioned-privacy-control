@@ -1,0 +1,228 @@
+import { Step } from "@/components/mdx/step"
+import { Callout } from "@/components/mdx/callout"
+
+export const metadata = {
+  title: "Getting Started",
+  description: "Set up Open Privacy Suite and run it locally in minutes.",
+}
+
+# Getting Started
+
+Set up Open Privacy Suite and run it locally in minutes.
+
+## Prerequisites
+
+- **Docker** and **Docker Compose** v2+
+- **Make**
+- **Git**
+
+<Callout variant="info" title="Development mode">
+  In development mode, the proxy uses mock ZK verification. No real Privado wallet needed — use the flask icon on the login page for instant mock authentication.
+</Callout>
+
+<Callout variant="info" title="Evaluating the product?">
+  `make quickstart` brings up a self-contained demo — two banks and a regulator on one chain, with seeded identities and ready-to-use tokens — and verifies the privacy story live. `ONBOARDING.md` in the repo root is the guided tour; the steps below bring up the plain development stack instead.
+</Callout>
+
+## Installation
+
+<Step number={1} title="Clone the repository">
+```bash
+git clone https://github.com/LFDT-Permissioned-Privacy-Control/permissioned-privacy-control.git
+cd permissioned-privacy-control
+```
+</Step>
+
+<Step number={2} title="Start the stack">
+```bash
+make run
+```
+This starts PostgreSQL, Anvil (local Ethereum node), the proxy backend, and the admin frontend.
+</Step>
+
+<Step number={3} title="Open the admin UI">
+```bash
+open http://localhost:5173
+```
+Click the flask icon below the QR code for instant mock login. Mock users are automatically granted the `admin` claim, so the admin dashboard is accessible immediately.
+</Step>
+
+## Services
+
+| Service | Port | Description |
+|---------|------|-------------|
+| proxy-backend | 8080 | API server |
+| proxy-frontend | 5173 | Admin UI |
+| postgres | 5432 | Database |
+| anvil | 8545 | Local Ethereum node |
+
+## Full-stack dev (privacy mode — proxy + block-explorer + chain-indexer)
+
+`make run` only brings up the proxy itself. For an end-to-end privacy-mode environment that includes the **block-explorer** (frontend + BFF), the **chain-indexer**, and a second postgres for the explorer, use `make full-stack-dev`:
+
+```bash
+make full-stack-dev
+```
+
+This calls `scripts/privacy-dev-up.sh`, which:
+
+1. Resolves the sibling-repo paths (`BLOCK_EXPLORER_PATH`, `CHAIN_INDEXER_PATH`) and verifies they exist.
+2. Generates `.env.privacy.dev` on first run (random secrets — POSTGRES passwords, JWT secrets, `ADMIN_API_TOKEN`). Delete the file to rotate (run `down -v` first to drop encrypted volumes).
+3. Auto-creates `rpc-namespaces.json` from the example so the `EXTRA_RPC_NAMESPACES_FILE` mount doesn't fail.
+4. Brings the stack up via `docker-compose.privacy.dev.yml`, then waits for the `proxy-backend` healthcheck.
+
+### Required layout (sibling clones)
+
+```
+/your/dev/dir/
+  ├── open-privacy-suite/  ← you are here
+  ├── block-explorer/      ← clone of gateway-fm/ops-explorer
+  └── chain-indexer/       ← clone of gateway-fm/ops-indexer (optional;
+                             the dev compose pulls the published image
+                             by default — see Configuration → INDEXER_VERSION)
+```
+
+Override paths if your layout differs:
+
+```bash
+BLOCK_EXPLORER_PATH=/path/to/block-explorer \
+CHAIN_INDEXER_PATH=/path/to/chain-indexer \
+  make full-stack-dev
+```
+
+### Services started
+
+| Service | Port | Source | Description |
+|---------|------|--------|-------------|
+| proxy-backend | 8080 | local build | Open Privacy Suite API (mock-login + mock-signatures enabled) |
+| proxy-frontend | 5173 | local build | Open Privacy Suite admin UI |
+| privacy-postgres | — | image | Open Privacy Suite database |
+| anvil | 8545 | image | Local Ethereum node |
+| redis | — | image | Per-user rate limit + session store |
+| chain-indexer | 50051 (gRPC) | published image, tag `INDEXER_VERSION` (default `0.4.0`) | Block indexer feeding the BFF |
+| indexer-postgres | — | image | Chain-indexer database |
+| block-explorer-api | — | local build from `BLOCK_EXPLORER_PATH/backend` | Block-explorer BFF (privacy-mode build, chain-indexer client compiled out) |
+| block-explorer-frontend | 3001 | local build from `BLOCK_EXPLORER_PATH/frontend` | Block-explorer UI (nginx) |
+| block-explorer-postgres | — | image | Block-explorer database |
+
+URLs after start:
+
+- Open Privacy Suite backend → `http://localhost:8080`
+- Open Privacy Suite frontend → `http://localhost:5173` (mock-login)
+- Block-explorer frontend → `http://localhost:3001`
+
+<Callout variant="warning" title="Dev only — mock auth is on">
+  This stack uses `ALLOW_MOCK_LOGIN=true` and `MOCK_SIGNATURES=true`. Both are runtime-gated AND require the `mockauth` build tag (`-tags mockauth`). The prod compose (`docker-compose.privacy.yml`) compiles them out entirely. Do not point the dev manifest at any customer-facing environment.
+</Callout>
+
+Stop with `docker compose -f docker-compose.privacy.dev.yml down`. Add `-v` to wipe all volumes.
+
+## Useful Commands
+
+| Command | Description |
+|---------|-------------|
+| `make run` | Start all services |
+| `make stop` | Stop all services |
+| `make restart` | Restart all services |
+| `make logs` | View live logs |
+| `make status` | Show service status |
+| `make clean` | Stop and remove volumes |
+
+## LAN Access
+
+Every port binds to `127.0.0.1` by default, so nothing is reachable from other
+devices until you opt in. Set `HOST_BIND` to expose the app and API:
+
+```bash
+HOST_BIND=0.0.0.0 make run
+```
+
+Then open `http://YOUR_LAN_IP:5173` on the other device. Find your IP with
+`ipconfig getifaddr en0` (macOS) or `hostname -I` (Linux).
+
+That is the only variable you need. In particular:
+
+- **`BASE_URL` is not required.** The browser sends its own origin with the
+  login request, and the backend derives the callback URL from it.
+- **`CORS_ALLOWED_ORIGINS` is not required.** The frontend proxies `/api` to the
+  backend server-side, so browser requests are same-origin.
+- **`FRONTEND_URL` is not required.** It is only used by the OAuth server flow.
+
+Postgres and the local chain node stay on loopback regardless of `HOST_BIND` —
+only the app and API are exposed. `HOST_BIND=0.0.0.0` puts an unauthenticated
+dev stack on your network; use it on a network you trust.
+
+The RPC endpoint shown in the UI follows the address you opened the app at, so
+it is already correct on the LAN and can be copied straight into MetaMask. Set
+`VITE_BACKEND_URL` only for a split-origin deployment where the API is served
+from a different host than the dashboard.
+
+### Wallet login from a phone
+
+The Privado ID wallet calls back to the **API** (port 8080), not the app. Which
+address it is told to call depends on the address you opened the app at, so
+there are two distinct setups — do not mix them.
+
+**Same wifi, plain http.** Open the app at `http://YOUR_LAN_IP:5173`. The
+backend derives the callback from that origin and points the wallet at
+`http://YOUR_LAN_IP:8080`, which `HOST_BIND=0.0.0.0` has already exposed.
+Nothing else to set:
+
+```bash
+HOST_BIND=0.0.0.0 make run
+```
+
+**Wallet needs https — tunnel.** Either port works, because the frontend
+proxies `/auth/callback` through to the API in every serving mode (dev server
+and both nginx images).
+
+Tunnelling the **app** is the simpler of the two — open the tunnel URL in the
+browser and the backend derives the callback from that origin, so there is
+nothing else to set. Start the stack first; `ngrok` holds the terminal:
+
+```bash
+make run          # detached
+ngrok http 5173   # then open the tunnel URL on the phone
+```
+
+Tunnelling the **API** works too, but the stack needs the tunnel address at
+startup, so it takes two terminals — and you must then open the app at
+`http://localhost:5173` **on the machine running the stack** and scan the QR
+from the phone, because `BASE_URL` is only consulted for a localhost origin:
+
+```bash
+# terminal 1 — leave running, copy the https URL it prints
+ngrok http 8080
+
+# terminal 2
+BASE_URL=https://YOUR-TUNNEL.ngrok-free.app make run
+```
+
+Either way the phone only needs to reach the tunnel, so `HOST_BIND` is not
+required for this path.
+
+One tunnel is enough here because the wallet contacts exactly one address: the
+QR carries the whole authorization request inline, and the only URL inside it
+is the callback, which answers with JSON rather than a redirect.
+
+That is specific to wallet login. Two other sign-in flows redirect the browser
+to a second host and need that host reachable in its own right:
+
+- **Block explorer OAuth** — on completion the browser is sent to the client's
+  registered redirect URI.
+- **Microsoft Entra ID** — the browser leaves for Microsoft and returns to
+  `<origin>/auth/azure/callback`, so that origin must be reachable and
+  registered on the app registration.
+
+## Custom Ports
+
+```bash
+HOST_PORT_PROXY=8081 HOST_PORT_UI=5174 HOST_PORT_DB=5433 HOST_PORT_RPC=8546 make run
+```
+
+## Next Steps
+
+- [Architecture](/docs/architecture) — understand the system design
+- [Authentication](/docs/authentication) — ZK-proof auth and SSO flows
+- [RBAC](/docs/rbac) — role-based access control
+- [Configuration](/docs/configuration) — environment variables reference

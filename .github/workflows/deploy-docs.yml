@@ -1,0 +1,80 @@
+name: Deploy Docs to GitHub Pages
+
+on:
+  push:
+    # Rebuild on every main push AND on every release tag. No `paths` filter:
+    # a top-level `paths` also gates tag pushes (and a tag on an existing commit
+    # often reports no changed paths, silently skipping the build), so a release
+    # could ship without refreshing its docs. Over-building on main is cheap and
+    # concurrency-guarded below; stale-docs-at-release is the failure we avoid.
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Preserve the existing deployment. A new host enables Pages and sets
+    # DOCS_PAGES_ENABLED=true before this workflow publishes there.
+    if: ${{ github.repository == 'gateway-fm/open-privacy-suite' || vars.DOCS_PAGES_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Aikido: this job never pushes, so the checkout token is not needed.
+          persist-credentials: false
+          # Full history + tags so `git describe --tags` can resolve the
+          # release version below (the default shallow clone omits tags).
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      # Resolve the version shown in the docs badge from the git tag — the same
+      # source of truth the binary uses (Makefile VERSION). On a tag build it's
+      # the tag itself; on a main build it's the latest release tag reachable
+      # (so the badge reads the released version, not a commit descriptor).
+      - name: Resolve docs version
+        id: docs_version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            raw="${GITHUB_REF_NAME}"
+          else
+            raw="$(git describe --tags --abbrev=0 2>/dev/null || echo dev)"
+          fi
+          version="${raw#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Docs version resolved to '${version}' (ref_type=${GITHUB_REF_TYPE}, ref=${GITHUB_REF_NAME})"
+
+      - run: npm ci
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_DOCS_VERSION: ${{ steps.docs_version.outputs.version }}
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

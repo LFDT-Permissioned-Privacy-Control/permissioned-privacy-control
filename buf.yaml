@@ -1,0 +1,22 @@
+# Vendored proto contract from gateway-fm/ops-indexer. We do NOT depend
+# on chain-indexer's Go module — we carry our own copy of the .proto
+# files and generate our own stubs. See docs/rd-855-behavioral-shifts.md
+# for the rationale.
+#
+# When chain-indexer's proto surface changes: copy the updated .proto
+# files from chain-indexer/proto/chain_indexer/v1/*.proto and run
+# `make proto-gen`.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - PACKAGE_VERSION_SUFFIX
+breaking:
+  use:
+    - FILE

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "namespaces": {
+    "Linea": [
+      {"method": "linea_estimateGas", "alias": "eth_estimateGas"},
+      {"method": "linea_getProof", "alias": "eth_getProof"},
+      {"method": "linea_getTransactionExclusionStatusV1", "alias": "eth_getTransactionByHash"}
+    ]
+  }
+}

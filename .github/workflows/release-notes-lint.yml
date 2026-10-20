@@ -1,0 +1,34 @@
+name: Release Notes Lint
+
+# Enforces the canonical release-notes structure (see
+# .claude/skills/release/SKILL.md) independently of whether the /release
+# skill was used to author them. Runs when a release is published or its
+# notes are edited, and fails the check if a required section is missing.
+
+on:
+  release:
+    types: [published, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    # Drafts have no stable published body yet — skip them.
+    if: ${{ !github.event.release.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Aikido: this job never pushes, so the checkout token is not needed.
+          persist-credentials: false
+          # A release event defaults checkout to the release's tag. Editing an
+          # older release (tag predates this workflow/script) would check out a
+          # tree without scripts/lint-release-notes.sh and fail before linting.
+          # Pin to the default branch so edits always run the current linter.
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Lint release notes
+        env:
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: printf '%s' "$RELEASE_BODY" | bash scripts/lint-release-notes.sh -

@@ -1,0 +1,16 @@
+{
+  "name": "mock-erigon-node",
+  "version": "1.0.0",
+  "description": "Mock Erigon node for E2E testing",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.22.1"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
+  },
+  "license": "Apache-2.0"
+}

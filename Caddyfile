@@ -1,0 +1,12 @@
+{$BASE_URL:https://localhost} {
+	encode gzip
+
+	# Backend: API, RPC proxy, auth callbacks, health
+	reverse_proxy /api/*    proxy-backend:8080
+	reverse_proxy /rpc/*    proxy-backend:8080
+	reverse_proxy /auth/*   proxy-backend:8080
+	reverse_proxy /health   proxy-backend:8080
+
+	# Frontend: everything else goes to nginx serving the built SPA
+	reverse_proxy *         proxy-frontend:80
+}

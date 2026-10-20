@@ -1,0 +1,135 @@
+import { Callout } from "@/components/mdx/callout";
+
+export const metadata = {
+  title: "Backup & Disaster Recovery",
+  description:
+    "What to back up, how to restore, and how to re-establish audit-chain integrity after a restore.",
+};
+
+# Backup & Disaster Recovery
+
+Data lifecycle — backups, restores, and recovery objectives — is owned by your
+infrastructure. This page describes **what** the Open Privacy Suite needs backed
+up, **how** to restore it, and the one product-specific step a restore requires:
+re-establishing audit-chain integrity.
+
+---
+
+## What to back up
+
+| Store | Contents | Back up? |
+|-------|----------|----------|
+| **Primary database** (`DATABASE_URL`) | RBAC, contracts, users, disclosure grants, compliance logs — the source of truth | **Yes** — this is the critical target |
+| **Audit database** (`AUDIT_DATABASE_URL`) | The append-only access log and its tamper-evident hash chain | **Yes** — required for audit/compliance continuity |
+| **Redis** (`REDIS_URL`) | Sessions, OAuth flow state, RBAC permission cache | **No** — ephemeral; rebuilds from Postgres |
+| **Object/secret stores** | `JWT_SECRET`, `ADMIN_API_TOKEN`, DB credentials, `AUDIT_CHECKPOINT_KEY`, `EXPLORER_PSEUDONYM_KEY`, etc. | **Yes** — back up your secret manager independently |
+
+<Callout variant="info" title="Redis needs no backup">
+  Redis holds only derived, short-lived state. After a restore, sessions and
+  OAuth flows are re-established on next login and the RBAC cache repopulates
+  from Postgres. Do not treat Redis as a recovery target.
+</Callout>
+
+<Callout variant="warning" title="Keep the secrets that sign the audit chain">
+  `AUDIT_CHECKPOINT_KEY` signs the audit-chain checkpoints. If you lose it you
+  cannot verify historical checkpoints or perform a signed re-anchor after a
+  restore. Store it in your secret manager with the same durability as your
+  database credentials.
+</Callout>
+
+---
+
+## Backups
+
+Both databases are standard PostgreSQL. Use your existing Postgres backup
+strategy — logical dumps (`pg_dump`), physical snapshots, or continuous
+archiving / point-in-time recovery (PITR). The product imposes no special
+requirement beyond backing up **both** the primary and the audit database.
+
+Back up the two databases as close together in time as possible so that, after a
+restore, the access log in the audit database lines up with the RBAC/contract
+state in the primary database.
+
+### Recovery objectives (RPO / RTO)
+
+- **RPO** (recovery point objective — how much data you can afford to lose) is set
+  by your backup frequency. Continuous archiving / PITR gives the smallest RPO;
+  nightly dumps give an RPO of up to a day.
+- **RTO** (recovery time objective — how fast you must be back up) is set by your
+  restore tooling and database size.
+
+Both are operator decisions. Choose them against your compliance obligations and
+validate them with a periodic restore drill.
+
+---
+
+## Restore procedure
+
+1. **Restore the databases.** Restore the primary and audit databases from the
+   same backup window. Recreate the restricted audit runtime role if your backup
+   did not include roles (see [Configuration](/docs/configuration)).
+2. **Restore secrets.** Ensure the instance's environment points at the restored
+   databases and that all secrets (JWT, admin token, `AUDIT_CHECKPOINT_KEY`,
+   pseudonym key, DB credentials) are present.
+3. **Re-anchor the audit chain** (see below).
+4. **Start the proxy** and confirm it passes startup validation.
+5. **Verify.** Run an audit-integrity verification and smoke-test authentication
+   and a representative RPC call.
+
+Redis requires no restore step — point the proxy at any healthy Redis and it
+repopulates automatically.
+
+---
+
+## Re-establishing audit-chain integrity
+
+The audit log is protected by a tamper-evident hash chain that is pinned to an
+external **anchor**. After a restore, the restored chain head will not match the
+anchor that existed before the incident (the anchor reflects the pre-incident
+state), so integrity verification will report a mismatch until the chain is
+re-anchored to the restored head.
+
+Re-anchoring is a deliberate, audited **break-glass** operation. It applies to
+the `access_logs` chain (the high-volume access log in the audit database, which
+carries the checkpoint machinery). Preview it first — it is a dry run by default:
+
+```bash
+privacy-cli audit re-anchor \
+  --chain access_logs \
+  --actor "<operator-identity>" \
+  --reason "restore from backup <date/ticket>"
+```
+
+The dry run prints the current chain statistics and the anchor that would be
+written, but changes nothing. When the values look correct, apply it with
+`--dry-run=false --confirm`. Point `--database-url` (or `AUDIT_ADMIN_DATABASE_URL`)
+at the audit database's admin/owner role — re-anchoring updates the chain anchor,
+which the restricted runtime role cannot do — and provide `AUDIT_CHECKPOINT_KEY`
+so the new anchor and checkpoint are signed. Every re-anchor records the actor
+and reason, so the operation is itself an auditable event.
+
+<Callout variant="danger" title="Break-glass only">
+  Re-anchoring rewrites the trust root of the audit chain. Use it only as part of
+  a legitimate disaster-recovery restore, with an actor and a reason that a later
+  reviewer can trace to a change record. It is not a routine operation.
+</Callout>
+
+After re-anchoring, run verification to confirm the chain is healthy:
+
+```bash
+privacy-cli audit verify --chain access_logs
+```
+
+See [Audit Log Integrity](/docs/security/audit-integrity) for how ongoing
+verification and alerting work.
+
+---
+
+## Recommended practice
+
+- **Test your restore.** A backup you have never restored is a hypothesis. Run a
+  periodic restore drill into a scratch environment and time it against your RTO.
+- **Back up both databases together** so the access log and RBAC state stay
+  consistent after recovery.
+- **Protect the audit-chain key** with the same rigor as your database
+  credentials — without it you cannot re-anchor.

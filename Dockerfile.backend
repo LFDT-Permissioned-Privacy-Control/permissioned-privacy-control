@@ -1,0 +1,76 @@
+FROM golang:1.26.9-trixie AS builder-base
+
+# Install build dependencies for CGO (required by go-rapidsnark).
+# `apt-get upgrade` pulls patched libc/curl/etc. on every build to clear
+# Aikido findings against the trixie baseline.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgmp-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build identity (RD-1023). Passed in as build-args because the build
+# context excludes .git, so `git describe` can't run here — the host
+# Makefile / CI resolves these and forwards them. Each stage redeclares the
+# ARGs with defaults (ARG values do not cross FROM boundaries), so an
+# arg-less `docker build` still works and just reports version=dev.
+
+# --- Dev build: includes mock auth for testing ---
+FROM builder-base AS builder-dev
+ARG VERSION=dev
+ARG GIT_COMMIT=none
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=1 GOOS=linux go build -tags mockauth \
+	-ldflags "-X privacy-proxy/internal/version.Version=${VERSION} -X privacy-proxy/internal/version.Commit=${GIT_COMMIT} -X privacy-proxy/internal/version.BuildTime=${BUILD_TIME}" \
+	-o /app/bin/privacy-proxy ./cmd/server
+
+# --- Production build: no mock auth, no dev shortcuts ---
+FROM builder-base AS builder-prod
+ARG VERSION=dev
+ARG GIT_COMMIT=none
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=1 GOOS=linux go build -tags production \
+	-ldflags "-X privacy-proxy/internal/version.Version=${VERSION} -X privacy-proxy/internal/version.Commit=${GIT_COMMIT} -X privacy-proxy/internal/version.BuildTime=${BUILD_TIME}" \
+	-o /app/bin/privacy-proxy ./cmd/server
+
+# --- Runtime base (shared) ---
+FROM debian:trixie-slim AS runtime-base
+
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
+    postgresql-client \
+    libgmp10 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -r -u 1000 -m appuser
+
+# RD-1112: pre-create the async audit buffer dir (the recommended AUDIT_BUFFER_DIR)
+# owned by the non-root runtime user. A fresh Docker named volume mounted here
+# inherits this ownership, so the async buffer works with no host-side chown.
+# (Kubernetes PVCs are root-owned regardless — set the pod's fsGroup to 1000;
+# see docs/security/audit-integrity.)
+RUN mkdir -p /var/lib/pp/auditbuf && chown -R appuser:appuser /var/lib/pp/auditbuf
+
+WORKDIR /app
+EXPOSE 8080
+
+USER appuser
+
+CMD ["./privacy-proxy"]
+
+# --- Dev target ---
+FROM runtime-base AS dev
+COPY --from=builder-dev /app/bin/privacy-proxy .
+
+# --- Prod target (default) ---
+FROM runtime-base AS prod
+COPY --from=builder-prod /app/bin/privacy-proxy .

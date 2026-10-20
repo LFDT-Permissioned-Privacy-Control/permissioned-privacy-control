@@ -1,0 +1,49 @@
+import { Callout } from "@/components/mdx/callout";
+import { withBasePath } from "@/lib/base-path";
+
+export const metadata = {
+  title: "API Reference",
+  description:
+    "REST API reference for the Open Privacy Suite: authentication model, base paths, and the OpenAPI specification generated from the code.",
+};
+
+# API Reference
+
+The Open Privacy Suite exposes a REST API for authentication, RBAC and organization
+administration, compliance, selective disclosure, and the block explorer,
+alongside the JSON-RPC proxy endpoint itself.
+
+## Authentication model
+
+User-facing endpoints authenticate with a Bearer JWT
+(`Authorization: Bearer <access_token>`) obtained through one of the
+[auth flows](/docs/authentication). Admin endpoints authenticate with the
+`X-Admin-Token` header and are additionally restricted to the private
+network — they are not reachable through the public ingress. A deprecated
+legacy `/api/*` prefix is still served for backward compatibility; new
+integrations should use `/api/v1`.
+
+## Endpoint reference
+
+The full endpoint reference is **generated from the code on every merge**, so
+it cannot drift from the running implementation.
+
+- **[Browse the interactive API reference](/api-reference)** — every endpoint
+  with parameters, request/response schemas, and example payloads.
+- <a href={withBasePath("/openapi.json")} download="openapi.json">Download the raw OpenAPI 3.1 spec (openapi.json)</a> —
+  import it into Postman, Insomnia, or an API client generator.
+
+<Callout variant="info" title="Single source of truth">
+
+The generated OpenAPI document is the authoritative reference. The
+hand-written endpoint tables that used to live on this page have been removed;
+where other docs pages mention endpoints, they are illustrative — the spec is
+normative.
+
+</Callout>
+
+## Errors
+
+Endpoints return errors as JSON with an `error` field describing the failure.
+Status codes and per-endpoint response schemas are documented in the generated
+reference.

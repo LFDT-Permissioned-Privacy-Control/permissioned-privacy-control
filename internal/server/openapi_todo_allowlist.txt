@@ -1,0 +1,3 @@
+# RD-1166 route↔spec coverage allowlist — operations not yet annotated.
+# Lines may only be REMOVED (the gate fails on stale entries). Burn to zero in P2.
+# Format: METHOD /canonical/path (params normalized to {})

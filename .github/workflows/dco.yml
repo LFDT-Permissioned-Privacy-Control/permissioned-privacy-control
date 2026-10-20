@@ -1,0 +1,49 @@
+name: DCO
+
+# Enforces the Developer Certificate of Origin documented in
+# CONTRIBUTING.md: every non-merge, human-authored commit in a PR must
+# carry a "Signed-off-by: Name <email>" line (git commit -s).
+# Merge commits and bot-account commits (dependabot etc.) are exempt —
+# by the GitHub account type, not by author name, which anyone can set.
+#
+# Fixing a PR that fails this check:
+#   git rebase --signoff origin/main && git push --force-with-lease
+#
+# No third-party action on purpose — the check is a single API query
+# with the runner's gh + jq.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dco:
+    name: DCO sign-off check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check Signed-off-by on PR commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          unsigned=$(gh api --paginate "repos/$REPO/pulls/$PR/commits" --jq '
+            .[]
+            | select((.parents | length) == 1)
+            | select(((.author.type // "") == "Bot") | not)
+            | select((.commit.message | split("\n")
+                      | any(test("^Signed-off-by: .+ <.+@.+>$"))) | not)
+            | "\(.sha[0:7]) \(.commit.message | split("\n")[0])"
+          ')
+          if [ -n "$unsigned" ]; then
+            echo "::error::Commits missing a Signed-off-by line (DCO, see CONTRIBUTING.md)."
+            echo "$unsigned"
+            echo ""
+            echo "Fix: git rebase --signoff origin/main && git push --force-with-lease"
+            exit 1
+          fi
+          echo "All commits carry a DCO sign-off."

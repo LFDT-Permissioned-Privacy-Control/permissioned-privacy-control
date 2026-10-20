@@ -1,0 +1,13 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc = "0.8.20"
+
+# Anvil default settings
+[rpc_endpoints]
+local = "http://localhost:8545"
+
+# Default Anvil private key (account 0)
+# Address: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+[profile.default.etherscan]

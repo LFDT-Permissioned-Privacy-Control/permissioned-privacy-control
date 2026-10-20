@@ -1,0 +1,152 @@
+import { Callout } from "@/components/mdx/callout"
+
+export const metadata = {
+  title: "What It Does",
+  description:
+    "Plain-language summary: what the Open Privacy Suite hides, from whom, what it does not hide, and the trust model.",
+}
+
+# What It Does
+
+This page is the plain-language version of the whole product. No API calls,
+no configuration — just what the system can and cannot do, so you can decide
+in ten minutes whether it fits your problem.
+
+**The one-sentence version:** the Open Privacy Suite sits between your users and a
+shared EVM blockchain and enforces *who is allowed to see and do what* —
+so multiple organizations can transact on one chain without seeing each
+other's business.
+
+## The problem it solves
+
+On a normal blockchain, everything is public to everyone with a node
+connection: every transaction, every counterparty, every amount. That is a
+non-starter for banks, payment operators, and enterprises that are required
+to keep client activity confidential.
+
+The Open Privacy Suite makes a shared chain behave like this instead:
+
+- **You see your own activity in full.**
+- **You see what others have explicitly shared with you.**
+- **Everything else is redacted or invisible** — list and count surfaces are
+  filtered per viewer, so hidden activity is not itemized to those who may
+  not see it.
+
+## What is hidden, from whom
+
+| Data | Who can see it |
+|------|----------------|
+| An organization's contracts and their activity | That organization's members (per their role), plus anyone explicitly granted access |
+| A user's personal wallet and its history | Only that user — **not even their own org admin** — plus recipients of a disclosure grant |
+| Transaction details (counterparties, amounts, calldata) | Participants of the transaction; others see `[PRIVATE]` placeholders or nothing at all |
+| Transaction counts, volumes, charts | Filtered per viewer — count surfaces reflect what the viewer is allowed to see, not raw chain totals |
+| Unknown/unregistered addresses | Nobody (private by default) |
+
+Two enforcement layers apply to every response: raw JSON-RPC responses are
+filtered before they reach the caller, and the block-explorer API applies
+graduated redaction (`[PRIVATE]` placeholders, zeroed values, dropped rows)
+based on the viewer's identity. Both layers are kept in agreement by
+dedicated tests.
+
+## What is NOT hidden
+
+Honesty matters more in this section than anywhere else:
+
+- **The chain itself is not encrypted.** Privacy is enforced at the access
+  layer. Anyone with *direct* access to an underlying node sees everything,
+  and chain data is replicated to **every** node — so the guarantee only
+  holds if **all nodes of the chain** are protected: each one is either
+  behind the Open Privacy Suite or unreachable from users entirely. A single
+  unprotected node re-exposes the whole ledger and defeats the system. That
+  is a deployment requirement, not an optional hardening step.
+- **Chain-level metadata** (block numbers, timestamps) is visible to
+  authenticated users. Aggregate fields that could disclose hidden activity
+  (block sizes, per-block gas totals) are zeroed or omitted rather than
+  recomputed from what a viewer can see.
+- **Whatever you share is shared.** Grants and disclosure approvals reveal
+  exactly what they say they reveal — the system's job is to make that
+  sharing explicit, scoped, expiring, and audited.
+
+## How access control works
+
+- **Organizations** own contracts. **Groups** within an org carry permissions.
+  **Users** belong to groups.
+- Permissions are layered: the **method allowlist** decides which JSON-RPC
+  methods a group may call (this is the authorization model — there are no
+  read/write claims), **contract grants** decide which contracts it can see
+  and touch, operational claims (`deploy`, `upgrade`, `admin`) gate contract
+  creation, proxy upgrades and admin bypass, and rules go down to
+  **individual function parameters** — e.g. "this group may call
+  `balanceOf`, but only for the caller's own address."
+- **Cross-organization isolation is absolute by default**: org A's users
+  cannot read or call org B's contracts — even indirectly. Transactions are
+  runtime-traced, so routing a call through an intermediary contract does not
+  evade the check.
+- Users authenticate with ZK-proof credentials (Privado ID), SSO
+  (Microsoft Entra ID), or wallet linking — and then use standard JSON-RPC
+  tooling with an `Authorization` header. Clients that cannot set HTTP
+  headers (browser wallets like MetaMask) connect through a JWT-injecting
+  reverse proxy that stamps the token onto every request (the deployment
+  keeps the short-lived token file fresh; the injector re-reads it on
+  change).
+
+## Sharing and disclosure
+
+Data crosses a privacy boundary only through explicit, auditable mechanisms:
+
+- **Contract grants** — an org shares a contract (or single functions of it)
+  with a specific group.
+- **Disclosure requests** — e.g. a regulator requests access to a user's
+  activity. The request names a reason and legal basis, requires consent,
+  can expire automatically, and **every access made under it is logged**
+  and can be exported as a compliance report.
+
+## Compliance built in
+
+- KYC status gates access to protected state and transaction methods. One
+  deliberate exception: an authenticated but not-yet-KYC'd user still gets
+  already-public chain metadata (chain id, block number and the like) — no
+  less than an anonymous caller would see. Banned users are always denied.
+- Travel-rule checks can be enforced on transfers.
+- Access logs are written to an append-only audit store with tamper-evident
+  integrity checking — an operator can prove what was and wasn't accessed.
+
+## The trust model, honestly stated
+
+- The **proxy operator** is trusted: they run the gateway and hold admin
+  credentials. The product's guarantees are about *users and organizations
+  not seeing each other's data* — not about hiding data from whoever operates
+  the infrastructure.
+- **Every node of the chain must sit behind a proxy** (or be unreachable by
+  users) in production. The proxy enforces privacy; the chain does not — and
+  chain data is replicated to all nodes, so one exposed node anywhere undoes
+  the guarantee for everyone.
+- The **audit trail is tamper-evident**: logs are hash-chained and verified,
+  so after-the-fact manipulation is detectable.
+
+## Quick answers
+
+| Question | Answer |
+|----------|--------|
+| Can Bank B see Bank A's transactions? | No — not the parties, amounts, or even that they exist, unless Bank A grants access. |
+| Can my org admin read my wallet history? | No. Personal wallets are visible only to their owner, unless the owner approves a disclosure. |
+| Can a regulator get access? | Yes — through a scoped, consented, expiring disclosure grant, with every access logged. |
+| Does it modify the blockchain? | No. It is a gateway in front of a standard EVM node; contracts and tooling work unchanged. |
+| Can I use MetaMask / Foundry / ethers.js? | It speaks standard JSON-RPC, so yes — but requests need an auth header. Clients that can set one (ethers.js, web3.js, curl) work directly; browser wallets like MetaMask cannot, and connect through a JWT-injecting reverse proxy instead. |
+| What if someone bypasses the proxy? | Then they see raw chain data. Every node of the chain must be reachable only through the Open Privacy Suite — one open node exposes the entire ledger. See [Operator Deployment](/docs/operator-deployment). |
+
+## Try it in five minutes
+
+The repo ships a one-command demo — two banks and a regulator on one chain,
+with ready-to-use identities:
+
+```bash
+git clone https://github.com/LFDT-Permissioned-Privacy-Control/permissioned-privacy-control.git
+cd permissioned-privacy-control
+make quickstart
+```
+
+It prints tokens and copy-paste requests that show the same query answered
+differently for three different viewers. `ONBOARDING.md` in the repo root is
+the guided tour — and if you use an AI coding agent, point it at the repo and
+ask it anything: the repo is set up so agents can answer accurately.

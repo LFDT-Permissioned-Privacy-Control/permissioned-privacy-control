@@ -1,0 +1,98 @@
+# RBAC Management Demo
+# Demonstrates enterprise-grade role-based access control for blockchain
+
+version: "1"
+
+metadata:
+  name: "rbac-management"
+  title: "Enterprise Access Control for Web3"
+  description: "Role-based access control with fine-grained permissions"
+
+video:
+  resolution: { width: 1920, height: 1080 }
+  fps: 60
+  viewport: { width: 1920, height: 1080 }
+  quality:
+    preset: "slow"
+    crf: 15
+    bitrate: "25M"
+    audio_bitrate: "320k"
+    profile: "high"
+    level: "4.2"
+
+voice:
+  provider: "edge"
+  voice_id: "guy"  # Professional male voice (en-US-GuyNeural)
+  speed: "+0%"
+
+steps:
+  - id: "intro"
+    action: "navigate"
+    url: "/admin/rbac/organizations"
+    wait: { selector: "[data-testid='rbac-manager']", timeout: 15000 }
+    narration: "Open Privacy Suite provides enterprise-grade access control for blockchain applications. Let's explore the admin interface."
+    pause: 3.0
+    screenshot: true
+
+  - id: "organizations_overview"
+    action: "wait"
+    wait: { selector: "[data-testid='tab-organizations']", timeout: 5000 }
+    narration: "Organizations are the top-level containers. Each organization can have multiple groups with different permissions."
+    pause: 3.5
+
+  - id: "groups_tab"
+    action: "click"
+    selector: "[data-testid='tab-groups']"
+    wait: { timeout: 2000 }
+    narration: "Groups define collections of users with shared permissions. Each group can have specific rate limits and default claims."
+    pause: 3.5
+    screenshot: true
+
+  - id: "contracts_tab"
+    action: "click"
+    selector: "[data-testid='tab-contracts']"
+    wait: { timeout: 2000 }
+    narration: "Smart contracts are registered with the organization. You define exactly which methods are accessible and at what permission level."
+    pause: 4.0
+    screenshot: true
+
+  - id: "users_tab"
+    action: "click"
+    selector: "[data-testid='tab-users']"
+    wait: { timeout: 2000 }
+    narration: "The users tab shows all authenticated users, their linked wallet addresses, and group memberships."
+    pause: 3.5
+    screenshot: true
+
+  - id: "explain_permissions"
+    action: "wait"
+    wait: { timeout: 1000 }
+    narration: "Users inherit permissions from their groups. Contract grants define specific claims like read, write, admin, and upgrade access."
+    pause: 4.0
+
+  - id: "back_to_orgs"
+    action: "click"
+    selector: "[data-testid='tab-organizations']"
+    wait: { timeout: 2000 }
+    narration: "This hierarchical model provides fine-grained control over who can access what on the blockchain."
+    pause: 3.0
+
+  - id: "conclusion"
+    action: "wait"
+    wait: { timeout: 1000 }
+    narration: "Open Privacy Suite brings enterprise-grade access control to Web3. Your blockchain, your rules."
+    pause: 3.0
+    screenshot: true
+
+branding:
+  watermark:
+    position: "bottom-right"
+    opacity: 0.7
+
+captions:
+  style: "modern"
+  position: "bottom"
+  font_size: 48
+
+export:
+  - { aspect: "16:9", resolution: "1920x1080" }

@@ -1,0 +1,67 @@
+-- 068_drop_access_logs_from_main.sql
+--
+-- ── WHAT ─────────────────────────────────────────────────────────
+-- DROPs the access_logs table (+ its sequence + its indexes) from the MAIN
+-- (shared) database. After RD-1147 the access_logs audit trail lives EXCLUSIVELY
+-- in a SEPARATE, always-on append-only audit database (see
+-- internal/db/migrations_audit). The main database must NOT contain access_logs
+-- at all — there is NO fallback to the main DB.
+--
+-- This DROP is deliberately destructive and is the ONE place in the main
+-- migration set that overrides CLAUDE.md's expand-only policy. It is
+-- EXPLICITLY AUTHORIZED by the owner for RD-1147: the table is being physically
+-- relocated, not deleted for good — every access_logs row now lives in the
+-- audit DB, provisioned + migrated by the audit migration set.
+--
+-- ⚠️ KEEPS the audit_chain_* tables (audit_chain_anchor, audit_chain_checkpoint,
+-- audit_chain_reanchor) in the MAIN DB. Those tables are chain_name-keyed and
+-- SHARED between two independent hash chains: the access_logs chain (now in the
+-- audit DB, which has its OWN copies) AND the rbac_audit_log chain (STAYS in
+-- main). The rbac_audit_log integrity verifier (internal/audit/verifier.go,
+-- startingPrev) reads `audit_chain_anchor WHERE chain_name = 'rbac_audit_log'`
+-- on every verification pass; migration 057 explicitly documents rbac_audit_log
+-- seeding from audit_chain_anchor. Dropping these tables from main would break
+-- the rbac_audit_log chain's anchor-based seed after any prune. So they STAY.
+--
+-- rbac_audit_log and compliance_logs themselves also STAY in main (RD-1147 scope
+-- is access_logs only).
+--
+-- ── WHY (ticket: RD-1147) ────────────────────────────────────────
+-- The isolated audit DB gives the runtime proxy role an append-only seal
+-- (INSERT+SELECT, no UPDATE/DELETE) on access_logs that the main-DB owner role
+-- cannot provide. Leaving a writable access_logs in main would defeat the seal:
+-- a compromised proxy (or leaked main credential) could rewrite/delete
+-- access-log history there. Removing the table from main makes the audit DB the
+-- SOLE home of the access_logs trail.
+--
+-- ── AFFECTED ─────────────────────────────────────────────────────
+-- Table access_logs and everything owned by it in the main DB. No rows are
+-- migrated by this file: the audit DB is provisioned + migrated independently
+-- (infra provisions the DB; the app runs the lean audit migrations against it).
+-- Detection query (main must have NO access_logs after this migration):
+--   SELECT to_regclass('public.access_logs');   -- must return NULL
+-- And the rbac_audit_log chain tables MUST survive:
+--   SELECT to_regclass('public.audit_chain_anchor');       -- must be non-NULL
+--   SELECT to_regclass('public.audit_chain_checkpoint');   -- must be non-NULL
+--   SELECT to_regclass('public.audit_chain_reanchor');     -- must be non-NULL
+--
+-- ── AUTHORITATIVE-RECORD note ────────────────────────────────────
+-- The authoritative, traceable record of this change is this migration file
+-- (git) + PR review + tern schema_version (applied-at timestamp). This
+-- migration writes NOTHING to any hash-chained audit table.
+--
+-- ── EXPAND-ONLY / ROLE-SEPARATION status ─────────────────────────
+-- Expand-only: EXCEPTION — owner-authorized DROP for RD-1147 (table relocation).
+-- Role separation: preserved (audit_chain_* grants for rbac_audit_log untouched).
+
+-- CASCADE removes the owned sequence (access_logs_id_seq) and all indexes
+-- (idx_logs_created_at, idx_logs_external_id, idx_access_logs_correlation,
+-- idx_access_logs_org_id, idx_access_logs_org_created, access_logs_buffer_seq_uniq)
+-- and the primary key in one statement.
+DROP TABLE IF EXISTS access_logs CASCADE;
+
+---- create above / drop below ----
+
+-- No down migration. Recreating access_logs in main would reintroduce the very
+-- exposure RD-1147 removes; if the isolation is ever reverted, do it via a new
+-- forward migration that recreates the full RD-1112-era access_logs schema.

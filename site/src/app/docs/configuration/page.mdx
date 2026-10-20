@@ -1,0 +1,625 @@
+import { Callout } from "@/components/mdx/callout";
+import { EnvTable } from "@/components/mdx/env-table";
+
+export const metadata = {
+  title: "Configuration Reference",
+  description:
+    "Environment variables, token TTLs, rate limiting, Docker configuration, and database setup for the Open Privacy Suite.",
+};
+
+# Configuration Reference
+
+Open Privacy Suite configuration is driven by environment variables, with an optional [configuration file](#configuration-file) as a base layer for non-secret settings. This page documents every variable, their defaults, and how they interact across development and production modes.
+
+---
+
+## Configuration File
+
+By default every setting is read from an environment variable (the rest of this page). For deployments with many settings, you can keep the non-secret ones in a single **TOML file** and point the proxy at it with `CONFIG_FILE`:
+
+```bash
+CONFIG_FILE=/etc/privacy-proxy/config.toml
+```
+
+```toml
+# config.toml
+version = 1
+
+ENVIRONMENT = "production"
+BASE_URL = "https://proxy.example.com"
+NODE_URL = "http://eth-node:8545"
+ENABLE_TRAVEL_RULE = true
+COMPLIANCE_DEFAULT_MODE = "enforce"
+```
+
+**Precedence — the environment always wins.** For every setting the proxy checks, in order: (1) the environment variable, (2) the value in `CONFIG_FILE`, (3) the built-in default. A value set in both the environment and the file resolves to the environment's value, so 12-factor / Kubernetes overrides and secret injection keep working unchanged — the file is a base layer, not a replacement.
+
+**Keys are the environment-variable names.** A file key is exactly the env var it stands in for (`DATABASE_URL`, `BASE_URL`, `ENABLE_TRAVEL_RULE`, …). Values are typed: strings, booleans, and numbers are all accepted (`ENABLE_TRAVEL_RULE = true` and `ENABLE_TRAVEL_RULE = "true"` are equivalent). Nested tables and arrays are not supported.
+
+**`version` is required.** The file must declare a top-level `version` (currently `1`). The proxy refuses to start on a missing or unsupported version, so a file written for a future schema fails loudly instead of being silently mis-read.
+
+<Callout variant="danger" title="Secrets are not allowed in the config file">
+Secrets — `JWT_SECRET`, `JWT_REFRESH_SECRET`, `JWT_SECRET_PREVIOUS`, `JWT_REFRESH_SECRET_PREVIOUS`, `ADMIN_API_TOKEN`, `OPERATOR_API_TOKEN`, `AZURE_AD_CLIENT_SECRET`, `DATABASE_URL`, `AUDIT_DATABASE_URL`, `AUDIT_ADMIN_DATABASE_URL`, `EXPLORER_DATABASE_URL`, `REDIS_URL` / `REDIS_PASSWORD`, `RPC_API_KEY`, `RPC_API_KEY_ENCRYPTION_KEY`, `OAUTH_FIRST_PARTY_CLIENTS`, `CROSS_ORG_AUTHORIZATION_ORACLE_TOKEN` — must live in your environment or secrets manager, never in a plaintext config file. **The proxy refuses to start if it finds one of these in the file**, naming the offending key. Inject secrets via the environment, which overrides the file anyway.
+</Callout>
+
+A fully-commented template lives at `config.example.toml` in the repository root — copy and trim it:
+
+```bash
+cp config.example.toml config.toml
+```
+
+---
+
+## Required in Production
+
+These variables **must** be set when `ENVIRONMENT=production`. The server will refuse to start without them.
+
+| Variable | Description |
+|----------|-------------|
+| `JWT_SECRET` | Secret for signing access tokens |
+| `JWT_REFRESH_SECRET` | Secret for signing refresh tokens |
+| `VERIFIER_ID` | Your Privado verifier DID |
+| `ADMIN_API_TOKEN` | Shared token for admin API authentication (M2M / bootstrap) |
+| `NODE_URL` | Target Ethereum node URL |
+| `BASE_URL` | Public URL for auth callbacks |
+
+`DATABASE_URL` is **not** enforced here — it has a built-in localhost default, so a production deploy without it starts and silently targets `localhost:5432`. Set it explicitly.
+
+---
+
+## Timezone
+
+The proxy operates in **UTC**. The backend container image sets `TZ=UTC`, and the database connection pins the PostgreSQL session timezone to UTC, so timestamp-based checks (token and membership expiry) are correct regardless of the host or database server's local timezone. No action is required for the bundled deployment. If you run the database separately, leaving its timezone at the default (UTC) is recommended; the proxy does not depend on it but consistent UTC avoids confusion when inspecting rows directly.
+
+---
+
+## Core Settings
+
+<EnvTable vars={[
+  { name: "PORT", default: "8080", description: "Server listen port" },
+  { name: "NODE_URL", default: "http://localhost:8545", description: "Target Ethereum node URL" },
+  { name: "DATABASE_URL", default: "postgres://postgres:postgres@localhost:5432/privacy_proxy?sslmode=disable", description: "PostgreSQL connection string" },
+  { name: "ENVIRONMENT", default: "development", description: "Set to production or development" },
+  { name: "BASE_URL", default: "http://localhost:8080", description: "Public URL for auth callbacks" },
+  { name: "TRUSTED_INTERNAL_CIDRS", default: "(none)", description: "Comma-separated CIDRs for internal API access. Appended to the default list (localhost, Docker, RFC1918, Tailscale). Set when the block explorer or monitoring runs outside default networks (e.g., Kubernetes pod CIDRs, cloud VPCs)." },
+  { name: "REDIS_URL", default: "(none)", description: "Redis connection URL for distributed state stores (sessions, caches, rate limiting). When not set, in-memory stores are used (single-instance only). Example: redis://:password@redis:6379/0" },
+  { name: "ENS_RESOLVER_URL", default: "https://eth.llamarpc.com", description: "Public RPC endpoint used for ENS name resolution when displaying addresses in the UI. Does not need to match NODE_URL." },
+]} />
+
+---
+
+## Connection Pools & Scaling
+
+These tune connection reuse. Defaults suit a single high-throughput node; size them to your node and to Postgres `max_connections` when running multiple instances.
+
+<EnvTable vars={[
+  { name: "DB_MAX_OPEN_CONNS", default: "50", description: "Max open Postgres connections per instance. With N instances, keep N × this under the database's max_connections — use a pooler (e.g. PgBouncer) if you exceed it." },
+  { name: "DB_MAX_IDLE_CONNS", default: "(= DB_MAX_OPEN_CONNS)", description: "Idle connections retained in the pool. Defaults to DB_MAX_OPEN_CONNS so connections are reused, not churned, under bursty load." },
+  { name: "DB_CONN_MAX_LIFETIME", default: "5m", description: "Max lifetime of a pooled Postgres connection before it is recycled." },
+  { name: "NODE_HTTP_MAX_IDLE_CONNS_PER_HOST", default: "256", description: "Idle keep-alive connections kept to the upstream node host. Go's default of 2 causes connection churn at high request rates; raise to match expected concurrency." },
+  { name: "NODE_HTTP_MAX_IDLE_CONNS", default: "512", description: "Total idle keep-alive connections across hosts for the upstream node client." },
+  { name: "NODE_HTTP_MAX_CONNS_PER_HOST", default: "0", description: "Cap on total (active + idle) connections to the node host. 0 = unlimited (the node governs throughput)." },
+  { name: "NODE_HTTP_IDLE_CONN_TIMEOUT", default: "90s", description: "How long an idle keep-alive connection to the node is retained before it is closed." },
+]} />
+
+---
+
+## Audit Logging
+
+The access log is a tamper-evident hash chain (an ISO 27001 / SOC 2 detective control). By default it is written synchronously on the request path. For high throughput, enable the async path: the request appends to a durable local buffer and a background sealer writes the chain off the hot path.
+
+<EnvTable vars={[
+  { name: "AUDIT_BUFFER_DIR", default: "(none)", description: "Filesystem path for the durable audit buffer. When set, access-log writes leave the request hot path — the request appends here (fsync'd, survives restart) and a background sealer drains it into the chain. Use a durable/replicated volume writable by the proxy's non-root runtime user (uid 1000) — see the ownership note below. Empty = synchronous (legacy)." },
+  { name: "AUDIT_CHECKPOINT_KEY", default: "(none)", description: "Enables signed truncation-detection checkpoints. A worker signs each chain's head + row count so the integrity verifier can detect deletion of recent rows (which a plain hash-walk cannot). Source this from a secret DISTINCT from the database credential — a signature the DB-writing identity can also forge adds nothing. Empty = disabled." },
+  { name: "AUDIT_CHECKPOINT_INTERVAL", default: "1m", description: "How often a signed checkpoint is written per chain." },
+]} />
+
+**Durable-buffer note:** with `AUDIT_BUFFER_DIR` set, an entry is durable on the local volume the instant the request returns, but only reaches the (replicated, backed-up) database when the sealer next runs. Keep the buffer on a durable/replicated volume and the seal interval short so the un-sealed window stays small.
+
+**Volume ownership:** the proxy runs as a non-root user (uid 1000), and the buffer open is **fail-hard** — if the directory isn't writable the backend will not start (with an error naming the uid). A fresh **Docker named volume** mounted at the image's pre-created buffer path (`/var/lib/pp/auditbuf`) inherits the right ownership automatically, so no `chown` is needed. On **Kubernetes**, set the pod's `securityContext.fsGroup: 1000` so the mounted volume is group-writable. For any other path or a bind mount, ensure the directory is writable by uid 1000 (owned by it, or group-writable via a matching `fsGroup`).
+
+### Separate append-only audit database
+
+The access log **always** lives in its own PostgreSQL database, separate from your main `DATABASE_URL`. This lets the running proxy **append** access-log rows but not rewrite or delete history. The main database has no access-log table at all. Two connection strings control it (both are secrets — keep them in the environment / your secrets manager, not the config file):
+
+<EnvTable vars={[
+  { name: "AUDIT_DATABASE_URL", default: "derived from DATABASE_URL", description: "Runtime connection string for the audit database. Should connect as the RESTRICTED database role — the one with INSERT + SELECT on access_logs but not UPDATE/DELETE. That role is what makes the append-only seal bite." },
+  { name: "AUDIT_ADMIN_DATABASE_URL", default: "derived from DATABASE_URL", description: "Admin/owner connection string for the same database. The proxy uses it to run the audit-database migrations at startup and to run retention pruning (which the restricted runtime role cannot do)." },
+]} />
+
+At startup the proxy migrates the audit database (as the admin DSN), then reads and writes all access-log data there.
+
+**Infra provisions the database; the proxy only migrates it.** The proxy **never** runs `CREATE DATABASE`. You (your infrastructure-as-code — Terraform / RDS / etc.) must provision the audit database and the restricted role before the proxy starts; the proxy then connects and applies the lean audit schema. In the dev stack the Postgres container does this provisioning for you (see `scripts/init-audit-db.sh`).
+
+**Default (derived) DSNs.** If you leave `AUDIT_DATABASE_URL` / `AUDIT_ADMIN_DATABASE_URL` unset, each is derived from `DATABASE_URL` by swapping the database name to `<name>_audit` on the same server, reusing `DATABASE_URL`'s credentials. This is convenient, but the derived DSN connects as the **owner**, so the append-only seal is **not** enforced on it. For production, set `AUDIT_DATABASE_URL` explicitly to the restricted role.
+
+**Deployment dependency — the restricted role is what makes this work.** The append-only guarantee comes from the *database role* the runtime DSN connects as, not from the proxy. `AUDIT_DATABASE_URL` **must** connect as the restricted role (`privacy_proxy_app`, which the audit-database migration grants INSERT + SELECT on `access_logs`, no UPDATE/DELETE). If it connects as the owner instead (including the derived default), the proxy still works but the seal does **nothing** — the owner can update and delete rows. `AUDIT_ADMIN_DATABASE_URL` is the owner DSN and is used only for migrations and retention pruning.
+
+**`AUDIT_ADMIN_DATABASE_URL` must own the audit schema, not just hold grants on it.** It runs the migrations, and DDL needs ownership — `GRANT ALL PRIVILEGES` does not confer it. This bites when you follow the path above: the derived DSN's role created the audit tables, so it stays their owner after you switch to the dedicated roles. Transfer them at the same time. `REASSIGN OWNED` needs the privileges of both roles, so run it as a superuser, or grant the membership for the duration if `<derived_role>` may administer `privacy_proxy_admin` (as it can when it is a managed instance's master user):
+
+```sql
+-- in the audit database. One transaction: a failed transfer must not leave
+-- <derived_role> holding privacy_proxy_admin, which is the separation you came
+-- here to get.
+BEGIN;
+GRANT CREATE ON SCHEMA public TO privacy_proxy_admin;
+GRANT privacy_proxy_admin TO <derived_role>;        -- not needed as a superuser
+REASSIGN OWNED BY <derived_role> TO privacy_proxy_admin;
+REVOKE privacy_proxy_admin FROM <derived_role>;     -- not needed as a superuser
+COMMIT;
+```
+
+Existing grants survive the transfer, including the `privacy_proxy_app` append-only allowlist on `access_logs`. Do the transfer when you switch: the proxy refuses to start, naming the table and the statement to run, only when a migration is actually blocked by the missing ownership — it does not re-check ownership on every boot, so a deployment can start fine today and fail on the next migration that touches the schema.
+
+**Resilience.** Set `AUDIT_BUFFER_DIR` (see above) so a transient audit-database outage does not block request handling: entries are written to a durable local buffer and sealed into the audit database by a background worker when it is reachable again.
+
+---
+
+## Authentication
+
+<EnvTable vars={[
+  { name: "PRIVADO_RPC_URL", default: "https://rpc-mainnet.privado.id", description: "Privado network RPC endpoint (backs the privado:main state resolver)" },
+  { name: "BILLIONS_RPC_URL", default: "(unset)", description: "RPC endpoint for the Billions identity chain (chainID 45056). Required to let users sign in with the Billions app; while unset that network is not registered, Billions sign-ins are refused with a clear message, and the login page advertises Privado ID only." },
+  { name: "BILLIONS_STATE_CONTRACT", default: "0x3C9acB2205Aa72A05F6D77d708b5Cf85FCa3a896", description: "Billions on-chain identity state contract. Defaults to the shared iden3 cross-chain address; override only if Billions moves it." },
+  { name: "IPFS_GATEWAY", default: "https://ipfs-proxy-cache.privado.id", description: "IPFS gateway for schemas" },
+  { name: "JWT_SECRET", default: "(auto in dev)", description: "Access token signing secret" },
+  { name: "JWT_REFRESH_SECRET", default: "(auto in dev)", description: "Refresh token signing secret" },
+  { name: "JWT_SECRET_PREVIOUS", default: "(none)", description: "Optional comma-separated previous access-token secrets, accepted for validation only (never signing). Lets you rotate JWT_SECRET without logging every session out: promote the new secret to JWT_SECRET and move the old one here, then drop it after the access-token TTL elapses." },
+  { name: "JWT_REFRESH_SECRET_PREVIOUS", default: "(none)", description: "Optional comma-separated previous refresh-token secrets, accepted for validation only. Same rotation-window purpose as JWT_SECRET_PREVIOUS; drop old entries after the refresh-token TTL elapses." },
+  { name: "VERIFIER_ID", default: "(required in prod)", description: "Privado verifier DID" },
+  { name: "ADMIN_API_TOKEN", default: "(required in prod)", description: "Shared token for admin API access via X-Admin-Token header" },
+]} />
+
+<Callout variant="danger" title="Never expose ADMIN_API_TOKEN to the frontend">
+  Do not pass `ADMIN_API_TOKEN` as a Vite build arg or environment variable to the frontend. Vite bakes `VITE_*` vars into the static JS bundle, making them visible to every browser visitor. For browser-based admin access, use JWT authentication (login grants admin claim via RBAC). For bootstrap, use `curl` with `X-Admin-Token` directly against the backend API.
+</Callout>
+
+### Cross-org authorization oracle
+
+`POST /api/v1/admin/cross-org-authorization-oracle` lets one trusted infrastructure service ask whether a subject may make
+an RPC call, before it is signed (see [RBAC](/docs/rbac#cross-organization-authorization-oracle)). It is disabled by default.
+
+<EnvTable vars={[
+  { name: "CROSS_ORG_AUTHORIZATION_ORACLE_MODE", default: "disabled", description: "disabled (the endpoint answers 404), verdict_only (decision and coarse reason only) or full_simulation (an allow also returns the raw, unredacted trace and logs). Prefer verdict_only where the operator must not be able to access tenant data." },
+  { name: "CROSS_ORG_AUTHORIZATION_ORACLE_TOKEN", default: "(required when enabled)", description: "Secret sent by the caller in X-Cross-Org-Authorization-Oracle-Token. Must differ from ADMIN_API_TOKEN and OPERATOR_API_TOKEN. Keep it in the environment or a secrets manager; the config file rejects it." },
+  { name: "CROSS_ORG_AUTHORIZATION_ORACLE_ORG_IDS", default: "(required when enabled)", description: "Comma-separated organization IDs the oracle may evaluate. This allowlist is the consent boundary: the token holder may query any member of any listed organization. The oracle never consults an organization outside it and answers indeterminate instead." },
+]} />
+
+The oracle has no request quota: one global concurrency cap (`MAX_CONCURRENT_REQUESTS` requests in flight) and a
+5-second trace timeout protect the proxy and the node. Request-rate limits belong to the upstream RPC proxy: oracle traces
+use the subject organization's RPC API key (or `RPC_API_KEY`), so they count against that key's quota. Enabling the oracle
+writes a `cross_org_oracle.enabled` entry to the RBAC audit log at startup; the proxy refuses to start if it cannot.
+
+---
+
+## ProofOfHumanity (Billions)
+
+<EnvTable vars={[
+  { name: "BILLIONS_ISSUER_DID", default: "(none)", description: "Billions issuer DID for PoH verification" },
+  { name: "REQUIRE_PROOF_OF_HUMANITY", default: "false (dev) / true (prod)", description: "Require PoH credential for authentication" },
+]} />
+
+---
+
+## Runtime Tracing
+
+The proxy uses `debug_traceCall` to validate all addresses touched by transactions and `eth_call` reads before forwarding them to the node. This provides comprehensive cross-organization isolation on both writes and reads:
+
+- **All internal CALL/DELEGATECALL/STATICCALL targets are validated** against RBAC permissions, on both `eth_sendTransaction`/`eth_sendRawTransaction` and `eth_call`
+- **Custom Multicall contracts are detected** -- any contract batching calls will have all targets validated
+- **CREATE/CREATE2 in runtime is blocked** -- prevents unauthorized contract deployment
+- **Precompiles (0x01--0x09) are always allowed**
+
+**Node requirements:**
+
+- Upstream node must support `debug_traceCall` (Geth, Anvil, Erigon, Nethermind)
+- For Geth: the `--http.api debug` flag is required
+
+**Performance impact:**
+
+- Adds approximately 50--200 ms latency per transaction
+- Tiered validation skips tracing for calls to known org-owned addresses (sends only)
+- Caching reduces overhead for repeated patterns (sends only -- the `eth_call` path is intentionally uncached, see below)
+
+**`eth_call` cross-org isolation:**
+
+`eth_call` is traced on every request, separately from the send-side path. Three differences matter:
+
+- **Uncached.** Proxy-pattern contracts (EIP-1967, Diamond, Beacon, transparent upgradeable) can re-target their internal calls by rewriting a storage slot, so a `(from,to,data,value)` cache yields stale "allow" decisions after a cross-org upgrade. The eth_call path always asks the upstream node.
+- **`from` rebound to the JWT-bound EOA.** Sends pin `msg.sender` via the unlocked key; reads do not. The proxy looks up the caller's linked Ethereum addresses and rejects user-supplied `from` that doesn't match (rather than silently rebinding -- mismatches are logged as spoof attempts).
+- **Trace runs at the same block as the forwarded call.** If `eth_call` supplies a historical block tag or EIP-1898 object as `params[1]`, the trace runs at that same block. Otherwise an attacker could exfil historical cross-org state via a proxy contract that has since been re-targeted.
+- **Calls without `to` are deployments.** An `eth_call`, `eth_estimateGas` or `eth_createAccessList` without `to` runs its `data` as contract-creation code. It requires authentication and the `deploy` claim, and it is always traced, whatever `RUNTIME_TRACING_ETH_CALL_ENABLED` says: the trace checks every contract the creation code reaches through `CALL`, `STATICCALL` or `DELEGATECALL` (contracts it deploys itself may be called), with the same per-call timeout. A `from`, if given, must be one of the caller's linked addresses. The creation trace retains the supplied gas, fee, nonce and access-list settings. If tracing is missing, disabled or unavailable, the call is refused.
+
+<EnvTable vars={[
+  { name: "RUNTIME_TRACING_ETH_CALL_ENABLED", default: "true", description: "Rollback knob for the eth_call cross-org tracing path. Default ON. Set to false ONLY as a documented change-management exception (ISO 27001 A.8.32) -- disabling allows same-org wrapper contracts to bubble up foreign-org state via internal calls. It applies to calls with a `to`; calls without `to` (contract-creation code) are always traced. See the runtime toggle endpoint below for the emergency rollback path." },
+  { name: "ETH_CALL_TRACE_TIMEOUT", default: "5s", description: "Per-call timeout for the eth_call trace. Distinct from (and shorter than) the 30s send-side trace timeout — a slow upstream times out faster on the read path. Aggregate trace work per JWT is capped by MAX_CONCURRENT_REQUESTS, which is acquired before the trace runs." },
+]} />
+
+**Runtime toggle endpoint (emergency rollback):** super-admins can flip the knob without a redeploy via `POST /api/v1/admin/system/eth-call-tracing` with body `{"enabled": false, "reason": "..."}`. The change is **in-memory only** — a restart re-arms the env value. The endpoint requires the super-admin token (`ADMIN_API_TOKEN`); tier-2 admin JWTs receive `403`. Every toggle writes a row to `rbac_audit_log` and (when configured) fires a SIEM event. `GET` returns the current state and is available to any admin caller so dashboards can prove the control is on.
+
+<Callout title="Important: eth_call tracing scope">
+
+Read trace validation runs when the method resolves to `eth_call` or `eth_estimateGas`, and for creation-shaped `eth_createAccessList` requests. Chain-specific methods declared in `EXTRA_RPC_NAMESPACES_FILE` with `"alias": "eth_call"` (e.g. an explicit `linea_call` entry) are traced. **Passthrough methods are NOT traced** — and they are also not subject to contract access checks or response filtering (see Extra RPC Namespaces below).
+
+A passthrough method has no defined `to`/`from`/`data` shape, so the proxy has nothing to extract for the trace and no way to know whether the method even runs the EVM. To apply organization scope checks to a chain-specific method, declare it with an `alias` instead.
+
+Client-supplied state and block overrides are refused for every caller, including admins, on built-in and aliased methods (see the [simulation-option policy](/docs/security/response-filtering#state-and-block-overrides)). Passthrough methods get no such check. Declare a chain-specific call or gas-estimation method such as `linea_estimateGas` with an `alias` (here `eth_estimateGas`), not as passthrough: an aliased method's override argument is refused, while a passthrough method's arguments, overrides included, are forwarded as sent.
+
+</Callout>
+
+**Intra-org contract-grant scoping:**
+
+By default, runtime tracing enforces the **organization** as the isolation boundary: an internal call frame into any contract owned by one of the caller's orgs is allowed, even if the caller's groups have no grant for that specific contract. (A direct call to such a contract is still denied at the entry point — this only concerns contracts reached indirectly through another contract's internal calls.)
+
+Set `RUNTIME_TRACING_INTRA_ORG_GRANTS_ENABLED=true` to tighten this: when on, an internal frame into a same-org contract is allowed only if the caller actually has a contract grant for it (the same rule applied to the directly-called contract). Turn this on when contract-to-contract composition within an org should respect per-contract grants, not just org membership.
+
+- **Default OFF.** Org ownership remains the boundary unless you opt in.
+- **Cross-org isolation is unaffected** by this flag — calls into another org's contracts (and into unregistered addresses) are always denied regardless.
+- Governs both reads (`eth_call`) and writes (`eth_sendTransaction`, `eth_sendRawTransaction`, and contract-deploy constructor calls). Client `debug_traceCall` and standard-profile `debug_traceTransaction` always apply this check, whatever this flag says, because a trace names every contract its internal calls reach. Strict-profile mined traces return only the participant's top frame and retain organization ownership validation.
+- **In-flight deploys are not blocked.** Multi-contract or factory deploys (CREATE2/CREATE3) that reference a precomputed sibling address before it is mined still work — pre-registered deployment addresses are allowed for deploy-claim callers, the same as the direct-call access check.
+- Has no effect when runtime tracing is globally unavailable.
+
+<EnvTable vars={[
+  { name: "RUNTIME_TRACING_INTRA_ORG_GRANTS_ENABLED", default: "false", description: "When true, runtime tracing also requires a contract grant for same-org contracts reached through internal call frames, matching the entry-point access check. When false (default), internal frames into same-org contracts are allowed on org ownership alone. Cross-org isolation is enforced either way." },
+]} />
+
+**Runtime toggle endpoint:** flip this knob without a redeploy via `POST /api/v1/admin/system/intra-org-grant-tracing` with body `{"enabled": true, "reason": "..."}`. Same posture as the eth_call toggle above: super-admin token only, in-memory (a restart re-arms the env value), audit-logged with the required `reason`, and a `GET` readable by any admin. Note the directions are not symmetric — turning this **off** widens access within an org, so the audit row matters most on a disable.
+
+---
+
+## Extra RPC Namespaces
+
+The proxy forwards a JSON-RPC method to the node only when it knows how to protect it:
+
+- **Built-in methods** — the standard `eth_*`, `net_*`, `web3_*` and `debug_trace*` methods the proxy models, each with its access check and response filtering.
+- **Aliased methods** — chain-specific methods you declare with an `alias` to a built-in method.
+- **Passthrough methods** — chain-specific methods you declare by exact name with `"passthrough": true`.
+
+Every other method is refused with `method not found` and never reaches the node, whatever a group's allowed methods say. This includes `eth_getRawTransaction*`, `eth_getAccount`, `eth_simulateV1`, `eth_callMany`, `eth_sendRawTransactionSync`, and the `trace_*`, `ots_*`, `erigon_*` and `parity_*` namespaces unless you declare a method from them as passthrough (see below — they return data the proxy cannot filter).
+
+To declare chain-specific methods (e.g. Linea, zkSync, Optimism), create a JSON config file and point to it with `EXTRA_RPC_NAMESPACES_FILE`:
+
+```bash
+EXTRA_RPC_NAMESPACES_FILE=./rpc-namespaces.json
+```
+
+All three compose files (`docker-compose.yml`, `docker-compose.privacy.yml`, and `docker-compose.privacy.dev.yml`) include the volume mount and env-var passthrough. The backend only loads the file when `EXTRA_RPC_NAMESPACES_FILE` is set; leave it empty to disable the feature.
+
+```json
+{
+  "version": 1,
+  "namespaces": {
+    "Linea": [
+      {"method": "linea_estimateGas", "alias": "eth_estimateGas"},
+      {"method": "linea_getProof", "alias": "eth_getProof"},
+      {"method": "linea_getTransactionExclusionStatusV1", "alias": "eth_getTransactionByHash"}
+    ],
+    "zkEVM": [
+      {"method": "zkevm_batchNumber", "passthrough": true}
+    ]
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `version` | Schema version (`1` or `2`). Version `2` also accepts each namespace as an object `{"explicit": [...]}`. |
+| `namespaces` | Map of display label to method list. The label appears as the section heading in the admin UI. |
+| `method` | The exact method name. Wildcards (`*`) are not accepted. |
+| `alias` | A built-in method whose access checks and response filtering the method inherits. |
+| `passthrough` | `true` to forward the method unfiltered (see below). |
+
+Each entry needs **exactly one** of `alias` or `"passthrough": true`. The proxy refuses to start when an entry:
+
+- has neither, or both;
+- contains `*`;
+- reuses the name of a built-in method (in any letter case);
+- sits in the `eth_`, `net_`, `web3_` or `engine_` namespace. The built-in methods own the standard namespaces, so an unmodelled method there can only be supported by the proxy itself; `engine_` is the consensus-client API and never belongs on this endpoint;
+- is globally blocked (`debug_*`, `admin_*`, `personal_*`, `miner_*`, `txpool_*`, `clique_*`, `les_*`);
+- has an `alias` that is not a supported built-in method; alias targets are trimmed and normalized to the built-in spelling at config load;
+- has an `alias` of `eth_sendTransaction`, `eth_sendRawTransaction`, `debug_traceCall`, `debug_traceTransaction`, `eth_getBlockByHash`, `eth_getBlockByNumber`, `eth_getBlockTransactionCountByHash` or `eth_getBlockTransactionCountByNumber`. These methods are protected by checks that apply only under their own name (sender linking, runtime tracing, travel-rule compliance, trace validation, block participant filtering), so an alias to them would skip those checks.
+
+The proxy also refuses to start on a file that still contains a `wildcard` block. Prefix wildcards are not supported: list each method you need by name.
+
+### Aliased methods
+
+An aliased method inherits its alias target's contract access checks, storage-slot tiering, deployment detection, eth_call tracing and participant-based response filtering. Pick the alias whose parameters **and response shape** match the method: a response filter that does not recognise the shape cannot filter it. Aliases inherit the target historical-state restriction. For example, a concrete-block `linea_getProof` request is denied to non-org-admin viewers in the same way as `eth_getProof`. The Multicall check also uses the resolved target.
+
+### Passthrough methods
+
+A passthrough method is forwarded to the node **as-is**:
+
+- no contract access check (the proxy does not know whether the method takes an address);
+- no response filtering (the proxy does not know the response shape);
+- no eth_call tracing;
+- no simulation-option check: state and block override arguments are forwarded as sent.
+
+Do not declare a method that executes caller-supplied calls as passthrough. Methods such as `trace_call` and `trace_callMany` would run those calls against any contract, with whatever override arguments the node accepts, and return traces the proxy cannot filter. Declare a chain's own call or gas-estimation method, such as `linea_estimateGas`, with an `alias` instead (see [Aliased methods](#aliased-methods)).
+
+**You are responsible for what a passthrough method returns.** Declare one only if you run a node that serves it and its responses cannot expose data your tenants must not see. The proxy lists the passthrough methods in a startup warning. Each call is tagged `matched_via: "passthrough"` in the SIEM audit stream.
+
+Because a passthrough method can return any tenant's data, only an admin-tier token (not a tier-2 org-admin JWT) can add one to a group. An org admin can keep or remove a passthrough method an admin already granted, but cannot add one. Before declaring a method passthrough, check which groups already list that name; an existing entry becomes live as soon as the method is declared:
+
+```sql
+SELECT g.org_id, g.id, g.slug
+FROM group_access ga
+JOIN groups g ON g.id = ga.group_id
+WHERE 'zkevm_batchNumber' = ANY (ga.allowed_methods);
+```
+
+A passthrough method is available **only to groups that list it by exact name**:
+
+- A group's `*` entry never includes it.
+- Anonymous callers never get it, even if the anonymous group lists it.
+- The admin UI marks it **Unfiltered** in the group method picker.
+
+### Group `allowed_methods`
+
+A group's `allowed_methods` holds exact method names. The admin API rejects, with `400`, any entry the proxy would not forward. That includes unknown methods, `prefix*` globs and entries not declared in the namespaces file. The anonymous group accepts built-in methods only, listed one by one: `*` is rejected there.
+
+The API still accepts a bare `*` for scripting convenience. It stores the explicit list instead: every built-in `eth_*`/`net_*`/`web3_*`/`debug_trace*` method the group could be granted, plus aliased methods whose alias target is in that list, plus any other supported method listed next to the `*`. Passthrough methods and `eth_getProof`, `eth_createAccessList` and `eth_getBlockReceipts` are granted only when listed by name. The dashboard group editor does not offer those three built-in methods; grant them through the admin API. The editor shows them as "Also granted" and keeps them on save.
+
+The admin UI drops a stored entry the proxy does not support when it loads a group and shows a notice. Saving the group removes that entry.
+
+**Upgrading.** On upgrade, groups stored with a `*` entry are rewritten to the explicit list, and `prefix*` entries are removed. A group loses any method it reached only through such an entry: an aliased or passthrough chain-specific method, or `eth_getProof` / `eth_createAccessList` / `eth_getBlockReceipts`. Re-grant those by name. A group whose only entries were globs ends up with no methods, so its members can call nothing until you grant some. `eth_signTypedData` and `eth_signTypedData_v4` are now blocked; groups that list them keep the entry, but it is refused at request time, and the next save must drop it. Run this query before upgrading to find the groups the rewrite affects:
+
+```sql
+SELECT g.org_id, g.id, g.slug, ga.allowed_methods
+FROM group_access ga
+JOIN groups g ON g.id = ga.group_id
+WHERE EXISTS (SELECT 1 FROM unnest(ga.allowed_methods) AS e WHERE strpos(e, '*') > 0);
+```
+
+Client `debug_traceTransaction` requires the method in the group's stored `allowed_methods`. Under the standard read profile, admitted senders, recipients, called-contract admins and shared recipients receive a validated call tree with access required for each contract, and an internal call's values only when they may read the storage of the contract that produced them. Under strict, linked senders/recipients receive only the top frame, without internal calls or logs, subject to organization ownership checks. Other tracers are rejected.
+
+A ready-to-use example is provided in `rpc-namespaces.example.json` — copy and customize it:
+
+```bash
+cp rpc-namespaces.example.json rpc-namespaces.json
+```
+
+---
+
+## Token TTLs
+
+| Token | TTL | Notes |
+|-------|-----|-------|
+| Access Token | 5 minutes | Short-lived; use refresh to renew (dev/mockauth builds use 30 min) |
+| Refresh Token | 7 days | Rotated on each refresh |
+| Auth Session | 10 minutes | Time to complete the auth flow |
+| ETH Link Challenge | 5 minutes | Signature challenge expiry |
+
+---
+
+## RPC API Keys
+
+Each RBAC group can have an API key for the upstream RPC node. This enables per-group rate limiting and usage tracking on the upstream side.
+
+<EnvTable vars={[
+  { name: "RPC_API_KEY", default: "(none)", description: "Global fallback API key for the upstream RPC node. Used when no group-specific key is configured." },
+  { name: "RPC_API_KEY_HEADER", default: "Authorization", description: "Header name used to send the upstream RPC API key. Default 'Authorization' sends 'Bearer <key>'; any other value (e.g. 'X-API-Key') sends the key verbatim under that header. Validated against ^[A-Za-z0-9-]+$ at startup." },
+  { name: "RPC_API_KEY_ENCRYPTION_KEY", default: "(none)", description: "Hex-encoded 32-byte key for encrypting API keys at rest. Required in production. Generate with: openssl rand -hex 32. The proxy refuses to start if this is set to an invalid value (bad hex or wrong length) rather than silently storing keys in plaintext — fix or unset it to boot." },
+  { name: "MAX_CONCURRENT_REQUESTS", default: "50", description: "Maximum concurrent in-flight requests per authenticated user." },
+  { name: "MAX_CONCURRENT_ANONYMOUS_REQUESTS", default: "= MAX_CONCURRENT_REQUESTS", description: "Shared concurrency cap for anonymous /rpc traffic (requests with no JWT). The per-user cap is keyed by identity and cannot bound anonymous callers, so this bounds the total in-flight work an unauthenticated flood can create. Set 0 to disable." },
+  { name: "OPS_APPROVAL_PREFLIGHT_RATE", default: "20", description: "Applies only when signed transaction approvals are enabled (OPS_APPROVAL_TARGETS set). How many transactions per second each identity may have simulated on the node for approval, sustained; decimals allowed, 0.001 to 100000. The budget is shared by all proxy instances through Redis when REDIS_URL is set, and held per instance otherwise (and per instance while Redis is unreachable). A transaction over the budget is refused with 429 before anything is simulated. An invalid or out-of-range value stops start-up. Environment only: not read from CONFIG_FILE." },
+  { name: "OPS_APPROVAL_PREFLIGHT_BURST", default: "40", description: "How many simulations an identity may run back to back after being idle before OPS_APPROVAL_PREFLIGHT_RATE applies; a whole number, 1 to 100000. An invalid or out-of-range value stops start-up. Environment only: not read from CONFIG_FILE." },
+]} />
+
+Per-group keys are configured in the admin dashboard under group access settings. Keys are encrypted at rest in production and masked in API responses (only last 4 characters visible). Each group can also override `rpc_api_key_header` to switch between `Authorization` and any single-header alternative such as `X-API-Key`.
+
+Rotating `RPC_API_KEY_ENCRYPTION_KEY` orphans every stored key. To rotate, generate a new key and re-encrypt the stored keys with `privacy-cli`:
+
+```bash
+privacy-cli reencrypt-rpc-keys --database-url $DATABASE_URL --old-key $OLD_KEY --new-key $NEW_KEY
+```
+
+Add `--dry-run` to preview the change without writing. Run it before switching `RPC_API_KEY_ENCRYPTION_KEY` over to the new value.
+
+The client's IP is forwarded to the upstream node via `X-Forwarded-For` for upstream rate limiting.
+
+### Request size and pagination limits
+
+Fixed limits protect the proxy from oversized or unbounded requests. These are not configurable:
+
+- **Request body size:** admin, explorer, and `/rpc` requests are capped at 1 MB. A declared `Content-Length` above the cap is rejected with `413 Request Entity Too Large`; chunked or under-declared bodies are still bounded and fail with a 4xx response when the handler reads past the cap.
+- **Admin list pagination:** `?limit=` on admin list endpoints is capped at 1000; higher values are clamped down. Non-numeric, zero, or negative values fall back to the endpoint default.
+- **Explorer pagination:** `?limit=` on explorer list endpoints is capped at 100; negative `limit`/`offset` values are treated as the default rather than passed through to the database.
+- **Batch admin operations:** contract sync-delete and batch-move accept at most 200 contract IDs per request; a single contract grant accepts at most 100 custom-address event param rules.
+
+---
+
+## Explorer Pseudonyms
+
+Under a pseudonymous disclosure grant the explorer renders addresses as a stable `Address-XXXX` alias. The alias is non-reversible in all configurations — it reveals nothing about the underlying address. Setting a key additionally makes aliases non-enumerable, so an attacker cannot recompute the alias for a candidate address.
+
+<EnvTable vars={[
+  { name: "EXPLORER_PSEUDONYM_KEY", default: "(none)", description: "Optional hex-encoded key that makes explorer address pseudonyms non-enumerable. Recommended in production. When unset, aliases are still stable and non-reversible but can be recomputed from a candidate address; when set, they cannot. Changing this value changes every alias, so set it once and keep it stable. Generate with: openssl rand -hex 32. The proxy refuses to start if this is set to an invalid value (bad hex)." },
+]} />
+
+---
+
+## Environment Modes
+
+### Development (`ENVIRONMENT=development`)
+
+- `/auth/verify` endpoint enabled for manual testing
+- JWT secrets auto-generated if not set
+- `REQUIRE_PROOF_OF_HUMANITY` defaults to `false`
+- Mock tokens accepted: `mock.{did}` or `mock.jwz.token.{did}`
+- Mock-login users are auto-granted the `admin` claim (instant admin dashboard access)
+
+### Production (`ENVIRONMENT=production`)
+
+- `/auth/verify` endpoint disabled
+- JWT secrets required (server will not start without them)
+- `REQUIRE_PROOF_OF_HUMANITY` defaults to `true`
+- `VERIFIER_ID` required
+- `ADMIN_API_TOKEN` required (server will not start without it)
+
+<Callout variant="warning" title="Development-only features">
+  Mock tokens and the `/auth/verify` endpoint are disabled in production mode. Do not rely on them for integration testing against a production deployment.
+</Callout>
+
+---
+
+## Docker Configuration
+
+### Services
+
+Standalone proxy (`docker-compose.yml`, `make run`):
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| `postgres` | 5432 | Database |
+| `proxy-backend` | 8080 | API server |
+| `proxy-frontend` | 5173 | Admin UI |
+| `anvil` | 8545 | Local Ethereum node |
+
+Full-stack privacy mode adds (`docker-compose.privacy.dev.yml`, `make full-stack-dev`):
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| `redis` | — | Per-user rate-limit / session store |
+| `chain-indexer` | 50051 (gRPC) | Block indexer (BFF-side data feed) |
+| `indexer-postgres` | — | Chain-indexer database |
+| `block-explorer-api` | — | Block-explorer BFF (privacy-mode build) |
+| `block-explorer-frontend` | 3001 | Block-explorer UI |
+| `block-explorer-postgres` | — | Block-explorer database |
+
+The prod manifest (`docker-compose.privacy.yml`) pulls the proxy-backend image rather than building from source; see [Deployment](/docs/deployment) for the prod topology and trust-zone split.
+
+### Image pinning (privacy mode)
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `INDEXER_VERSION` | `0.4.0` (quickstart) / `latest` (prod) | Tag pulled from `gatewayfm/chain-indexer` (dev, dockerhub) or `ghcr.io/gateway-fm/chain-indexer` (prod). Verify any new pin with `docker manifest inspect` before changing — the dev default has no `v` prefix because the dockerhub tag doesn't carry one. |
+| `BLOCK_EXPLORER_PATH` | `../block-explorer` | Sibling-clone location for the block-explorer source (dev only — both api and frontend build from this path). |
+| `CHAIN_INDEXER_PATH` | `../chain-indexer` | Sibling-clone location for chain-indexer (only used when overriding the published image with a local build via `docker-compose.override.yml`). |
+
+### E2E Testing
+
+The `docker-compose.e2e.yml` file replaces the mock node with Anvil for realistic testing:
+
+```bash
+make e2e          # Run full suite
+make e2e-debug    # Keep services running after tests
+make e2e-down     # Stop services
+```
+
+---
+
+## Database
+
+### Connection
+
+Uses pgx v5 with the standard `database/sql` interface.
+
+```bash
+# Local development
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/privacy_proxy?sslmode=disable
+
+# Docker
+DATABASE_URL=postgres://postgres:postgres@postgres:5432/privacy_proxy?sslmode=disable
+```
+
+### Migrations
+
+Uses Tern v2 with embedded migrations.
+
+```bash
+# Run migrations
+make db-migrate
+
+# Create new migration
+make db-new-migration name=add_feature
+```
+
+<Callout variant="info" title="Migration policy">
+  Migrations are expand-only in production. Never use DROP in UP migrations. If a migration needs undoing, create a new forward migration.
+</Callout>
+
+---
+
+## Compliance and Retention
+
+<EnvTable vars={[
+  { name: "ENABLE_TRAVEL_RULE", default: "false", description: "Enable FATF travel-rule compliance checks on value transfers. Fails closed when token pricing is missing." },
+  { name: "COMPLIANCE_DEFAULT_MODE", default: "enforce", description: "Cluster-wide default compliance enforcement mode: 'enforce' (block violations) or 'monitor' (allow the transfer but record it as would-have-blocked). Per-org compliance config overrides it. Sanctioned addresses always block regardless of mode." },
+  { name: "RETENTION_ACCESS_LOGS", default: "2160h", description: "How long access log entries are retained before the periodic cleaner deletes them. Go duration format (e.g., 2160h = 90 days)." },
+  { name: "MAX_ACCESS_LOG_ROWS", default: "0", description: "FIFO row cap on access_logs. When set above 0, the retention loop trims the oldest rows so at most this many remain. Complements RETENTION_ACCESS_LOGS for high-volume deployments. The audit hash chain stays verifiable across the cut via the audit_chain_anchor table." },
+  { name: "RETENTION_COMPLIANCE_LOGS", default: "61320h", description: "How long compliance log entries are retained. Typically longer than access logs for regulatory audit trails. Default is roughly 7 years." },
+  { name: "ORG_ADMIN_VIEW_USER_TXS", default: "false", description: "When true, org admins see user-to-user transaction rows that are otherwise dropped (both parties private) in the explorer, with the value/amount preserved so it matches the Transfer event they can already read. Counterparty addresses still render as [PRIVATE] — a volume/timing audit view, not real-address disclosure. Every request that reveals such a row is written to rbac_audit_log (actor, endpoint, row count, client IP). Default off = strict privacy (rows dropped, value zeroed)." },
+  { name: "PRIVACY_READ_PROFILE", default: "standard", description: "Read privacy policy for transactions, receipts and events on JSON-RPC and the Explorer Data API: standard or strict. Under strict a transaction or receipt reaches only a transaction participant (linked address is the tx from/to) and an event only a viewer named by one of its ABI-indexed address parameters; admin claims, visibleTo and ORG_ADMIN_VIEW_USER_TXS grant no read access, View as user and dry-run reads are refused, and a send that carries a visibleTo field is rejected. Fixed at startup; any other value (including one of only spaces) refuses to start. Empty = the CONFIG_FILE value, else standard. The effective value is reported at GET /api/v1/admin/system/read-profile. Switching back from strict to standard is a disclosure event: it re-applies the standard policy to existing data. See Strict Read Profile." },
+  { name: "OAUTH_FIRST_PARTY_CLIENTS", default: "(empty)", description: "Silent-SSO allowlist for trusted first-party OAuth clients. Comma-separated entries of the form <client_id>:<bcrypt_hash>. The proxy verifies the matching client_secret at /oauth/token via HTTP Basic (RFC 6749 client_secret_basic) or client_secret_post. Empty = no client gets silent SSO; every flow falls back to interactive Privado. Use per-environment opaque IDs (e.g. explorer-prod-${random}) — the literal default 'explorer' is warned-on at startup in production mode. Recipe: id=explorer-prod-$(openssl rand -hex 8); secret=$(openssl rand -hex 32); hash=$(htpasswd -bnBC 12 '' \"$secret\" | tr -d ':\\n'); echo \"${id}:${hash}\"." },
+]} />
+
+---
+
+## Audit Log Integrity
+
+Both `access_logs` and `rbac_audit_log` are protected by a SHA-256 hash chain. Every row links to the previous row's hash so an attacker cannot silently rewrite history without invalidating every downstream hash. A scheduled in-process verifier walks the chain at a configurable interval and fires structured alerts on mismatch.
+
+<EnvTable vars={[
+  { name: "AUDIT_INTEGRITY_VERIFY_INTERVAL", default: "15m", description: "How often the in-process verifier walks every audit chain. Set to 0 to disable the scheduled worker entirely (manual verification via privacy-cli still works). Go duration format." },
+  { name: "AUDIT_TAMPER_WEBHOOK_URL", default: "(empty)", description: "Optional generic webhook POSTed with a JSON payload when the verifier detects tampering. Used when no SIEM is configured; wire to Slack incoming webhooks, PagerDuty Events API, Discord, or your alert ingestion bus. Subject to the same SSRF guard as SIEM_WEBHOOK_URL (loopback, RFC-1918, link-local, cloud-metadata IPs are rejected). Leave empty when SIEM forwarding is the alert channel — the verifier already emits a SIEM event of type 'audit.chain.tamper_detected' on every violation." },
+]} />
+
+When a violation is detected, the verifier:
+
+- Logs a structured `slog.Error` with the chain name, the offending row id, and the mismatch reason.
+- Increments a Prometheus tamper-violation counter (labelled by chain and reason).
+- Emits a SIEM event of type `audit.chain.tamper_detected` via the existing `SIEM_WEBHOOK_URL` forwarder (preferred channel — the customer's SIEM already routes to PagerDuty / Slack / Datadog).
+- POSTs a JSON payload to `AUDIT_TAMPER_WEBHOOK_URL` if configured.
+
+For on-demand verification (auditor spot-check, incident response), use:
+
+```bash
+privacy-cli audit verify --database-url $DATABASE_URL --chain all
+```
+
+The CLI is read-only; connect with the `privacy_proxy_admin` role or a dedicated read-only audit role, not the runtime app credential.
+
+---
+
+## Trusted Proxies
+
+For Docker environments, the server trusts `X-Forwarded-For` from:
+
+- `172.16.0.0/12` (Docker networks)
+- `127.0.0.1` (localhost)
+
+Adjust the proxy's trusted-proxy configuration if your deployment requires additional trusted ranges.
+
+---
+
+## Example .env
+
+```bash
+# Required for production
+ENVIRONMENT=production
+JWT_SECRET=your-secure-secret-here
+JWT_REFRESH_SECRET=your-refresh-secret-here
+VERIFIER_ID=did:polygonid:polygon:main:your-verifier-did
+
+# Database
+DATABASE_URL=postgres://user:pass@host:5432/dbname?sslmode=require
+
+# Ethereum node
+NODE_URL=https://eth-mainnet.alchemyapi.io/v2/your-key
+
+# Privado
+PRIVADO_RPC_URL=https://rpc-mainnet.privado.id
+
+# ProofOfHumanity (optional)
+BILLIONS_ISSUER_DID=did:polygonid:polygon:main:billions-issuer-did
+REQUIRE_PROOF_OF_HUMANITY=true
+
+# Admin API
+ADMIN_API_TOKEN=your-admin-token-here
+
+# RPC API key encryption (generate with: openssl rand -hex 32)
+RPC_API_KEY_ENCRYPTION_KEY=your-64-char-hex-string-here
+
+# Public URL
+BASE_URL=https://your-domain.com
+```

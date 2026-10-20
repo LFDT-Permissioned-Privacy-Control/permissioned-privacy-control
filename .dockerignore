@@ -1,0 +1,90 @@
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files (secrets)
+.env
+.env.*
+!.env.example
+
+# Dependencies (rebuilt in container)
+node_modules/
+vendor/
+.go/
+
+# Build artifacts
+bin/
+dist/
+coverage/
+.tmp/
+# Native integration source and historical PoC evidence do not belong in the
+# OPS backend build. Their Dockerfiles have explicit context allowlists.
+node-approvals/
+poc/
+*.out
+*.test
+
+# Frontend (for backend builds)
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+
+# Docs site (Next.js, ~750MB)
+site/
+
+# Demo files
+demo/
+demos/
+
+# Agents
+.agents/
+
+# Claude Code worktree dirs — repo-internal worktrees and agent
+# scratch space. Each worktree carries its own go-build / node_modules
+# / dist artifacts; including them as build context bloats it
+# multi-GB and triggers BuildKit context-transfer timeouts on
+# `make full-stack-dev`.
+.claude/
+
+# Test files
+e2e/
+*_test.go
+**/*_test.go
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Logs
+*.log
+logs/
+
+# Database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Scripts (not needed in runtime)
+scripts/
+
+# Config files not needed in container
+tern.conf
+CLAUDE.md
+Makefile

@@ -1,0 +1,23 @@
+# Virtual environment
+.venv/
+
+# Cache directories
+.cache/
+__pycache__/
+*.pyc
+
+# Output files
+output/
+
+# Playwright
+playwright/test-results/
+playwright/playwright-report/
+playwright/node_modules/
+playwright/tests/generated/*.spec.ts
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store

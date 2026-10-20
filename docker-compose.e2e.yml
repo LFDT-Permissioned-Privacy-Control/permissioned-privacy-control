@@ -1,0 +1,147 @@
+# E2E test configuration - runs in complete isolation from local dev
+# Usage: ./scripts/e2e-harness.sh playwright
+# The harness supplies a unique Compose project and per-run artifact paths.
+#
+# Key differences from dev docker-compose.yml:
+# 1. Uses a unique, per-run project name supplied by the E2E harness
+# 2. Uses a project-scoped volume for postgres (not shared with dev)
+# 3. No host port mappings - services communicate only via internal network
+# 4. Ephemeral - all data destroyed on `docker-compose down -v`
+
+services:
+  # PostgreSQL database - isolated instance for E2E
+  postgres:
+    image: postgres:15-alpine
+    # No port mapping - only accessible within e2e network
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=privacy_proxy
+    # Project-scoped volume - data is ephemeral, destroyed on down -v
+    volumes:
+      - e2e-postgres-data:/var/lib/postgresql/data
+    networks:
+      - e2e-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d privacy_proxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Anvil (Foundry's local Ethereum node)
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    # No port mapping
+    networks:
+      - e2e-network
+    # --steps-tracing enables debug_traceCall support for runtime validation
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--port", "8545", "--steps-tracing"]
+    healthcheck:
+      test: ["CMD-SHELL", "cast block-number --rpc-url http://localhost:8545 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # Open Privacy Suite backend
+  proxy-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      target: dev
+      # Build identity (RD-1023). Forwarded from the environment; falls
+      # back to the Dockerfile defaults (dev/none/unknown) if unset.
+      args:
+        VERSION: ${VERSION:-dev}
+        GIT_COMMIT: ${GIT_COMMIT:-none}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    # No port mapping - only playwright container needs access
+    environment:
+      - NODE_URL=http://anvil:8545
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/privacy_proxy?sslmode=disable
+      # RD-1147: server.New requires a resolvable audit DB. Co-locate the audit
+      # schema in the same e2e Postgres (the lean audit migration is idempotent),
+      # mirroring the Go e2e configs. Avoids needing a separate privacy_proxy_audit DB.
+      - AUDIT_DATABASE_URL=postgres://postgres:postgres@postgres:5432/privacy_proxy?sslmode=disable
+      - AUDIT_ADMIN_DATABASE_URL=postgres://postgres:postgres@postgres:5432/privacy_proxy?sslmode=disable
+      - PORT=8080
+      - ENVIRONMENT=test
+      - VERIFIER_ID=did:privado:verifier:e2e-test-verifier-0000000000000000
+      - JWT_SECRET=e2e-test-jwt-secret-not-for-production
+      - JWT_REFRESH_SECRET=e2e-test-refresh-secret-not-for-production
+      - MOCK_SIGNATURES=true
+      - ALLOW_MOCK_LOGIN=true
+
+      - ENABLE_TRAVEL_RULE=true
+      - ADMIN_API_TOKEN=e2e-test-admin-token
+    depends_on:
+      postgres:
+        condition: service_healthy
+      anvil:
+        condition: service_healthy
+    networks:
+      - e2e-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Frontend (production build with nginx + API proxy to backend)
+  proxy-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: e2e
+      args:
+        - VITE_ALLOW_MOCK_LOGIN=true
+        - VITE_BACKEND_URL=http://proxy-backend:8080
+    # No port mapping - only playwright container needs access
+    depends_on:
+      proxy-backend:
+        condition: service_healthy
+    networks:
+      - e2e-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:80 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Playwright test runner
+  playwright:
+    build:
+      context: ./e2e/playwright
+      dockerfile: Dockerfile
+    volumes:
+      - ./e2e/playwright:/app
+      - /app/node_modules
+      - "${E2E_PLAYWRIGHT_RESULTS_DIR:-./e2e/playwright/test-results}:/app/test-results"
+      - "${E2E_PLAYWRIGHT_REPORT_DIR:-./e2e/playwright/playwright-report}:/app/playwright-report"
+    environment:
+      - PROXY_URL=http://proxy-backend:8080
+      - ADMIN_URL=http://proxy-backend:8080
+      - FRONTEND_URL=http://proxy-frontend:80
+      - CI=${CI:-false}
+      - E2E_PLAYWRIGHT_WORKERS=${E2E_PLAYWRIGHT_WORKERS:-1}
+
+      - ADMIN_API_TOKEN=e2e-test-admin-token
+    depends_on:
+      proxy-backend:
+        condition: service_healthy
+      proxy-frontend:
+        condition: service_healthy
+    networks:
+      - e2e-network
+    working_dir: /app
+
+# Isolated volume - separate from dev
+volumes:
+  e2e-postgres-data:
+
+# Isolated network - separate from dev
+networks:
+  e2e-network:
+    driver: bridge

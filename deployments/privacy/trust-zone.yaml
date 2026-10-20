@@ -1,0 +1,78 @@
+# Source of truth for the privacy-mode trust-zone service inventory.
+#
+# Privacy mode enforces a two-zone split:
+#
+#   - indexer-zone holds services that handle raw chain data
+#     (chain-indexer, indexer-postgres, the EVM node) plus Open Privacy Suite's
+#     own state (privacy-postgres, redis). Open Privacy Suite is the only
+#     legitimate caller of these services.
+#
+#   - bff-zone holds the block-explorer BFF and its verification
+#     postgres. The BFF talks to Open Privacy Suite and to its own postgres;
+#     it has no route to indexer-zone.
+#
+# Open Privacy Suite is the only service that legitimately attaches to both
+# zones — it is the sole bridge. A misbuilt BFF (e.g. one that lost the
+# `--target privacy` Go build tag in a future change) physically cannot
+# reach the indexer because the network forbids it. This is the
+# structural floor that survives upstream build-pipeline mistakes.
+#
+# Consumed by:
+#   - e2e/privacy_bypass_test.go     (runtime negative-network test)
+#   - e2e/privacy_manifest_test.go   (static compose-config validation)
+#
+# A service listed under `indexer_zone` or `bff_zone` MUST NOT publish
+# ports to the host in docker-compose.privacy.yml, and MUST attach only
+# to its named docker network (the static test enforces both).
+#
+# A service listed under `public` IS published on the host (typically
+# bound to 127.0.0.1) and acts as the external-facing surface.
+#
+# `default_internal_port` is the port the container listens on inside
+# the compose network — used by the runtime test to probe that nothing
+# on the host responds on that port.
+
+version: 2
+
+indexer_zone:
+  - name: chain-indexer
+    default_internal_port: 50051
+    description: chain-indexer gRPC server; Open Privacy Suite is the sole consumer
+  - name: indexer-postgres
+    default_internal_port: 5432
+    description: chain-indexer's private postgres
+  - name: privacy-postgres
+    default_internal_port: 5432
+    description: Open Privacy Suite's RBAC / disclosure / audit postgres
+  - name: anvil
+    default_internal_port: 8545
+    description: dev EVM node; swap for external RPC in production
+  - name: redis
+    default_internal_port: 6379
+    description: Open Privacy Suite session / rate-limit / OAuth state store
+
+bff_zone:
+  - name: block-explorer-postgres
+    default_internal_port: 5432
+    description: block-explorer BFF postgres (contract verifications only; no chain data)
+  - name: block-explorer-api
+    default_internal_port: 8080
+    description: block-explorer BFF (privacy-tagged build — no chain-indexer client linked); sits between block-explorer-frontend and Open Privacy Suite, owns sessions, forwards data reads to Open Privacy Suite for redaction
+
+# proxy-backend is the only service permitted to attach to both
+# indexer-zone and bff-zone. The static manifest test enforces this by
+# name — adding any other multi-zone service requires updating the test
+# AND justifying why it needs the cross-zone path.
+public:
+  - name: proxy-backend
+    host_port_env: HOST_PORT_PROXY
+    default_host_port: 8080
+    description: Open Privacy Suite REST + admin surface; sole bridge between indexer-zone and bff-zone
+  - name: proxy-frontend
+    host_port_env: HOST_PORT_UI
+    default_host_port: 5173
+    description: Open Privacy Suite admin UI
+  - name: block-explorer-frontend
+    host_port_env: HOST_PORT_EXPLORER
+    default_host_port: 3001
+    description: block-explorer SPA — routes /api/* to block-explorer-api (the BFF); attaches to bff-zone to reach the BFF

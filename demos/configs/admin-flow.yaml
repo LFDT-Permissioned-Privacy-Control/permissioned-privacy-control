@@ -1,0 +1,144 @@
+# Admin Backend Flow Demo
+# Complete admin experience: Dashboard monitoring, access logs, and RBAC management
+# Shows the full power of the admin interface
+
+version: "1"
+
+metadata:
+  name: "admin-flow"
+  title: "Admin Backend Management"
+  description: "Complete admin walkthrough: monitoring, logs, and access control"
+
+video:
+  resolution: { width: 1920, height: 1080 }
+  fps: 60
+  viewport: { width: 1920, height: 1080 }
+  quality:
+    preset: "slow"      # High quality encoding
+    crf: 15             # Near-lossless (lower = higher quality)
+    bitrate: "25M"      # High bitrate
+    audio_bitrate: "320k"
+    profile: "high"
+    level: "4.2"
+
+voice:
+  provider: "edge"
+  voice_id: "guy"  # Professional, authoritative male voice
+  speed: "+0%"
+
+steps:
+  # === ADMIN DASHBOARD ===
+  - id: "intro"
+    action: "navigate"
+    url: "/admin/dashboard"
+    wait: { selector: "[data-testid='admin-app']", timeout: 15000 }
+    narration: "Welcome to the Open Privacy Suite admin console. This is where administrators monitor and manage blockchain access."
+    pause: 3.5
+    screenshot: true
+
+  - id: "explain_header"
+    action: "wait"
+    wait: { selector: "[data-testid='admin-header']", timeout: 5000 }
+    narration: "The navigation bar provides quick access to three main sections: Dashboard, Access Logs, and Role-Based Access Control."
+    pause: 3.5
+
+  - id: "show_dashboard"
+    action: "wait"
+    wait: { timeout: 3000 }
+    narration: "The Dashboard shows real-time system status. You can see proxy health, node connectivity, and test RPC requests directly from this interface."
+    pause: 4.0
+    screenshot: true
+
+  # === ACCESS LOGS ===
+  - id: "nav_logs"
+    action: "click"
+    selector: "[data-testid='nav-logs']"
+    wait: { timeout: 3000 }
+    narration: "The Access Logs section provides a detailed audit trail. Every RPC request is logged with method, timestamp, and access control decisions."
+    pause: 4.0
+    screenshot: true
+
+  - id: "explain_logs"
+    action: "wait"
+    wait: { timeout: 2000 }
+    narration: "Administrators can filter logs by method, status, and time range. This is essential for debugging, compliance, and security monitoring."
+    pause: 3.5
+
+  # === RBAC MANAGEMENT ===
+  - id: "nav_rbac"
+    action: "click"
+    selector: "[data-testid='nav-rbac']"
+    wait: { selector: "[data-testid='rbac-manager']", timeout: 10000 }
+    narration: "Now let's explore the Role-Based Access Control system. This is the heart of Open Privacy Suite's permission management."
+    pause: 3.5
+    screenshot: true
+
+  - id: "show_org_tab"
+    action: "wait"
+    wait: { selector: "[data-testid='tab-organizations']", timeout: 5000 }
+    narration: "Organizations are the top-level containers. Think of them as tenants, each with their own isolated access policies."
+    pause: 3.5
+
+  - id: "click_groups"
+    action: "click"
+    selector: "[data-testid='tab-groups']"
+    wait: { timeout: 2500 }
+    narration: "Groups define collections of users with shared permissions. Each group specifies which RPC methods are allowed and sets rate limits."
+    pause: 4.0
+    screenshot: true
+
+  - id: "explain_groups"
+    action: "wait"
+    wait: { timeout: 2000 }
+    narration: "Groups can be hierarchical. A parent group's permissions cascade to child groups, making it easy to manage complex permission structures."
+    pause: 3.5
+
+  - id: "click_users"
+    action: "click"
+    selector: "[data-testid='tab-users']"
+    wait: { timeout: 2500 }
+    narration: "The Users tab shows all authenticated users and their linked wallet addresses. Administrators can view group memberships and manage access at the individual level."
+    pause: 4.0
+    screenshot: true
+
+  - id: "click_contracts"
+    action: "click"
+    selector: "[data-testid='tab-contracts']"
+    wait: { timeout: 2500 }
+    narration: "Smart Contract registration is where the fine-grained control happens. Register contracts and define exactly which methods each group can call."
+    pause: 4.0
+    screenshot: true
+
+  - id: "explain_claims"
+    action: "wait"
+    wait: { timeout: 2000 }
+    narration: "Contract grants use a claims-based model: read, write, admin, and upgrade. This gives you precise control over who can do what with each smart contract."
+    pause: 4.0
+
+  # === CONCLUSION ===
+  - id: "back_to_orgs"
+    action: "click"
+    selector: "[data-testid='tab-organizations']"
+    wait: { timeout: 2000 }
+    narration: "Together, these tools give administrators complete control over blockchain access."
+    pause: 3.0
+    screenshot: true
+
+  - id: "conclusion"
+    action: "wait"
+    wait: { timeout: 1000 }
+    narration: "Open Privacy Suite: Enterprise-grade access control for Web3. Monitor, audit, and manage with confidence."
+    pause: 3.5
+
+branding:
+  watermark:
+    position: "bottom-right"
+    opacity: 0.7
+
+captions:
+  style: "modern"
+  position: "bottom"
+  font_size: 48
+
+export:
+  - { aspect: "16:9", resolution: "1920x1080" }

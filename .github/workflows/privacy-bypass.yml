@@ -1,0 +1,62 @@
+name: Privacy-Mode Bypass Closure (RD-855 Phase 4b)
+
+# Runs the negative-network integration test against the production privacy
+# topology. The harness builds the current proxy plus pinned public
+# ops-explorer v0.9.0-rc.1 and ops-indexer v0.4.0-rc.1 sources from shallow,
+# artifact-owned checkouts. It needs neither sibling checkouts nor registry
+# credentials. The suite is scheduled/manual because a cold run builds and
+# starts the complete stack. Cleanup is project-scoped and never prunes the
+# shared Docker daemon.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 7 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.26.9'
+
+jobs:
+  negative-network:
+    name: Privacy-mode trust boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      E2E_RUN_ID: gha-privacy-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_PROJECT: privacy-proxy-e2e-gha-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_PRIVACY_PROJECT: privacy-proxy-privacy-gha-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_ARTIFACT_DIR: ${{ github.workspace }}/.tmp/e2e-runs/gha-privacy-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Aikido: this job never pushes, so the checkout token is not needed.
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Show Docker version
+        run: docker version && docker compose version
+
+      - name: Run privacy-boundary E2E
+        run: make e2e-privacy
+
+      - name: Upload privacy E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: privacy-e2e-artifacts
+          path: ${{ env.E2E_ARTIFACT_DIR }}/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Ensure this E2E stack is down
+        if: always()
+        run: make e2e-down

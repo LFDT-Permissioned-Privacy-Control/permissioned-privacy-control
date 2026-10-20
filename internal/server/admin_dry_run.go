@@ -1,0 +1,1031 @@
+package server
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"privacy-proxy/internal/apimodels"
+	"privacy-proxy/internal/compliance"
+	"privacy-proxy/internal/proxy"
+	"privacy-proxy/internal/rbac"
+	"privacy-proxy/internal/tracer"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+// RD-872 — admin dry-run / impersonation endpoint.
+//
+// Both write-method shapes (eth_sendTransaction with a tx object;
+// eth_sendRawTransaction with a signed RLP blob) are translated to
+// debug_traceCall. eth_sendRawTransaction reuses the production
+// `decodeRawTransaction` helper so dry-run sees the same (from, to,
+// data, value) the real-call path would.
+//
+//
+// Lets a tier-2 org admin in :org_id ask "what would user X see if they
+// made this RPC call?" without ever creating a user-shaped JWT,
+// mutating chain state, or exposing data that the admin doesn't already
+// have. Read methods pass through and get filtered as user X; write
+// methods (eth_sendTransaction / eth_sendRawTransaction) are translated
+// to debug_traceCall so the admin can see RBAC's verdict + the events
+// the tx WOULD emit + the subset visible to user X.
+//
+// Read answers use the production response filter within :org_id
+// (RD-1308, viewer_org_scope.go). The write-method trace and logs_emitted
+// are admin diagnostics; validateDryRunTrace checks their frames against
+// the same named organization before they are returned.
+//
+// Super-admin (X-Admin-Token) is explicitly rejected — they have no
+// data-layer reach into RPC/explorer responses today, and impersonation
+// would be the path that gives it to them. They flip feature flags;
+// they don't browse user data. Tier-3 admins (per-contract admin only,
+// no `is_org_admin`) and the upcoming Read-Only Admin (RD-866) are
+// likewise out of scope.
+//
+// Multi-org user data is structurally invisible: the synthetic
+// principal is built via GetEffectivePermissionsByIDs(userID, :org_id),
+// so a user who is also in Org B has Org B's grants resolved to nothing
+// in this context. Cross-org existence is hidden behind a generic 404.
+
+// dryRunResponse is the handler's reply.
+type dryRunResponse struct {
+	Decision string `json:"decision"` // "allow" | "deny" | "indeterminate"
+	Reason   string `json:"reason,omitempty"`
+	// For read methods: the redacted-as-user response.
+	Response json.RawMessage `json:"response,omitempty"`
+	// For write methods: debug_traceCall output + per-user log filtering.
+	Trace             json.RawMessage   `json:"trace,omitempty"`
+	LogsEmitted       []json.RawMessage `json:"logs_emitted,omitempty"`
+	LogsVisibleToUser []json.RawMessage `json:"logs_visible_to_user,omitempty"`
+}
+
+// supported method allowlist for Phase 1. Read methods are forwarded and
+// filtered as the user; write methods are translated to debug_traceCall. Anything
+// outside this set returns 400 — clearer than silently no-op'ing,
+// expandable as use cases come up.
+var dryRunReadMethods = map[string]bool{
+	"eth_call":                  true,
+	"eth_getLogs":               true,
+	"eth_getTransactionReceipt": true,
+	"eth_getTransactionByHash":  true,
+	"eth_getBalance":            true,
+	"eth_getCode":               true,
+	"eth_getStorageAt":          true,
+	"eth_blockNumber":           true,
+	"eth_chainId":               true,
+}
+var dryRunTraceMethods = map[string]bool{
+	"eth_sendTransaction":    true,
+	"eth_sendRawTransaction": true,
+}
+
+// handleDryRun handles POST /api/orgs/:org_id/dry-run.
+//
+// @Summary      Dry-run an RPC call as a user
+// @Description  Evaluates "what would this user see if they made this RPC call?" in the path org, without mutating chain state. Returns allow or deny for definitive local decisions. If nested execution reaches a contract owned by another organization, returns decision=indeterminate and reason=external_scope_required without evaluating that foreign policy. eth_call is traced with debug_traceCall even when live eth_call tracing is disabled, so its verdict can be stricter than live (indeterminate where live allows), and it needs a node that supports debug_traceCall. Read methods are forwarded, and the response goes through the same privacy filter as the user's own call, evaluated in the path org only: the user's contract grants, admin role and visibleTo shares from other organizations do not apply, and the user's disclosure grants never apply (a grant discloses to the grantee alone); a transaction or receipt the user may not read, or one sent to or deploying another organization's contract, comes back null; logs are filtered, and embedded addresses the user cannot see are redacted. Write methods (eth_sendTransaction / eth_sendRawTransaction) are translated to debug_traceCall so the RBAC verdict, the events the tx would emit, and the subset the user would see in its receipt can be inspected. If the user's view cannot be produced, nothing from the node is returned (500). Requires a tier-2 org-admin JWT of the path org: X-Admin-Token credentials (both the full super-admin token and the operator token) are explicitly rejected, since impersonation reads tenant data as the user. The impersonated user must exist and be a member of the path org, else an opaque 404. Every evaluation is written to the impersonation audit log fail-closed. Under the strict read privacy profile (PRIVACY_READ_PROFILE=strict) read methods are refused with 403 before anything is forwarded (the refusal is audited), and a simulated send returns only the allow/deny verdict, without the trace or its logs. Supported methods: eth_call, eth_getLogs, eth_getTransactionReceipt, eth_getTransactionByHash, eth_getBalance, eth_getCode, eth_getStorageAt, eth_blockNumber, eth_chainId, eth_sendTransaction, eth_sendRawTransaction.
+// @Description  Client state/block override options are unsupported regardless of the selected user's role, including admins.
+// @Tags         Admin: RBAC
+// @Accept       json
+// @Produce      json
+// @Param        org_id path string true "Organization ID (UUID)"
+// @Param        request body apimodels.DryRunRequest true "impersonation request (user_did and rpc.method/params)"
+// @Success      200 {object} apimodels.DryRunResponseDoc
+// @Failure      400 {object} apimodels.APIError "invalid body, unsupported method, self-dry-run, or missing user_did/rpc.method"
+// @Failure      401 {object} apimodels.APIError "missing admin authentication (no admin_subject)"
+// @Failure      403 {object} apimodels.APIError "source address not on the private network, X-Admin-Token/operator credentials used (dry-run requires a tier-2 admin JWT), or a read method under the strict read profile"
+// @Failure      404 {object} apimodels.APIError "impersonated user not found or not a member of the path org (opaque)"
+// @Failure      500 {object} apimodels.APIError "internal error (includes audit-log write failure, or the user's view could not be produced — response withheld)"
+// @Failure      502 {object} apimodels.APIError "upstream node error on a forwarded read, or the node does not support debug_traceCall (permanent; eth_call and write methods need it)"
+// @Failure      503 {object} apimodels.APIError "trace (timeout, transient upstream failure) or compliance preview unavailable"
+// @Security     AdminToken
+// @Router       /api/v1/admin/orgs/{org_id}/dry-run [post]
+func (s *Server) handleDryRun(c *gin.Context) {
+
+	ctx := c.Request.Context()
+	orgID := c.Param("org_id")
+	ctx = withViewerOrgScope(ctx, orgID)
+
+	// Reject the token credentials explicitly. orgScopingMiddleware lets both
+	// admin_token (full) and operator_token through any :org_id — we have to
+	// gate here because dry-run is the one admin-API endpoint where that
+	// "bypass org scoping" rule must NOT apply: impersonating a user is reading
+	// tenant data as that user, which neither token may do.
+	if am := c.GetString("auth_method"); am == "admin_token" || am == "operator_token" {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "dry-run requires a tier-2 admin JWT; X-Admin-Token credentials are not authorised for impersonation",
+		})
+		return
+	}
+
+	// Admin must be JWT-authenticated tier-2 of :org_id. The middleware
+	// chain (adminAuth + orgScoping) already enforces this; the
+	// admin_subject context value is the admin's DID.
+	adminDID := c.GetString("admin_subject")
+	if adminDID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "admin authentication required"})
+		return
+	}
+
+	// L8: cap body size so a misbehaving admin (or one whose JWT is
+	// compromised) can't memory-pressure the proxy with a huge dry-run
+	// payload. Mirror the JSON-RPC handler's 1MB cap.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxRequestBodySize)
+
+	// Parse body.
+	var req apimodels.DryRunRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	// The rpc block is forwarded re-encoded from this decode, so a case
+	// variant of a request field (`{"To": X}`) would reach the node as a
+	// field the access check below never saw (RD-1303).
+	if env, err := proxy.CheckDecodedRequest(req.RPC.Method, req.RPC.Params); err != nil || ambiguousParams(env) != "" {
+		slog.Warn("dry-run: ambiguous rpc block refused", slog.Any("err", err))
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	req.UserDID = strings.TrimSpace(req.UserDID)
+	if req.UserDID == "" || req.RPC.Method == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_did and rpc.method are required"})
+		return
+	}
+	if req.UserDID == adminDID {
+		// Self-dry-run is meaningless and would skew audit reasoning.
+		// Reject explicitly.
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot dry-run as yourself"})
+		return
+	}
+
+	// Verify method is in scope. Phase 1 supports a subset; outside
+	// this set we return 400 so the admin gets a clear answer rather
+	// than a silent denial.
+	isRead := dryRunReadMethods[req.RPC.Method]
+	isTrace := dryRunTraceMethods[req.RPC.Method]
+	if !isRead && !isTrace {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "method not supported by dry-run; supported: eth_call, eth_getLogs, eth_getTransactionReceipt, eth_getTransactionByHash, eth_getBalance, eth_getCode, eth_getStorageAt, eth_blockNumber, eth_chainId, eth_sendTransaction, eth_sendRawTransaction",
+		})
+		return
+	}
+
+	// Resolve impersonated user — must exist AND have a membership in
+	// admin's :org_id. Anything else returns a generic 404 so we never
+	// leak cross-org existence to a tier-2 admin.
+	user, err := s.db.GetUserByExternalID(ctx, req.UserDID)
+	if err != nil || user == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+
+	// Membership gate: GetUserOrgIDs returns every org the user has at
+	// least one group membership in. If admin's :org_id isn't there,
+	// the user is invisible to this admin regardless of any other
+	// org's data they might have. Same generic 404 either way.
+	userOrgIDs, err := s.rbacAccessCtrl.GetUserOrgIDs(ctx, user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	inAdminOrg := false
+	for _, id := range userOrgIDs {
+		if id == orgID {
+			inAdminOrg = true
+			break
+		}
+	}
+	if !inAdminOrg {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+
+	userPerms, err := s.rbacAccessCtrl.GetEffectivePermissionsByIDs(ctx, user.ID, orgID)
+	if err != nil || userPerms == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+
+	// RD-1299: under the strict read profile a dry-run read would show the
+	// administrator chain data as the member sees it (their own transactions,
+	// receipts and events), which strict never grants to administrative
+	// authority. Refuse before anything is forwarded; the refusal is audited.
+	if isRead && s.readProfile().Strict() {
+		if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "deny", "strict_read_profile", c.GetString("correlation_id"), ""); logErr != nil {
+			slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "dry-run of read methods is not available under the strict read privacy profile"})
+		return
+	}
+
+	// Run RBAC CheckAccess as the impersonated user.
+	//
+	// C8: pass OrgID = admin's :org_id. Pre-fix the request had no
+	// OrgID, so CheckAccess built OrgContext from the user's
+	// memberships and picked whichever org owned the target contract.
+	// For a multi-org user, that meant the FOREIGN org's grants
+	// decided the answer — a tier-2 admin in Org A dry-running a Bob
+	// who is also in Org B got Bob's Org B view on Org B-owned
+	// contracts. With OrgID set, CheckAccess scopes resolution to
+	// admin's org; cross-org contracts evaluate as if Bob were a
+	// non-member there (the safe answer).
+	evaluation, err := s.evaluateOperation(ctx, req.UserDID, req.RPC, authorizationScopeOrgLocal, orgID)
+	if err != nil {
+		var accessErr *operationAccessError
+		if errors.As(err, &accessErr) {
+			if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "error", sanitizeDryRunReason(err), c.GetString("correlation_id"), ""); logErr != nil {
+				slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		slog.Warn("dry-run: could not build access check", "method", req.RPC.Method, "err", err)
+		if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "error", "decode_error", c.GetString("correlation_id"), ""); logErr != nil {
+			slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid raw transaction"})
+		return
+	}
+	accessReq, accessResult := evaluation.AccessRequest, evaluation.AccessResult
+
+	if !accessResult.Allowed {
+		if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "deny", sanitizeDryRunReason(accessResult.Reason), c.GetString("correlation_id"), ""); logErr != nil {
+			slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		c.JSON(http.StatusOK, dryRunResponse{
+			Decision: "deny",
+			Reason:   accessResult.Reason,
+		})
+		return
+	}
+
+	if reason, validationErr := s.validatePolicyCheckSender(ctx, req.UserDID, req.RPC); validationErr != nil {
+		if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "error", "sender_validation_unavailable", c.GetString("correlation_id"), ""); logErr != nil {
+			slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	} else if reason != "" {
+		if reason == ReasonInvalidRequestShape {
+			if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "error", "decode_error", c.GetString("correlation_id"), ""); logErr != nil {
+				slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+				return
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid operation"})
+			return
+		}
+		if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "deny", reason, c.GetString("correlation_id"), ""); logErr != nil {
+			slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		c.JSON(http.StatusOK, dryRunResponse{Decision: "deny", Reason: reason})
+		return
+	}
+
+	// Org-local reads must prove their nested execution scope even when live
+	// runtime tracing is disabled. Trace directly and stop at the first foreign
+	// boundary before forwarding the read response.
+	if req.RPC.Method == "eth_call" {
+		apiKey := accessResult.RPCAPIKey
+		apiKeyHeader := proxy.DefaultAPIKeyHeader
+		if s.jsonrpcProcessor != nil {
+			if apiKey == "" {
+				apiKey = s.jsonrpcProcessor.defaultRPCAPIKey
+			}
+			apiKeyHeader = s.jsonrpcProcessor.resolveAPIKeyHeader()
+		}
+		traceCtx, cancel := context.WithTimeout(ctx, policyCheckTraceTimeout)
+		traceResp, traceErr := s.forwardDryRunTraceWithAPIKey(traceCtx, req.RPC, apiKey, apiKeyHeader)
+		cancel()
+		if traceErr != nil {
+			if s.respondDryRunTraceError(c, ctx, adminDID, req.UserDID, orgID, req.RPC, traceErr) {
+				return
+			}
+		}
+		if validationErr := s.validateDryRunTrace(ctx, user, userPerms, req.RPC.Method, orgID, accessReq.TargetAddress, traceResp.Parsed); validationErr != nil {
+			decision, wireDecision, wireReason, auditReason, responseDecision := dryRunTraceProcessOutcome(validationErr)
+			if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, decision, auditReason, c.GetString("correlation_id"), responseDecision); logErr != nil {
+				slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+				return
+			}
+			if decision == "error" {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+				return
+			}
+			c.JSON(http.StatusOK, dryRunResponse{Decision: wireDecision, Reason: wireReason})
+			return
+		}
+	}
+
+	// Allowed — execute or trace. Both branches log on success.
+	if isTrace {
+		traceCtx, cancel := context.WithTimeout(ctx, policyCheckTraceTimeout)
+		traceResp, traceErr := s.forwardDryRunTrace(traceCtx, req.RPC)
+		cancel()
+		if traceErr != nil {
+			// Same classification as eth_call: 400 caller error, 502 node
+			// without debug_traceCall, 503 transient failure or timeout.
+			s.respondDryRunTraceError(c, ctx, adminDID, req.UserDID, orgID, req.RPC, traceErr)
+			return
+		}
+		if validationErr := s.validateDryRunTrace(ctx, user, userPerms, req.RPC.Method, orgID, accessReq.TargetAddress, traceResp.Parsed); validationErr != nil {
+			decision, wireDecision, wireReason, auditReason, responseDecision := dryRunTraceProcessOutcome(validationErr)
+			if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, decision, auditReason, c.GetString("correlation_id"), responseDecision); logErr != nil {
+				slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+				return
+			}
+			if decision == "error" {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+				return
+			}
+			c.JSON(http.StatusOK, dryRunResponse{Decision: wireDecision, Reason: wireReason})
+			return
+		}
+		if s.dryRunWriteComplianceBlocked(c, ctx, adminDID, req.UserDID, orgID, user, req.RPC) {
+			return
+		}
+		if s.readProfile().Strict() {
+			// RD-1299: strict keeps the permission verdict, not the
+			// simulated trace or its logs, so the user's view of those logs
+			// is neither built nor returned.
+			if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "allow", "", c.GetString("correlation_id"), ""); logErr != nil {
+				slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+				return
+			}
+			c.JSON(http.StatusOK, dryRunResponse{Decision: "allow"})
+			return
+		}
+		visibleLogs, viewErr := s.dryRunTraceLogsVisibleToUser(ctx, traceResp, req.UserDID, orgID, accessResult)
+		if viewErr != nil {
+			s.refuseDryRunWithoutUserView(ctx, c, adminDID, req, orgID, viewErr)
+			return
+		}
+		if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "allow", "", c.GetString("correlation_id"), ""); logErr != nil {
+			slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		c.JSON(http.StatusOK, dryRunResponse{
+			Decision:          "allow",
+			Trace:             traceResp.Trace,
+			LogsEmitted:       traceResp.Logs,
+			LogsVisibleToUser: visibleLogs,
+		})
+		return
+	}
+
+	// Read method: forward through the proxy, then filter the response as
+	// the impersonated user (below).
+	rawResp, err := s.forwardDryRunRead(ctx, req.RPC, c.ClientIP())
+	if err != nil {
+		if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "error", sanitizeDryRunReason(err), c.GetString("correlation_id"), ""); logErr != nil {
+			slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": "upstream error"})
+		return
+	}
+
+	// RD-1308: use the production response filter as the impersonated user,
+	// with permissions and visibility inputs scoped to the path organization.
+	rawResp, err = s.filterDryRunReadResponse(ctx, req.RPC, req.UserDID, orgID, accessResult, rawResp)
+	if err != nil {
+		s.refuseDryRunWithoutUserView(ctx, c, adminDID, req, orgID, err)
+		return
+	}
+
+	if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "allow", "", c.GetString("correlation_id"), ""); logErr != nil {
+		slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, dryRunResponse{
+		Decision: "allow",
+		Response: rawResp,
+	})
+}
+
+// refuseDryRunWithoutUserView answers a dry-run whose user view could not be
+// produced (RD-1308). The node's answer is never returned without the user's
+// response filter, so the evaluation is audited as an error and the admin gets
+// an opaque 500 — not an "allow" for a response that was never served.
+func (s *Server) refuseDryRunWithoutUserView(ctx context.Context, c *gin.Context, adminDID string, req apimodels.DryRunRequest, orgID string, viewErr error) {
+	reason := "internal_error"
+	if errors.Is(viewErr, errDryRunFilterUnavailable) {
+		reason = "response_filter_unavailable"
+	}
+	slog.Error("dry-run: user view unavailable; response withheld", "method", req.RPC.Method, "err", viewErr)
+	if logErr := s.recordImpersonation(ctx, adminDID, req.UserDID, orgID, req.RPC, "error", reason, c.GetString("correlation_id"), ""); logErr != nil {
+		slog.Error("dry-run: audit log write failed", "err", logErr)
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+}
+
+// sanitizeDryRunReason maps an error or reason string into a finite
+// enum-shaped value safe to persist in impersonation_log.reason.
+// Migration 047 explicitly forbids raw DB errors or embedded private
+// addresses in this column (audit M4 / threat-model F1). The full
+// error is preserved in slog.
+func sanitizeDryRunReason(in any) string {
+	const max = 200
+	var s string
+	switch v := in.(type) {
+	case string:
+		s = v
+	case error:
+		s = v.Error()
+	default:
+		s = fmt.Sprintf("%v", v)
+	}
+	lower := strings.ToLower(s)
+	switch {
+	case s == rbac.StateOverrideDeniedReason:
+		// RD-1305: exact match on the shared CheckAccess reason.
+		return ReasonStateOverrideNotAllowed
+	case strings.Contains(lower, "method not allowed") ||
+		strings.Contains(lower, "method not permitted"):
+		return "method_not_allowed"
+	case strings.Contains(lower, "no access") ||
+		strings.Contains(lower, "no claim") ||
+		strings.Contains(lower, "denied") ||
+		strings.Contains(lower, "forbidden"):
+		return "denied"
+	case strings.Contains(lower, "rate limit"):
+		return "rate_limited"
+	case strings.Contains(lower, "compliance"):
+		return "compliance"
+	case strings.Contains(lower, "upstream") ||
+		strings.Contains(lower, "debug_tracecall") ||
+		strings.Contains(lower, "trace"):
+		return "upstream_error"
+	case strings.Contains(lower, "decode") || strings.Contains(lower, "malformed"):
+		return "decode_error"
+	case strings.Contains(lower, "user is banned"):
+		return "user_banned"
+	default:
+		// Truncate as a final defense — never persist >200 chars of
+		// free text.
+		if len(s) > max {
+			return s[:max]
+		}
+		return s
+	}
+}
+
+// dryRunTraceResult is what forwardDryRunTrace returns to the handler.
+type dryRunTraceResult struct {
+	Trace  json.RawMessage     // the raw debug_traceCall response (callTracer + withLog)
+	Logs   []json.RawMessage   // logs extracted from the trace frames
+	Parsed *tracer.TraceResult // the same trace parsed for access validation
+}
+
+// forwardDryRunTrace evaluates an EVM call with debug_traceCall using the
+// operator default upstream credential. It does not change chain state.
+func (s *Server) forwardDryRunTrace(ctx context.Context, rpc apimodels.DryRunRPCBlock) (*dryRunTraceResult, error) {
+	apiKey, apiKeyHeader := "", proxy.DefaultAPIKeyHeader
+	if s.jsonrpcProcessor != nil {
+		apiKey = s.jsonrpcProcessor.defaultRPCAPIKey
+		apiKeyHeader = s.jsonrpcProcessor.resolveAPIKeyHeader()
+	}
+	return s.forwardDryRunTraceWithAPIKey(ctx, rpc, apiKey, apiKeyHeader)
+}
+
+// errNodeTraceUnsupported is a permanent condition: the upstream node does not
+// expose debug_traceCall. Dry-run answers it explicitly, not as a retryable 503.
+var errNodeTraceUnsupported = errors.New("node does not support debug_traceCall")
+
+// simulationClientError marks an operation-shape error controlled by the
+// caller (malformed params). Policy-check maps it to 400, distinct from
+// infrastructure failures (500).
+type simulationClientError struct{ msg string }
+
+func (e *simulationClientError) Error() string { return e.msg }
+
+// respondDryRunTraceError maps trace simulation failures to HTTP responses.
+// Caller-controlled operation shapes are audited client errors (400); upstream
+// trace unavailability is operational (503). Returns true when a response was
+// written.
+// dryRunWriteComplianceBlocked runs the side-effect-free compliance preview for
+// write-shaped RPC methods after trace validation succeeds. Returns true when
+// the handler response has been written.
+func (s *Server) dryRunWriteComplianceBlocked(
+	c *gin.Context,
+	ctx context.Context,
+	adminDID, userDID, orgID string,
+	user *rbac.User,
+	rpc apimodels.DryRunRPCBlock,
+) bool {
+	if s.complianceChecker == nil {
+		return false
+	}
+	if rpc.Method != "eth_sendTransaction" && rpc.Method != "eth_sendRawTransaction" {
+		return false
+	}
+	from, to, data, value, extractErr := policyCheckTransactionFields(rpc)
+	if extractErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid operation"})
+		return true
+	}
+	compResult, compErr := complianceVerdict(ctx, s.complianceChecker, evaluationPreview, &compliance.CheckRequest{
+		OrgID: orgID, UserID: user.ID, From: from, To: to, Data: data, Value: value,
+	})
+	if compErr != nil {
+		if logErr := s.recordImpersonation(ctx, adminDID, userDID, orgID, rpc, "error", "compliance_unavailable", c.GetString("correlation_id"), ""); logErr != nil {
+			slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return true
+		}
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "compliance preview unavailable"})
+		return true
+	}
+	if compResult.Allowed {
+		return false
+	}
+	if logErr := s.recordImpersonation(ctx, adminDID, userDID, orgID, rpc, "deny", ReasonComplianceBlocked, c.GetString("correlation_id"), ""); logErr != nil {
+		slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return true
+	}
+	c.JSON(http.StatusOK, dryRunResponse{Decision: "deny", Reason: "compliance"})
+	return true
+}
+
+func (s *Server) respondDryRunTraceError(
+	c *gin.Context,
+	ctx context.Context,
+	adminDID, userDID, orgID string,
+	rpc apimodels.DryRunRPCBlock,
+	traceErr error,
+) bool {
+	var clientErr *simulationClientError
+	if errors.As(traceErr, &clientErr) {
+		if logErr := s.recordImpersonation(ctx, adminDID, userDID, orgID, rpc, "error", "decode_error", c.GetString("correlation_id"), ""); logErr != nil {
+			slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return true
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid operation"})
+		return true
+	}
+	if errors.Is(traceErr, errNodeTraceUnsupported) {
+		s.respondDryRunTraceUnsupported(c, ctx, adminDID, userDID, orgID, rpc)
+		return true
+	}
+	if logErr := s.recordImpersonation(ctx, adminDID, userDID, orgID, rpc, "error", ReasonTracingUnavailable, c.GetString("correlation_id"), ""); logErr != nil {
+		slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+	}
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "policy simulation unavailable"})
+	return true
+}
+
+// respondDryRunTraceUnsupported answers a node without debug_traceCall, for
+// eth_call and write methods alike.
+func (s *Server) respondDryRunTraceUnsupported(c *gin.Context, ctx context.Context, adminDID, userDID, orgID string, rpc apimodels.DryRunRPCBlock) {
+	if logErr := s.recordImpersonation(ctx, adminDID, userDID, orgID, rpc, "error", "trace_unsupported", c.GetString("correlation_id"), ""); logErr != nil {
+		slog.Error("dry-run: audit log write failed; refusing response", "err", logErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusBadGateway, gin.H{"error": "node does not support debug_traceCall; dry-run unavailable for this method"})
+}
+
+// forwardDryRunTraceWithAPIKey evaluates an EVM call with debug_traceCall
+// using the same upstream credential as the matching live request.
+//
+// eth_sendRawTransaction is RLP-decoded via the production helper
+// (decodeRawTransaction in jsonrpc_processor.go) — same path the real
+// raw-tx handler uses, so the trace sees the same (from, to, data, value)
+// the production processor would. Sender recovery uses the chain-id-aware
+// signer; signature must be valid (a malformed signed blob gets a clear
+// decode error, not a silent pass).
+func (s *Server) forwardDryRunTraceWithAPIKey(ctx context.Context, rpc apimodels.DryRunRPCBlock, apiKey, apiKeyHeader string) (*dryRunTraceResult, error) {
+	var txObj map[string]any
+	blockParam := any("latest")
+	effectiveMethod := rbac.ResolveMethodAlias(rpc.Method)
+	switch effectiveMethod {
+	case "eth_call", "eth_estimateGas", "eth_createAccessList", "eth_sendTransaction":
+		if len(rpc.Params) == 0 {
+			return nil, &simulationClientError{msg: fmt.Sprintf("%s requires a transaction object", rpc.Method)}
+		}
+		if (effectiveMethod == "eth_call" || effectiveMethod == "eth_estimateGas" || effectiveMethod == "eth_createAccessList") && len(rpc.Params) > 2 {
+			return nil, &simulationClientError{msg: fmt.Sprintf("%s state and block overrides are not supported", rpc.Method)}
+		}
+		if effectiveMethod == "eth_sendTransaction" && len(rpc.Params) != 1 {
+			return nil, &simulationClientError{msg: fmt.Sprintf("%s requires exactly one transaction object", rpc.Method)}
+		}
+		obj, ok := rpc.Params[0].(map[string]any)
+		if !ok {
+			return nil, &simulationClientError{msg: fmt.Sprintf("%s param[0] must be a transaction object", rpc.Method)}
+		}
+		txObj = obj
+		if effectiveMethod == "eth_sendTransaction" {
+			txObj = policyCheckTraceTransaction(txObj)
+		} else {
+			block, err := traceBlockParam(rpc.Params)
+			if err != nil {
+				return nil, err
+			}
+			blockParam = block
+		}
+	case "eth_sendRawTransaction":
+		if len(rpc.Params) > 2 {
+			return nil, &simulationClientError{msg: fmt.Sprintf("%s accepts at most two parameters", rpc.Method)}
+		}
+		rawHex, err := extractRawTxHex(rpc.Params)
+		if err != nil {
+			return nil, fmt.Errorf("invalid raw transaction: %w", err)
+		}
+		from, to, data, value, _, err := decodeRawTransaction(rawHex)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode raw transaction: %w", err)
+		}
+		built := buildTxParams(from, to, data, value)
+		if len(built) == 0 {
+			return nil, fmt.Errorf("internal: buildTxParams returned empty")
+		}
+		obj, ok := built[0].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("internal: buildTxParams returned wrong type")
+		}
+		txObj = obj
+	default:
+		return nil, fmt.Errorf("unsupported trace method: %s", rpc.Method)
+	}
+	if s.proxy == nil {
+		return nil, fmt.Errorf("proxy not configured")
+	}
+
+	// Build the debug_traceCall request. callTracer + withLog gives us
+	// nested call frames + the logs each frame would emit, which is
+	// exactly what dry-run needs — RBAC gating + audit are already done
+	// upstream of this call.
+	traceReq := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "debug_traceCall",
+		"params": []any{
+			txObj,
+			blockParam,
+			map[string]any{
+				"tracer": "callTracer",
+				"tracerConfig": map[string]any{
+					"onlyTopCall": false,
+					"withLog":     true,
+				},
+			},
+		},
+		"id": 1,
+	}
+	body, err := json.Marshal(traceReq)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	respBody, status, header, err := s.proxy.ForwardWithResponseHeaders(ctx, body, apiKeyHeader, apiKey, "")
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusTooManyRequests {
+		return nil, &upstreamRateLimitedError{retryAfter: header.Get("Retry-After")}
+	}
+
+	var rpcResp struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
+		return nil, fmt.Errorf("upstream returned malformed response")
+	}
+	if rpcResp.Error != nil {
+		// Common case: debug_* not enabled on the node. Sanitise the
+		// message so we don't echo arbitrary upstream output back to
+		// the admin UI without inspection.
+		msg := strings.ToLower(rpcResp.Error.Message)
+		if rpcResp.Error.Code == -32601 || (strings.Contains(msg, "method") && strings.Contains(msg, "not")) {
+			return nil, errNodeTraceUnsupported
+		}
+		return nil, fmt.Errorf("trace failed: %s", rpcResp.Error.Message)
+	}
+	// Fail closed on an absent or empty trace. A "result": null or {} payload
+	// parses into a TraceResult with zero call targets, which the validator
+	// would otherwise accept (no target to deny) and surface as allow. The
+	// live RPC path treats a missing trace as tracing-unavailable; mirror it.
+	if len(rpcResp.Result) == 0 || string(rpcResp.Result) == "null" || string(rpcResp.Result) == "{}" {
+		return nil, fmt.Errorf("trace returned no result")
+	}
+	parsed, err := tracer.ParseCallTraceResult(rpcResp.Result)
+	if err != nil {
+		return nil, fmt.Errorf("could not validate trace: %w", err)
+	}
+	if parsed == nil {
+		return nil, fmt.Errorf("trace returned no result")
+	}
+	return &dryRunTraceResult{
+		Trace:  rpcResp.Result,
+		Logs:   extractLogsFromCallTrace(rpcResp.Result),
+		Parsed: parsed,
+	}, nil
+}
+
+// policyCheckTraceTransaction copies a transaction object without proxy-only
+// visibility data. The live write path removes this field before RPC forwarding.
+func policyCheckTraceTransaction(txObj map[string]any) map[string]any {
+	dup := make(map[string]any, len(txObj))
+	for key, value := range txObj {
+		if key != "visibleTo" {
+			dup[key] = value
+		}
+	}
+	return dup
+}
+
+// validateDryRunTrace applies the live trace validator to the exact callTracer
+// payload returned by forwardDryRunTrace. Validation is deliberately pinned to
+// orgID rather than all of the impersonated user's memberships: an Org A admin
+// must not receive nested Org B calls merely because the user belongs to both.
+func dryRunTraceProcessOutcome(validationErr *ProcessError) (decision, wireDecision, wireReason, auditReason, responseDecision string) {
+	if validationErr.StatusCode >= http.StatusInternalServerError {
+		return "error", "deny", validationErr.Message, sanitizeDryRunReason(validationErr.Reason), ""
+	}
+	v := traceVerdict(authorizationScopeOrgLocal, validationErr)
+	if v.decision == oracleDecisionIndeterminate {
+		responseDecision = v.decision
+	}
+	return "deny", v.decision, v.wireReason, v.internalReason, responseDecision
+}
+
+func (s *Server) validateDryRunTrace(
+	ctx context.Context,
+	user *rbac.User,
+	perms *rbac.EffectivePermissions,
+	method, orgID, targetAddr string,
+	traceResult *tracer.TraceResult,
+) *ProcessError {
+	userOrgIDs, userHasDeploy, err := traceOrgScope(ctx, s.rbacAccessCtrl, user, evaluationScope{kind: authorizationScopeOrgLocal, orgID: orgID})
+	if err != nil {
+		slog.Warn("dry-run trace: scope lookup failed", "org_id", orgID, "err", err)
+		return &ProcessError{StatusCode: http.StatusInternalServerError, Message: sendTraceValidatorError, Reason: ReasonTracingUnavailable}
+	}
+	return s.validateTraceWithOrgIDs(ctx, user, perms, orgID, targetAddr, traceResult, userOrgIDs, userHasDeploy,
+		traceShapeOptions(method, targetAddr)...)
+}
+
+// validateTraceWithOrgIDs applies a trace policy with an explicit organization
+// set. Admin dry-run supplies its selected organization. Policy-check supplies
+// all subject organizations, as the live RPC path does.
+func (s *Server) validateTraceWithOrgIDs(
+	ctx context.Context,
+	user *rbac.User,
+	perms *rbac.EffectivePermissions,
+	orgID, targetAddr string,
+	traceResult *tracer.TraceResult,
+	userOrgIDs map[string]bool,
+	userHasDeploy bool,
+	extraOpts ...rbac.TraceOption,
+) *ProcessError {
+	if user == nil || perms == nil || traceResult == nil || s.db == nil {
+		return &ProcessError{
+			StatusCode: http.StatusInternalServerError,
+			Message:    sendTraceValidatorError,
+			Reason:     ReasonTracingUnavailable,
+		}
+	}
+
+	validator := rbac.NewTraceValidator(s.db)
+	var traceOpts []rbac.TraceOption
+	if s.jsonrpcProcessor != nil {
+		if s.jsonrpcProcessor.traceValidator != nil {
+			validator = s.jsonrpcProcessor.traceValidator
+		}
+		var err error
+		traceOpts, err = s.jsonrpcProcessor.intraOrgGrantTraceOptions(
+			ctx, user.ID, targetAddr, userOrgIDs,
+		)
+		if err != nil {
+			slog.Warn("dry-run trace: grant resolution failed",
+				slog.String("user", user.ExternalID), slog.String("org_id", orgID), slog.Any("err", err))
+			return &ProcessError{
+				StatusCode: http.StatusInternalServerError,
+				Message:    sendTraceValidatorError,
+				Reason:     ReasonTracingUnavailable,
+			}
+		}
+	}
+
+	validation, err := validator.ValidateTrace(
+		ctx,
+		userOrgIDs,
+		traceResult,
+		userHasDeploy,
+		append(traceOpts, extraOpts...)...,
+	)
+	if err != nil {
+		slog.Warn("dry-run trace: validator error",
+			slog.String("user", user.ExternalID), slog.String("org_id", orgID), slog.Any("err", err))
+		return &ProcessError{
+			StatusCode: http.StatusInternalServerError,
+			Message:    sendTraceValidatorError,
+			Reason:     ReasonTracingUnavailable,
+		}
+	}
+	if !validation.Allowed {
+		slog.Info("dry-run trace: denial",
+			slog.String("user", user.ExternalID),
+			slog.String("org_id", orgID),
+			slog.String("kind", string(validation.DenialKind)))
+		slog.Debug("dry-run trace: denial detail",
+			slog.String("user", user.ExternalID),
+			slog.String("org_id", orgID),
+			slog.String("reason", validation.Reason),
+			slog.String("denied_target", validation.DeniedTarget))
+		return &ProcessError{
+			StatusCode:        http.StatusForbidden,
+			Message:           sendTraceDenyMessage(validation.Reason),
+			Reason:            traceDenialReason(validation.DenialKind),
+			TraceDenialKind:   validation.DenialKind,
+			TraceDeniedTarget: validation.DeniedTarget,
+			TraceDeniedOrgID:  validation.DeniedOrgID,
+		}
+	}
+	return nil
+}
+
+func traceDenialReason(kind rbac.DenialKind) string {
+	switch kind {
+	case rbac.DenialKindForeignOrg, rbac.DenialKindCreateForeign, rbac.DenialKindOutOfScope:
+		return ReasonCrossOrg
+	case rbac.DenialKindUnregistered:
+		return ReasonCrossOrg
+	case rbac.DenialKindDeployClaim:
+		return ReasonDeployClaimRequired
+	default:
+		return ReasonWireGenericDenied
+	}
+}
+
+// extractLogsFromCallTrace walks a callTracer-with-withLog response
+// and pulls every `logs` array from every frame (top + nested). Each
+// log entry comes back as raw JSON so downstream filters (the user-
+// scoped FilterEventLogs) can consume it directly.
+func extractLogsFromCallTrace(raw json.RawMessage) []json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var frame struct {
+		Logs  []json.RawMessage `json:"logs"`
+		Calls []json.RawMessage `json:"calls"`
+	}
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		return nil
+	}
+	out := make([]json.RawMessage, 0, len(frame.Logs))
+	out = append(out, frame.Logs...)
+	for _, sub := range frame.Calls {
+		out = append(out, extractLogsFromCallTrace(sub)...)
+	}
+	return out
+}
+
+// forwardDryRunRead forwards a read-only RPC call to the upstream node
+// and returns the raw response body. The caller filters it as the
+// impersonated user (filterDryRunReadResponse) before it is returned.
+func (s *Server) forwardDryRunRead(ctx context.Context, rpc apimodels.DryRunRPCBlock, clientIP string) (json.RawMessage, error) {
+	if s.proxy == nil {
+		return nil, fmt.Errorf("proxy not configured")
+	}
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  rpc.Method,
+		"params":  rpc.Params,
+		"id":      1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	respBody, _, err := s.proxy.Forward(body)
+	if err != nil {
+		return nil, err
+	}
+	_ = clientIP // forwarded for parity with regular path; unused in this minimal helper
+	_ = ctx
+	return json.RawMessage(respBody), nil
+}
+
+// recordImpersonation writes one row to the impersonation_log table.
+// `reason` is operator-safe text — the caller is responsible for not
+// passing raw DB errors or embedded private addresses.
+func (s *Server) recordImpersonation(
+	ctx context.Context,
+	actorDID, impersonatedDID, orgID string,
+	rpc apimodels.DryRunRPCBlock,
+	decision, reason, correlationID, responseDecision string,
+) error {
+	if s.db == nil {
+		return nil
+	}
+	conn := s.db.Conn()
+	if conn == nil {
+		return nil
+	}
+	paramsHash := dryRunParamsHash(rpc.Method, rpc.Params)
+	corr := uuid.NullUUID{}
+	if id, err := uuid.Parse(correlationID); err == nil {
+		corr.UUID = id
+		corr.Valid = true
+	}
+	_, err := conn.ExecContext(ctx, `
+		INSERT INTO impersonation_log (actor_did, impersonated_did, org_id, method, params_hash, decision, reason, correlation_id, response_decision)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, NULLIF($9, ''))`,
+		actorDID, impersonatedDID, orgID, rpc.Method, paramsHash, decision, reason, corr, responseDecision,
+	)
+	return err
+}
+
+// dryRunParamsHash returns a stable hex-encoded SHA-256 of (method,
+// params). We never persist the raw params — they could carry private
+// addresses or signed-tx blobs.
+//
+// L7: if json.Marshal errors (unreachable through current gin binding
+// but a future refactor could trigger it), return an empty string so
+// every error case doesn't collapse to the constant SHA-256 of "".
+func dryRunParamsHash(method string, params []any) string {
+	payload, err := json.Marshal(struct {
+		Method string `json:"m"`
+		Params []any  `json:"p"`
+	}{Method: method, Params: params})
+	if err != nil {
+		slog.Warn("dryRunParamsHash: marshal failed", "method", method, "err", err)
+		return ""
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+// dryRunAccessRequest builds the access check for an impersonated call with
+// the same helpers JSONRPCProcessor.Process uses on a real request, so the
+// dry-run verdict matches enforcement. Without FunctionSelector, CheckAccess
+// denies every contract whose grant has function-level rules with "function
+// selector required", so a call the user may make and one blocked by a param
+// rule both came back as the same uninformative deny.
+//
+// eth_sendRawTransaction keeps its target and calldata inside the signed
+// blob, so it is decoded and checked as eth_sendTransaction exactly as
+// processRawTransaction does. Derived from the undecoded params it has no
+// target at all, which skips the contract gates entirely and waves every
+// raw tx through to the tracer whatever it points at.
+func dryRunAccessRequest(userDID, orgID string, rpc apimodels.DryRunRPCBlock) (*rbac.AccessCheckRequest, error) {
+	method, params := rpc.Method, rpc.Params
+	if rbac.ResolveMethodAlias(method) == "eth_sendRawTransaction" {
+		rawHex, err := extractRawTxHex(params)
+		if err != nil {
+			return nil, err
+		}
+		from, to, data, value, _, err := decodeRawTransaction(rawHex)
+		if err != nil {
+			return nil, err
+		}
+		method, params = "eth_sendTransaction", buildTxParams(from, to, data, value)
+	}
+
+	accessMethod := rbac.ResolveMethodAlias(method)
+	var requiredClaims []rbac.Claim
+	if claim := rbac.ClassifyOperation(accessMethod, params); claim != "" {
+		requiredClaims = []rbac.Claim{claim}
+	}
+	return &rbac.AccessCheckRequest{
+		UserExternalID:   userDID,
+		OrgID:            orgID,
+		Method:           method,
+		AccessMethod:     accessMethod,
+		Params:           params,
+		TargetAddress:    rbac.GetTargetAddress(accessMethod, params),
+		FunctionSelector: rbac.GetFunctionSelector(accessMethod, params),
+		RequiredClaims:   requiredClaims,
+		// Skip the in-memory permission cache, as the View-as RPC mirror does
+		// (ProcessRequest.BypassPermsCache), so both resolve the user's
+		// permissions the same way right after a grant or membership change.
+		BypassCache: true,
+	}, nil
+}

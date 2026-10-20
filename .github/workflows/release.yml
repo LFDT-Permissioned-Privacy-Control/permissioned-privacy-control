@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  release-backend:
+    name: Release Backend Image
+    # These credentials and image names belong to Gateway. LFDT starts with
+    # a source import; artifact publication is configured separately.
+    # Approval integrations have their own artifact/tag lifecycle.
+    if: ${{ github.repository == 'gateway-fm/open-privacy-suite' && !startsWith(github.ref_name, 'approvals-v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Aikido: this job never pushes, so the checkout token is not needed.
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: gatewayfm/privacy-proxy-backend
+          # Publish ONLY the exact-version tag. Docker Hub tag-immutability is on,
+          # so any re-pushable tag (`:latest`, or a rolling `:0.8`) is rejected once
+          # it exists and fails the whole release. flavor: latest=false stops
+          # metadata-action's default latest=auto from emitting `:latest`; the
+          # rolling major.minor tag was likewise dropped. Production pins exact tags.
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=branch
+            type=ref,event=pr
+          labels: |
+            org.opencontainers.image.title=privacy-proxy-backend
+            org.opencontainers.image.description=Open Privacy Suite Backend
+            org.opencontainers.image.url=${{ github.event.repository.html_url }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.created=${{ github.event.release.created_at }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      # RD-1023: resolve the build identity stamped into the binary via
+      # -ldflags. The build context excludes .git, so we compute these on the
+      # runner and forward them as build-args.
+      - name: Resolve build metadata
+        id: build_meta
+        run: |
+          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Backend image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.backend
+          target: prod
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.build_meta.outputs.version }}
+            GIT_COMMIT=${{ steps.build_meta.outputs.short_sha }}
+            BUILD_TIME=${{ steps.build_meta.outputs.build_time }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Aikido: always rebuild the stage that runs `apt-get upgrade`. Its
+          # cache key is the instruction text (never changes) plus the
+          # debian:trixie-slim digest, so a release cut after a new CVE lands
+          # can restore a pre-advisory layer from the gha cache and republish
+          # the SAME vulnerable packages. That is how CVE-2026-63072
+          # (libssl3t64/openssl 3.5.6-1~deb13u2) survived: the advisory
+          # appeared 2026-08-26, after the v0.13.0-rc.3 build on 2026-08-25,
+          # and the base image had not moved since. Only this stage is
+          # uncached; the Go build stages still hit the cache.
+          no-cache-filters: runtime-base
+
+  release-frontend:
+    name: Release Frontend Image
+    if: ${{ github.repository == 'gateway-fm/open-privacy-suite' && !startsWith(github.ref_name, 'approvals-v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Aikido: this job never pushes, so the checkout token is not needed.
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: gatewayfm/privacy-proxy-frontend
+          # Publish ONLY the exact-version tag. Docker Hub tag-immutability is on,
+          # so any re-pushable tag (`:latest`, or a rolling `:0.8`) is rejected once
+          # it exists and fails the whole release. flavor: latest=false stops
+          # metadata-action's default latest=auto from emitting `:latest`; the
+          # rolling major.minor tag was likewise dropped. Production pins exact tags.
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=branch
+            type=ref,event=pr
+          labels: |
+            org.opencontainers.image.title=privacy-proxy-frontend
+            org.opencontainers.image.description=Open Privacy Suite Frontend
+            org.opencontainers.image.url=${{ github.event.repository.html_url }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.created=${{ github.event.release.created_at }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and push Frontend image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: frontend/
+          file: frontend/Dockerfile
+          target: prod
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Aikido: same reason as the backend. Note `apk upgrade --no-cache`
+          # in the Dockerfile is an apk flag (skip the package index cache) and
+          # does NOT stop Docker restoring this whole layer from the gha cache,
+          # so the openssl 3.5.7-r0 -> 3.5.8-r0 fix needs the stage marked
+          # uncached here. `prod` is the stage that runs the upgrade.
+          no-cache-filters: prod

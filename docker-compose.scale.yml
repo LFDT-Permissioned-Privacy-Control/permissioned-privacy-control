@@ -1,0 +1,154 @@
+# docker-compose.scale.yml — Multi-instance setup for testing horizontal scaling.
+#
+# Starts shared infrastructure (Postgres, Redis, Anvil) and 2 proxy instances
+# on different ports, all sharing the same database and Redis.
+#
+# Usage:
+#   docker compose -f docker-compose.scale.yml up --build -d
+#
+# Ports:
+#   Proxy instance 1:  http://localhost:8091
+#   Proxy instance 2:  http://localhost:8092
+#   Anvil (shared):    http://localhost:8545
+#   Postgres:          localhost:5432
+#   Redis:             (internal only)
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=privacy_proxy
+    volumes:
+      - scale-postgres-data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d privacy_proxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass scaletest123
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "scaletest123", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    ports:
+      - "127.0.0.1:8545:8545"
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--port", "8545", "--steps-tracing", "--block-time", "2"]
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "cast block-number --rpc-url http://localhost:8545 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # Proxy instance 1
+  proxy-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      target: dev
+      # Build identity (RD-1023). Forwarded from the environment; falls
+      # back to the Dockerfile defaults (dev/none/unknown) if unset.
+      args:
+        VERSION: ${VERSION:-dev}
+        GIT_COMMIT: ${GIT_COMMIT:-none}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "127.0.0.1:8091:8080"
+    environment:
+      - NODE_URL=http://anvil:8545
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/privacy_proxy?sslmode=disable
+      - REDIS_URL=redis://:scaletest123@redis:6379
+      - PORT=8080
+      - ENVIRONMENT=development
+      - VERIFIER_ID=did:privado:verifier:dev-0000000000000000
+      - BASE_URL=http://localhost:8091
+      - JWT_SECRET=scale-test-jwt-secret-not-for-production
+      - JWT_REFRESH_SECRET=scale-test-refresh-secret-not-for-production
+      - MOCK_SIGNATURES=true
+      - ALLOW_MOCK_LOGIN=true
+      - DISABLE_COINGECKO=true
+      - ADMIN_API_TOKEN=scale-test-admin-token
+    depends_on:
+      postgres:
+        condition: service_healthy
+      anvil:
+        condition: service_healthy
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # Proxy instance 2
+  proxy-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      target: dev
+      # Build identity (RD-1023). Forwarded from the environment; falls
+      # back to the Dockerfile defaults (dev/none/unknown) if unset.
+      args:
+        VERSION: ${VERSION:-dev}
+        GIT_COMMIT: ${GIT_COMMIT:-none}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "127.0.0.1:8092:8080"
+    environment:
+      - NODE_URL=http://anvil:8545
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/privacy_proxy?sslmode=disable
+      - REDIS_URL=redis://:scaletest123@redis:6379
+      - PORT=8080
+      - ENVIRONMENT=development
+      - VERIFIER_ID=did:privado:verifier:dev-0000000000000000
+      - BASE_URL=http://localhost:8092
+      - JWT_SECRET=scale-test-jwt-secret-not-for-production
+      - JWT_REFRESH_SECRET=scale-test-refresh-secret-not-for-production
+      - MOCK_SIGNATURES=true
+      - ALLOW_MOCK_LOGIN=true
+      - DISABLE_COINGECKO=true
+      - ADMIN_API_TOKEN=scale-test-admin-token
+    depends_on:
+      postgres:
+        condition: service_healthy
+      anvil:
+        condition: service_healthy
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  scale-postgres-data:
+
+networks:
+  internal:
+    driver: bridge

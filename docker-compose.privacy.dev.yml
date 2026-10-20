@@ -1,0 +1,390 @@
+# Privacy-mode DEV stack for local development.
+#
+# Same architecture as docker-compose.privacy.yml (the prod manifest):
+# indexer-zone + bff-zone + public networks, BFF in front of
+# Open Privacy Suite, no block-explorer indexer. Differences are scoped to
+# developer ergonomics:
+#
+#   - proxy-backend built with target: dev (mockauth-tagged binary).
+#   - ALLOW_MOCK_LOGIN=true, MOCK_SIGNATURES=true on proxy-backend.
+#   - proxy-frontend built with VITE_ALLOW_MOCK_LOGIN=true so the
+#     "Mock Login (Skip Wallet)" button renders.
+#   - anvil's RPC published on the host so devs can point cast / forge
+#     / MetaMask directly at it. The trust-boundary tests run against
+#     the prod manifest only, so this convenience does NOT weaken the
+#     audited deployment.
+#   - chain-indexer runs with FORCE_REINDEX=true so a fresh anvil
+#     (no volume) doesn't trip the chain-reset detector against an
+#     indexer-postgres volume from a previous run.
+#   - ENVIRONMENT=development (rather than production), so the
+#     in-code production gate doesn't force-disable mock-auth.
+#
+# Use:
+#   docker compose -f docker-compose.privacy.dev.yml up -d
+#
+# This is a complete compose file — do NOT layer it on top of
+# docker-compose.privacy.yml. The two files are siblings, not
+# base/overlay. Picking one chooses the deployment shape outright.
+#
+# By default, block-explorer is expected as a sibling clone of
+# Open Privacy Suite (same parent directory). Override the path via the
+# `BLOCK_EXPLORER_PATH` env var.
+#
+# chain-indexer is pulled as a published image (Docker Hub) — pin a
+# tagged release via `INDEXER_VERSION` (defaults to a known-good version
+# below). Contributors iterating on chain-indexer source: drop a
+# `docker-compose.override.yml` with a `build:` block alongside this
+# file, or `docker compose build` your own tag and set INDEXER_VERSION
+# to it. Removes the hard requirement of a sibling chain-indexer
+# checkout for users who only run the stack.
+#
+# scripts/privacy-dev-up.sh wraps the boilerplate (secret generation,
+# `--no-cache` frontend rebuild, health-wait, URL print).
+
+services:
+  # ----- Trust zone --------------------------------------------------------
+
+  privacy-postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${PRIVACY_POSTGRES_PASSWORD:?PRIVACY_POSTGRES_PASSWORD is required in privacy mode}
+      - POSTGRES_DB=privacy_proxy
+      # RD-1147: password for the restricted runtime role provisioned by
+      # scripts/init-audit-db.sh so AUDIT_DATABASE_URL connects as
+      # privacy_proxy_app and the append-only seal actually bites in dev.
+      - AUDIT_APP_PASSWORD=${AUDIT_APP_PASSWORD:?AUDIT_APP_PASSWORD is required in privacy mode (restricted audit-DB role)}
+    volumes:
+      - privacy-postgres-data:/var/lib/postgresql/data
+      # RD-1147: on first init, the CONTAINER provisions the "<db>_audit" database
+      # + the restricted privacy_proxy_app LOGIN role (mirrors POSTGRES_DB — one
+      # more DB, no new infra pattern). The app then migrates the audit DB.
+      - ./scripts/init-audit-db.sh:/docker-entrypoint-initdb.d/10-init-audit-db.sh:ro
+    networks:
+      - indexer-zone
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d privacy_proxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required in privacy mode}
+    networks:
+      - indexer-zone
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD is required in privacy mode}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--port", "8545", "--steps-tracing", "--block-time", "2"]
+    # DEV-ONLY: expose anvil's RPC on the host for cast / forge / MetaMask.
+    # The prod manifest deliberately omits this — anvil sits on
+    # indexer-zone only there. Trust-boundary tests run against the
+    # prod manifest, so this convenience does NOT weaken the audited
+    # deployment.
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT_RPC:-8545}:8545"
+    networks:
+      - indexer-zone
+    healthcheck:
+      test: ["CMD-SHELL", "cast block-number --rpc-url http://localhost:8545 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  indexer-postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${INDEXER_POSTGRES_PASSWORD:?INDEXER_POSTGRES_PASSWORD is required in privacy mode}
+      - POSTGRES_DB=chain_indexer
+    volumes:
+      - indexer-postgres-data:/var/lib/postgresql/data
+    networks:
+      - indexer-zone
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d chain_indexer"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  chain-indexer:
+    # Built from the sibling checkout (CHAIN_INDEXER_PATH), like the proxy
+    # and block-explorer services — privacy-dev-up.sh already requires that
+    # checkout to exist, and pulling a published tag here meant the dev
+    # stack silently tested RELEASED indexer code while every other service
+    # ran local source (bit the RD-1149 acceptance run). The built image is
+    # tagged :dev-local so it never clobbers a pinned published tag. To run
+    # a published image instead, override this service in
+    # docker-compose.privacy.dev.override.yml with BOTH
+    # `build: !reset null` and `image: gatewayfm/chain-indexer:<tag>`.
+    # The `!reset` is required: simply omitting `build:` in the override does
+    # NOT drop the inherited mapping, so `privacy-dev-up.sh`'s `up --build`
+    # would still rebuild local source and tag it with the published tag.
+    #
+    # If you point at a published tag: ≥ 0.2.0 is REQUIRED — earlier tags
+    # stored from_address / to_address in EIP-55 checksum case but compared
+    # exact-match in SQL, so every ByAddress query returned zero rows for
+    # the lowercased addresses the proxy passes (fixed upstream in v0.2.0,
+    # commit 03182bd "fix(reads): case-insensitive address lookups …").
+    build:
+      context: ${CHAIN_INDEXER_PATH:-../chain-indexer}
+    image: gatewayfm/chain-indexer:dev-local
+    environment:
+      - RPC_URL=http://anvil:8545
+      - DATABASE_URL=postgres://postgres:${INDEXER_POSTGRES_PASSWORD:?INDEXER_POSTGRES_PASSWORD is required in privacy mode}@indexer-postgres:5432/chain_indexer?sslmode=disable
+      - GRPC_LISTEN_ADDR=:50051
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - POLL_INTERVAL=2s
+      - ENABLE_TRACING=true
+      - ENABLE_OP_DEPOSITS=${ENABLE_OP_DEPOSITS:-false}
+      # DEV-ONLY: wipe indexer progress on startup. Avoids "chain reset
+      # detected" crash loops when anvil restarts fresh (no volume) but
+      # indexer-postgres still remembers an older chain head. NEVER set
+      # in the prod manifest.
+      - FORCE_REINDEX=true
+    depends_on:
+      indexer-postgres:
+        condition: service_healthy
+      anvil:
+        condition: service_healthy
+    networks:
+      - indexer-zone
+    restart: unless-stopped
+
+  proxy-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      # DEV: target: dev → binary built with -tags mockauth. Wires the
+      # mock-login + mock-signatures code paths so they can be turned on
+      # via env vars below. The prod build target compiles them out.
+      target: dev
+      # Build identity (RD-1023). privacy-dev-up.sh computes and exports
+      # these before `docker compose ... up --build`; falls back to the
+      # Dockerfile defaults (dev/none/unknown) if unset.
+      args:
+        VERSION: ${VERSION:-dev}
+        GIT_COMMIT: ${GIT_COMMIT:-none}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT_PROXY:-8080}:8080"
+    environment:
+      - NODE_URL=http://anvil:8545
+      - DATABASE_URL=postgres://postgres:${PRIVACY_POSTGRES_PASSWORD:?PRIVACY_POSTGRES_PASSWORD is required in privacy mode}@privacy-postgres:5432/privacy_proxy?sslmode=disable
+      # RD-1147: access_logs lives in a SEPARATE append-only audit database
+      # (privacy_proxy_audit), provisioned by the container's init hook. Two DSNs
+      # so dev enforces the append-only seal:
+      #   AUDIT_ADMIN_DATABASE_URL — owner (postgres): runs the lean audit
+      #     migrations + retention prune (DELETE).
+      #   AUDIT_DATABASE_URL — restricted runtime role privacy_proxy_app
+      #     (INSERT+SELECT on access_logs, no UPDATE/DELETE) → the seal bites.
+      - AUDIT_ADMIN_DATABASE_URL=postgres://postgres:${PRIVACY_POSTGRES_PASSWORD:?PRIVACY_POSTGRES_PASSWORD is required in privacy mode}@privacy-postgres:5432/privacy_proxy_audit?sslmode=disable
+      - AUDIT_DATABASE_URL=postgres://privacy_proxy_app:${AUDIT_APP_PASSWORD:?AUDIT_APP_PASSWORD is required in privacy mode (restricted audit-DB role)}@privacy-postgres:5432/privacy_proxy_audit?sslmode=disable
+      - PORT=8080
+      # ENVIRONMENT is binary in code: only "production" is production;
+      # anything else unlocks dev shortcuts (localhost in OAuth redirect
+      # allowlist, MOCK_SIGNATURES / ALLOW_MOCK_LOGIN honored). Dev
+      # compose sets "development" explicitly.
+      - ENVIRONMENT=development
+      - VERIFIER_ID=${VERIFIER_ID:-did:privado:verifier:dev-0000000000000000}
+      - BASE_URL=${BASE_URL:-http://localhost:${HOST_PORT_PROXY:-8080}}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:${HOST_PORT_UI:-5173}}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required in privacy mode}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required in privacy mode}
+      - ADMIN_API_TOKEN=${ADMIN_API_TOKEN:?ADMIN_API_TOKEN is required in privacy mode (bootstrap admin credential)}
+      - CROSS_ORG_AUTHORIZATION_ORACLE_MODE=${CROSS_ORG_AUTHORIZATION_ORACLE_MODE:-disabled}
+      - CROSS_ORG_AUTHORIZATION_ORACLE_TOKEN=${CROSS_ORG_AUTHORIZATION_ORACLE_TOKEN:-}
+      - CROSS_ORG_AUTHORIZATION_ORACLE_ORG_IDS=${CROSS_ORG_AUTHORIZATION_ORACLE_ORG_IDS:-}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required in privacy mode}@redis:6379
+      - ENABLE_TRAVEL_RULE=true
+      - EXTRA_RPC_NAMESPACES_FILE=${EXTRA_RPC_NAMESPACES_FILE:-}  # Path to JSON file with chain-specific RPC methods (opt-in; empty = skip)
+      - OAUTH_FIRST_PARTY_CLIENTS=${OAUTH_FIRST_PARTY_CLIENTS:-}  # RD-993 + RD-1006: <client_id>:<bcrypt_hash>,... — see .env.production.example
+      # Org-admin volume/timing audit view of user↔user txs (default off = strict privacy).
+      - ORG_ADMIN_VIEW_USER_TXS=${ORG_ADMIN_VIEW_USER_TXS:-false}
+      - PRIVACY_READ_PROFILE=${PRIVACY_READ_PROFILE:-}
+      - INDEXER_URL=chain-indexer:50051
+      - EXPLORER_DATABASE_URL=postgres://postgres:${INDEXER_POSTGRES_PASSWORD:?INDEXER_POSTGRES_PASSWORD is required in privacy mode}@indexer-postgres:5432/chain_indexer?sslmode=disable
+      # DEV-ONLY: mock-login + mock-signatures. Both runtime-gated AND
+      # build-tag-gated; force-disabled when ENVIRONMENT=production
+      # (see internal/config/config.go:215-229).
+      - ALLOW_MOCK_LOGIN=true
+      - MOCK_SIGNATURES=true
+    volumes:
+      - ./rpc-namespaces.json:/app/config/rpc-namespaces.json:ro
+    depends_on:
+      privacy-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chain-indexer:
+        condition: service_started
+    networks:
+      # proxy-backend is the sole legitimate bridge — it attaches to
+      # both internal zones plus public. The static manifest test
+      # enforces by name that no other service may be on both
+      # indexer-zone and bff-zone.
+      - indexer-zone
+      - bff-zone
+      - public
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # ----- Public zone -------------------------------------------------------
+
+  proxy-frontend:
+    # Vite dev server (target: dev) — required so import.meta.env.DEV is
+    # true. Several admin-dashboard panels (DeployDemoTokenPanel, dev
+    # tools) are gated on that flag and dead-code-eliminated by the
+    # production build, so target: prod would hide them even with mock
+    # auth on. The bind-mount + node_modules volume enable hot-reload
+    # against the live source.
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT_UI:-5173}:5173"
+    environment:
+      - VITE_API_TARGET=http://proxy-backend:8080
+      - VITE_ALLOW_MOCK_LOGIN=true
+      # Browser-facing explorer URL used by the RBAC "View as in Explorer"
+      # handoff. Override in the containerized demo E2E stack with the
+      # explorer service name; local dev keeps the published host port.
+      - VITE_BLOCK_EXPLORER_URL=${VITE_BLOCK_EXPLORER_URL:-http://localhost:${HOST_PORT_EXPLORER:-3001}}
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      proxy-backend:
+        condition: service_started
+    networks:
+      - public
+    restart: unless-stopped
+
+  block-explorer-postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${BLOCK_EXPLORER_POSTGRES_PASSWORD:?BLOCK_EXPLORER_POSTGRES_PASSWORD is required in privacy mode}
+      - POSTGRES_DB=explorer
+    volumes:
+      - block-explorer-postgres-data:/var/lib/postgresql/data
+    networks:
+      - bff-zone
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d explorer"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  block-explorer-api:
+    build:
+      context: ${BLOCK_EXPLORER_PATH:-../block-explorer}/backend
+      dockerfile: Dockerfile.api
+      # SAME AS PROD: the dev variant does not loosen the BFF's
+      # privacy-build invariants. The chain-indexer gRPC client is
+      # still compiled out — dev convenience is scoped to Open Privacy Suite
+      # auth, never to data-path correctness.
+      target: privacy
+      # Build identity (RD-1023). block-explorer's Dockerfile.api stamps these
+      # into the binary (surfaced at /version + UI footer). They come from
+      # block-explorer's OWN git, NOT Open Privacy Suite's — privacy-dev-up.sh
+      # resolves BLOCK_EXPLORER_* from $BLOCK_EXPLORER_PATH and exports them.
+      # Falls back to the Dockerfile defaults (dev/none/unknown) if unset.
+      args:
+        VERSION: ${BLOCK_EXPLORER_VERSION:-dev}
+        GIT_COMMIT: ${BLOCK_EXPLORER_GIT_COMMIT:-none}
+        BUILD_TIME: ${BLOCK_EXPLORER_BUILD_TIME:-unknown}
+    environment:
+      - DATABASE_URL=postgres://postgres:${BLOCK_EXPLORER_POSTGRES_PASSWORD:?BLOCK_EXPLORER_POSTGRES_PASSWORD is required in privacy mode}@block-explorer-postgres:5432/explorer?sslmode=disable
+      - RPC_URL=http://proxy-backend:8080
+      - API_PORT=8080
+      - PRIVACY_PROXY_URL=http://proxy-backend:8080
+      - PRIVACY_PROXY_PUBLIC_URL=${PRIVACY_PROXY_PUBLIC_URL:-http://localhost:${HOST_PORT_PROXY:-8080}}
+      # W-1: the privacy-mode block-explorer BFF fails closed at startup unless
+      # the trusted browser origins are explicit (it refuses to reflect
+      # arbitrary Origins with credentials). Explorer SPA + Open Privacy Suite UI.
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:${HOST_PORT_EXPLORER:-3001},http://localhost:${HOST_PORT_UI:-5173}}
+      # A-3: the BFF forces auth cookies to Secure in privacy mode unless this
+      # is set explicitly; browsers drop Secure cookies over plain HTTP (this
+      # dev stack), silently breaking login. false for HTTP dev; HTTPS in prod.
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      - SSO_CLIENT_ID=${SSO_CLIENT_ID:-explorer}
+      - SSO_CLIENT_SECRET=${SSO_CLIENT_SECRET:-}
+      - SSO_REDIRECT_URI=${SSO_REDIRECT_URI:-http://localhost:${HOST_PORT_EXPLORER:-3001}/api/auth/callback}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    depends_on:
+      block-explorer-postgres:
+        condition: service_healthy
+      proxy-backend:
+        condition: service_started
+    networks:
+      # bff-zone only — the BFF holds no chain data and has no route
+      # to indexer-zone. Even if a future change drops the
+      # `--target privacy` build tag or sets INDEXER_URL, the BFF
+      # cannot reach chain-indexer because they're on different docker
+      # networks.
+      - bff-zone
+    restart: unless-stopped
+
+  block-explorer-frontend:
+    build:
+      context: ${BLOCK_EXPLORER_PATH:-../block-explorer}/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT_EXPLORER:-3001}:80"
+    environment:
+      # Mirror the prod compose flag — entrypoint.sh writes VITE_* into
+      # window.__runtimeConfig at container start, lib/features.ts reads
+      # it to hide the contract-verification surface (block-explorer
+      # rc1 #5). The BFF also strips matching backend routes via the
+      # `privacy` Go build tag.
+      - VITE_PRIVACY_MODE=true
+    volumes:
+      - ./deployments/privacy/nginx.privacy.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      block-explorer-api:
+        condition: service_started
+    networks:
+      - public
+      # Frontend's nginx also attaches to bff-zone so it can reach
+      # block-explorer-api. It does NOT attach to indexer-zone — there
+      # is no path for the SPA host to reach the indexer.
+      - bff-zone
+    restart: unless-stopped
+
+networks:
+  # See docker-compose.privacy.yml for the full description of why
+  # there are two internal zones and what each contains. Mirrored here
+  # so the dev manifest stays structurally equivalent to prod.
+  indexer-zone:
+    driver: bridge
+    internal: false
+  bff-zone:
+    driver: bridge
+    internal: false
+  public:
+    driver: bridge
+
+volumes:
+  privacy-postgres-data:
+  indexer-postgres-data:
+  block-explorer-postgres-data:

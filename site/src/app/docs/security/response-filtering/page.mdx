@@ -1,0 +1,420 @@
+import { Callout } from "@/components/mdx/callout";
+
+export const metadata = {
+  title: "Response-Level Privacy Filtering",
+  description:
+    "Per-method response filtering for transactions, receipts, event logs, and raw storage access in the Open Privacy Suite.",
+};
+
+# Response-Level Privacy Filtering
+
+The Open Privacy Suite enforces privacy at two distinct layers. **Request filtering** (covered in the [Security](/docs/security) page) determines which methods and contracts a user can access. **Response filtering**, described here, controls what data a user sees within allowed responses.
+
+Request filtering alone is insufficient for financial privacy. Consider a contract with ten participants who all have access: without response filtering, every participant can read every other participant's transaction calldata, nonces, and event log parameters. Response filtering closes this gap by restricting response data to information that involves the requesting user's own addresses.
+
+<Callout variant="info" title="Standard and strict read profiles">
+  This page describes the default `standard` read profile. With `PRIVACY_READ_PROFILE=strict` a transaction, receipt or trace reaches only a transaction participant and an event only a viewer named by one of its indexed address parameters; admin claims, `visibleTo` and the `visibleTo` unlock grant no read access. See [Strict Read Profile](/docs/security/strict-read-profile).
+</Callout>
+
+---
+
+## How It Works
+
+Response filters run **after** the proxy forwards a request to the Ethereum node and **before** the response is returned to the client. Each filtered method has its own logic, but they all share a common concept: the **user's linked ETH addresses**.
+
+### Linked ETH Addresses
+
+A user's linked ETH addresses include two types:
+
+- **User-initiated links** — addresses explicitly verified through `POST /eth/link/challenge` + `POST /eth/link/verify`, which require an EIP-191 signature proving key ownership.
+- **System-inferred links** — addresses automatically linked when a user sends a signed transaction via `eth_sendRawTransaction`. The proxy cryptographically recovers the sender address from the transaction signature; no separate linking step is needed.
+
+Both link types are included in participant checks. User-initiated links take precedence when the same address exists under both types.
+
+Response filtering uses these linked addresses to determine what the user is allowed to see. A user is considered a **participant** in a transaction if their linked address matches the transaction's `from` or `to` field.
+
+<Callout variant="danger" title="No linked addresses = no data">
+  If a user has not linked any ETH addresses and has not yet sent any transactions through the proxy, all response-filtered methods return null or empty results. Addresses are linked automatically as users interact with the network via `eth_sendRawTransaction`.
+</Callout>
+
+---
+
+## eth\_getStorageAt -- Tiered Access
+
+`eth_getStorageAt` uses claim-based tiered access instead of a blanket block. Raw storage slot reads bypass contract-level privacy controls (ABI restrictions, parameter rules, method allowlists), so access is restricted based on the user's claims on the target contract.
+
+| Claim level | Access |
+|-------------|--------|
+| **Admin** | Unrestricted access to all storage slots |
+| **Non-admin** (any user without admin claim) | Allowed only for well-known proxy infrastructure slots (see below) |
+| **No access to the contract** (no grant, or another organization's contract) | Blocked |
+
+### Well-known proxy infrastructure slots
+
+Non-admin users can query only the following four slots. These are standard EIP-1967 and EIP-2535 proxy infrastructure slots that expose implementation/admin addresses, not user data:
+
+| Slot | Standard | Purpose |
+|------|----------|---------|
+| `0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc` | EIP-1967 | Implementation address |
+| `0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103` | EIP-1967 | Admin address |
+| `0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50` | EIP-1967 | Beacon address |
+| `0xc8fcad8db84d3cc18b4c41d551ea0ee66dd599cde068d998e57d5e09332c131c` | EIP-2535 | Diamond storage |
+
+Any other slot returns an error for non-admin users. This allows standard proxy introspection tools (e.g., OpenZeppelin Upgrades) to function while preventing raw state extraction of private contract data.
+
+### eth\_getProof
+
+`eth_getProof` returns the value of every requested storage key (`storageProof[].value`) together with the account's balance, nonce, code hash and storage root, so it follows the same tiers:
+
+| Caller | Allowed requests |
+|--------|------------------|
+| **Admin** | Any storage keys |
+| **Non-admin** | Only the four slots above: every key in the list must be one of them. An empty key list (an account-only proof) is allowed. |
+| **No access to the contract** | Blocked |
+
+For a non-admin user, a key list that mixes an allowed slot with any other slot, or that is missing, `null`, or not a list of hex strings, is rejected as a whole, before the request reaches the node. Contract admins may request any keys. Chain-specific methods you alias to `eth_getProof` or `eth_getStorageAt` (for example `linea_getProof`) follow the same rules.
+
+<Callout variant="warning" title="Proof response metadata">
+  An allowed proof includes account metadata, the storage root (`storageHash`), and trie proof nodes in addition to the requested slot values. This metadata is forwarded unchanged; the slot allowlist controls the requested values. Allow `eth_getProof` only for groups that need state proofs.
+</Callout>
+
+---
+
+## State and block overrides
+
+Some nodes support state or block override sets as optional arguments on existing RPC methods such as `eth_call`. These options select temporary account state or block fields for the simulation; their shape and availability depend on the node implementation. OPS does not accept client-supplied overrides. Ordinary calls and simulations still run against the configured node's state at the requested block, under the normal access and tracing rules.
+
+The policy applies to every caller, including contract and organization admins. Requests with unsupported options are refused before tracing or forwarding and receive the same opaque `method not found` as other RPC access denials. A differently-cased `stateOverrides`, `blockOverrides` or `txIndex` key is refused earlier, with `400 invalid JSON-RPC request`, because the request has more than one reading (see [Security](/docs/security)).
+
+| Method | Rejected | Passes the option check |
+|--------|----------|----------|
+| `eth_call`, `eth_estimateGas`, `eth_createAccessList` | non-empty or malformed overrides in the third or fourth parameter; anything in the block-parameter position other than a string (block tag or number), `null`, or a block object with only `blockNumber`, `blockHash` and `requireCanonical`; more than four parameters | omitted, `null`, or `{}` positional overrides; supported block references; a boolean third parameter for `eth_createAccessList` optimization |
+| `debug_traceCall` | any `stateOverrides`, `stateOverride`, `blockOverrides`, `blockOverride`, or `txIndex` config key, including case-equivalent spellings, regardless of its value | a config omitting those keys, subject to normal trace checks |
+
+A client emitting trace override keys with empty values must omit the keys. Passing the option check does not guarantee node support for a particular optional argument; normal RBAC, block-reference validation, and node validation still apply.
+
+A chain-specific method declared with an `alias` is checked under its alias target's rules. For example, `linea_estimateGas` aliased to `eth_estimateGas` is refused when it carries an override set, whether in the second parameter or in the standard override positions. A **passthrough** method gets no option check: its arguments, overrides included, are forwarded as sent. Do not declare a simulation method as passthrough; see [Passthrough methods](/docs/configuration#passthrough-methods).
+
+Bundled methods `eth_simulateV1`, `eth_simulate`, `eth_multicallV1`, `eth_callMany`, and `eth_callBundle` are unsupported.
+
+Rejected override requests are recorded in Access Logs with the reason "State override not allowed" (`state_override_not_allowed`). The check runs before the request's organization is resolved, so these entries carry no organization: they appear only in the fleet-wide Access Logs view, not in an organization admin's view. A group with verbose error reasons receives `state_override_not_allowed` only on `/rpc/:org_id`. Admin dry-run and test-request diagnostics apply the same policy.
+
+---
+
+## Transaction Data
+
+Transaction data can be fetched by hash or by block position. All three methods apply the same participant check and return the same filtered result.
+
+| Method | Participant check | Non-participant response |
+|--------|-------------------|-------------------------|
+| `eth_getTransactionByHash` | `from` or `to` matches linked address | `null` (full tx if the viewer's DID is in the tx's `visibleTo` list) |
+| `eth_getTransactionByBlockHashAndIndex` | same | `null` (full tx if the viewer's DID is in the tx's `visibleTo` list) |
+| `eth_getTransactionByBlockNumberAndIndex` | same | `null` (full tx if the viewer's DID is in the tx's `visibleTo` list) |
+
+**What this protects:**
+
+- **Calldata** (`input` field) -- contains the function selector and encoded arguments. Without filtering, any reader could decode another user's function call parameters.
+- **Nonce** -- reveals the sender's transaction count, which can be used to infer activity patterns.
+- **Value** -- the ETH amount transferred.
+- **Gas parameters** -- can reveal information about transaction complexity.
+
+Non-participants receive `null`, which is indistinguishable from querying a transaction hash that does not exist. This prevents information leakage even through the presence/absence of a response.
+
+---
+
+## Transaction Receipts (eth\_getTransactionReceipt)
+
+Transaction receipts contain execution results including status, gas used, and -- critically -- event logs.
+
+**Participant check:** The receipt's `from` and `to` fields are compared against linked addresses.
+
+| User is a participant? | Response |
+|------------------------|----------|
+| Yes | Receipt (but logs are filtered to only show those involving the user, and `logsBloom` is zeroed) |
+| No, but entitled to ≥1 of the tx's logs under their event rules | Receipt, with the `logs` array filtered to only those entitled logs (`logsBloom` zeroed) |
+| No, and entitled to none of the tx's logs | `null` |
+
+Even when a user is a participant, the receipt's `logs` array is filtered using the same rules as `eth_getLogs` (see below), and the `logsBloom` is zeroed out to prevent leaking the total number or presence of redacted logs. Note that "the same rules as `eth_getLogs`" includes the own-transaction rule below: a participant sees every log of their own transaction that was emitted by a contract they have access to — including events that do not carry their address (e.g. an event keyed by a business identifier).
+
+A viewer who is **not** a participant (and not in the tx's `visibleTo`, and not an admin) but who **is** entitled to at least one of the transaction's logs under their group's event rules — for example a payment's payee admitted to a `PaymentCreated` event by a `must_be:self` rule on an indexed party parameter — also receives the receipt, with its `logs` filtered to exactly those entitled logs. The `logs` themselves reveal nothing new — the viewer already receives them from `eth_getLogs` (which returns each log's `transactionHash`). Admitting the receipt envelope does additionally expose the envelope fields `from`, `to`, `status`, and `gasUsed`, which `eth_getLogs` does not return; this is the same disclosure posture as a `visibleTo` recipient, who receives the full receipt for a transaction they are named on. It is justified by the viewer's proven log-entitlement (they are a party to at least one of the transaction's events). **Contract-deployment receipts are excluded** from this admission — they are returned only to participants/`visibleTo`/admins, so the deploy receipt's top-level `contractAddress` is never exposed this way.
+
+---
+
+## Event Logs (eth\_getLogs)
+
+`eth_getLogs` returns an array of log entries matching a filter. The response filter iterates through each log individually and applies per-entry address matching on indexed topics.
+
+### Topic structure
+
+Each log entry has up to four topics:
+
+| Topic | Content | Used for filtering? |
+|-------|---------|---------------------|
+| `topics[0]` | Event signature hash (`keccak256` of the event name and parameter types) for non-anonymous events; may be an address for anonymous events | **Yes** -- checked for the zero-padded address pattern |
+| `topics[1]` | First indexed parameter (zero-padded to 32 bytes) | Yes, if it contains an address |
+| `topics[2]` | Second indexed parameter | Yes, if it contains an address |
+| `topics[3]` | Third indexed parameter | Yes, if it contains an address |
+
+### Filtering logic
+
+For each log entry in the response:
+
+1. **Check all four topics including `topics[0]`** -- for standard (non-anonymous) events, `topics[0]` is the event signature hash (e.g., `keccak256("Transfer(address,address,uint256)")`). Because this is not a zero-padded address, the address-pattern check naturally skips it. For anonymous events (declared with the `anonymous` keyword), `topics[0]` may contain an indexed address parameter and is therefore scanned.
+2. **Check `topics[1]` through `topics[3]`** -- for each topic, extract the lower 20 bytes as an Ethereum address (topics are 32 bytes; addresses are the last 20 bytes, zero-padded on the left).
+3. **Compare each extracted address** against the user's linked ETH addresses (case-insensitive).
+4. **Keep the log entry** if at least one topic address matches a linked address. Otherwise, apply the own-transaction rule below; if that also does not apply, **remove it**.
+
+### Own-transaction logs
+
+An event does not always name its stakeholders in an indexed address topic — some contracts emit events keyed only by a business identifier (for example `PaymentCompleted(bytes32 paymentKey, string paymentId)`). Address matching alone would hide such an event from the very people it concerns, including the account that submitted the transaction.
+
+To close this, a user also sees the logs of **transactions they participated in** (their linked address is the transaction's `from` or `to`), for logs emitted by contracts they have access to — even when the event carries no address of theirs. This reveals nothing new: the user submitted (or received) the transaction and already knows its contents.
+
+This admission is bounded:
+
+- It applies **only to contracts the user has a grant on**. A log emitted by a contract the user cannot otherwise see stays hidden, even if it appeared in one of their transactions (for example, an internal call into another organization's private contract).
+- It does **not** relax the ABI and dynamic-payload requirements. An event whose contract has no registered ABI, or that carries a dynamic non-indexed parameter without the contract's `events_allow_dynamic_payload` setting enabled, remains hidden — those protections guard against leaking addresses embedded in the payload, and they apply to participants too.
+
+### Example: ERC-20 Transfer event
+
+```solidity
+event Transfer(address indexed from, address indexed to, uint256 value);
+```
+
+For this event:
+
+- `topics[0]` = `keccak256("Transfer(address,address,uint256)")` -- skipped
+- `topics[1]` = sender address (zero-padded to 32 bytes)
+- `topics[2]` = recipient address (zero-padded to 32 bytes)
+
+A user with linked address `0xAlice` would see Transfer logs where `0xAlice` is either the sender or recipient. Transfers between two other parties are filtered out.
+
+### Embedded address redaction within a kept log
+
+Keeping a log entry does not mean returning it verbatim. A single event can carry several addresses — a sender, a recipient, and other parties — and a user entitled to see the event because *one* of those addresses is theirs is not necessarily entitled to see the others. Once a log is kept, every embedded address the user is not entitled to see — in the indexed topics **and** in the ABI-decoded event data — is zeroed out (`0x000…0`). Only the addresses the user can see are returned in the clear: their own linked addresses, addresses in contracts they hold a grant on, and public addresses. Disclosure grants never change regular RPC or Explorer masking; disclosed data is available only through the dedicated [grant API](/docs/disclosure).
+
+This makes `eth_getLogs`, transaction receipts, and the block explorer reveal the **same** set of addresses to a given user — a log fetched over JSON-RPC exposes nothing the explorer would have hidden, and vice versa.
+
+The one exception to this masking is the per-contract `visibleTo` unlock described below: when a contract has opted in and the sender listed an eligible user on a transaction, that user receives the contract's logs from that transaction exactly as emitted, embedded addresses included — identically through `eth_getLogs`, the receipt, and the block explorer's transaction log view.
+
+<Callout variant="warning" title="A zeroed address looks like the zero address">
+  A redacted address slot is zeroed, which is indistinguishable from a genuine zero address (for example, a token mint or burn whose `from`/`to` is `0x000…0`). Clients must not treat a zero address inside a returned log as authoritative — it may be a real zero address or a redacted one.
+</Callout>
+
+### Known Limitations
+
+<Callout variant="warning" title="Events without indexed address parameters">
+  Events that do not include any indexed address parameter in `topics[1]`--`topics[3]` are filtered out for **all** users, because no topic can match any linked address. For example, `event Initialized(uint8 version)` has only `topics[0]` (the signature hash) and no indexed address. No user will ever see this event through `eth_getLogs`.
+</Callout>
+
+<Callout variant="warning" title="Multi-party events with non-address identifiers">
+  Events that use a business identifier instead of an address for their indexed parameters (e.g., `event PaymentInitiated(string indexed paymentIdentifier)`) cannot be matched to any user's linked ETH address. These events are filtered out for all users; a separate stakeholder whitelist mechanism would be needed to surface them selectively.
+</Callout>
+
+---
+
+## Block Methods (eth\_getBlockByHash, eth\_getBlockByNumber)
+
+These methods return an entire block, optionally including full transaction objects. The filtering behavior depends on the `fullTxObjects` parameter.
+
+| Method | `fullTxObjects` | Filtering |
+|--------|-----------------|-----------|
+| `eth_getBlockByHash` | `true` | Per-tx `from`/`to` check; non-participant txs removed from array |
+| `eth_getBlockByHash` | `false` | Per-tx check (proxy requests full objects, filters, and maps to hashes) |
+| `eth_getBlockByNumber` | `true` | Per-tx `from`/`to` check; non-participant txs removed from array |
+| `eth_getBlockByNumber` | `false` | Per-tx check (proxy requests full objects, filters, and maps to hashes) |
+
+Whether `fullTxObjects` is `true` or `false`, the `transactions` array is strictly filtered. For `false` queries, the proxy transparently fetches full transaction objects behind the scenes, applies the filters, and returns only the hashes of transactions the user participated in. This prevents leaking the exact total number of transactions in a block.
+
+### Block Transaction Counts (eth_getBlockTransactionCountByHash/Number)
+These methods return the hex-encoded integer count of transactions in a block. The proxy intercepts these calls, fetches the full block, counts only the transactions the user is a participant in, and returns that personalized count.
+
+When `fullTxObjects=true`, the `transactions` array contains full transaction objects (the same shape as `eth_getTransactionByHash` responses). The filter iterates over each transaction and removes entries where neither `from` nor `to` matches a linked address. Block-level fields (`number`, `hash`, `timestamp`, `gasLimit`, etc.) are preserved, but **`logsBloom`, `gasUsed`, `blobGasUsed`, and `size` are forcefully zeroed** on every block-shaped response, for every viewer — these aggregate fields (bloom, total gas, and the block's serialized byte-length) would otherwise leak the existence of redacted logs and the volume of other-org activity across the block. The block explorer API omits `size` entirely.
+
+---
+
+## Block Receipts (eth\_getBlockReceipts)
+
+`eth_getBlockReceipts` returns all transaction receipts in a block. For each receipt it checks whether `from` or `to` matches a linked address. Non-participant receipts are **removed from the array entirely**, consistent with how `eth_getBlockByNumber` removes non-participant transactions. Each kept receipt's `logs` array goes through exactly the same event filtering and address masking as `eth_getTransactionReceipt` for the same user (contract grant, registered ABI, event rules, own-transaction logs), and `logsBloom` is zeroed.
+
+---
+
+## Stateful Filter API -- Blocked
+
+`eth_newFilter`, `eth_newBlockFilter`, `eth_newPendingTransactionFilter`, `eth_getFilterLogs`, `eth_getFilterChanges`, and `eth_uninstallFilter` are globally blocked. These create server-side filter state that cannot be safely scoped per-user, posing the same bypass risk as `eth_subscribe`.
+
+Use `eth_getLogs` with explicit block ranges instead -- it is properly response-filtered.
+
+---
+
+## Compliance Requirements
+
+These response-filtering features implement core privacy requirements for regulated financial networks:
+
+| Requirement | Implementation |
+|-------------|----------------|
+| **Intra-org transaction confidentiality** | `eth_getTransactionByHash` returns `null` for non-participants, preventing co-members from reading each other's calldata and transfer details |
+| **Event log visibility restrictions** | `eth_getLogs` filters entries by indexed address topics, ensuring users see only events involving their own addresses |
+| **Raw state access prevention** | `eth_getStorageAt` and `eth_getProof` use tiered access based on claims: admin users get unrestricted slot access, non-admin users can read or prove only the EIP-1967 / EIP-2535 proxy infrastructure slots, and users without access to the contract are blocked entirely |
+| **Receipt log redaction** | `eth_getTransactionReceipt` strictly filters inner logs and zeros bloom filters, ensuring even participants cannot see unrelated logs |
+
+These controls ensure that even within a shared private network where all participants have read access to the same contracts, individual transaction privacy is maintained at the response level.
+
+---
+
+## Per-Transaction Visibility (`visibleTo`)
+
+The `visibleTo` feature (renamed from `logVisibleTo`) allows a transaction sender to specify additional DIDs (decentralized identifiers) that can see the transaction and its event logs. This is useful for multi-party workflows where a third party needs to observe events they are not a direct participant of (e.g., an auditor, a settlement bank, or a compliance officer).
+
+### Two distinct mechanisms
+
+`visibleTo` drives two different things with **different gating** — keep them separate:
+
+| Mechanism | What a listed DID sees | What it requires |
+| --- | --- | --- |
+| **Transaction & receipt visibility** (always on) | The full transaction object (`eth_getTransactionByHash` and the block-index variants) and the full receipt (`eth_getTransactionReceipt`) for that one tx | Only that the viewer's DID is in the tx's `visibleTo` list. **No group access or contract grant is required.** Logs inside a returned receipt are still event-rule filtered. |
+| **Event-log unlock** (per-contract opt-in) | Every log **emitted by that opted-in contract in this transaction**, with its full event payload, independently of the event-rules allowlist, `param_rules`, and embedded-address masking | The `allow_visibleto_unlock` flag on the contract **and** the viewer is eligible: an org admin, or a member of a group with a grant on the contract in its owning org (see eligibility below). Cross-org and anonymous viewers are denied. |
+
+So "I listed Bob in `visibleTo`" does **not** by itself mean "Bob sees every event payload." Bob always gets the transaction and receipt; he only gets the unredacted event logs when the contract has opted in *and* Bob is grant-eligible.
+
+### How it works
+
+**Recommended: a top-level `visibleTo` field** on the JSON-RPC request (a sibling of `params`), on either send method. `privateFor` is accepted as an alias for Quorum/Tessera/Besu compatibility. Recipients may be **DIDs and/or Ethereum addresses** — an address is resolved to the DID it is linked to (fail-closed: an address with no linked identity is ignored, never widening visibility):
+
+```json
+{
+  "jsonrpc": "2.0", "id": 1,
+  "method": "eth_sendRawTransaction",
+  "params": ["0xf86c..."],
+  "visibleTo": ["did:privado:auditor1", "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"]
+}
+```
+
+`privateFor` is an alias with identical behaviour (useful when migrating from Quorum/Tessera):
+
+```json
+{
+  "jsonrpc": "2.0", "id": 1,
+  "method": "eth_sendRawTransaction",
+  "params": ["0xf86c..."],
+  "privateFor": ["0x70997970C51812dc3A010C7d01b50e0d17dc79C8"]
+}
+```
+
+The top-level form works with standard Ethereum client libraries. For back-compat the field is also accepted **inside the params** — in the transaction object for `eth_sendTransaction` (params\[0\]), or as a second parameter for `eth_sendRawTransaction`:
+
+```json
+{"method":"eth_sendTransaction","params":[{"from":"0xabc...","to":"0xdef...","data":"0x...","visibleTo":["did:privado:auditor1"]}]}
+{"method":"eth_sendRawTransaction","params":["0xf86c...",{"visibleTo":["did:privado:auditor1"]}]}
+```
+
+All forms present on one request are combined (deduped, capped at 32 recipients). The proxy strips every `visibleTo`/`privateFor` field before forwarding to the node, resolves addresses to DIDs, stores the rule in the database, and applies it during response filtering and explorer visibility.
+
+### Interaction with static event rules
+
+By default `visibleTo` is **additive** -- it never restricts existing access:
+
+- If a viewer already has access to an event through normal event rules or address-based filtering, `visibleTo` has no effect.
+- If a viewer is denied an event because `must_be=self` param rules fail, `visibleTo` serves as a fallback: the log is visible if the viewer's DID appears in that transaction's list. This fallback applies **only on contracts the viewer already holds a grant to**, and only the sender's listing counts — being a party to a token transfer in the transaction does not. In the block explorer this fallback, like the unlock, currently applies on a transaction's log view, not in the global or per-address log lists.
+- `visibleTo` does **not** grant access to a contract the viewer has **no** grant on. Logs from an ungranted contract stay hidden even when the viewer is listed in the tx's `visibleTo` — grant eligibility is required. (The viewer still receives the transaction/receipt envelope, but its logs are filtered.) Standalone `visibleTo`-based event access requires the per-contract unlock opt-in below.
+- `visibleTo` does **not** bypass the topic0 allowlist. If an event's signature is not in the allowed event rules, it remains hidden regardless of `visibleTo`.
+- Under the standard profile, admin users always see all events -- `visibleTo` does not change which events they see. On a contract that enables the unlock described below, a listed org admin also receives those logs with the full payload instead of masked addresses.
+
+Per-contract operators can opt **out of additive-only** behaviour and into the unlock semantic described below.
+
+### Per-contract opt-in: `visibleTo` as event-visibility unlock
+
+Some workflows need many participants with shifting event-by-event visibility (e.g. settlement banks, multi-party trade settlement). Pre-declaring an `event_rules` allowlist per group does not scale for those. The contract owner can opt the contract in to the **unlock semantic**: per-tx `visibleTo` lists become per-event opt-in unlocks for listed users.
+
+**Enable per-contract:**
+
+```
+PUT /api/orgs/:org_id/contracts/:address/visibleto-unlock
+{"allow_visibleto_unlock": true}
+```
+
+Admin-only on the contract's owning org. Default is `false` -- existing additive behaviour stays unless explicitly opted in.
+
+**When the flag is true and a transaction lists an eligible viewer, that viewer sees every log emitted by this opted-in contract in this one transaction** -- including events absent from their event-rules allowlist, events that fail their parameter rules, and the full event payload with every embedded address in topics and data. `eth_getLogs`, the receipt, and the block explorer's transaction log view return these logs identically. A log emitted by a different contract in the same transaction is checked against **that other contract's** grant and flag. A later transaction is checked against its own `visibleTo` list. Only the sender's listing counts: being a party to a token transfer in a transaction does not unlock that transaction's logs.
+
+### Example: one call, two emitters
+
+Alice submits one call to `PaymentContract`, which emits `PaymentCreated(payer, payee, intermediary)` and also moves tokens on `LedgerContract`, which emits `Transfer(from, to, value)`, in the same transaction. Alice lists settlement reviewer Sam in the transaction's `visibleTo`. Sam holds grants on both contracts; his `PaymentContract` grant allowlists `PaymentCreated` only when Sam is the payer, and Sam is neither payer nor payee.
+
+| `PaymentContract` setting | What Sam receives |
+|---------------------------|-------------------|
+| `allow_visibleto_unlock=false` (default) | `PaymentCreated` passes the `visibleTo` fallback for his allowlisted event, with the payer, payee and intermediary addresses zeroed. `Transfer` is filtered by his `LedgerContract` grant, with hidden addresses zeroed. |
+| `allow_visibleto_unlock=true` | `PaymentCreated` exactly as emitted, including the payer, payee and intermediary addresses. `Transfer` is unchanged: `LedgerContract` did not opt in, so its ordinary rules and masking still apply. |
+
+A `PaymentSettled` event emitted by a **later transaction** is not covered by Alice's earlier `visibleTo` list.
+
+**Eligibility requires both:**
+
+1. The viewer is registered (has a DID-backed user account -- anonymous viewers are denied).
+2. In the contract's owning org, the viewer is either an **org admin**, or a member of a group that has a `contract_grant` on this contract. The grant's `event_rules` may be deny-all -- the unlock works because of the grant link, not its rule set. Grants held by **system groups** or by the built-in **default group** that new users join automatically do not count: granting the default group access to a flagged contract does not make every user eligible. A group you configure as the automatic group for an Azure AD tenant is treated like any other group -- granting it access to a flagged contract makes every user provisioned into it eligible.
+
+Cross-org isolation: a viewer who has access only in another org cannot be unlocked, even if they are listed in `visibleTo`. Anonymous viewers are denied.
+
+**Per-tx blast-radius cap:** `visibleTo` lists at `eth_sendTransaction` time are capped at **32 entries**. Larger lists are rejected with HTTP 400. Use a dedicated group + grant for larger recipient sets.
+
+**Operator security checklist before flipping the flag:**
+
+- Contracts with the flag on let the tx sender authorise per-event visibility for any DID they list. Set this only on contracts where that's the intended workflow.
+- The set of users who can see a contract's events grows beyond what your `groups + grants` enumeration shows when the flag is on: for access reviews, check which eligible grant holders were listed on each transaction — grants alone do not show who received a particular unlocked event.
+- A sender who is themselves eligible can list their own DID and receive the full payload of everything the contract emits in their transaction, including third-party addresses the contract writes into its events. Org admins are eligible on every contract of their organization, so a listed org admin also sees user addresses that are otherwise kept private from admins. Enable the flag only on contracts whose events are meant to be shared in full with any eligible, listed participant.
+- Revoking a viewer's group membership cuts their unlock access immediately on the next request -- the eligibility check runs per-request.
+
+### RPC method access still required
+
+`visibleTo` and the unlock relax redaction, never method access -- every RPC retrieval is gated by the viewer's group method allowlist first. Every RPC retrieval surface is gated by the viewer's group `AllowedMethods`, before any visibility or redaction logic runs:
+
+- To receive the transaction object, the group must allow `eth_getTransactionByHash` (or the block-index variants).
+- To receive the receipt and its logs, the group must allow `eth_getTransactionReceipt`.
+- To receive filtered logs, the group must allow `eth_getLogs` (plus contract access).
+
+A DID listed in `visibleTo` whose group does not allow the relevant method is denied at the allowlist check -- the feature never adds a method to a viewer's allowlist. The Explorer API is gated by the redaction engine and the viewer's identity rather than the RPC method allowlist, which is why a viewer granted visibility on a transaction can see it in the explorer even if the corresponding raw RPC method is not in their group's allowlist.
+
+### Scope
+
+`visibleTo` grants visibility at two layers:
+
+1. **Explorer views**: Transactions with `visibleTo` grants appear in the regular Transactions and Token Transfers pages for listed DIDs, alongside their own activity.
+2. **JSON-RPC filtering**: Listed DIDs can see event logs from these transactions via `eth_getLogs` and can bypass the from/to participant check for:
+   - `eth_getTransactionReceipt` -- listed DID receives the full receipt (with logs filtered by the same event rules)
+   - `eth_getTransactionByHash` -- listed DID receives the full transaction object
+   - `eth_getTransactionByBlockHashAndIndex` / `eth_getTransactionByBlockNumberAndIndex` -- listed DID receives the full transaction object
+
+   This makes `visibleTo` a consistent cross-method override: whichever RPC the listed DID uses to fetch data for an allowed tx, they get the response they would get as a participant. Unlisted DIDs remain gated by the normal participant check.
+
+---
+
+## Summary Table
+
+| Method | Participant behavior | Non-participant behavior |
+|--------|---------------------|--------------------------|
+| `eth_getStorageAt` | Admin: all slots; Non-admin: EIP-1967 / EIP-2535 proxy slots only | Blocked (no access to the contract) |
+| `eth_getProof` | Admin: any keys; Non-admin: every key must be an EIP-1967 / EIP-2535 proxy slot (empty key list allowed) | Blocked (no access to the contract) |
+| `eth_getTransactionByHash` | Full transaction | `null` (or full tx if viewer is in `visibleTo`) |
+| `eth_getTransactionByBlockHashAndIndex` | Full transaction | `null` (or full tx if viewer is in `visibleTo`) |
+| `eth_getTransactionByBlockNumberAndIndex` | Full transaction | `null` (or full tx if viewer is in `visibleTo`) |
+| `eth_getTransactionReceipt` | Receipt with filtered logs | `null` (or receipt with filtered logs if viewer is in `visibleTo`) |
+| `eth_getBlockByHash` (`fullTxObjects=true`) | Full block with all txs | Non-participant txs removed from array |
+| `eth_getBlockByHash` (`fullTxObjects=false`) | Hashes of user's txs | Non-participant hashes removed from array |
+| `eth_getBlockByNumber` (`fullTxObjects=true`) | Full block with all txs | Non-participant txs removed from array |
+| `eth_getBlockByNumber` (`fullTxObjects=false`) | Hashes of user's txs | Non-participant hashes removed from array |
+| `eth_getBlockTransactionCountByHash/Number` | Count of user's txs | Count of user's txs only |
+| `eth_getBlockReceipts` | Receipts with filtered logs | Non-participant receipts removed from array |
+| `eth_getLogs` | Logs where a topic address matches | Those logs removed from response |
+| `eth_newFilter` / `eth_newBlockFilter` / etc. | Blocked (globally) | Blocked (globally) |
+
+---
+
+<Callout variant="warning" title="Not covered by response filtering">
+  1. **Multi-party event stakeholder whitelists** -- Events that use a business identifier (e.g., `event PaymentInitiated(string indexed paymentIdentifier)`) require a per-event-ID whitelist of stakeholders (debtor bank, settlement bank, creditor bank). Without it, events with non-address indexed parameters are filtered out for all users. Requires a new data model, admin API, and on-chain lookup to resolve stakeholders dynamically.
+
+  2. **`eth_call` return data** -- responses are raw ABI-encoded bytes passed through unmodified; address-typed return values are not field-level redacted. Avoid returning sensitive addresses from view functions exposed to unauthorized callers.
+
+  3. **Value inference for mixed public/private transactions** -- When a transaction involves one private address and one public address, the `value` field is stripped and the private side is replaced with `[PRIVATE]` in the block explorer. However, the transferred amount may still be inferable from the public address's balance deltas across adjacent blocks. Stripping the value removes the direct leakage path but is not a complete financial privacy guarantee. See [Privacy Requirements](/docs/security/privacy-requirements) for details.
+
+  4. **Logs from contracts without a registered ABI** -- denied to non-admin viewers (we cannot decode non-indexed `address` parameters in `data`, so we fail closed). Register the contract's ABI to enable event-level access.
+</Callout>

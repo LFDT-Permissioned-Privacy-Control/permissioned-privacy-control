@@ -1,0 +1,208 @@
+import { Callout } from "@/components/mdx/callout";
+import { Step } from "@/components/mdx/step";
+import { EnvTable } from "@/components/mdx/env-table";
+
+export const metadata = {
+  title: "Azure AD / SSO",
+  description:
+    "Azure AD / Microsoft Entra ID SSO integration for the Open Privacy Suite. Setup, bootstrap, and testing guide.",
+};
+
+# Azure AD / SSO
+
+The Open Privacy Suite supports Azure AD (Microsoft Entra ID) as an authentication provider alongside Privado ID ZK proofs. This enables enterprise SSO login for organizations using Microsoft identity.
+
+## Prerequisites
+
+### 1. Azure AD Tenant
+
+Go to the [Microsoft 365 Developer Program](https://developer.microsoft.com/en-us/microsoft-365/dev-program) to get a free developer tenant with 25 E5 licenses. Alternatively, any personal Microsoft account works if you register the app with "Any org + personal accounts".
+
+### 2. App Registration
+
+<Step number={1} title="Create the App Registration">
+
+Go to [Azure Portal](https://portal.azure.com) > **Microsoft Entra ID** > **App registrations** > **New registration**.
+
+</Step>
+
+<Step number={2} title="Configure Basic Settings">
+
+- **Name**: anything (e.g., "Open Privacy Suite Dev")
+- **Supported account types**: "Single tenant" (your org only) or "Any org + personal" for testing
+- **Redirect URI**: select **Web** and enter `http://localhost:5173/auth/azure/callback`
+
+</Step>
+
+<Step number={3} title="Note Your Credentials">
+
+After creating the app, note the **Application (client) ID** and **Directory (tenant) ID** from the overview page.
+
+</Step>
+
+<Step number={4} title="Create a Client Secret">
+
+Go to **Certificates & secrets** > **New client secret** > copy the value immediately (it is only shown once).
+
+</Step>
+
+## Environment Variables
+
+Add the following to your `.env` file:
+
+<EnvTable vars={[
+  { name: "AZURE_AD_CLIENT_ID", default: "(required)", description: "Application (client) ID from Azure app registration" },
+  { name: "AZURE_AD_CLIENT_SECRET", default: "(required)", description: "Client secret value from Certificates & secrets" },
+  { name: "AZURE_AD_TENANT_ID", default: "(required)", description: "Directory (tenant) ID from Azure app registration" },
+  { name: "AZURE_AD_SP_AUDIENCE", default: "(AZURE_AD_CLIENT_ID)", description: "Expected audience (aud) for service-principal access tokens at /api/v1/auth/azure/service-principal. Defaults to the client ID; set it when the client requests tokens for a distinct API resource (e.g. api://<app-id>)." },
+  { name: "ADMIN_API_TOKEN", default: "(required)", description: "Secret string for bootstrapping the admin API (used with X-Admin-Token header)" },
+]} />
+
+## Bootstrap: Adding Tenant to Allowlist
+
+The backend maintains an allowlist of Azure AD tenants that are permitted to log in. The `.env` tenant ID configures which Azure AD app handles OAuth -- the allowlist controls which tenants can actually authenticate.
+
+<Callout variant="warning" title="Bootstrap required">
+
+Since you cannot access the admin UI until you are logged in, the first tenant must be added via the admin API using `X-Admin-Token`. This is a one-time setup step.
+
+</Callout>
+
+Start the stack first:
+
+```bash
+docker-compose up -d
+```
+
+Verify Azure AD is enabled in the backend logs:
+
+```bash
+docker-compose logs proxy-backend | grep "Azure AD"
+# Should show: Azure AD authentication enabled ... tenant=<your-tenant-id>
+```
+
+Then add your tenant to the allowlist:
+
+```bash
+export ADMIN_API_TOKEN=<same-value-as-in-env>
+
+curl -X POST http://localhost:8080/api/v1/admin/azure-tenants \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Token: ${ADMIN_API_TOKEN}" \
+  -d '{
+    "tenant_id": "<your-directory-tenant-id>",
+    "label": "My Org",
+    "auto_provision": true
+  }'
+```
+
+| Field | Description |
+|-------|-------------|
+| `tenant_id` | Your Azure AD Directory (tenant) ID (same as `AZURE_AD_TENANT_ID`) |
+| `auto_provision` | When `true`, users from this tenant are automatically created on first login |
+| `default_org_id` | (Optional) Auto-place new users into this organization |
+| `default_group_id` | (Optional) Auto-place new users into this group |
+
+After this one-time bootstrap, you can manage tenants from the admin UI at **RBAC > Azure Tenants**.
+
+## Service Principal Login (Machine-to-Machine)
+
+For automated integrations with no interactive user, an Azure AD **service principal** can authenticate using the OAuth2 **client-credentials** grant — no browser required. The integration obtains an Azure AD access token directly from Microsoft, then exchanges it with the proxy for our standard tokens. The service principal's tenant must be in the allowlist above, exactly like interactive users.
+
+<Step number={1} title="Obtain an Azure AD access token">
+
+The client requests a token in its own tenant, with the proxy's API as the resource:
+
+```bash
+curl -X POST "https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=<service-principal-client-id>" \
+  -d "client_secret=<service-principal-secret>" \
+  -d "scope=<api-resource>/.default"
+```
+
+`<api-resource>` must match `AZURE_AD_SP_AUDIENCE` (which defaults to `AZURE_AD_CLIENT_ID`).
+
+</Step>
+
+<Step number={2} title="Exchange it for proxy tokens">
+
+```bash
+curl -X POST http://localhost:8080/api/v1/auth/azure/service-principal \
+  -H "Content-Type: application/json" \
+  -d '{ "access_token": "<azure-ad-access-token>" }'
+```
+
+The proxy verifies the token (signature via Azure JWKS, expiry, and audience), checks the token's `tid` against the tenant allowlist, auto-provisions the service principal as the RBAC user `azuread:<oid>`, and returns:
+
+```json
+{ "access_token": "...", "refresh_token": "...", "token_type": "Bearer", "expires_in": 300 }
+```
+
+</Step>
+
+<Step number={3} title="Call the API">
+
+The integration calls `/rpc` with `Authorization: Bearer <access_token>` like any other client, and refreshes via `POST /api/v1/refresh` when the short-lived access token expires.
+
+</Step>
+
+> **Permissions follow the same model as interactive users.** A newly-provisioned service principal lands in its tenant's default group and is **not KYC-verified**, so write/transfer methods stay gated until an administrator grants them. Scope its access via the tenant's `default_group_id` and the usual RBAC controls.
+
+## Full Login Flow Testing
+
+<Step number={1} title="Open the Login Page">
+
+Navigate to `http://localhost:5173/login`. You should see two tabs: **Privado ID** and **Microsoft**.
+
+</Step>
+
+<Step number={2} title="Initiate Microsoft Sign-In">
+
+Click the **Microsoft** tab, then click **Continue with Microsoft**.
+
+</Step>
+
+<Step number={3} title="Authenticate with Microsoft">
+
+Sign in with your Microsoft account. Microsoft redirects back to `/auth/azure/callback`.
+
+</Step>
+
+<Step number={4} title="Callback Processing">
+
+The callback page exchanges the authorization code for JWT tokens. You should see a spinner with "Completing Microsoft sign-in..." and then land on `/link-wallet`.
+
+</Step>
+
+## Verification Checklist
+
+| Step | What to Check |
+|------|--------------|
+| Login page | Microsoft tab visible, Privado QR still works |
+| Microsoft redirect | URL contains your `client_id`, correct `redirect_uri` |
+| Callback | Spinner shows "Completing Microsoft sign-in...", no errors |
+| After login | JWT works -- user appears in admin UI under Users |
+| Admin UI | User shows with `azuread:{oid}` subject |
+| Tenant not in allowlist | Remove tenant from allowlist -- login returns 403 |
+
+## Smoke Tests
+
+You can verify the UI integration without a real Azure tenant:
+
+1. `GET /api/v1/auth/providers` -- returns `["privado"]` when Azure is not configured, `["privado", "azuread"]` when it is.
+2. Login page renders correctly with and without the Microsoft tab.
+3. Visit `/auth/azure/callback?error=access_denied&error_description=User+cancelled` -- error UI should display.
+4. Visit `/auth/azure/callback` (no params) -- should show "Missing code or state" error.
+5. Visit `/auth/azure/callback?code=fake&state=fake` -- should show backend error (invalid state).
+
+## Troubleshooting
+
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| No Microsoft tab on login page | Env vars not passed to container | Check that `AZURE_AD_CLIENT_ID` and `AZURE_AD_CLIENT_SECRET` are in `docker-compose.yml` environment section and `.env` |
+| 403 "tenant is not authorized" | Tenant not in allowlist | Add tenant via admin API (bootstrap step above) |
+| 404 on callback URL | Vite proxy intercepting `/auth/*` | Ensure Vite proxy only matches `/auth/callback`, not `/auth/azure/callback` |
+| AADSTS50011 "redirect URI does not match" | Wrong redirect URI in Azure Portal | Set redirect URI to `http://localhost:5173/auth/azure/callback` |
+| "nonce mismatch" | State or session expired | Try again -- state tokens have 10-minute TTL |
+| "tid claim missing" | Unusual Azure AD configuration | Check the `id_token` claims in browser devtools |

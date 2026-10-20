@@ -1,0 +1,78 @@
+# Test-only overlay for the real Open Privacy Suite demo acceptance suite.
+#
+# Base: docker-compose.privacy.dev.yml (the production-shaped trust topology,
+# with mock authentication enabled). This overlay adds only the Playwright
+# runner and container-reachable browser URLs. Run through `make demo-e2e` so
+# contract artifacts are built and the stack is always torn down.
+
+services:
+  chain-indexer:
+    # The demo suite consumes a prebuilt indexer image: CI builds it from
+    # source and tags it ghcr.io/gateway-fm/chain-indexer:${INDEXER_VERSION}
+    # (see e2e-playwright.yml); local runs pull the published tag. `!reset`
+    # drops the dev manifest's `build:` mapping so `up --build` doesn't try
+    # to rebuild from a sibling checkout the demo environment doesn't have.
+    build: !reset null
+    image: ghcr.io/gateway-fm/chain-indexer:${INDEXER_VERSION:-0.3.0}
+
+  proxy-backend:
+    environment:
+      - BASE_URL=http://proxy-backend:8080
+      - FRONTEND_URL=http://proxy-frontend:5173
+      - CORS_ALLOWED_ORIGINS=http://proxy-frontend:5173,http://block-explorer-frontend
+      - DISABLE_COINGECKO=true
+
+  proxy-frontend:
+    environment:
+      - VITE_BLOCK_EXPLORER_URL=http://block-explorer-frontend
+
+  block-explorer-api:
+    environment:
+      - PRIVACY_PROXY_PUBLIC_URL=http://proxy-backend:8080
+      - CORS_ALLOWED_ORIGINS=http://block-explorer-frontend,http://proxy-frontend:5173
+      - COOKIE_SECURE=false
+      - SSO_REDIRECT_URI=http://block-explorer-frontend/api/auth/callback
+
+  playwright-demo:
+    build:
+      context: ./e2e/playwright
+      dockerfile: Dockerfile
+    command: ["npx", "playwright", "test", "--project=demo"]
+    volumes:
+      - ./e2e/playwright:/app
+      - /app/node_modules
+      - ./contracts/out:/contracts/out:ro
+      - ./e2e/playwright/test-results:/app/test-results
+      - ./e2e/playwright/playwright-report:/app/playwright-report
+    environment:
+      - CI=${CI:-false}
+      - CI_REQUIRE_E2E=1
+      - PROXY_URL=http://proxy-backend:8080
+      - ADMIN_URL=http://proxy-backend:8080
+      - FRONTEND_URL=http://proxy-frontend:5173
+      - EXPLORER_URL=http://block-explorer-frontend
+      - ANVIL_URL=http://anvil:8545
+      - CONTRACT_ARTIFACT_DIR=/contracts/out
+      - ADMIN_API_TOKEN=${ADMIN_API_TOKEN}
+      - PROXY_GIT_COMMIT=${GIT_COMMIT:-unknown}
+      - EXPLORER_GIT_COMMIT=${BLOCK_EXPLORER_GIT_COMMIT:-unknown}
+      - INDEXER_VERSION=${INDEXER_VERSION:-0.3.0}
+      - DEMO_E2E=1
+      # The manifest contains synthetic session tokens used between projects;
+      # keep it ephemeral rather than copying it into CI artifacts.
+      - DEMO_MANIFEST_PATH=/tmp/demo-scenario.json
+    depends_on:
+      proxy-backend:
+        condition: service_healthy
+      proxy-frontend:
+        condition: service_started
+      block-explorer-api:
+        condition: service_started
+      block-explorer-frontend:
+        condition: service_started
+      anvil:
+        condition: service_healthy
+    networks:
+      - public
+      - indexer-zone
+    working_dir: /app

@@ -1,0 +1,88 @@
+# Quickstart overlay — layered ON TOP of docker-compose.yml (unlike
+# docker-compose.privacy.dev.yml, which is a standalone sibling):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.quickstart.yml up -d
+#
+# Run it through the wrapper instead:
+#
+#   make quickstart        (scripts/quickstart.sh)
+#
+# What it adds on top of the base dev stack:
+#   - chain-indexer + its postgres, so the proxy's explorer API
+#     (/api/v1/explorer/*) serves real data. Both sit behind the
+#     "explorer" compose profile: the published gatewayfm/chain-indexer
+#     image may not be pullable anonymously, and the wrapper falls back
+#     to a no-explorer stack when the pull fails.
+#   - the append-only audit database (RD-1147), provisioned by the same
+#     init hook the privacy dev stack uses, so the backend boots with a
+#     working AUDIT_DATABASE_URL and the seal is enforced even here.
+#
+# Everything is DEV-ONLY: mock auth, fixed local passwords, localhost
+# port binds. Same posture as the base docker-compose.yml — never deploy
+# any of this to something customer-facing.
+
+services:
+  postgres:
+    environment:
+      - AUDIT_APP_PASSWORD=${QUICKSTART_AUDIT_APP_PASSWORD:-quickstart-audit-dev-only}
+    volumes:
+      - ./scripts/init-audit-db.sh:/docker-entrypoint-initdb.d/10-init-audit-db.sh:ro
+
+  proxy-backend:
+    environment:
+      # Audit DB (RD-1147): admin DSN runs the lean migrations + prune; the
+      # restricted role DSN is what the app writes access_logs through, so
+      # the INSERT-only seal bites even in the quickstart stack.
+      - AUDIT_ADMIN_DATABASE_URL=postgres://postgres:postgres@postgres:5432/privacy_proxy_audit?sslmode=disable
+      - AUDIT_DATABASE_URL=postgres://privacy_proxy_app:${QUICKSTART_AUDIT_APP_PASSWORD:-quickstart-audit-dev-only}@postgres:5432/privacy_proxy_audit?sslmode=disable
+      # Explorer data sources. ${VAR-default} (no colon) on purpose: the
+      # wrapper exports these as EMPTY strings in --no-explorer mode, which
+      # cleanly disables the explorer backends instead of pointing them at
+      # hostnames that don't exist.
+      - INDEXER_URL=${QUICKSTART_INDEXER_URL-chain-indexer:50051}
+      - EXPLORER_DATABASE_URL=${QUICKSTART_EXPLORER_DATABASE_URL-postgres://postgres:postgres@indexer-postgres:5432/chain_indexer?sslmode=disable}
+
+  indexer-postgres:
+    image: postgres:15-alpine
+    profiles: ["explorer"]
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=chain_indexer
+    volumes:
+      - indexer-postgres-data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d chain_indexer"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  chain-indexer:
+    # Published image — see docker-compose.privacy.dev.yml for why ≥ 0.2.0
+    # is required and how to swap in your own build via INDEXER_VERSION.
+    image: gatewayfm/chain-indexer:${INDEXER_VERSION:-0.4.0}
+    profiles: ["explorer"]
+    environment:
+      - RPC_URL=http://anvil:8545
+      - DATABASE_URL=postgres://postgres:postgres@indexer-postgres:5432/chain_indexer?sslmode=disable
+      - GRPC_LISTEN_ADDR=:50051
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - POLL_INTERVAL=2s
+      - ENABLE_TRACING=true
+      # DEV-ONLY: wipe indexer progress on startup so a fresh anvil (no
+      # volume) doesn't trip the chain-reset detector. Never in prod.
+      - FORCE_REINDEX=true
+    depends_on:
+      indexer-postgres:
+        condition: service_healthy
+      anvil:
+        condition: service_healthy
+    networks:
+      - internal
+    restart: unless-stopped
+
+volumes:
+  indexer-postgres-data:

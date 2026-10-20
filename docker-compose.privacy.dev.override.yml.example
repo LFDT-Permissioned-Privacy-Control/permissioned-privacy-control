@@ -1,0 +1,26 @@
+# Example local override for the dev stack.
+#
+# Copy to docker-compose.privacy.dev.override.yml (gitignored) and
+# `make full-stack-dev` will auto-include it — no manual `docker compose -f`.
+#
+#   cp docker-compose.privacy.dev.override.yml.example docker-compose.privacy.dev.override.yml
+#   cp config.example.toml config.local.toml      # then trim to non-secret keys
+#   make full-stack-dev
+#
+# Use it to test things the lean default stack doesn't wire:
+#   - a layered CONFIG_FILE (RD-1130) mounted into the backend,
+#   - the restricted operator token (RD-1132) — OPERATOR_API_TOKEN,
+#   - Azure AD (RD-1120) — AZURE_AD_CLIENT_SECRET (the non-secret Azure bits go in the config file).
+#
+# SECRETS still come from the environment only: add OPERATOR_API_TOKEN and/or
+# AZURE_AD_CLIENT_SECRET to .env.privacy.dev (the script sources it). Putting a
+# secret in config.local.toml makes the proxy refuse to start (by design).
+services:
+  proxy-backend:
+    environment:
+      - CONFIG_FILE=/app/config/config.local.toml
+      # empty = operator tier OFF; set OPERATOR_API_TOKEN in .env.privacy.dev to turn it on
+      - OPERATOR_API_TOKEN=${OPERATOR_API_TOKEN:-}
+      - AZURE_AD_CLIENT_SECRET=${AZURE_AD_CLIENT_SECRET:-}
+    volumes:
+      - ./config.local.toml:/app/config/config.local.toml:ro

@@ -1,0 +1,174 @@
+# Production compose — pulls pre-built images from DockerHub.
+#
+# Usage (without TLS — direct port access):
+#   PRIVACY_PROXY_VERSION=v0.5.0 docker compose -f docker-compose.prod.yml up -d
+#
+# Usage (with Caddy TLS — production):
+#   PRIVACY_PROXY_VERSION=v0.5.0 docker compose -f docker-compose.prod.yml --profile tls up -d
+#
+# Recommended: use a .env file instead of inline env vars.
+#   cp .env.production.example .env && $EDITOR .env
+#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml down -v   # works without repeating vars
+#
+# What this provides:
+#   - Backend/frontend from DockerHub (no local build needed)
+#   - Postgres included (can use external DB instead — see below)
+#   - No Anvil — NODE_URL must point to your real Ethereum node
+#   - Caddy for TLS (optional, enable with --profile tls)
+#   - Dev-only flags (MOCK_SIGNATURES, ALLOW_MOCK_LOGIN) disabled
+#   - Required config validated at backend startup (not in compose)
+#
+# External database:
+#   Set DATABASE_URL to your external postgres and skip the built-in one:
+#   docker compose -f docker-compose.prod.yml up -d proxy-backend proxy-frontend
+#
+# Required environment variables (backend fails on startup if missing):
+#   PRIVACY_PROXY_VERSION   Docker image tag (e.g. v0.5.0, latest)
+#   BASE_URL                e.g. https://proxy.yourdomain.com
+#   JWT_SECRET              openssl rand -hex 32
+#   JWT_REFRESH_SECRET      openssl rand -hex 32
+#   ADMIN_API_TOKEN         openssl rand -hex 32
+#   VERIFIER_ID             your Privado verifier DID
+#   DATABASE_URL            postgres://user:pass@host:5432/privacy_proxy?sslmode=require
+#   NODE_URL                http(s)://your-ethereum-node:8545
+#   REDIS_PASSWORD          openssl rand -hex 32 (used by built-in redis; set REDIS_URL to skip built-in)
+#
+# Optional:
+#   TRUSTED_INTERNAL_CIDRS  Additional CIDRs for internal API access (comma-separated)
+#                           e.g. 10.100.0.0/16,fd00::/8 for Kubernetes pod networks
+#                           Appended to defaults (localhost, Docker, RFC1918, Tailscale)
+
+services:
+  # Built-in postgres — started by default.
+  # To use an external DB instead, set DATABASE_URL to your external postgres
+  # and start with: docker compose -f docker-compose.prod.yml up -d proxy-backend proxy-frontend
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=privacy_proxy
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d privacy_proxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Built-in Redis for shared state stores (sessions, OAuth state, RBAC cache).
+  # To use an external Redis, set REDIS_URL in .env and remove this service.
+  # The backend retries the initial connection for up to 20s at startup.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  proxy-backend:
+    image: gatewayfm/privacy-proxy-backend:${PRIVACY_PROXY_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT_PROXY:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Run the process in UTC — plain TIMESTAMP columns store wall-clock
+      # components, so a non-UTC process tz would skew RBAC expiry checks
+      # (RD-1005). The DB session is also pinned to UTC in code.
+      - TZ=UTC
+      - ENVIRONMENT=production
+      - GIN_MODE=release
+      - MOCK_SIGNATURES=false
+      - ALLOW_MOCK_LOGIN=false
+      - DEMO_AUTO_AUTH_DELAY=
+      - ENABLE_TRAVEL_RULE=true
+      # Org admins get a volume/timing audit view of user↔user txs (value preserved,
+      # addresses stay [PRIVATE], every reveal audit-logged). Default off = strict privacy.
+      - ORG_ADMIN_VIEW_USER_TXS=${ORG_ADMIN_VIEW_USER_TXS:-false}
+      - PRIVACY_READ_PROFILE=${PRIVACY_READ_PROFILE:-}
+      - EXTRA_RPC_NAMESPACES_FILE=${EXTRA_RPC_NAMESPACES_FILE:-}
+      - JWT_SECRET=${JWT_SECRET:-}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-}
+      - ADMIN_API_TOKEN=${ADMIN_API_TOKEN:-}
+      - CROSS_ORG_AUTHORIZATION_ORACLE_MODE=${CROSS_ORG_AUTHORIZATION_ORACLE_MODE:-disabled}
+      - CROSS_ORG_AUTHORIZATION_ORACLE_TOKEN=${CROSS_ORG_AUTHORIZATION_ORACLE_TOKEN:-}
+      - CROSS_ORG_AUTHORIZATION_ORACLE_ORG_IDS=${CROSS_ORG_AUTHORIZATION_ORACLE_ORG_IDS:-}
+      - VERIFIER_ID=${VERIFIER_ID:-}
+      - DATABASE_URL=${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/privacy_proxy?sslmode=disable}
+      - REDIS_URL=${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
+      - NODE_URL=${NODE_URL:-}
+      - BASE_URL=${BASE_URL:-}
+      - FRONTEND_URL=${FRONTEND_URL:-${BASE_URL:-}}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-${BASE_URL}}
+      - TRUSTED_INTERNAL_CIDRS=${TRUSTED_INTERNAL_CIDRS:-}
+      # Async access-log auditing (RD-1112) — moves the audit write off the request
+      # hot path. Off by default. To enable, uncomment this AND the audit-buffer
+      # volume below. The buffer dir must be writable by the runtime user (uid 1000):
+      # the named volume mounts at the image's pre-owned path, so no chown is needed.
+      # On Kubernetes set the pod securityContext fsGroup: 1000 instead.
+      # - AUDIT_BUFFER_DIR=/var/lib/pp/auditbuf
+    # volumes:
+    #   - audit-buffer:/var/lib/pp/auditbuf
+    networks:
+      - internal
+
+  proxy-frontend:
+    image: gatewayfm/privacy-proxy-frontend:${PRIVACY_PROXY_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT_UI:-5173}:80"
+    environment:
+      - BACKEND_URL=http://proxy-backend:8080
+    depends_on:
+      proxy-backend:
+        condition: service_started
+    networks:
+      - internal
+
+  # TLS-terminating reverse proxy — optional, enable with --profile tls
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: ["tls"]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      - BASE_URL=${BASE_URL:-}
+    depends_on:
+      proxy-backend:
+        condition: service_started
+      proxy-frontend:
+        condition: service_started
+    networks:
+      - internal
+
+volumes:
+  postgres-data:
+  redis-data:
+  caddy-data:
+  caddy-config:
+  # audit-buffer:   # RD-1112 async audit buffer (uncomment with AUDIT_BUFFER_DIR above)
+
+networks:
+  internal:
+    driver: bridge
