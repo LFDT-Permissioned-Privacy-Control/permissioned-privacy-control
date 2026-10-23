@@ -1,5 +1,5 @@
 FROM ghcr.io/foundry-rs/foundry:v1.4.0@sha256:f6a3fd201ae617fdc67bf7b3db9abdca7678e2589e15eda6bc84f88eb5239e04 AS foundry
-FROM node:22-trixie-slim AS dev
+FROM node:24.22.1-trixie-slim AS dev
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     python3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
