@@ -26,7 +26,7 @@ import (
 // @Produce      json
 // @Success      200 {object} map[string]interface{} "OpenAPI 3.1 document"
 // @Router       /openapi.json [get]
-func (s *Server) handleOpenAPISpec(c *gin.Context) {
+func handleOpenAPISpec(c *gin.Context) {
 	c.Data(http.StatusOK, "application/json; charset=utf-8", apispec.JSON)
 }
 

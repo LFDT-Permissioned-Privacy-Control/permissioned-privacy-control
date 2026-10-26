@@ -147,7 +147,7 @@ var GlobalBlockedMethods = map[string]bool{
 	// NOTE: eth_sendRawTransaction is handled specially - it's allowed ONLY when
 	// runtime tracing is enabled. The proxy decodes the RLP transaction, extracts
 	// from/to/data/value, and runs runtime tracing to validate all call targets.
-	// See jsonrpc_processor.go for the implementation.
+	// See internal/server/jsonrpc_legacy_send.go for the implementation.
 	// When runtime tracing is disabled, this method is blocked by CheckAccess.
 
 	// Clique namespace - consensus manipulation

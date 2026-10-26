@@ -17,8 +17,7 @@ import (
 func TestHandleOpenAPISpec(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	s := &Server{}
-	r.GET("/openapi.json", s.handleOpenAPISpec)
+	r.GET("/openapi.json", handleOpenAPISpec)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()

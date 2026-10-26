@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"privacy-proxy/internal/apimodels"
 	"privacy-proxy/internal/compliance"
@@ -64,18 +63,6 @@ type policyCheckRPCBlock struct {
 func (op policyCheckRPCBlock) rpcBlock() apimodels.DryRunRPCBlock {
 	return apimodels.DryRunRPCBlock{Method: op.Method, Params: op.Params}
 }
-
-// Oracle answers. deny only when policy was evaluated inside the oracle scope;
-// indeterminate when part of the evaluation is outside it.
-const (
-	oracleDecisionAllow         = "allow"
-	oracleDecisionDeny          = "deny"
-	oracleDecisionIndeterminate = "indeterminate"
-
-	oracleReasonDenied       = "denied"
-	oracleReasonOutsideScope = "outside_oracle_scope"
-	oracleReasonNotSimulated = "not_simulated"
-)
 
 // policyCheckWireResponse is projected according to the configured server
 // mode. verdict_only omits Artifacts; full_simulation includes the trace.
@@ -138,19 +125,9 @@ const oracleMaxMethodLength = 128
 // traces in flight whatever the caller address.
 const crossOrgOracleLimitKey = "cross_org_oracle"
 
-// policyCheckTraceTimeout bounds one oracle or dry-run trace. A variable so
-// tests can shorten it.
-var policyCheckTraceTimeout = 5 * time.Second
-
 // errSimUpstreamUnavailable wraps any upstream/trace failure (node error,
 // timeout, empty or malformed trace): a transient condition, answered 503.
 var errSimUpstreamUnavailable = errors.New("policy-check simulation upstream unavailable")
-
-// upstreamRateLimitedError is an upstream HTTP 429 on a trace forward. The
-// oracle answers 429 and passes Retry-After through.
-type upstreamRateLimitedError struct{ retryAfter string }
-
-func (e *upstreamRateLimitedError) Error() string { return "upstream rate limit reached" }
 
 // errPolicyCheckSubjectMalformed marks an invalid subject (neither or both of
 // did/address); the handler answers 400.
@@ -769,40 +746,6 @@ func policyCheckRawVisibleToEntries(raw any) []string {
 	return entries
 }
 
-func (s *Server) validatePolicyCheckSender(ctx context.Context, subjectDID string, op apimodels.DryRunRPCBlock) (string, error) {
-	from, _, _, _, err := policyCheckTransactionFields(op)
-	if err != nil {
-		return "", err
-	}
-	if from == "" {
-		return "", nil
-	}
-	if !gethcommon.IsHexAddress(from) {
-		return ReasonInvalidRequestShape, nil
-	}
-	linked, err := senderLinked(ctx, s.rbacAccessCtrl.Store(), subjectDID, from)
-	if err != nil {
-		return "", err
-	}
-	if !linked {
-		return ReasonSenderNotLinked, nil
-	}
-	return "", nil
-}
-
-func policyCheckTransactionFields(op apimodels.DryRunRPCBlock) (from, to, data, value string, err error) {
-	if rbac.ResolveMethodAlias(op.Method) == "eth_sendRawTransaction" {
-		rawHex, rawErr := extractRawTxHex(op.Params)
-		if rawErr != nil {
-			return "", "", "", "", rawErr
-		}
-		from, to, data, value, _, err = decodeRawTransaction(rawHex)
-		return from, to, data, value, err
-	}
-	from, to, data, value = extractTxParams(op.Params)
-	return from, to, data, value, nil
-}
-
 // oracleAuditRecord is the audited view of one oracle request.
 type oracleAuditRecord struct {
 	subjectDID, subjectAddress     string
@@ -847,4 +790,23 @@ func (s *Server) recordPolicyCheck(ctx context.Context, rec oracleAuditRecord) e
 		ResourceName:    "cross_org_authorization_oracle",
 		NewValue:        payload,
 	})
+}
+
+// crossOrgAuthorizationOracleLimit caps the oracle requests in flight with one
+// global concurrency key, so a burst cannot tie up the proxy or the node.
+// Request-rate limits belong to the upstream RPC proxy. It is a handler, not
+// a constructor, so the route table only names it.
+func (s *Server) crossOrgAuthorizationOracleLimit(c *gin.Context) {
+	if s.jsonrpcProcessor == nil || s.jsonrpcProcessor.concurrencyLimiter == nil {
+		c.Next()
+		return
+	}
+	limiter := s.jsonrpcProcessor.concurrencyLimiter
+	if !limiter.TryAcquire(crossOrgOracleLimitKey) {
+		respondTooManyRequests(c, "policy-check capacity exhausted; retry later")
+		c.Abort()
+		return
+	}
+	defer limiter.Release(crossOrgOracleLimitKey)
+	c.Next()
 }
