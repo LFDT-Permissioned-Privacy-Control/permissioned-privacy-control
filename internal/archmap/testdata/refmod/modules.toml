@@ -1,0 +1,89 @@
+[scope]
+include = ["**/*.go"]
+
+[[module]]
+name = "store"
+tier = "core"
+audit_scope = "access"
+data = true
+summary = "reads rows"
+owner = "maintainers"
+paths = ["store/**"]
+
+[[module]]
+name = "gate"
+tier = "core"
+audit_scope = "access"
+summary = "decides access"
+owner = "maintainers"
+paths = ["gate/**"]
+
+[[module]]
+name = "router"
+tier = "core"
+audit_scope = "access"
+summary = "routes and wires"
+owner = "maintainers"
+paths = ["app/serve.go"]
+
+[[module]]
+name = "legacy"
+tier = "legacy"
+summary = "old path"
+owner = "maintainers"
+paths = ["legacy/**"]
+except = ["legacy/wire_pb.go"]
+
+[[module]]
+name = "legacy-gen"
+tier = "legacy"
+generated = true
+generator = "hand for the fixture"
+summary = "generated legacy wire code"
+owner = "maintainers"
+paths = ["legacy/wire_pb.go"]
+
+[[module]]
+name = "legacy-app"
+tier = "legacy"
+summary = "legacy code in a core package"
+owner = "maintainers"
+paths = ["app/legacy_part.go"]
+
+[[module]]
+name = "legacy-main"
+tier = "legacy"
+summary = "a legacy program entry point"
+owner = "maintainers"
+paths = ["cmd/tool/**"]
+
+[[module]]
+name = "tool"
+tier = "outside"
+summary = "tooling"
+owner = "maintainers"
+paths = ["app/tool.go"]
+
+[[dispatch]]
+file = "app/serve.go"
+function = "Router.Serve"
+objects = ["Old", "Other"]
+reason = "selects the legacy path only in legacy mode"
+
+[[dispatch]]
+file = "app/serve.go"
+function = "Router.Wide"
+objects = ["Old"]
+reason = "selects the legacy path only in legacy mode"
+
+[[dispatch]]
+file = "app/serve.go"
+function = "Listed"
+objects = ["New", "Thing"]
+reason = "builds the legacy component only in legacy mode"
+
+[[dispatch]]
+file = "app/serve.go"
+function = "Gone"
+objects = ["Old"]
+reason = "a function that no longer exists"

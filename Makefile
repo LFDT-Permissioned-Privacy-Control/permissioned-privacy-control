@@ -173,6 +173,13 @@ api-spec:
 	cp internal/server/apispec/swagger.json site/public/openapi.json
 	go run ./cmd/api-inventory
 
+# RD-1367: regenerate docs/architecture/perimeter-report.md (module sizes per
+# security tier) from docs/architecture/modules.toml; add -boundaries to the
+# command to list perimeter rule violations. internal/archtest fails on drift.
+.PHONY: perimeter-report
+perimeter-report:
+	go run ./cmd/perimeter-report -write
+
 # RD-1166: regenerate only API_ENDPOINTS.md (method/path/auth inventory).
 .PHONY: api-inventory
 api-inventory:
