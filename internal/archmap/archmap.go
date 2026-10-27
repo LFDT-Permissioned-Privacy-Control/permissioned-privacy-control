@@ -48,6 +48,8 @@ type Module struct {
 	// AuditScope groups core modules into separately quotable audit scopes.
 	AuditScope string `toml:"audit_scope"`
 	// Data marks modules that read or write stored or chain data directly.
+	// It is recorded, not enforced: no rule checks yet that other modules
+	// reach that data only through these.
 	Data bool `toml:"data"`
 	// Generated marks machine-generated code (protocol buffers, API
 	// documents). It is classified so the rules can follow references into

@@ -80,8 +80,8 @@ which also says whether it is inside the audited security perimeter (see
   boundary violations.
 - **Size changes:** run `make perimeter-report` and commit
   `docs/architecture/perimeter-report.md` (CI fails on drift).
-- **Shipped Go code is never `outside`.** Core code reaches legacy-mode code
-  only from the `dispatch` functions listed in the map (keep new ones small);
+- **Shipped Go code is never `outside`.** Core code names legacy-mode code
+  only in the `dispatch` functions listed in the map (keep new ones small);
   moving code to a lower tier needs a security review of the map change
   itself.
 

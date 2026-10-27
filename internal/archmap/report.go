@@ -182,7 +182,7 @@ func Report(m *Manifest, sizes []FileSize, opts ReportOptions) string {
 		scopes = append(scopes, s)
 	}
 	sort.Strings(scopes)
-	b.WriteString("\n## Perimeter by audit scope\n\nEach core module belongs to one audit scope, so the perimeter can be quoted as a whole or scope by scope.\n\n| Scope | Modules | nSLOC |\n|---|---|---:|\n")
+	b.WriteString("\n## Perimeter by audit scope\n\nEach core module belongs to one audit scope. A scope's figure counts only its own modules; an audit of one scope also covers the code that scope runs on and is called from, so the figure is a lower bound for that audit.\n\n| Scope | Modules | nSLOC |\n|---|---|---:|\n")
 	for _, sc := range scopes {
 		names := scopeMods[sc]
 		sort.Strings(names)

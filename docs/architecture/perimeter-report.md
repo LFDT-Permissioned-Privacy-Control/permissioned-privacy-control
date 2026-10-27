@@ -13,7 +13,7 @@ Sizes are nSLOC: source lines that contain code, without blank and comment-only 
 
 ## Perimeter by audit scope
 
-Each core module belongs to one audit scope, so the perimeter can be quoted as a whole or scope by scope.
+Each core module belongs to one audit scope. A scope's figure counts only its own modules; an audit of one scope also covers the code that scope runs on and is called from, so the figure is a lower bound for that audit.
 
 | Scope | Modules | nSLOC |
 |---|---|---:|
