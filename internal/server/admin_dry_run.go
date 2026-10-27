@@ -63,6 +63,7 @@ type dryRunResponse struct {
 	Response json.RawMessage `json:"response,omitempty"`
 	// For write methods: debug_traceCall output + per-user log filtering.
 	Trace             json.RawMessage   `json:"trace,omitempty"`
+	Policy            json.RawMessage   `json:"policy,omitempty"`
 	LogsEmitted       []json.RawMessage `json:"logs_emitted,omitempty"`
 	LogsVisibleToUser []json.RawMessage `json:"logs_visible_to_user,omitempty"`
 }
@@ -90,6 +91,7 @@ var dryRunTraceMethods = map[string]bool{
 // handleDryRun handles POST /api/orgs/:org_id/dry-run.
 //
 // @Summary      Dry-run an RPC call as a user
+// @Description  In Reth policy mode, execution requests use the node evaluator and return allow or deny, never indeterminate; diagnostic bypass requires a human administrator and remains organization-scoped.
 // @Description  Evaluates "what would this user see if they made this RPC call?" in the path org, without mutating chain state. Returns allow or deny for definitive local decisions. If nested execution reaches a contract owned by another organization, returns decision=indeterminate and reason=external_scope_required without evaluating that foreign policy. eth_call is traced with debug_traceCall even when live eth_call tracing is disabled, so its verdict can be stricter than live (indeterminate where live allows), and it needs a node that supports debug_traceCall. Read methods are forwarded, and the response goes through the same privacy filter as the user's own call, evaluated in the path org only: the user's contract grants, admin role and visibleTo shares from other organizations do not apply, and the user's disclosure grants never apply (a grant discloses to the grantee alone); a transaction or receipt the user may not read, or one sent to or deploying another organization's contract, comes back null; logs are filtered, and embedded addresses the user cannot see are redacted. Write methods (eth_sendTransaction / eth_sendRawTransaction) are translated to debug_traceCall so the RBAC verdict, the events the tx would emit, and the subset the user would see in its receipt can be inspected. If the user's view cannot be produced, nothing from the node is returned (500). Requires a tier-2 org-admin JWT of the path org: X-Admin-Token credentials (both the full super-admin token and the operator token) are explicitly rejected, since impersonation reads tenant data as the user. The impersonated user must exist and be a member of the path org, else an opaque 404. Every evaluation is written to the impersonation audit log fail-closed. Under the strict read privacy profile (PRIVACY_READ_PROFILE=strict) read methods are refused with 403 before anything is forwarded (the refusal is audited), and a simulated send returns only the allow/deny verdict, without the trace or its logs. Supported methods: eth_call, eth_getLogs, eth_getTransactionReceipt, eth_getTransactionByHash, eth_getBalance, eth_getCode, eth_getStorageAt, eth_blockNumber, eth_chainId, eth_sendTransaction, eth_sendRawTransaction.
 // @Description  Client state/block override options are unsupported regardless of the selected user's role, including admins.
 // @Tags         Admin: RBAC
@@ -170,6 +172,9 @@ func (s *Server) handleDryRun(c *gin.Context) {
 	// than a silent denial.
 	isRead := dryRunReadMethods[req.RPC.Method]
 	isTrace := dryRunTraceMethods[req.RPC.Method]
+	if s.config != nil && s.config.NodePolicy.Enabled() && (req.RPC.Method == "eth_estimateGas" || req.RPC.Method == "debug_traceCall") {
+		isRead = true
+	}
 	if !isRead && !isTrace {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "method not supported by dry-run; supported: eth_call, eth_getLogs, eth_getTransactionReceipt, eth_getTransactionByHash, eth_getBalance, eth_getCode, eth_getStorageAt, eth_blockNumber, eth_chainId, eth_sendTransaction, eth_sendRawTransaction",
@@ -206,7 +211,6 @@ func (s *Server) handleDryRun(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
 	}
-
 	userPerms, err := s.rbacAccessCtrl.GetEffectivePermissionsByIDs(ctx, user.ID, orgID)
 	if err != nil || userPerms == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
@@ -224,6 +228,11 @@ func (s *Server) handleDryRun(c *gin.Context) {
 			return
 		}
 		c.JSON(http.StatusForbidden, gin.H{"error": "dry-run of read methods is not available under the strict read privacy profile"})
+		return
+	}
+
+	if s.config != nil && s.config.NodePolicy.Enabled() && nodeExecutionMethod(req.RPC.Method) {
+		s.handleNodeDryRun(c, req, user)
 		return
 	}
 

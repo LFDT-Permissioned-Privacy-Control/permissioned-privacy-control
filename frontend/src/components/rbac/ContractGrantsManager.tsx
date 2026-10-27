@@ -11,7 +11,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import { ConfirmDialog, AlertDialog } from '@/components/ui/ConfirmDialog';
+import ManagedStreamNotice from './ManagedStreamNotice';
+import { extractApiError } from '@/lib/executionPolicy';
 import {
   Loader2,
   Plus,
@@ -61,6 +63,13 @@ interface ContractGrantsManagerProps {
   // Without it the list badge and a reopened dialog show stale state because
   // this component only updates its own local state.
   onContractUpdated?: (contract: Contract) => void;
+  // RD-1295: grants and the contract-level toggles close once a reviewed
+  // contract-registry or execution-rules document owns the organisation. The
+  // parent knows both streams' state: `managed` says a document owns them (the
+  // notice is shown), `readOnly` says this viewer may not edit for any other
+  // reason, including "the stream state is not known yet".
+  managed?: boolean;
+  readOnly?: boolean;
 }
 
 // Extended grant type that includes the group info and group access
@@ -73,8 +82,12 @@ export default function ContractGrantsManager({
   orgId,
   contract,
   onContractUpdated,
+  managed = false,
+  readOnly = false,
 }: ContractGrantsManagerProps) {
   const { isReadonlyAdmin } = useAdmin();
+  const canEdit = !isReadonlyAdmin && !readOnly && !managed;
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [grants, setGrants] = useState<GrantWithGroup[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [loading, setLoading] = useState(true);
@@ -159,6 +172,9 @@ export default function ContractGrantsManager({
       await loadData();
     } catch (error) {
       console.error('Failed to delete grant:', error);
+      setDeleteTarget(null);
+      // The server's reason, not silence: a managed stream says so.
+      setDeleteError(extractApiError(error, 'Failed to remove group access.').message);
     }
   };
 
@@ -313,8 +329,10 @@ export default function ContractGrantsManager({
         </p>
       </div>
 
+      {managed && <ManagedStreamNotice subject="Contract grants and access settings" />}
+
       {/* RD-874: per-contract visibleTo unlock toggle */}
-      {!isReadonlyAdmin && (
+      {canEdit && (
         <div className="space-y-2">
           {unlockError && (
             <div className="p-3 rounded-lg bg-error-light border border-error/30 flex items-start gap-2">
@@ -442,7 +460,7 @@ export default function ContractGrantsManager({
             <Shield className="w-4 h-4 text-primary" />
             <span className="text-sm font-medium text-neutral-700">Groups with Access</span>
           </div>
-          {!isReadonlyAdmin && (
+          {canEdit && (
             <Button onClick={() => setShowForm(true)} size="sm" className="gap-2">
               <Plus className="w-4 h-4" />
               Add Group
@@ -460,7 +478,7 @@ export default function ContractGrantsManager({
             <p className="text-sm text-neutral-500 mb-3">
               No groups have access to this contract yet
             </p>
-            {!isReadonlyAdmin && (
+            {canEdit && (
               <Button variant="outline" size="sm" onClick={() => setShowForm(true)} className="gap-2">
                 <Plus className="w-4 h-4" />
                 Add a group
@@ -491,7 +509,7 @@ export default function ContractGrantsManager({
                     </div>
                   </div>
                   <div className="flex items-center gap-1">
-                    {!isReadonlyAdmin && (
+                    {canEdit && (
                       <>
                         <Button
                           variant="ghost"
@@ -555,7 +573,7 @@ export default function ContractGrantsManager({
                     </div>
                   )}
                   </div>
-                  {!isReadonlyAdmin && (
+                  {canEdit && (
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button
@@ -611,7 +629,7 @@ export default function ContractGrantsManager({
                     </div>
                   )}
                   </div>
-                  {!isReadonlyAdmin && (
+                  {canEdit && (
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button
@@ -688,6 +706,18 @@ export default function ContractGrantsManager({
         cancelLabel="Cancel"
         onConfirm={handleDeleteConfirm}
         variant="destructive"
+      />
+
+      {/* Delete Error Alert */}
+      <AlertDialog
+        open={deleteError !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteError(null);
+        }}
+        title="Remove Failed"
+        description={deleteError ?? ''}
+        buttonLabel="OK"
+        variant="error"
       />
     </div>
   );

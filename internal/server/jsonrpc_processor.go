@@ -40,6 +40,7 @@ type AuditBuffer interface {
 // It separates concerns from HTTP handling, making the logic testable
 // and reusable.
 type JSONRPCProcessor struct {
+	nodeExecution     NodeExecutionService
 	nodeApprovals     *nodeapproval.Service
 	rbacAccessCtrl    *rbac.AccessController
 	rateLimiter       RateLimiterInterface
@@ -244,6 +245,9 @@ type EthCallTracingConfig struct {
 // zero-value meaning; each matches the degraded mode the corresponding
 // unwired Set* call used to leave behind.
 type JSONRPCProcessorConfig struct {
+	// NodeExecution selects the private node execution path. Nil retains legacy.
+	NodeExecution NodeExecutionService
+
 	// Core request-path dependencies.
 	RBACAccessCtrl     *rbac.AccessController
 	RateLimiter        RateLimiterInterface
@@ -295,6 +299,7 @@ type JSONRPCProcessorConfig struct {
 // NewJSONRPCProcessor creates a fully wired processor from cfg (RD-1259).
 func NewJSONRPCProcessor(cfg JSONRPCProcessorConfig) *JSONRPCProcessor {
 	p := &JSONRPCProcessor{
+		nodeExecution:          cfg.NodeExecution,
 		rbacAccessCtrl:         cfg.RBACAccessCtrl,
 		rateLimiter:            cfg.RateLimiter,
 		proxy:                  cfg.Proxy,
@@ -697,6 +702,9 @@ func (p *JSONRPCProcessor) Process(ctx context.Context, req *ProcessRequest) *Pr
 	// body. Operator methods require an explicit registered alias or
 	// passthrough entry.
 	req.Method = rbac.CanonicalizeMethod(req.Method)
+	if p.nodeExecution != nil && nodeExecutionMethod(req.Method) {
+		return p.processNodeExecution(ctx, req)
+	}
 
 	// Handle eth_sendRawTransaction specially - requires runtime tracing
 	if req.Method == "eth_sendRawTransaction" {
@@ -2511,18 +2519,20 @@ func (p *JSONRPCProcessor) pollAndFinalizeRuntimeCreates(txHash string, preRegAd
 					contract.DeployedByUserID = &userID
 				}
 				contract.DeployedAt = &now
-				if createErr := p.rbacAccessCtrl.Store().CreateContract(ctx, contract); createErr != nil {
-					slog.Warn("failed to register diverged runtime create", "address", addr, "error", createErr)
-				} else if userID != "" {
-					if gErr := p.rbacAccessCtrl.Store().GrantContractToDeployerGroup(ctx, orgID, contract.ID, userID); gErr != nil {
-						slog.Warn("failed to grant contract to deployer group for runtime create", "address", addr, "error", gErr)
-					} else {
-						// Drop the deployer's cached permissions so the next call to the
-						// newly-registered contract re-resolves and sees the new grant.
-						if invErr := p.rbacAccessCtrl.InvalidateUser(ctx, userID); invErr != nil {
-							slog.Warn("failed to invalidate deployer cache after runtime create grant", "user_id", userID, "error", invErr)
-						}
+				// One authorised registration transaction: admitted as deployment
+				// drift by a reviewed document owning this organisation.
+				granted, regErr := p.rbacAccessCtrl.Store().RegisterDeployedContract(ctx, contract, userID)
+				switch {
+				case regErr != nil:
+					slog.Warn("failed to register diverged runtime create", "address", addr, "error", regErr)
+				case granted:
+					// Drop the deployer's cached permissions so the next call to the
+					// newly-registered contract re-resolves and sees the new grant.
+					if invErr := p.rbacAccessCtrl.InvalidateUser(ctx, userID); invErr != nil {
+						slog.Warn("failed to invalidate deployer cache after runtime create grant", "user_id", userID, "error", invErr)
 					}
+				case userID != "":
+					slog.Warn("runtime create registered without a deployer grant: no current deploy-claim membership", "address", addr, "user_id", userID)
 				}
 			}
 		}

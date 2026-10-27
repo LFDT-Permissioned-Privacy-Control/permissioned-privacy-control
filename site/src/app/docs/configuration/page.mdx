@@ -180,7 +180,7 @@ Existing grants survive the transfer, including the `privacy_proxy_app` append-o
 an RPC call, before it is signed (see [RBAC](/docs/rbac#cross-organization-authorization-oracle)). It is disabled by default.
 
 <EnvTable vars={[
-  { name: "CROSS_ORG_AUTHORIZATION_ORACLE_MODE", default: "disabled", description: "disabled (the endpoint answers 404), verdict_only (decision and coarse reason only) or full_simulation (an allow also returns the raw, unredacted trace and logs). Prefer verdict_only where the operator must not be able to access tenant data." },
+  { name: "CROSS_ORG_AUTHORIZATION_ORACLE_MODE", default: "disabled", description: "disabled (the endpoint answers 404), verdict_only (decision and coarse reason only) or full_simulation (an allow also returns the raw, unredacted trace and logs). Prefer verdict_only where the operator must not be able to access tenant data. Must stay disabled with OPS_NODE_POLICY_MODE=reth: start-up fails otherwise." },
   { name: "CROSS_ORG_AUTHORIZATION_ORACLE_TOKEN", default: "(required when enabled)", description: "Secret sent by the caller in X-Cross-Org-Authorization-Oracle-Token. Must differ from ADMIN_API_TOKEN and OPERATOR_API_TOKEN. Keep it in the environment or a secrets manager; the config file rejects it." },
   { name: "CROSS_ORG_AUTHORIZATION_ORACLE_ORG_IDS", default: "(required when enabled)", description: "Comma-separated organization IDs the oracle may evaluate. This allowlist is the consent boundary: the token holder may query any member of any listed organization. The oracle never consults an organization outside it and answers indeterminate instead." },
 ]} />
@@ -394,6 +394,8 @@ cp rpc-namespaces.example.json rpc-namespaces.json
 ## RPC API Keys
 
 Each RBAC group can have an API key for the upstream RPC node. This enables per-group rate limiting and usage tracking on the upstream side.
+
+A group's key is set either operationally, through the group credential endpoint, or declaratively: the reviewed groups document names an environment variable in the organisation's namespace (`OPS_RPC_CREDENTIAL_<ORG>_<NAME>`), and activation reads it from the OPS process environment, encrypts it with `RPC_API_KEY_ENCRYPTION_KEY` and stores it. Populate those variables from your secrets store the same way as the other secret-class settings; without an encryption key such an activation is refused rather than stored in plaintext.
 
 <EnvTable vars={[
   { name: "RPC_API_KEY", default: "(none)", description: "Global fallback API key for the upstream RPC node. Used when no group-specific key is configured." },

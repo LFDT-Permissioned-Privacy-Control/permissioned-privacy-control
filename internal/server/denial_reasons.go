@@ -66,6 +66,10 @@ const (
 	// ReasonUpstreamError: the upstream node was unreachable / returned a
 	// transport error (502).
 	ReasonUpstreamError = "upstream_error"
+	// Node rejection can be a transaction-pool or policy error. It does not
+	// imply that the authenticated caller lacks a method permission.
+	ReasonNodeRejected         = "node_rejected"
+	ReasonExecutionUnavailable = "execution_unavailable"
 	// ReasonInternalError: an internal failure (500) — generic by construction.
 	ReasonInternalError = "internal_error"
 
@@ -108,7 +112,9 @@ func wireReason(code string) string {
 		ReasonStateOverrideNotAllowed,
 		ReasonRateLimited,
 		ReasonConcurrencyLimited,
-		ReasonUpstreamError:
+		ReasonUpstreamError,
+		ReasonNodeRejected,
+		ReasonExecutionUnavailable:
 		return code
 	default:
 		return ReasonWireGenericDenied

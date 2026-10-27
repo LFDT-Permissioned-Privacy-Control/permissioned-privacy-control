@@ -314,7 +314,9 @@ type Config struct {
 	BillionsCredentialQueryFile string         // env BILLIONS_CREDENTIAL_QUERY_FILE — path to JSON file with the credential query
 	BillionsCredentialQuery     map[string]any // Parsed from BillionsCredentialQueryFile at startup
 
+	NodePolicy                        NodePolicyConfig
 	AdminAPIToken                     string              // Shared token required for admin API access (required in production). FULL super-admin: reads + writes + platform/fleet. Held by trusted ops / MCP.
+	PlatformAdminSubjects             []string            // PLATFORM_ADMIN_SUBJECTS: exact verified external IDs with named configuration-only platform authority.
 	OperatorAPIToken                  string              // RD-1132: optional restricted "operator/onboarder" token. Platform-only — create/manage orgs + mint org admins; NO per-org tenant reads or mutations. For a 3rd-party onboarder that should not see/touch tenant data.
 	CrossOrgAuthorizationOracleMode   string              // disabled (default), verdict_only, or full_simulation.
 	CrossOrgAuthorizationOracleToken  string              // Dedicated credential; must differ from admin/operator tokens.
@@ -773,6 +775,7 @@ func Load() *Config {
 	}
 
 	return &Config{
+		NodePolicy:                          loadNodePolicy(os.Getenv),
 		NodeURL:                             getEnv("NODE_URL", "http://localhost:8545"),
 		DatabaseURL:                         databaseURL,
 		DBMaxOpenConns:                      dbMaxOpen,
@@ -807,6 +810,7 @@ func Load() *Config {
 		BillionsCredentialQueryFile:         billionsQueryFile,
 		BillionsCredentialQuery:             billionsQuery,
 		AdminAPIToken:                       getEnv("ADMIN_API_TOKEN", ""),
+		PlatformAdminSubjects:               getSliceEnv("PLATFORM_ADMIN_SUBJECTS", ","),
 		OperatorAPIToken:                    getEnv("OPERATOR_API_TOKEN", ""),
 		CrossOrgAuthorizationOracleMode:     strings.ToLower(getEnv("CROSS_ORG_AUTHORIZATION_ORACLE_MODE", "disabled")),
 		CrossOrgAuthorizationOracleToken:    getEnv("CROSS_ORG_AUTHORIZATION_ORACLE_TOKEN", ""),
@@ -963,6 +967,9 @@ func (c *Config) AzureADEnabled() bool {
 // When RequireProofOfHumanity is enabled, Path B configuration is validated
 // regardless of environment — misconfiguring Path B breaks login for everyone.
 func (c *Config) Validate() error {
+	if err := c.NodePolicy.Validate(); err != nil {
+		return err
+	}
 	// A configured-but-unreadable CONFIG_FILE is a fatal misconfiguration: the
 	// operator intended to use it, so fail fast instead of silently ignoring it.
 	if fileConfigErr != nil {
@@ -1055,6 +1062,11 @@ func (c *Config) validateCrossOrgAuthorizationOracle() error {
 	case "verdict_only", "full_simulation":
 	default:
 		return fmt.Errorf("CROSS_ORG_AUTHORIZATION_ORACLE_MODE must be disabled, verdict_only, or full_simulation (got %q)", c.CrossOrgAuthorizationOracleMode)
+	}
+	// The oracle answers from OPS's own access rules; with node policy
+	// execution the node decides, so its verdicts would not match enforcement.
+	if c.NodePolicy.Enabled() {
+		return errors.New("CROSS_ORG_AUTHORIZATION_ORACLE_MODE must be disabled when OPS_NODE_POLICY_MODE=reth: the oracle does not evaluate node execution policies")
 	}
 
 	token := strings.TrimSpace(c.CrossOrgAuthorizationOracleToken)

@@ -1,7 +1,5 @@
 components:
   schemas:
-    big.Int:
-      type: object
     data:
       properties:
         data:
@@ -94,6 +92,8 @@ components:
         required:
         - address
         type: object
+    math_big.Int:
+      type: object
     privacy-proxy_internal_apimodels.APIError:
       properties:
         error:
@@ -536,6 +536,178 @@ components:
       - originator_user_id
       - transfer_type
       type: object
+    privacy-proxy_internal_apimodels.ConfigurationCapabilities:
+      properties:
+        apiVersion:
+          type: string
+        approvalModes:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        compiler:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationCompiler'
+        humanOnlyKinds:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        kinds:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        maxDocumentBytes:
+          type: integer
+        priceFeed:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationPriceFeed'
+      type: object
+    privacy-proxy_internal_apimodels.ConfigurationCoactivateRequest:
+      properties:
+        coactivate:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_apimodels.ConfigurationCompiler:
+      properties:
+        available:
+          type: boolean
+        version:
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.ConfigurationContext:
+      properties:
+        active:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevision'
+        approvers:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ApproversSpec'
+        capabilities:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationCapabilities'
+        compliance:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ComplianceSnapshot'
+        execution:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ExecutionSpec'
+        executionMigration:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ExecutionMigrationReview'
+        groups:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.GroupSnapshot'
+        legacyExecution:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.LegacyExecutionGrant'
+          type: array
+          uniqueItems: false
+        platform:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.PlatformSnapshot'
+        registry:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.RegistrySnapshot'
+        source:
+          type: object
+        viewer:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationViewer'
+      type: object
+    privacy-proxy_internal_apimodels.ConfigurationManaged:
+      properties:
+        kind:
+          type: string
+        managed:
+          type: boolean
+      type: object
+    privacy-proxy_internal_apimodels.ConfigurationPriceFeed:
+      properties:
+        available:
+          type: boolean
+        reason:
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.ConfigurationReview:
+      properties:
+        approvers:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ApproversSpec'
+        approversDiff:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ApproversSpec'
+        compliance:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ComplianceSnapshot'
+        complianceDiff:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ComplianceDiff'
+        executionDiff:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ExecutionDiff'
+        groupDiff:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.GroupDiff'
+        groups:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.GroupSnapshot'
+        legacyExecution:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.LegacyExecutionGrant'
+          type: array
+          uniqueItems: false
+        platform:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.PlatformSnapshot'
+        platformDiff:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.PlatformDiff'
+        registry:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.RegistrySnapshot'
+        registryDiff:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.RegistryDiff'
+        revisions:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevision'
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_apimodels.ConfigurationRevision:
+      properties:
+        activatedAt:
+          type: string
+        activatedBy:
+          type: string
+        artifact:
+          type: object
+        baseRevision:
+          type: integer
+        createdAt:
+          type: string
+        createdBy:
+          type: string
+        createdPrincipalKind:
+          type: string
+        dependencies:
+          additionalProperties:
+            type: string
+          type: object
+        digest:
+          type: string
+        id:
+          type: string
+        kind:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.Kind'
+        revision:
+          type: integer
+        scope:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.Scope'
+        source:
+          type: string
+        status:
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.ConfigurationRevisionList:
+      properties:
+        revisions:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevision'
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_apimodels.ConfigurationViewer:
+      properties:
+        canActivate:
+          type: boolean
+        principalId:
+          type: string
+        principalKind:
+          type: string
+      type: object
     privacy-proxy_internal_apimodels.ContractABIUpdateRequest:
       properties:
         abi:
@@ -951,6 +1123,7 @@ components:
           items: {}
           type: array
           uniqueItems: false
+        policy: {}
         reason:
           type: string
         response: {}
@@ -1004,14 +1177,275 @@ components:
           example: address linked successfully
           type: string
       type: object
-    privacy-proxy_internal_apimodels.ExplorerABIUpdateResponse:
+    privacy-proxy_internal_apimodels.ExecutionPolicyCompiler:
+      description: Compiler is the exact build the artifact was produced with.
       properties:
-        address:
-          example: "0x0000000000000000000000000000000000000001"
+        evm_version:
+          description: EVMVersion is the target the artifact was built for.
+          example: shanghai
           type: string
-        success:
-          example: true
+        optimizer_runs:
+          description: OptimizerRuns is the optimiser setting used.
+          example: 200
+          type: integer
+        version:
+          description: Version is the exact compiler, which is pinned rather than
+            ranged.
+          example: 0.8.35+commit.47b9dedd
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.ExecutionPolicyContext:
+      properties:
+        active:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyRevision'
+        api_version:
+          type: string
+        base_revision:
+          description: |-
+            BaseRevision is the active revision a candidate must declare. Creating
+            another draft does not move this base. A stale base is refused.
+          example: 3
+          type: integer
+        contracts:
+          description: Contracts are the organisation's registered contracts.
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyContract'
+          type: array
+          uniqueItems: false
+        groups:
+          description: |-
+            Groups are the regular groups a policy may bind. Administrator groups are
+            omitted: they are a trust root, not ordinary policy.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        kind:
+          type: string
+        nested_calls:
+          type: string
+        org_id:
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.ExecutionPolicyContract:
+      properties:
+        abi_digest:
+          description: ABIDigest is what a rule on this contract must pin.
+          type: string
+        address:
+          type: string
+        has_abi:
+          description: |-
+            HasABI is false when no ABI is registered. Such a contract cannot carry a
+            rule, because nothing says what its selectors and arguments mean.
           type: boolean
+        name:
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.ExecutionPolicyRevision:
+      description: Active is the policy currently in force, if any.
+      properties:
+        activated_at:
+          type: string
+        activated_by:
+          type: string
+        base_revision:
+          description: |-
+            BaseRevision identifies the active policy used to author this draft.
+            Null means legacy provenance is unavailable and activation is refused.
+          type: integer
+        compiler:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyCompiler'
+        created_at:
+          type: string
+        created_by:
+          type: string
+        id:
+          type: string
+        policy_digest:
+          description: |-
+            PolicyDigest identifies the approved document by its meaning, not by its
+            bytes: it is taken over the normalised policy, so two documents that
+            differ only in whitespace or key order share one digest. Hashing the
+            `source` field directly will not reproduce it.
+          type: string
+        revision:
+          description: Revision is the monotonic number within the organisation.
+          example: 3
+          type: integer
+        runtime_digest:
+          description: RuntimeDigest identifies the compiled bytecode that is enforced.
+          type: string
+        solidity_digest:
+          description: SolidityDigest identifies the generated contract source.
+          type: string
+        status:
+          description: |-
+            Status is draft, active, superseded or withdrawn. Only one revision per
+            organisation is active, and only an active one decides anything.
+          example: active
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.ExecutionPolicyRevisionDetail:
+      properties:
+        activated_at:
+          type: string
+        activated_by:
+          type: string
+        base_revision:
+          description: |-
+            BaseRevision identifies the active policy used to author this draft.
+            Null means legacy provenance is unavailable and activation is refused.
+          type: integer
+        compiler:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyCompiler'
+        created_at:
+          type: string
+        created_by:
+          type: string
+        id:
+          type: string
+        policy_digest:
+          description: |-
+            PolicyDigest identifies the approved document by its meaning, not by its
+            bytes: it is taken over the normalised policy, so two documents that
+            differ only in whitespace or key order share one digest. Hashing the
+            `source` field directly will not reproduce it.
+          type: string
+        revision:
+          description: Revision is the monotonic number within the organisation.
+          example: 3
+          type: integer
+        runtime_bytecode:
+          description: RuntimeBytecode is the compiled code, 0x-prefixed hex.
+          type: string
+        runtime_digest:
+          description: RuntimeDigest identifies the compiled bytecode that is enforced.
+          type: string
+        solidity_digest:
+          description: SolidityDigest identifies the generated contract source.
+          type: string
+        solidity_source:
+          description: SoliditySource is the contract generated from it.
+          type: string
+        source:
+          description: Source is the candidate exactly as submitted.
+          type: string
+        status:
+          description: |-
+            Status is draft, active, superseded or withdrawn. Only one revision per
+            organisation is active, and only an active one decides anything.
+          example: active
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.ExecutionPolicySimulateFrame:
+      properties:
+        call_type:
+          description: CallType is call, staticcall, delegatecall or callcode.
+          example: call
+          type: string
+        calldata:
+          description: Calldata is the frame's input, 0x-prefixed hex including the
+            selector.
+          type: string
+        code_address:
+          description: |-
+            CodeAddress is the account whose code runs. It differs from the storage
+            address only for delegatecall and callcode, and defaults to it.
+          type: string
+        storage_address:
+          description: StorageAddress is the account whose storage the frame may modify.
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.ExecutionPolicySimulateRequest:
+      properties:
+        frames:
+          description: Frames are the call frames the execution would produce, outermost
+            first.
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicySimulateFrame'
+          type: array
+          uniqueItems: false
+        groups:
+          description: Groups the hypothetical principal belongs to.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        linked_addresses:
+          description: LinkedAddresses are the accounts linked to the hypothetical
+            principal.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        signer:
+          description: |-
+            Signer is the account that would have signed the transaction. Leaving it
+            empty models an execution with no recovered signer, which no rule
+            requiring the signer can satisfy.
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.ExecutionPolicySimulateResponse:
+      properties:
+        agreed:
+          description: |-
+            Agreed reports whether the reference evaluator and the compiled artifact
+            reached the same decision. False would mean the reviewed policy and the
+            enforced policy are not the same thing.
+          type: boolean
+        allowed:
+          description: Allowed is the decision. Every frame must be permitted for
+            it to be true.
+          type: boolean
+        code:
+          description: Code categorises a denial and is safe to show a denied caller.
+          example: argument_constraint
+          type: string
+        compiled_allowed:
+          description: |-
+            CompiledAllowed is the decision reached by running the compiled contract
+            on the same inputs.
+          type: boolean
+        compiled_code:
+          description: CompiledCode is that run's denial category.
+          type: string
+        reason:
+          description: |-
+            Reason explains a denial for an operator. It quotes policy bounds and
+            addresses, so it belongs in operator tooling, not in a caller's response.
+          type: string
+        runtime_digest:
+          description: RuntimeDigest identifies the bytecode that produced CompiledAllowed.
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.ExecutionPolicySubmitRequest:
+      properties:
+        base_revision:
+          description: |-
+            BaseRevision is the active revision the candidate was written against.
+            Zero means the organisation has no active policy yet.
+          example: 3
+          type: integer
+        policy:
+          additionalProperties: {}
+          description: Policy is the candidate document.
+          type: object
+      type: object
+    privacy-proxy_internal_apimodels.ExecutionStatus:
+      properties:
+        applied_version:
+          type: integer
+        desired_version:
+          type: integer
+        expires_at:
+          type: integer
+        mode:
+          type: string
+        ready:
+          type: boolean
+        reason:
+          type: string
       type: object
     privacy-proxy_internal_apimodels.ExplorerBlockNumberResponse:
       properties:
@@ -1509,6 +1943,9 @@ components:
         is_admin:
           example: true
           type: boolean
+        is_platform_admin:
+          example: false
+          type: boolean
         is_readonly_admin:
           example: false
           type: boolean
@@ -1526,6 +1963,21 @@ components:
           type: array
           uniqueItems: false
       type: object
+    privacy-proxy_internal_apimodels.NodeSimulationRequest:
+      properties:
+        candidateRevisionId:
+          type: string
+        dryRun:
+          type: boolean
+        method:
+          type: string
+        params:
+          items: {}
+          type: array
+          uniqueItems: false
+        principalId:
+          type: string
+      type: object
     privacy-proxy_internal_apimodels.NodeStatus:
       properties:
         error:
@@ -1535,6 +1987,21 @@ components:
         status:
           type: string
         url:
+          type: string
+      type: object
+    privacy-proxy_internal_apimodels.NodeTransactionProgress:
+      properties:
+        context_id:
+          type: string
+        execution:
+          $ref: '#/components/schemas/privacy-proxy_internal_nodepolicy.ExecutionOutcome'
+        reconciled:
+          type: boolean
+        reconciliation_note:
+          type: string
+        status:
+          type: string
+        transaction_hash:
           type: string
       type: object
     privacy-proxy_internal_apimodels.OAuthAuthorizeJSONResponse:
@@ -1714,6 +2181,11 @@ components:
         note:
           type: string
       type: object
+    privacy-proxy_internal_apimodels.ReadinessResponse:
+      properties:
+        status:
+          type: string
+      type: object
     privacy-proxy_internal_apimodels.RefreshRequest:
       properties:
         refresh_token:
@@ -1840,6 +2312,8 @@ components:
       type: object
     privacy-proxy_internal_apimodels.StatusResponse:
       properties:
+        execution:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionStatus'
         methods:
           $ref: '#/components/schemas/privacy-proxy_internal_apimodels.MethodsStatus'
         node:
@@ -2269,6 +2743,607 @@ components:
       x-enum-varnames:
       - UnknownPriceAllowed
       - UnknownPriceForbidden
+    privacy-proxy_internal_configuration.AddressThreshold:
+      properties:
+        address:
+          type: string
+        id:
+          type: string
+        note:
+          type: string
+        thresholdFiat:
+          type: number
+      type: object
+    privacy-proxy_internal_configuration.ApproversSpec:
+      properties:
+        groupIds:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        trustedCI:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.TrustedCI'
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_configuration.CIActivationRequest:
+      properties:
+        approval:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.CIApproval'
+        coactivate:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_configuration.CIApproval:
+      properties:
+        audience:
+          type: string
+        candidateDigests:
+          additionalProperties:
+            type: string
+          type: object
+        commit:
+          type: string
+        expiresAt:
+          type: integer
+        issuedAt:
+          type: integer
+        issuer:
+          type: string
+        nonce:
+          type: string
+        ref:
+          type: string
+        repository:
+          type: string
+        reviewerSubjects:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        scope:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.Scope'
+        signature:
+          type: string
+        subject:
+          type: string
+        trustId:
+          type: string
+        version:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.ComplianceDiff:
+      properties:
+        changes:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.ResourceChange'
+          type: array
+          uniqueItems: false
+        preservedDrift:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        projection:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ComplianceSpec'
+      type: object
+    privacy-proxy_internal_configuration.ComplianceSettings:
+      properties:
+        currency:
+          type: string
+        enabled:
+          type: boolean
+        enforcementMode:
+          type: string
+        thresholdFiat:
+          type: number
+        unknownPricePolicy:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.ComplianceSnapshot:
+      properties:
+        activeRevision:
+          type: integer
+        managedIds:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        scope:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.Scope'
+        spec:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ComplianceSpec'
+      type: object
+    privacy-proxy_internal_configuration.ComplianceSpec:
+      properties:
+        addressThresholds:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.AddressThreshold'
+          type: array
+          uniqueItems: false
+        settings:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ComplianceSettings'
+        tokenPrices:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.TokenPrice'
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_configuration.Contract:
+      properties:
+        abi:
+          items:
+            type: integer
+          type: array
+          uniqueItems: false
+        address:
+          type: string
+        allowVisibleToUnlock:
+          type: boolean
+        eventsAllowDynamicPayload:
+          type: boolean
+        id:
+          type: string
+        name:
+          type: string
+        readGrants:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.ReadGrant'
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_configuration.ContractState:
+      properties:
+        contract:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.Contract'
+        managed:
+          type: boolean
+        managedGrantIds:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_configuration.EventRule:
+      properties:
+        name:
+          type: string
+        paramRules:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_rbac.ParamRule'
+          type: array
+          uniqueItems: false
+        topic0:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.EventRules:
+      properties:
+        mode:
+          type: string
+        rules:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.EventRule'
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_configuration.ExecutionChange:
+      properties:
+        action:
+          type: string
+        after:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_policydsl.FrameRule'
+          type: array
+          uniqueItems: false
+        before:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_policydsl.FrameRule'
+          type: array
+          uniqueItems: false
+        groupId:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.ExecutionDiff:
+      properties:
+        after:
+          $ref: '#/components/schemas/privacy-proxy_internal_policydsl.Policy'
+        artifacts:
+          additionalProperties:
+            $ref: '#/components/schemas/privacy-proxy_internal_policydsl.Artifact'
+          type: object
+        before:
+          $ref: '#/components/schemas/privacy-proxy_internal_policydsl.Policy'
+        changes:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.ExecutionChange'
+          type: array
+          uniqueItems: false
+        migration:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.ExecutionMigrationReview'
+        policyDigest:
+          type: string
+        previousProjectionId:
+          type: string
+        previousProjectionRevision:
+          type: integer
+        projectionRevision:
+          type: integer
+        runtimeDigest:
+          type: string
+        sourceDigest:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.ExecutionMigrationReview:
+      properties:
+        diagnostics:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_policydsl.LegacyImportIssue'
+          type: array
+          uniqueItems: false
+        legacyRestriction:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.LegacyRestrictionEvidence'
+      type: object
+    privacy-proxy_internal_configuration.ExecutionSpec:
+      properties:
+        legacyRestrictionDigest:
+          type: string
+        policy:
+          items:
+            type: integer
+          type: array
+          uniqueItems: false
+        proxyPairs:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_policydsl.LegacyProxyPair'
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_configuration.Group:
+      properties:
+        allowedMethods:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        claims:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        description:
+          type: string
+        id:
+          type: string
+        isOrgAdmin:
+          type: boolean
+        isOrgReadonlyAdmin:
+          type: boolean
+        name:
+          type: string
+        rpcCredential:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.SecretRef'
+        slug:
+          type: string
+        verboseErrors:
+          type: boolean
+      type: object
+    privacy-proxy_internal_configuration.GroupChange:
+      properties:
+        action:
+          type: string
+        after:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.Group'
+        before:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.Group'
+        id:
+          type: string
+        liveMemberships:
+          type: integer
+        requiresPlatform:
+          type: boolean
+      type: object
+    privacy-proxy_internal_configuration.GroupDiff:
+      properties:
+        changes:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.GroupChange'
+          type: array
+          uniqueItems: false
+        preservedDrift:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        projection:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.Group'
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_configuration.GroupSnapshot:
+      properties:
+        activeRevision:
+          type: integer
+        groups:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.GroupState'
+          type: array
+          uniqueItems: false
+        scope:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.Scope'
+      type: object
+    privacy-proxy_internal_configuration.GroupState:
+      properties:
+        activeMembers:
+          type: integer
+        credential:
+          description: |-
+            Credential says who owns the group's upstream credential today:
+            "declared" (by the document, rendered as rpcCredential), "operational"
+            (set through the rotation endpoint, never rendered as source) or "none".
+          type: string
+        group:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.Group'
+        legacyHierarchy:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.LegacyGroupHierarchy'
+        liveMemberships:
+          type: integer
+        managed:
+          type: boolean
+        protected:
+          type: boolean
+      type: object
+    privacy-proxy_internal_configuration.Kind:
+      enum:
+      - groups
+      - contract-registry
+      - compliance
+      - approvers
+      - execution-rules
+      - platform
+      type: string
+      x-enum-varnames:
+      - Groups
+      - ContractRegistry
+      - Compliance
+      - Approvers
+      - ExecutionRules
+      - Platform
+    privacy-proxy_internal_configuration.LegacyExecutionGrant:
+      properties:
+        address:
+          type: string
+        functions:
+          description: |-
+            null grants all functions; [] grants none. This import-only representation
+            must never be silently normalized or projected by the registry stream.
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_rbac.FunctionRule'
+          type: array
+          uniqueItems: false
+        groupId:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.LegacyGroupHierarchy:
+      description: LegacyHierarchy is retained database metadata, not authorable source.
+      properties:
+        depth:
+          type: integer
+        parentId:
+          type: string
+        path:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.LegacyRestrictionEvidence:
+      properties:
+        artifact:
+          $ref: '#/components/schemas/privacy-proxy_internal_policydsl.Artifact'
+        policyDigest:
+          type: string
+        revision:
+          type: integer
+        revisionId:
+          type: string
+        source:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.PlatformDiff:
+      properties:
+        changes:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.ResourceChange'
+          type: array
+          uniqueItems: false
+        preservedDrift:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        projection:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.PlatformSpec'
+      type: object
+    privacy-proxy_internal_configuration.PlatformSnapshot:
+      properties:
+        activeRevision:
+          type: integer
+        managedIds:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        spec:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.PlatformSpec'
+      type: object
+    privacy-proxy_internal_configuration.PlatformSpec:
+      properties:
+        priceFeed:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.PriceFeed'
+        sharedInfrastructure:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.SharedInfrastructure'
+          type: array
+          uniqueItems: false
+        tenants:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.Tenant'
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_configuration.PriceFeed:
+      description: |-
+        PriceFeed, when present, names the endpoint and interval the pricing
+        service polls; absent means the environment defaults apply.
+      properties:
+        format:
+          type: string
+        refreshIntervalSeconds:
+          type: integer
+        uri:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.ReadGrant:
+      properties:
+        eventRules:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.EventRules'
+        groupId:
+          type: string
+        id:
+          type: string
+        legacyClaims:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_configuration.RegistryChange:
+      properties:
+        action:
+          type: string
+        id:
+          type: string
+        resource:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.RegistryDiff:
+      properties:
+        changes:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.RegistryChange'
+          type: array
+          uniqueItems: false
+        preservedDrift:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        projection:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.Contract'
+          type: array
+          uniqueItems: false
+      type: object
+    privacy-proxy_internal_configuration.RegistrySnapshot:
+      properties:
+        activeRevision:
+          type: integer
+        contracts:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_configuration.ContractState'
+          type: array
+          uniqueItems: false
+        scope:
+          $ref: '#/components/schemas/privacy-proxy_internal_configuration.Scope'
+      type: object
+    privacy-proxy_internal_configuration.ResourceChange:
+      properties:
+        action:
+          type: string
+        id:
+          type: string
+        resource:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.Scope:
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.SecretRef:
+      description: |-
+        RpcCredential names the environment variable holding the group's
+        upstream RPC credential. Optional; the value is resolved at activation
+        and never appears in the document.
+      properties:
+        fromEnv:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.SharedInfrastructure:
+      properties:
+        address:
+          type: string
+        codehash:
+          type: string
+        description:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.Tenant:
+      properties:
+        autoProvision:
+          type: boolean
+        defaultGroupId:
+          type: string
+        defaultOrgId:
+          type: string
+        id:
+          type: string
+        label:
+          type: string
+        tenantId:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.TokenPrice:
+      properties:
+        coingeckoId:
+          type: string
+        decimals:
+          type: integer
+        id:
+          type: string
+        pricesByCurrency:
+          additionalProperties:
+            type: number
+          type: object
+        symbol:
+          type: string
+        tokenAddress:
+          type: string
+      type: object
+    privacy-proxy_internal_configuration.TrustedCI:
+      properties:
+        audience:
+          type: string
+        id:
+          type: string
+        issuer:
+          type: string
+        publicKey:
+          type: string
+        ref:
+          type: string
+        repository:
+          type: string
+        subject:
+          type: string
+      type: object
     privacy-proxy_internal_db.AccessLog:
       properties:
         correlation_id:
@@ -3011,6 +4086,299 @@ components:
       - ReasonRBACGroupMember
       - ReasonParticipantOverride
       - ReasonVisibleToGrant
+    privacy-proxy_internal_nodepolicy.CreatedContract:
+      properties:
+        address:
+          type: string
+        org_id:
+          type: string
+        principal_id:
+          type: string
+      type: object
+    privacy-proxy_internal_nodepolicy.ExecutionOutcome:
+      properties:
+        block_hash:
+          type: string
+        block_number:
+          type: integer
+        created:
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_nodepolicy.CreatedContract'
+          type: array
+          uniqueItems: false
+        facts_version:
+          type: integer
+        finalized:
+          type: boolean
+        finalized_block_hash:
+          type: string
+        finalized_block_number:
+          type: integer
+        reason_code:
+          type: string
+        status:
+          type: string
+      type: object
+    privacy-proxy_internal_policydsl.AddressMatch:
+      description: AddressEquals constrains an address argument.
+      properties:
+        source:
+          $ref: '#/components/schemas/privacy-proxy_internal_policydsl.AddressSource'
+        value:
+          description: |-
+            Value carries the address when Source is literal, and must be empty
+            otherwise so that a document cannot appear to say two different things.
+          type: string
+      type: object
+    privacy-proxy_internal_policydsl.AddressSource:
+      enum:
+      - signer
+      - principal.linked
+      - literal
+      type: string
+      x-enum-varnames:
+      - AddressSourceSigner
+      - AddressSourcePrincipalLinked
+      - AddressSourceLiteral
+    privacy-proxy_internal_policydsl.ArgConstraint:
+      properties:
+        addressEquals:
+          $ref: '#/components/schemas/privacy-proxy_internal_policydsl.AddressMatch'
+        index:
+          description: |-
+            Index is the zero-based position of the argument in the function's inputs.
+
+            A document must state it explicitly. Because zero is a meaningful position,
+            an omitted index would quietly constrain the first argument and leave the
+            one the author meant unbounded.
+          type: integer
+        recordParty:
+          $ref: '#/components/schemas/privacy-proxy_internal_policydsl.RecordPartyMatch'
+        uintAtMost:
+          description: |-
+            UintAtMost is an inclusive upper bound for an unsigned integer argument,
+            written in decimal so that large token amounts survive JSON round-trips.
+          type: string
+      type: object
+    privacy-proxy_internal_policydsl.Artifact:
+      properties:
+        compiler:
+          $ref: '#/components/schemas/privacy-proxy_internal_policydsl.CompilerSettings'
+        creation_bytecode:
+          description: |-
+            CreationBytecode is the constructor output, kept for the case where the
+            artifact is ever deployed rather than executed directly.
+          items:
+            type: integer
+          type: array
+          uniqueItems: false
+        policy_digest:
+          description: |-
+            PolicyDigest is the lowercase hex sha256 of the canonical policy document
+            this was generated from, binding the artifact to its source of truth.
+          type: string
+        runtime_bytecode:
+          description: RuntimeBytecode is the deployed code, which is what an evaluator
+            executes.
+          items:
+            type: integer
+          type: array
+          uniqueItems: false
+        runtime_digest:
+          description: RuntimeDigest is the lowercase hex sha256 of RuntimeBytecode.
+          type: string
+        source:
+          description: Source is the generated Solidity.
+          type: string
+        source_digest:
+          description: SourceDigest is the lowercase hex sha256 of Source.
+          type: string
+      type: object
+    privacy-proxy_internal_policydsl.Binding:
+      properties:
+        allow:
+          description: |-
+            Allow is the complete set of frames this group may execute. An empty or
+            absent list denies everything, which is the fail-closed default.
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_policydsl.FrameRule'
+          type: array
+          uniqueItems: false
+        group:
+          description: Group is the stable identifier of an existing organisation
+            group.
+          type: string
+      type: object
+    privacy-proxy_internal_policydsl.CallType:
+      enum:
+      - call
+      - staticcall
+      - delegatecall
+      - callcode
+      - create
+      - create2
+      type: string
+      x-enum-varnames:
+      - CallTypeCall
+      - CallTypeStaticCall
+      - CallTypeDelegateCall
+      - CallTypeCallCode
+      - CallTypeCreate
+      - CallTypeCreate2
+    privacy-proxy_internal_policydsl.CompilerSettings:
+      description: |-
+        Compiler records the exact build, so the artifact can be rebuilt and
+        compared rather than trusted.
+      properties:
+        evm_version:
+          type: string
+        optimizer_runs:
+          type: integer
+        version:
+          type: string
+      type: object
+    privacy-proxy_internal_policydsl.DeployerException:
+      properties:
+        groups:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        storageAddress:
+          type: string
+      type: object
+    privacy-proxy_internal_policydsl.FrameRule:
+      properties:
+        abiDigest:
+          description: |-
+            ABIDigest is required for exact selectors and absent for * / 0x. It pins
+            the ABI this rule was validated against, as lowercase hex
+            sha256 of the canonical ABI text. If the contract's ABI later changes, the
+            mismatch is detectable instead of silently reinterpreting argument indexes.
+          type: string
+        allowUpgrade:
+          description: |-
+            AllowUpgrade permits recognized proxy-upgrade selectors only when this
+            binding's current target-specific claims also authorize the operation.
+          type: boolean
+        args:
+          description: Args constrains decoded arguments. All constraints must hold.
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_policydsl.ArgConstraint'
+          type: array
+          uniqueItems: false
+        callTypes:
+          description: |-
+            CallTypes lists the frame kinds this rule permits. An empty list means
+            call and staticcall only; delegatecall and callcode are never implied.
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_policydsl.CallType'
+          type: array
+          uniqueItems: false
+        callerAddress:
+          description: CallerAddress optionally requires the immediate EVM caller,
+            not the signer.
+          type: string
+        codeAddress:
+          description: |-
+            CodeAddress is the account whose code executes. Leave it empty for a normal
+            call, where code and storage coincide. A DelegateCall rule must set it,
+            because that is precisely the case where the two differ.
+          type: string
+        except:
+          description: |-
+            Except suppresses only this deployer fallback for an exact target while
+            the principal belongs to any listed group. Other explicit rules still
+            union normally; read-grant rows never become an execution authority.
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_policydsl.DeployerException'
+          type: array
+          uniqueItems: false
+        maxDepth:
+          description: |-
+            MaxDepth bounds frame depth inclusively. Nil means unbounded; zero permits
+            the top-level frame only. The node supplies depth with the root at zero.
+          type: integer
+        maxValue:
+          description: |-
+            MaxValue bounds native value in wei, as decimal uint256 text. Nil means
+            unbounded; a present zero allows only zero-value frames.
+          type: string
+        selector:
+          description: |-
+            Selector is an exact four-byte 0x-prefixed selector, * for any input
+            (including receive/fallback), or 0x for exactly empty input. Exact selectors
+            use the pinned ABI; wildcard and empty-input rules cannot constrain args.
+          type: string
+        storageAddress:
+          description: |-
+            StorageAddress is the account whose storage the frame may touch. For a
+            normal call this is simply the contract being called.
+          type: string
+        targetClass:
+          description: |-
+            TargetClass optionally names a resolved target class: org, shared, eoa,
+            precompile or create. Omitted means the literal addresses below. Classes
+            never accept author-supplied ownership or code classification facts.
+          type: string
+      type: object
+    privacy-proxy_internal_policydsl.LegacyImportIssue:
+      properties:
+        address:
+          type: string
+        group:
+          type: string
+        reason:
+          type: string
+      type: object
+    privacy-proxy_internal_policydsl.LegacyProxyPair:
+      properties:
+        codeAddress:
+          type: string
+        storageAddress:
+          type: string
+      type: object
+    privacy-proxy_internal_policydsl.Policy:
+      properties:
+        apiVersion:
+          type: string
+        bindings:
+          description: |-
+            Bindings map groups to the frames their members may execute. A principal
+            outside every listed group is denied by this policy.
+          items:
+            $ref: '#/components/schemas/privacy-proxy_internal_policydsl.Binding'
+          type: array
+          uniqueItems: false
+        kind:
+          type: string
+        nestedCalls:
+          description: |-
+            NestedCalls declares the nested-frame semantic this document was written
+            against. It is explicit so that a later change of default cannot silently
+            alter the meaning of an already-approved document.
+          type: string
+        org:
+          description: |-
+            Org is the organisation whose execution this policy governs. Every
+            contract and group referenced below must belong to it.
+          type: string
+      type: object
+    privacy-proxy_internal_policydsl.RecordPartyMatch:
+      description: |-
+        RecordParty maps this record ID to a pinned getter on the guarded storage
+        address and requires a returned party to match a principal-linked address.
+      properties:
+        abiDigest:
+          type: string
+        getter:
+          type: string
+        partyOutputs:
+          items:
+            type: integer
+          type: array
+          uniqueItems: false
+      type: object
     privacy-proxy_internal_rbac.AccessCheckRequest:
       properties:
         function_selector:
@@ -3352,6 +4720,11 @@ components:
         rpc_api_key:
           description: API key for upstream RPC proxy authentication
           type: string
+        rpc_api_key_source:
+          description: |-
+            RPCAPIKeySource names the environment variable a reviewed groups document
+            resolved rpc_api_key from; nil when the key was set operationally or not at all.
+          type: string
         updated_at:
           type: string
         verbose_errors:
@@ -3537,7 +4910,7 @@ components:
         circuitID:
           type: string
         extendedID:
-          $ref: '#/components/schemas/big.Int'
+          $ref: '#/components/schemas/math_big.Int'
         id:
           type: integer
         optional:
@@ -4324,6 +5697,314 @@ paths:
       summary: List system token prices
       tags:
       - 'Admin: compliance'
+  /api/v1/admin/configuration/platform/context:
+    get:
+      description: Requires a named human principal on the deployment's platform allowlist.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationContext'
+          description: OK
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+      security:
+      - BearerAuth: []
+      summary: Read platform configuration editing context
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/configuration/platform/managed:
+    get:
+      description: 'Readable by a named human principal on the deployment''s platform
+        allowlist or by the full admin token, the two principals that manage tenants
+        and shared infrastructure. True once a platform revision is active: the shared-infrastructure
+        and tenant write endpoints then answer 409 and edits go through a platform
+        revision.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationManaged'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+      security:
+      - BearerAuth: []
+      - AdminToken: []
+      summary: Report whether the platform configuration stream is managed
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/configuration/platform/revisions:
+    get:
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevisionList'
+          description: OK
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+      security:
+      - BearerAuth: []
+      summary: List platform configuration revisions
+      tags:
+      - 'Admin: Configuration'
+    post:
+      description: Platform drafts require a human author; a different allowlisted
+        human activates.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+          text/plain:
+            schema:
+              title: source
+              type: object
+        description: Complete ops.configuration/v1 platform document
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevision'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Conflict
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: this deployment lacks a dependency the document needs, such
+            as the pinned Solidity compiler for execution rules
+      security:
+      - BearerAuth: []
+      summary: Submit a complete platform configuration source document
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/configuration/platform/revisions/{revision_id}:
+    get:
+      parameters:
+      - description: Revision UUID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevision'
+          description: OK
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Not Found
+      security:
+      - BearerAuth: []
+      summary: Read a platform configuration revision
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/configuration/platform/revisions/{revision_id}/activate:
+    post:
+      description: The activator must be a currently allowlisted human other than
+        the author.
+      parameters:
+      - description: Revision UUID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationCoactivateRequest'
+                description: Sibling drafts
+                summary: request
+        description: Sibling drafts
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevisionList'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Conflict
+      security:
+      - BearerAuth: []
+      summary: Activate a reviewed platform configuration revision
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/configuration/platform/revisions/{revision_id}/simulate:
+    post:
+      parameters:
+      - description: Revision UUID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationCoactivateRequest'
+                description: Sibling drafts
+                summary: request
+        description: Sibling drafts
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationReview'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Conflict
+      security:
+      - BearerAuth: []
+      summary: Review a platform draft without mutation
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/configuration/platform/revisions/{revision_id}/withdraw:
+    post:
+      parameters:
+      - description: Revision UUID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevision'
+          description: OK
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Conflict
+      security:
+      - BearerAuth: []
+      summary: Withdraw an unactivated platform configuration draft
+      tags:
+      - 'Admin: Configuration'
   /api/v1/admin/contracts/by-address/{address}:
     get:
       description: Resolves a contract by address across all organizations, for the
@@ -6487,6 +8168,410 @@ paths:
       summary: Delete a travel-rule record
       tags:
       - 'Admin: compliance'
+  /api/v1/admin/orgs/{org_id}/configuration/{kind}/context:
+    get:
+      parameters:
+      - description: Organization UUID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Configuration stream
+        in: path
+        name: kind
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationContext'
+          description: OK
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+      security:
+      - BearerAuth: []
+      summary: Read configuration editing context
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/orgs/{org_id}/configuration/{kind}/managed:
+    get:
+      description: 'True once a revision of this stream is active: the stream''s legacy
+        write endpoints then answer 409 and the database refuses direct writes, so
+        changes go through a configuration revision. False while the legacy setters
+        are still the writer.'
+      parameters:
+      - description: Organization UUID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Configuration stream
+        in: path
+        name: kind
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationManaged'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: malformed organisation id or unknown stream
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: no admin authority for this organisation, or the restricted
+            operator token on a tenant organisation
+      security:
+      - BearerAuth: []
+      - AdminToken: []
+      summary: Report whether a configuration stream is managed by an active revision
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/orgs/{org_id}/configuration/{kind}/revisions:
+    get:
+      parameters:
+      - description: Organization UUID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Configuration stream
+        in: path
+        name: kind
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevisionList'
+          description: OK
+      security:
+      - BearerAuth: []
+      summary: List configuration revisions
+      tags:
+      - 'Admin: Configuration'
+    post:
+      description: Execution rules compile to a reviewed artifact set, keyed by group,
+        for the whole organization document. Each artifact must fit the runtime size
+        limit.
+      parameters:
+      - description: Organization UUID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Configuration stream
+        in: path
+        name: kind
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+          text/plain:
+            schema:
+              title: source
+              type: object
+        description: Complete ops.configuration/v1 document
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevision'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Conflict
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: this deployment lacks a dependency the document needs, such
+            as the pinned Solidity compiler for execution rules
+      security:
+      - BearerAuth: []
+      summary: Submit a complete configuration source document
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/orgs/{org_id}/configuration/{kind}/revisions/{revision_id}:
+    get:
+      parameters:
+      - description: Organization UUID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Configuration stream
+        in: path
+        name: kind
+        required: true
+        schema:
+          type: string
+      - description: Revision UUID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevision'
+          description: OK
+      security:
+      - BearerAuth: []
+      summary: Read a configuration revision
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/orgs/{org_id}/configuration/{kind}/revisions/{revision_id}/activate:
+    post:
+      description: Execution activation publishes the complete approved group artifact
+        set atomically, removing artifacts for bindings omitted from the replacement.
+      parameters:
+      - description: Organization UUID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Configuration stream
+        in: path
+        name: kind
+        required: true
+        schema:
+          type: string
+      - description: Revision UUID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationCoactivateRequest'
+                description: Sibling drafts
+                summary: request
+        description: Sibling drafts
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevisionList'
+          description: OK
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Conflict
+      security:
+      - BearerAuth: []
+      summary: Activate reviewed configuration revisions atomically
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/orgs/{org_id}/configuration/{kind}/revisions/{revision_id}/activate-ci:
+    post:
+      parameters:
+      - description: Organization UUID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Configuration stream
+        in: path
+        name: kind
+        required: true
+        schema:
+          type: string
+      - description: Revision UUID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/privacy-proxy_internal_configuration.CIActivationRequest'
+                description: Independent signed external approval
+                summary: request
+        description: Independent signed external approval
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevisionList'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Conflict
+      security:
+      - BearerAuth: []
+      summary: Activate exact externally reviewed configuration from trusted CI
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/orgs/{org_id}/configuration/{kind}/revisions/{revision_id}/simulate:
+    post:
+      parameters:
+      - description: Organization UUID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Configuration stream
+        in: path
+        name: kind
+        required: true
+        schema:
+          type: string
+      - description: Revision UUID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationCoactivateRequest'
+                description: Sibling drafts
+                summary: request
+        description: Sibling drafts
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationReview'
+          description: OK
+      security:
+      - BearerAuth: []
+      summary: Review a draft and its sibling projections without mutation
+      tags:
+      - 'Admin: Configuration'
+  /api/v1/admin/orgs/{org_id}/configuration/{kind}/revisions/{revision_id}/withdraw:
+    post:
+      parameters:
+      - description: Organization UUID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Configuration stream
+        in: path
+        name: kind
+        required: true
+        schema:
+          type: string
+      - description: Revision UUID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationRevision'
+          description: OK
+      security:
+      - BearerAuth: []
+      summary: Withdraw an unactivated configuration draft
+      tags:
+      - 'Admin: Configuration'
   /api/v1/admin/orgs/{org_id}/contracts:
     get:
       description: Lists the contracts registered to the organization, most recent
@@ -7631,6 +9716,7 @@ paths:
   /api/v1/admin/orgs/{org_id}/dry-run:
     post:
       description: |-
+        In Reth policy mode, execution requests use the node evaluator and return allow or deny, never indeterminate; diagnostic bypass requires a human administrator and remains organization-scoped.
         Evaluates "what would this user see if they made this RPC call?" in the path org, without mutating chain state. Returns allow or deny for definitive local decisions. If nested execution reaches a contract owned by another organization, returns decision=indeterminate and reason=external_scope_required without evaluating that foreign policy. eth_call is traced with debug_traceCall even when live eth_call tracing is disabled, so its verdict can be stricter than live (indeterminate where live allows), and it needs a node that supports debug_traceCall. Read methods are forwarded, and the response goes through the same privacy filter as the user's own call, evaluated in the path org only: the user's contract grants, admin role and visibleTo shares from other organizations do not apply, and the user's disclosure grants never apply (a grant discloses to the grantee alone); a transaction or receipt the user may not read, or one sent to or deploying another organization's contract, comes back null; logs are filtered, and embedded addresses the user cannot see are redacted. Write methods (eth_sendTransaction / eth_sendRawTransaction) are translated to debug_traceCall so the RBAC verdict, the events the tx would emit, and the subset the user would see in its receipt can be inspected. If the user's view cannot be produced, nothing from the node is returned (500). Requires a tier-2 org-admin JWT of the path org: X-Admin-Token credentials (both the full super-admin token and the operator token) are explicitly rejected, since impersonation reads tenant data as the user. The impersonated user must exist and be a member of the path org, else an opaque 404. Every evaluation is written to the impersonation audit log fail-closed. Under the strict read privacy profile (PRIVACY_READ_PROFILE=strict) read methods are refused with 403 before anything is forwarded (the refusal is audited), and a simulated send returns only the allow/deny verdict, without the trace or its logs. Supported methods: eth_call, eth_getLogs, eth_getTransactionReceipt, eth_getTransactionByHash, eth_getBalance, eth_getCode, eth_getStorageAt, eth_blockNumber, eth_chainId, eth_sendTransaction, eth_sendRawTransaction.
         Client state/block override options are unsupported regardless of the selected user's role, including admins.
       parameters:
@@ -7712,6 +9798,505 @@ paths:
       summary: Dry-run an RPC call as a user
       tags:
       - 'Admin: RBAC'
+  /api/v1/admin/orgs/{org_id}/execution-policy/context:
+    get:
+      description: Returns the revision a candidate must be written against, the groups
+        and ABI-bearing contracts it may refer to, and the policy currently in force.
+        Administrator groups and contracts without a registered ABI are omitted, because
+        a rule cannot name either. Scoped to {org_id}; the restricted operator token
+        is rejected.
+      parameters:
+      - description: Organization ID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyContext'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: missing or invalid admin token
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: operator token cannot manage per-org policy, or caller is out
+            of org scope
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Internal Server Error
+      security:
+      - AdminToken: []
+      summary: Read the execution-policy editing context
+      tags:
+      - 'Admin: Execution policy'
+  /api/v1/admin/orgs/{org_id}/execution-policy/revisions:
+    get:
+      description: Returns the organisation's policy revisions, newest first, with
+        the digests of each. Scoped to {org_id}; the restricted operator token is
+        rejected.
+      parameters:
+      - description: Organization ID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyRevision'
+                type: array
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: missing or invalid admin token
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: operator token cannot manage per-org policy, or caller is out
+            of org scope
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Internal Server Error
+      security:
+      - AdminToken: []
+      summary: List execution-policy revisions
+      tags:
+      - 'Admin: Execution policy'
+    post:
+      description: Validates and compiles a candidate and stores it as an attributed
+        draft. Full and read-only org admins may submit; token-only credentials cannot
+        submit. base_revision names the currently active revision (zero before first
+        activation), independently of draft numbering. Stale bases are refused. A
+        different identified full org admin must activate the draft. Scoped to {org_id};
+        the restricted operator token is rejected.
+      parameters:
+      - description: Organization ID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicySubmitRequest'
+                description: Candidate policy and the revision it was written against
+                summary: request
+        description: Candidate policy and the revision it was written against
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyRevisionDetail'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: the candidate is malformed or names something that does not
+            exist
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: missing or invalid admin token
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: operator token cannot manage per-org policy, or caller is out
+            of org scope
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: the candidate was written against a superseded revision
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Internal Server Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: the policy compiler is unavailable
+      security:
+      - BearerAuth: []
+      summary: Submit an execution-policy candidate
+      tags:
+      - 'Admin: Execution policy'
+  /api/v1/admin/orgs/{org_id}/execution-policy/revisions/{revision_id}:
+    get:
+      description: Returns the submitted document, the Solidity generated from it,
+        the compiled runtime bytecode and every digest, so a reviewer can check the
+        artifact before approving it. Scoped to {org_id}; the restricted operator
+        token is rejected.
+      parameters:
+      - description: Organization ID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Revision ID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyRevisionDetail'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: missing or invalid admin token
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: operator token cannot manage per-org policy, or caller is out
+            of org scope
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: no such revision in this organization
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Internal Server Error
+      security:
+      - AdminToken: []
+      summary: Read one execution-policy revision
+      tags:
+      - 'Admin: Execution policy'
+  /api/v1/admin/orgs/{org_id}/execution-policy/revisions/{revision_id}/activate:
+    post:
+      description: Atomically activates a draft only if its recorded base is still
+        active. Requires an identified full org admin different from the submitter;
+        read-only and token-only credentials are refused. Legacy drafts without recorded
+        provenance must be resubmitted. The approving administrator and artifact digests
+        are audited. Scoped to {org_id}; the restricted operator token is rejected.
+      parameters:
+      - description: Organization ID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Revision ID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyRevision'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: missing or invalid admin token
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: operator token cannot manage per-org policy, or caller is out
+            of org scope
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: no such revision in this organization
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: the revision is not a draft or its authoring base is stale
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Internal Server Error
+      security:
+      - BearerAuth: []
+      summary: Activate an execution-policy revision
+      tags:
+      - 'Admin: Execution policy'
+  /api/v1/admin/orgs/{org_id}/execution-policy/revisions/{revision_id}/simulate:
+    post:
+      description: 'Legacy mode only; Reth mode returns 409 and uses configuration/execution-rules
+        with execution/simulate. Evaluates a hypothetical execution against a stored
+        revision and returns the decision. The candidate is evaluated twice, once
+        by the reference evaluator and once by running the compiled contract, and
+        the response reports whether the two agreed. Simulation mutates nothing and
+        can be run against a draft, which is the point: it is how a reviewer checks
+        what a policy would do before putting it in force. Scoped to {org_id}; the
+        restricted operator token is rejected.'
+      parameters:
+      - description: Organization ID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Revision ID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicySimulateRequest'
+                description: The execution to test
+                summary: request
+        description: The execution to test
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicySimulateResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: the described execution is malformed
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: missing or invalid admin token
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: operator token cannot manage per-org policy, or caller is out
+            of org scope
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: no such revision in this organization
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: use configuration execution rules in Reth mode
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Internal Server Error
+      security:
+      - AdminToken: []
+      summary: Simulate an execution against a policy revision
+      tags:
+      - 'Admin: Execution policy'
+  /api/v1/admin/orgs/{org_id}/execution-policy/revisions/{revision_id}/withdraw:
+    post:
+      description: Abandons a draft that was never activated. An active or superseded
+        revision is part of the record of what was enforced and cannot be withdrawn.
+        Scoped to {org_id}; the restricted operator token is rejected.
+      parameters:
+      - description: Organization ID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Revision ID
+        in: path
+        name: revision_id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyRevision'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: missing or invalid admin token
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: operator token cannot manage per-org policy, or caller is out
+            of org scope
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: no such draft in this organization
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: the organization's execution rules are a managed configuration
+            stream; legacy drafts can no longer be changed here
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Internal Server Error
+      security:
+      - AdminToken: []
+      summary: Withdraw an execution-policy draft
+      tags:
+      - 'Admin: Execution policy'
+  /api/v1/admin/orgs/{org_id}/execution/simulate:
+    post:
+      description: Named organization administrators can preview their own calls and
+        stored execution revisions. Current active permissions remain mandatory for
+        candidate previews. dryRun permits a full human organization administrator
+        to diagnose another current member; independent organization isolation remains
+        mandatory. Under the strict read profile, dryRun read methods are refused
+        and debug_traceCall diagnostics return only policy.would_allow, with result
+        null. This never submits a transaction or changes active policy. Candidate
+        previews use current facts, including current memberships and registry state.
+      parameters:
+      - description: Organization UUID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/privacy-proxy_internal_apimodels.NodeSimulationRequest'
+                description: Simulation request
+                summary: request
+        description: Simulation request
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Not Found
+        "429":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Too Many Requests
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Service Unavailable
+      security:
+      - BearerAuth: []
+      summary: Preview execution through the node policy evaluator
+      tags:
+      - 'Admin: Configuration'
   /api/v1/admin/orgs/{org_id}/groups:
     get:
       description: 'Returns a paginated list of the organization''s groups, each with
@@ -8155,6 +10740,47 @@ paths:
       summary: Set group access
       tags:
       - 'Admin: RBAC'
+  /api/v1/admin/orgs/{org_id}/groups/{group_id}/rpc-credential:
+    put:
+      parameters:
+      - description: Organization UUID
+        in: path
+        name: org_id
+        required: true
+        schema:
+          type: string
+      - description: Group UUID
+        in: path
+        name: group_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+          text/plain:
+            schema:
+              title: request
+              type: object
+        description: rpc_api_key only; empty string clears it
+        required: true
+      responses:
+        "204":
+          description: No Content
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: the credential is declared by the group's configuration document;
+            change the document instead
+      security:
+      - BearerAuth: []
+      summary: Rotate operational upstream RPC credentials for a group
+      tags:
+      - 'Admin: Configuration'
   /api/v1/admin/orgs/{org_id}/groups/batch-delete:
     post:
       description: 'Deletes multiple groups (and their dependencies) in a single atomic
@@ -10343,67 +12969,6 @@ paths:
                 $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
           description: explorer store not configured
       summary: List accounts
-      tags:
-      - Explorer
-  /api/v1/explorer/addresses/{address}/abi:
-    post:
-      description: 'Stores the ABI JSON for a contract address. Private network only
-        (serves the explorer backend); not reachable through the public ingress. This
-        is privacy-gated: the write requires FULL visibility of the address for the
-        resolved viewer, so only members of the owning org (or a public contract)
-        may update the ABI; other viewers get 404 (indistinguishable from a missing
-        address). The request body is the raw ABI JSON.'
-      parameters:
-      - description: Contract address (0x-prefixed hex)
-        in: path
-        name: address
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-          text/plain:
-            schema:
-              title: request
-              type: object
-        description: Raw contract ABI JSON (array of ABI entries)
-        required: true
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExplorerABIUpdateResponse'
-          description: OK
-        "400":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
-          description: invalid request body
-        "404":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
-          description: address not found (also returned when the viewer lacks full
-            visibility)
-        "500":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
-          description: failed to set contract ABI
-        "503":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
-          description: explorer store not configured
-      summary: Set the ABI for a contract
       tags:
       - Explorer
   /api/v1/explorer/addresses/{address}/balance:
@@ -12804,6 +15369,63 @@ paths:
       summary: My organizations
       tags:
       - Profile
+  /api/v1/me/transactions/{hash}/execution:
+    get:
+      description: 'Status for a transaction submitted by this named principal, with
+        current organization membership and KYC required. Shared signing addresses
+        do not share status access. Queued, pending, denied and expired are nonterminal:
+        an execution already started may still be included. Included or reverted reflects
+        canonical node evidence; reconciled means OPS bookkeeping is committed. This
+        endpoint never returns raw transactions, signing envelopes or visibility recipients.'
+      parameters:
+      - description: Lowercase transaction hash
+        in: path
+        name: hash
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.NodeTransactionProgress'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Not Found
+        "429":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Too Many Requests
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Internal Server Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: Service Unavailable
+      security:
+      - BearerAuth: []
+      summary: My transaction execution status
+      tags:
+      - Profile
   /api/v1/refresh:
     post:
       description: Validates the refresh token, rejects it if revoked, expired, or
@@ -13329,6 +15951,45 @@ paths:
       summary: OpenAPI specification
       tags:
       - System
+  /ready:
+    get:
+      description: Returns 503 until the configured execution node has fresh policy
+        facts matching the database. No private policy or identity data is returned.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ReadinessResponse'
+          description: OK
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ReadinessResponse'
+          description: Service Unavailable
+      summary: Execution readiness
+      tags:
+      - Health
+    head:
+      description: Returns 503 until the configured execution node has fresh policy
+        facts matching the database. No private policy or identity data is returned.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ReadinessResponse'
+          description: OK
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ReadinessResponse'
+          description: Service Unavailable
+      summary: Execution readiness
+      tags:
+      - Health
   /rpc:
     post:
       description: |-

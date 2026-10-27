@@ -467,6 +467,10 @@ export const handlers = [
         runtime_tracing_enabled: false,
         travel_rule_enabled: true,
       },
+      // The server always reports the execution mode; legacy is its default
+      // (internal/server/node_policy.go executionStatus). Reth-mode tests
+      // override this per case.
+      execution: { mode: 'legacy', ready: true },
     });
   }),
 
@@ -885,6 +889,15 @@ export const handlers = [
       currency: body.currency,
       message: `Base currency updated to ${body.currency.toUpperCase()}`,
     });
+  }),
+
+  // Configuration streams are unmanaged by default, so the legacy screens keep
+  // their edit controls. Managed-stream tests override this per kind.
+  http.get('/api/v1/admin/orgs/:orgId/configuration/:kind/managed', ({ params }) => {
+    return HttpResponse.json({ kind: params.kind, managed: false });
+  }),
+  http.get('/api/v1/admin/configuration/platform/managed', () => {
+    return HttpResponse.json({ kind: 'platform', managed: false });
   }),
 
   // Default: the signed-in user is NOT an admin, so user-facing pages render

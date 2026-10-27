@@ -39,6 +39,32 @@ var claimImplications = map[Claim][]Claim{
 //
 // Read/write are not claim-gated; the method allowlist is the source of truth.
 // Returns a deduplicated, sorted slice.
+// ValidateClaims rejects anything outside the claim vocabulary. The set is
+// exactly AllClaims(): "read" and "write" were retired when the method
+// allowlist became the gate for reads and writes, so a claim that is not one
+// of these grants nothing and only misleads whoever reads the group later.
+// Callers validate BEFORE expanding, so the error names what the client sent.
+func ValidateClaims(claims []Claim) error {
+	valid := make(map[Claim]bool, len(AllClaims()))
+	for _, c := range AllClaims() {
+		valid[c] = true
+	}
+	for _, c := range claims {
+		if !valid[c] {
+			return fmt.Errorf("unknown claim %q: the claims are %s", c, strings.Join(claimNames(AllClaims()), ", "))
+		}
+	}
+	return nil
+}
+
+func claimNames(claims []Claim) []string {
+	names := make([]string, 0, len(claims))
+	for _, c := range claims {
+		names = append(names, string(c))
+	}
+	return names
+}
+
 func ExpandClaims(claims []Claim) []Claim {
 	set := make(map[Claim]bool, len(claims))
 	for _, c := range claims {
@@ -277,14 +303,17 @@ type ContractGrant struct {
 // Claims are operational gates: only deploy, upgrade, and admin are meaningful.
 // Read/write access is determined by AllowedMethods, not claims.
 type GroupAccess struct {
-	ID             string    `json:"id"`
-	GroupID        string    `json:"group_id"`
-	AllowedMethods []string  `json:"allowed_methods"`
-	Claims         []Claim   `json:"claims"`                // Operational claims: deploy, upgrade, admin
-	RPCAPIKey      *string   `json:"rpc_api_key,omitempty"` // API key for upstream RPC proxy authentication
-	VerboseErrors  bool      `json:"verbose_errors"`        // RD-1137 Part A: members get curated reason codes on the wire for denials
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID             string   `json:"id"`
+	GroupID        string   `json:"group_id"`
+	AllowedMethods []string `json:"allowed_methods"`
+	Claims         []Claim  `json:"claims"`                // Operational claims: deploy, upgrade, admin
+	RPCAPIKey      *string  `json:"rpc_api_key,omitempty"` // API key for upstream RPC proxy authentication
+	// RPCAPIKeySource names the environment variable a reviewed groups document
+	// resolved rpc_api_key from; nil when the key was set operationally or not at all.
+	RPCAPIKeySource *string   `json:"rpc_api_key_source,omitempty"`
+	VerboseErrors   bool      `json:"verbose_errors"` // RD-1137 Part A: members get curated reason codes on the wire for denials
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 
 	// Computed fields (not stored in DB, populated by handlers for child groups)
 	EffectiveClaims  []Claim `json:"effective_claims,omitempty"`
