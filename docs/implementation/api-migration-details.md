@@ -57,7 +57,7 @@ stays as a dormant column under the expand-only migration policy.
 | Group | Endpoints | Why it stays an operation |
 |---|---|---|
 | Users, bans, KYC | `GET /admin/users`, `GET/PUT/DELETE /admin/users/{u}`, `GET …/{u}/effective-permissions`, `GET …/{u}/linked-addresses` | user rows are created by login; bans/KYC are also set by compliance automation — a re-applied document with `banned: false` would undo an incident ban |
-| Memberships | `GET/POST /admin/users/{u}/memberships`, `DELETE …/memberships/{m}`, `POST/DELETE /orgs/{o}/memberships/by-did` | three writers at people scale — the admin API, Azure auto-provision, ZK roles — producing instances of rules that are reviewed elsewhere; a re-applied snapshot would revert the machine-written ones |
+| Memberships | `GET/POST /admin/users/{u}/memberships`, `DELETE …/memberships/{m}`, `POST/DELETE /orgs/{o}/memberships/by-did` | two writers at people scale — the admin API and Azure auto-provision — producing instances of rules that are reviewed elsewhere; a re-applied snapshot would revert the machine-written ones |
 | Address links | `POST /eth/link/challenge`, `POST /eth/link/verify`, `GET /eth/addresses`, `DELETE /eth/addresses/{a}`, `POST …/refresh-ens`, `GET /admin/eth-addresses/collisions` | the link *is* a signature by the user's key; nobody can author it for them |
 | Organisation lifecycle | `GET/POST /admin/orgs`, `GET/PUT/DELETE /admin/orgs/{o}` | **decided 2026-09-17 to move into the `platform` document** (see §6) — kept as an operation only until that is built |
 | Disclosure | `GET/POST /admin/disclosure/requests`, `GET/DELETE …/requests/{r}`, `GET /admin/disclosure/grants`, `…/{g}/revoke`, `…/{g}/summary|events|logs|report`, `GET …/check-access`; `GET /me/disclosure/*`, `POST /me/disclosure/requests/{r}/approve|reject|revoke` | a request needs the other organisation's answer; state machine between parties, not desired state |
@@ -173,7 +173,7 @@ codebase, with the reference), *measured* (a number), *judgement* (mine).
 | **[Approvers, trusted CI](#approvers-trusted-ci)** | reviewed document, human-authored only | it decides who may approve; eligibility for an activation is read from the **active** approvers revision, so a document cannot widen the set that approves it | verified (`ConfigurationActorIsApprover`) |
 | **[Platform](#platform)** | reviewed document, human-authored only | it is the deployment operator's decision, never a tenant's | principle |
 | **[Users](#facts-about-people)** | Postgres rows in `users`, written at login | identity comes from the identity provider at login; the product does not decide who exists | verified (`EnsureUserExists`) |
-| **[Memberships](#facts-about-people)** | Postgres rows in `user_memberships`, written by the API and by login | what is reviewed is the **rule**, not the row: the tenant mapping (`tenants[]` in the platform document) for Azure auto-provision, and the issuer's own process for ZK credentials, which name a group by slug and are honoured if it exists (`auth/zk_roles.go:83-124`). The row is the instance, written by three writers at per-person cadence | verified (`auth_azure.go:298`, `auth.go:603`) |
+| **[Memberships](#facts-about-people)** | Postgres rows in `user_memberships`, written by the API and by login | what is reviewed is the **rule**, not the row: the tenant mapping (`tenants[]` in the platform document) for Azure auto-provision. The row is the instance, written by two writers at per-person cadence | verified (`auth_azure.go:298`) |
 | **[Address links](#facts-about-people)** | Postgres rows in `eth_address_links`, written after the signature is verified | the link is the user's signature; in a document an author would assert someone else's address and authorise its transactions | principle; verified (`eth_link.go`) |
 | **[Bans](#facts-about-people)** | a column of `users`, set by an admin call | it must take effect before anyone can review it, and the review would have nothing to decide | principle |
 | **[KYC](#facts-about-people)** | a column of `users`, set at login | it is set by the credential the user logged in with | verified (`auth.go:571`) |
@@ -236,7 +236,7 @@ enter through the authorised registration transaction — the Reth reconciler
 and, since this branch, the legacy plain-CREATE path too — so the next registry
 revision adopts them as drift instead of the guard refusing them. Whether the
 auto-grant should exist at all once the rules express it (`targetClass:
-deployer`) is open. For memberships separation does not help: three writers
+deployer`) is open. For memberships separation does not help: two writers
 produce the same row for the same person.
 
 **Test 2 — it must take effect before anyone can review it.** The latency of a
@@ -382,7 +382,7 @@ unverified, which is exactly where the errors were.
 | "a ban reaches the node at the next block" | AFTER trigger on `users` → clock bump in the same transaction (073) | confirmed |
 | "a group secret is never desired state" | the 075 trigger ignores `rpc_api_key`; the credential has its own route | confirmed |
 | "a user row appears at login" | `EnsureUserExists` in `auth.go`, `auth_azure.go` | confirmed |
-| "memberships have several writers" | admin API, Azure auto-provision (`auth_azure.go:298`), ZK roles (`auth.go:603`) | confirmed — three, now named |
+| "memberships have several writers" | admin API, Azure auto-provision (`auth_azure.go:298`) | confirmed — two, now named (the ZK-role writer was removed, RD-1291) |
 | "deleting a group with live members needs the exact count" | `groups.go:80-86` | confirmed |
 | "pipeline-registered resources are adopted, not swept" | `PreservedDrift` in the groups, registry, compliance and platform diffs; `ExecutionDiff` has none, because a deployment cannot create a rule | confirmed, with that limit |
 | "the compiled policy is never on chain" | `known_bytecode` from the snapshot; `private_policy.rs` — no state entry, chain code at the same address does not override it, the application cannot observe it | confirmed |
@@ -673,7 +673,7 @@ it, how often.** Two findings came out of it; both are listed under the tables.
 | `slug`, `name`, `description` | an admin, in the document | rarely |
 | `isOrgAdmin`, `isOrgReadonlyAdmin` | an admin, in the document; the **platform token** is additionally required to touch an org-admin group (`denyJWTAdminTouchOrgAdminGroup`) | rarely, and it is a privilege change |
 | `allowedMethods`, `claims`, `verboseErrors` | an admin, in the document | rarely |
-| *membership of people* | **not in this document** — the admin API, directory auto-provision and ZK roles | continuously |
+| *membership of people* | **not in this document** — the admin API and directory auto-provision | continuously |
 
 **`contract-registry`**
 
@@ -768,7 +768,7 @@ and the document owns only its own share (as `sanctioned_addresses.source` and
 Because no two *decision* writers coexist by design; that is precisely what
 closing the thirty-two endpoints achieved. What remains are **event** writers,
 machines reacting in the request path: login creating the user row, directory
-auto-provision and ZK roles creating memberships, the reconciler recording a
+auto-provision creating memberships, the reconciler recording a
 finalized deployment, the price fetcher, the sanctions feed. Converting them
 would mean either a human approval inside the login path, which stops the system
 working, or machines self-activating their own revisions — which removes the
@@ -782,6 +782,12 @@ deployment auto-grant the policy can express with `targetClass: deployer`, and
 `refresh-codehash` writing an observed value into a document-owned field.
 
 ## 15. Two findings from the membership path (2026-09-18)
+
+**Resolved by removal (RD-1291, 2026-10-28).** Login no longer writes
+memberships from credential data. The data was never verified: plain login
+requests no proof, and the verifier checks only the proofs a request asks for,
+so the issuer-trust question below did not arise in practice. The two findings
+are kept as the record of why.
 
 **A ZK credential can grant membership in a privileged group.**
 `ProcessZKMemberships` resolves the group by slug and creates the membership

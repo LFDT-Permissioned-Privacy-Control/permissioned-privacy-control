@@ -87,7 +87,7 @@ field; bans do not.
 
 | Class | Why it is not a document |
 |---|---|
-| People: accounts, memberships, address links, KYC | none of it is authored. An account appears at login, KYC comes from the credential, a link is the user's own signature, and a membership is an instance of a rule reviewed elsewhere — the tenant mapping in the platform document — written by three writers at per-person cadence. (The credential path for memberships acts on claims the proof never covers: RD-1291) |
+| People: accounts, memberships, address links, KYC | none of it is authored. An account appears at login, KYC comes from the credential, a link is the user's own signature, and a membership is an instance of a rule reviewed elsewhere — the tenant mapping in the platform document — written by two writers at per-person cadence. (A credential path that acted on claims the proof never covered was removed: RD-1291) |
 | Bans on a principal | an incident ban must take effect before anyone can review it. A planned deactivation could be reviewed, but `users.banned` has no provenance field, so a re-applied document would lift an incident ban |
 | Live exchange rates | a feed: rates land in `system_token_prices` on a timer and are resolved at check time; the document only says which feed a token uses |
 | Sanctions list | operational **today**, but this depends on who produces it: a list the customer curates from OFAC designations is a decision and belongs in a document; a vendor feed is not. `sanctioned_addresses` already records `source`, so both can coexist — see the decision below |
