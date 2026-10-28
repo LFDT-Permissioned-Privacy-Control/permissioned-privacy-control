@@ -187,8 +187,9 @@ func (p *PrivadoVerifier) CreateHumanityAuthRequest(verifierID, callbackURL, rea
 type VerificationResult struct {
 	// UserDID is the decentralized identifier of the user who generated the proof
 	UserDID string
-	// ProofData contains the credential subject data from verified ZK proofs
-	// Each entry in the slice corresponds to a ZeroKnowledgeProofResponse from the scope
+	// ProofData holds one entry per requested proof the response answered (see
+	// requestedProofData). Only the field each request queried is bound to its
+	// proof; the rest of the presentation is supplied by the wallet.
 	ProofData []map[string]any
 }
 
@@ -204,8 +205,8 @@ func (p *PrivadoVerifier) VerifyJWZ(ctx context.Context, jwzToken string, authRe
 	return result.UserDID, nil
 }
 
-// VerifyJWZWithProofData verifies a Privado ID JWZ token and returns both the user DID and proof data
-// This extended version allows extraction of ZK-attested claims from the credential proofs
+// VerifyJWZWithProofData verifies a Privado ID JWZ token and returns the user DID
+// together with the data of the proofs the request asked for.
 func (p *PrivadoVerifier) VerifyJWZWithProofData(ctx context.Context, jwzToken string, authRequest *protocol.AuthorizationRequestMessage, verifierID string) (*VerificationResult, error) {
 	if p.verifier == nil {
 		return nil, fmt.Errorf("verifier not initialized")
@@ -240,10 +241,30 @@ func (p *PrivadoVerifier) VerifyJWZWithProofData(ctx context.Context, jwzToken s
 		return nil, fmt.Errorf("user DID not found in verified response")
 	}
 
-	// Extract proof data from the scope (ZK proof responses)
-	// Each proof in the scope contains credential data that may include role claims
+	return &VerificationResult{
+		UserDID:   userDID,
+		ProofData: requestedProofData(authRequest.Body.Scope, authResponse.Body.Scope),
+	}, nil
+}
+
+// requestedProofData returns the data of the proofs the verifier checked. The
+// verifier pairs each requested scope entry with the first response carrying
+// its ID and ignores every other response entry, so those are never returned:
+// a wallet can add entries the request did not ask for, and nothing checks
+// them. Even in a checked entry only the queried field is proven.
+func requestedProofData(requests []protocol.ZeroKnowledgeProofRequest, responses []protocol.ZeroKnowledgeProofResponse) []map[string]any {
 	var proofData []map[string]any
-	for _, zkProof := range authResponse.Body.Scope {
+	for _, request := range requests {
+		var zkProof *protocol.ZeroKnowledgeProofResponse
+		for i := range responses {
+			if responses[i].ID == request.ID {
+				zkProof = &responses[i]
+				break
+			}
+		}
+		if zkProof == nil {
+			continue
+		}
 		data := make(map[string]any)
 
 		// Add proof ID for reference
@@ -271,8 +292,5 @@ func (p *PrivadoVerifier) VerifyJWZWithProofData(ctx context.Context, jwzToken s
 		proofData = append(proofData, data)
 	}
 
-	return &VerificationResult{
-		UserDID:   userDID,
-		ProofData: proofData,
-	}, nil
+	return proofData
 }
