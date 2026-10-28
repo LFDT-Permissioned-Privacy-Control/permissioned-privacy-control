@@ -124,7 +124,6 @@ type Server struct {
 	nodeExecution        *nodeExecutionBridge
 	nodePolicyCancel     context.CancelFunc
 	nodePolicyDone       chan struct{}
-	zkRoleExtractor      *auth.ZKRoleExtractor
 	runtimeTracer        *tracer.RuntimeTracer
 	azureAuthenticator   *auth.AzureADAuthenticator
 	azureStateStore      AzureStateManager
@@ -650,9 +649,6 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 		}
 	}
 
-	// Initialize ZK role extractor for extracting role claims from Privado proofs
-	zkRoleExtractor := auth.NewZKRoleExtractor(database)
-
 	// Initialize disclosure service
 	// RD-1147: the disclosure store reads the access_logs audit trail
 	// (GetActivityLogs / GetActivitySummary) from the audit DB while all other
@@ -698,7 +694,6 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 		disclosureService:  disclosureService,
 		config:             cfg,
 		ensResolver:        ensResolver,
-		zkRoleExtractor:    zkRoleExtractor,
 		runtimeTracer:      runtimeTracer,
 		azureAuthenticator: azureAuthenticator,
 		azureStateStore:    azureStateStore,

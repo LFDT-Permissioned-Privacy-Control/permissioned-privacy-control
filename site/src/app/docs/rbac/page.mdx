@@ -33,7 +33,7 @@ policy information and must be treated as a cross-tenant trust boundary.
 
 - **Multi-tenant** -- multiple independent organizations with isolated permission sets
 - **Flat groups, UNION across memberships** -- each user can belong to multiple groups; effective permissions are the UNION of every membership's grants. The legacy parent/child group hierarchy was removed when groups became flat; the resolver no longer walks `parent_id` even though the column persists on the schema for compatibility.
-- **Dual membership** -- users can be assigned via admin API or ZK-attested credentials
+- **Membership** -- users join groups through the admin API (or Azure AD tenant mapping); a login credential never adds a membership. Earlier versions could add memberships from Privado credential data that was not verified. After upgrading, review memberships shown as **ZK Attested** in the admin UI, especially in org-admin groups, and remove any you did not grant
 - **Contract ownership** -- track deployed contracts and define owner capabilities
 - **Caching** -- in-memory and database-level caching for high-performance access checks
 - **Immediate propagation** -- permission changes (group access, memberships, contract grants) take effect immediately, no restart or cache wait required

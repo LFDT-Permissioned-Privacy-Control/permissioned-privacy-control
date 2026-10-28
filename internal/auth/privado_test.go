@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/iden3/iden3comm/v2/protocol"
@@ -116,6 +117,30 @@ func TestPrivadoVerifier_VerifyJWZWithProofData_NilAuthRequest(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "authorization request is required")
+}
+
+// The verifier checks only the proof it pairs with each requested scope entry
+// (the first response with that ID), so only those proofs may reach callers
+// (RD-1291).
+func TestRequestedProofData_KeepsOnlyVerifiedProofs(t *testing.T) {
+	claims := json.RawMessage(`{"credentialSubject":{"rbac_groups":["acme:admins"]}}`)
+	responses := []protocol.ZeroKnowledgeProofResponse{
+		{ID: 1, CircuitID: "credentialAtomicQueryV3-beta.1"},
+		{ID: 1, CircuitID: "credentialAtomicQueryV3-beta.1", VerifiablePresentation: claims},
+		{ID: 7, CircuitID: "credentialAtomicQueryV3-beta.1", VerifiablePresentation: claims},
+	}
+
+	t.Run("plain login requests no proofs", func(t *testing.T) {
+		assert.Empty(t, requestedProofData(nil, responses))
+	})
+
+	t.Run("only the first response for each requested ID", func(t *testing.T) {
+		requests := []protocol.ZeroKnowledgeProofRequest{{ID: 1, CircuitID: "credentialAtomicQueryV3-beta.1"}}
+		got := requestedProofData(requests, responses)
+		require.Len(t, got, 1)
+		assert.Equal(t, uint32(1), got[0]["id"])
+		assert.NotContains(t, got[0], "credentialSubject")
+	})
 }
 
 func TestVerificationResult_Structure(t *testing.T) {
