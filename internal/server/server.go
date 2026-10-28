@@ -29,6 +29,7 @@ import (
 	"privacy-proxy/internal/explorer"
 	"privacy-proxy/internal/explorer/indexerclient"
 	"privacy-proxy/internal/metrics"
+	"privacy-proxy/internal/nodeapproval"
 	"privacy-proxy/internal/nodehttp"
 	"privacy-proxy/internal/policydsl"
 	"privacy-proxy/internal/pricing"
@@ -44,6 +45,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/iden3/iden3comm/v2/protocol"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -994,18 +996,8 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 	if s.nodeExecution != nil {
 		nodeExecutionService = s.nodeExecution
 	}
-	approvals, err := nodeApprovalsFromEnv(cfg.NodeURL, nodeTransport)
+	approvals, approvalBudget, err := newNodeApprovals(cfg, nodeTransport, redisClient, m.Registry)
 	if err != nil {
-		return nil, err
-	}
-	approvalBudget, err := newApprovalPreflightLimiter(approvals, redisClient)
-	if err == nil {
-		err = registerNodeApprovalMetrics(approvals, m.Registry)
-	}
-	if err != nil {
-		if approvals != nil {
-			approvals.Close()
-		}
 		return nil, err
 	}
 	s.jsonrpcProcessor = NewJSONRPCProcessor(JSONRPCProcessorConfig{
@@ -1167,7 +1159,7 @@ func (s *Server) setupRouter() *gin.Engine {
 	// Generated OpenAPI document (RD-1166). Public by design: it is the
 	// published API reference (open-source project) and serves static
 	// embedded bytes — no DB or upstream work.
-	router.GET("/openapi.json", s.handleOpenAPISpec)
+	router.GET("/openapi.json", handleOpenAPISpec)
 
 	// Prometheus metrics endpoint — restricted to private network
 	metricsHandler := promhttp.HandlerFor(s.metrics.Registry, promhttp.HandlerOpts{})
@@ -1293,14 +1285,7 @@ func (s *Server) setupRouter() *gin.Engine {
 	orgScope := s.orgScopingMiddleware()
 	apiV1 := router.Group("/api/v1")
 	{
-		oracle := apiV1.Group("/admin")
-		oracle.Use(
-			middleware.BodyLimit(MaxRequestBodySize),
-			s.localhostOnlyMiddleware(),
-			s.crossOrgAuthorizationOracleAuthMiddleware(),
-			s.crossOrgAuthorizationOracleLimitMiddleware(),
-		)
-		oracle.POST("/cross-org-authorization-oracle", s.handlePolicyCheck)
+		s.mountCrossOrgOracle(apiV1)
 
 		// Admin endpoints - private network + token auth + org scoping
 		admin := apiV1.Group("/admin")
@@ -1849,6 +1834,46 @@ func (s *Server) adminAuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+// newNodeApprovals builds V1 signed-approval delivery when it is configured.
+// In Reth mode it builds nothing: NewWithVerifier has already refused
+// OPS_APPROVAL_TARGETS together with OPS_NODE_POLICY_MODE=reth, and the guard
+// here keeps that decision in the perimeter instead of in the V1 constructors.
+func newNodeApprovals(cfg *config.Config, transport nodehttp.TransportConfig, redisClient *privacyredis.Client, reg prometheus.Registerer) (*nodeapproval.Service, preflightLimiter, error) {
+	if cfg.NodePolicy.Enabled() {
+		return nil, nil, nil
+	}
+	approvals, err := nodeApprovalsFromEnv(cfg.NodeURL, transport)
+	if err != nil {
+		return nil, nil, err
+	}
+	budget, err := newApprovalPreflightLimiter(approvals, redisClient)
+	if err == nil {
+		err = registerNodeApprovalMetrics(approvals, reg)
+	}
+	if err != nil {
+		if approvals != nil {
+			approvals.Close()
+		}
+		return nil, nil, err
+	}
+	return approvals, budget, nil
+}
+
+// mountCrossOrgOracle registers the cross-org authorization oracle. Its auth
+// middleware answers 404 unless the oracle is enabled, and configuration
+// validation refuses enabling it with OPS_NODE_POLICY_MODE=reth, so the
+// legacy-mode handlers behind it never run in Reth mode.
+func (s *Server) mountCrossOrgOracle(apiV1 *gin.RouterGroup) {
+	oracle := apiV1.Group("/admin")
+	oracle.Use(
+		middleware.BodyLimit(MaxRequestBodySize),
+		s.localhostOnlyMiddleware(),
+		s.crossOrgAuthorizationOracleAuthMiddleware(),
+		s.crossOrgAuthorizationOracleLimit,
+	)
+	oracle.POST("/cross-org-authorization-oracle", s.handlePolicyCheck)
+}
+
 func (s *Server) crossOrgAuthorizationOracleEnabled() bool {
 	// The oracle answers from OPS's own rules, not the node's execution
 	// policies; config validation refuses the combination, this keeps it shut.
@@ -1881,26 +1906,6 @@ func (s *Server) crossOrgAuthorizationOracleAuthMiddleware() gin.HandlerFunc {
 			return
 		}
 		c.Set("auth_method", "cross_org_authorization_oracle_token")
-		c.Next()
-	}
-}
-
-// crossOrgAuthorizationOracleLimitMiddleware caps the oracle requests in flight
-// with one global concurrency key, so a burst cannot tie up the proxy or the
-// node. Request-rate limits belong to the upstream RPC proxy.
-func (s *Server) crossOrgAuthorizationOracleLimitMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if s.jsonrpcProcessor == nil || s.jsonrpcProcessor.concurrencyLimiter == nil {
-			c.Next()
-			return
-		}
-		limiter := s.jsonrpcProcessor.concurrencyLimiter
-		if !limiter.TryAcquire(crossOrgOracleLimitKey) {
-			respondTooManyRequests(c, "policy-check capacity exhausted; retry later")
-			c.Abort()
-			return
-		}
-		defer limiter.Release(crossOrgOracleLimitKey)
 		c.Next()
 	}
 }

@@ -251,3 +251,16 @@ func traceVerdict(scope authorizationScopeKind, denial *ProcessError) operationV
 	}
 	return deny
 }
+
+// Oracle answers, also used for the evaluation verdicts above. deny only when
+// policy was evaluated inside the oracle scope; indeterminate when part of the
+// evaluation is outside it.
+const (
+	oracleDecisionAllow         = "allow"
+	oracleDecisionDeny          = "deny"
+	oracleDecisionIndeterminate = "indeterminate"
+
+	oracleReasonDenied       = "denied"
+	oracleReasonOutsideScope = "outside_oracle_scope"
+	oracleReasonNotSimulated = "not_simulated"
+)

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"privacy-proxy/internal/apimodels"
 	"privacy-proxy/internal/compliance"
@@ -17,6 +18,7 @@ import (
 	"privacy-proxy/internal/rbac"
 	"privacy-proxy/internal/tracer"
 
+	gethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -1037,4 +1039,50 @@ func dryRunAccessRequest(userDID, orgID string, rpc apimodels.DryRunRPCBlock) (*
 		// permissions the same way right after a grant or membership change.
 		BypassCache: true,
 	}, nil
+}
+
+// Trace and sender helpers the dry-run shares with the cross-org oracle.
+
+// policyCheckTraceTimeout bounds one oracle or dry-run trace. A variable so
+// tests can shorten it.
+var policyCheckTraceTimeout = 5 * time.Second
+
+// upstreamRateLimitedError is an upstream HTTP 429 on a trace forward. The
+// oracle answers 429 and passes Retry-After through.
+type upstreamRateLimitedError struct{ retryAfter string }
+
+func (e *upstreamRateLimitedError) Error() string { return "upstream rate limit reached" }
+
+func (s *Server) validatePolicyCheckSender(ctx context.Context, subjectDID string, op apimodels.DryRunRPCBlock) (string, error) {
+	from, _, _, _, err := policyCheckTransactionFields(op)
+	if err != nil {
+		return "", err
+	}
+	if from == "" {
+		return "", nil
+	}
+	if !gethcommon.IsHexAddress(from) {
+		return ReasonInvalidRequestShape, nil
+	}
+	linked, err := senderLinked(ctx, s.rbacAccessCtrl.Store(), subjectDID, from)
+	if err != nil {
+		return "", err
+	}
+	if !linked {
+		return ReasonSenderNotLinked, nil
+	}
+	return "", nil
+}
+
+func policyCheckTransactionFields(op apimodels.DryRunRPCBlock) (from, to, data, value string, err error) {
+	if rbac.ResolveMethodAlias(op.Method) == "eth_sendRawTransaction" {
+		rawHex, rawErr := extractRawTxHex(op.Params)
+		if rawErr != nil {
+			return "", "", "", "", rawErr
+		}
+		from, to, data, value, _, err = decodeRawTransaction(rawHex)
+		return from, to, data, value, err
+	}
+	from, to, data, value = extractTxParams(op.Params)
+	return from, to, data, value, nil
 }

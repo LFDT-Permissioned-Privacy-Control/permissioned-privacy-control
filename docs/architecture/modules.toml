@@ -1,0 +1,680 @@
+# Module map of Open Privacy Suite (RD-1367).
+#
+# Every source file in [scope] belongs to exactly one module. A module's tier
+# says whether it is part of the security perimeter:
+#
+#   core     a bug can leak data or grant access in a Reth-mode (V2)
+#            deployment; this is the audit perimeter
+#   legacy   security-critical only in the legacy or V1 signed-approval
+#            modes, which a Reth-mode deployment never selects
+#   outside  never linked into a shipped binary (clients, tooling, demos);
+#            reaches the system only through its network API
+#
+# internal/archtest enforces the boundaries (see security-perimeter.md) and
+# `make perimeter-report` regenerates perimeter-report.md from this file.
+#
+# This file is a security control: moving a file out of the core tier
+# changes what an audit covers. Changes need a security review.
+
+[scope]
+include = [
+  "internal/**/*.go",
+  "cmd/**/*.go",
+  "gen/**/*.go",
+  "mcp/**/*.go",
+  "internal/db/migrations/*.sql",
+  "internal/db/migrations_audit/*.sql",
+  "node/reth/src/**/*.rs",
+  "node-approvals/reth/src/**/*.rs",
+  "node-approvals/besu/src/main/**/*.java",
+  "contracts/src/**/*.sol",
+  "contracts/script/**/*.sol",
+  "demo/contracts/**/*.sol",
+  "frontend/src/**/*.{ts,tsx}",
+  "sdk/src/**/*.ts",
+]
+exclude = [
+  "**/*_test.go",
+  "**/testdata/**",
+  "frontend/src/**/__tests__/**",
+  "frontend/src/**/*.test.{ts,tsx}",
+  "frontend/src/test/**",
+]
+
+# Non-source files that change what ships or how the rules judge it. A delta
+# audit reviews changes to them (`perimeter-report -since`).
+[audit_inputs]
+paths = [
+  "go.mod",
+  "go.sum",
+  "mcp/go.mod",
+  "mcp/go.sum",
+  "node/reth/Cargo.toml",
+  "node/reth/Cargo.lock",
+  "node-approvals/reth/Cargo.toml",
+  "node-approvals/reth/Cargo.lock",
+  "node-approvals/besu/build.gradle",
+  "node-approvals/compatibility.json",
+  "node/reth/scripts/prepare.py",
+  "Dockerfile.backend",
+  "proto/**",
+  "buf.gen.yaml",
+  "internal/server/apispec/swagger.*",
+  ".github/workflows/**",
+  "internal/archmap/**",
+  "internal/archtest/**",
+  "Caddyfile",
+  "docker-compose*.yml",
+  "frontend/nginx*.conf",
+]
+
+# ---------------------------------------------------------------------------
+# Core: platform (shared by every request path)
+# ---------------------------------------------------------------------------
+
+[[module]]
+name = "composition"
+tier = "core"
+audit_scope = "platform"
+summary = "Startup, configuration validation and mode selection (including the refusals that keep legacy and V1 paths out of a Reth-mode deployment), route registration with its middleware chains, request limits, SSRF guard and the shared API types whose field tags decide what a response may contain."
+owner = "OPS core maintainers"
+paths = [
+  "cmd/server/**",
+  "internal/config/**",
+  "internal/netguard/**",
+  "internal/apimodels/**",
+  "internal/viewscope/**",
+  "internal/evm/**",
+  "internal/server/middleware/**",
+  "internal/server/server.go",
+  "internal/server/admin_rbac.go",
+  "internal/server/http_responses.go",
+  "internal/server/denial_reasons.go",
+  "internal/server/interface_guards.go",
+  "internal/server/doc.go",
+  "internal/server/openapi_routes.go",
+]
+
+[[module]]
+name = "identity"
+tier = "core"
+audit_scope = "platform"
+summary = "Who the caller is: token issuance and verification, ZK/Privado, Azure AD and OAuth login, sessions and refresh revocation, login challenges, Ethereum address linking (the proof that ties a signer to a principal), column encryption."
+owner = "OPS core maintainers"
+paths = [
+  "internal/auth/**",
+  "internal/crypto/**",
+  "internal/types/**",
+  "internal/server/auth.go",
+  "internal/server/auth_azure.go",
+  "internal/server/auth_failure_reasons.go",
+  "internal/server/auth_network_support.go",
+  "internal/server/auth_ratelimit.go",
+  "internal/server/auth_prod.go",
+  "internal/server/auth_dev_admin_prod.go",
+  "internal/server/oauth.go",
+  "internal/server/interfaces.go",
+  "internal/server/admin_rbac_azure_tenant.go",
+  "internal/server/admin_rbac_session.go",
+  "internal/server/dev_test_identities_prod.go",
+  "internal/server/eth_link.go",
+]
+
+[[module]]
+name = "admin-access"
+tier = "core"
+audit_scope = "platform"
+summary = "Which administrator may do what: admin token and org-admin scoping, View-as impersonation and its org pinning, dry-run diagnostics that read tenant data as another user, and the runtime security toggles."
+owner = "OPS core maintainers"
+paths = [
+  "internal/server/admin_scope.go",
+  "internal/server/impersonation.go",
+  "internal/server/viewer_org_scope.go",
+  "internal/server/admin_dry_run.go",
+  "internal/server/admin_dry_run_filter.go",
+  "internal/server/admin_system.go",
+]
+
+[[module]]
+name = "directory"
+tier = "core"
+audit_scope = "platform"
+summary = "Organizations, users, groups, memberships, contract registry, grants, shared infrastructure and group upstream credentials: the facts every access decision and every Reth fact snapshot is built from, and the admin endpoints that change them."
+owner = "OPS core maintainers"
+paths = [
+  "internal/server/admin_rbac_contract.go",
+  "internal/server/admin_rbac_contract_claim.go",
+  "internal/server/admin_rbac_group.go",
+  "internal/server/admin_rbac_org.go",
+  "internal/server/admin_rbac_user.go",
+  "internal/server/admin_shared_infra.go",
+  "internal/server/admin_group_credentials.go",
+]
+
+[[module]]
+name = "demo-endpoints"
+tier = "core"
+audit_scope = "platform"
+summary = "Demo-contract deployment endpoint. It is part of the production binary and writes contracts and grants."
+owner = "OPS core maintainers"
+paths = ["internal/server/dev_deploy_demo.go"]
+
+[[module]]
+name = "observability"
+tier = "core"
+audit_scope = "platform"
+summary = "Prometheus metrics, including the request middleware that wraps every route (after gin's logger and recovery) and sees every request, the connection-pool collector and the build version."
+owner = "OPS core maintainers"
+paths = ["internal/metrics/**", "internal/version/**"]
+
+[[module]]
+name = "ens"
+tier = "core"
+audit_scope = "platform"
+summary = "Reverse ENS lookup of linked addresses. The name is shown wherever the address may be shown; linked addresses are sent to the configured resolver."
+owner = "OPS core maintainers"
+paths = ["internal/ens/**"]
+
+[[module]]
+name = "api-docs"
+tier = "core"
+audit_scope = "platform"
+summary = "The served OpenAPI document and the route inventory built from the live route table."
+owner = "OPS core maintainers"
+paths = [
+  "internal/server/openapi_info.go",
+  "internal/server/openapi_general_info.go",
+  "internal/server/api_inventory.go",
+  "internal/server/apispec/**",
+]
+
+[[module]]
+name = "audit"
+tier = "core"
+audit_scope = "platform"
+summary = "Tamper-evident audit trail: hash chains, checkpoints and the integrity verifier, retention, SIEM export with redaction, and the admin endpoints that read it."
+owner = "OPS core maintainers"
+paths = [
+  "internal/audit/**",
+  "internal/server/admin_audit.go",
+  "internal/server/admin_rbac_audit.go",
+  "internal/server/retention_audit_store.go",
+]
+
+[[module]]
+name = "operator-cli"
+tier = "core"
+audit_scope = "operator-tools"
+summary = "Operator CLI: registers Foundry deployments through the API with a user token, and break-glass commands that re-anchor the audit hash chain and re-encrypt stored columns with direct database writes."
+owner = "OPS core maintainers"
+paths = ["cmd/privacy-cli/**"]
+
+[[module]]
+name = "mcp-server"
+tier = "core"
+audit_scope = "operator-tools"
+summary = "MCP server for AI agents. It calls the admin API with the super-admin token, so its confirmation step for destructive calls and its outbound-request guard are the controls on what an agent can do."
+owner = "OPS core maintainers"
+paths = ["mcp/**"]
+
+[[module]]
+name = "schema"
+tier = "core"
+audit_scope = "platform"
+summary = "Database schema: role separation and grants, append-only audit tables and the triggers that refuse writes to revision-managed state. The migration runner applies them."
+owner = "OPS core maintainers"
+paths = [
+  "internal/db/migrations/**",
+  "internal/db/migrations_audit/**",
+  "cmd/migrate/**",
+]
+
+# Data access modules (data = true): SQL, Redis and other direct reads and writes of stored data
+
+[[module]]
+name = "persistence"
+tier = "core"
+audit_scope = "platform"
+data = true
+summary = "Database connection, transactions, retries and shared query helpers. test_helper.go is compiled into the package, so it is counted."
+owner = "OPS core maintainers"
+paths = [
+  "internal/db/db.go",
+  "internal/db/tx.go",
+  "internal/db/retry.go",
+  "internal/db/arrays.go",
+  "internal/db/invalidating_deletes.go",
+  "internal/db/test_helper.go",
+]
+
+[[module]]
+name = "directory-store"
+tier = "core"
+audit_scope = "platform"
+data = true
+summary = "SQL for the directory: organizations, users, groups, memberships, contracts, grants, linked addresses, pre-registered deployments, the permission cache generation and Azure tenants."
+owner = "OPS core maintainers"
+paths = [
+  "internal/db/rbac_store.go",
+  "internal/db/rbac_store_contract.go",
+  "internal/db/rbac_store_user.go",
+  "internal/db/rbac_store_group.go",
+  "internal/db/rbac_store_org.go",
+  "internal/db/rbac_store_shared_infra.go",
+  "internal/db/rbac_store_cache.go",
+  "internal/db/rbac_store_preregistered.go",
+  "internal/db/rbac_cache_generation.go",
+  "internal/db/tx_rbac.go",
+  "internal/db/tx_operations.go",
+  "internal/db/eth_addresses.go",
+  "internal/db/group_credentials.go",
+  "internal/db/azure_tenant_store.go",
+]
+
+[[module]]
+name = "audit-store"
+tier = "core"
+audit_scope = "platform"
+data = true
+summary = "SQL for the audit trail and its hash-chain anchors."
+owner = "OPS core maintainers"
+paths = [
+  "internal/db/rbac_store_audit.go",
+  "internal/db/audit_chain.go",
+  "internal/db/audit_handles.go",
+]
+
+[[module]]
+name = "session-store"
+tier = "core"
+audit_scope = "platform"
+data = true
+summary = "Redis: sessions and refresh revocation, login challenges, OAuth and Azure state, and the shared permission cache."
+owner = "OPS core maintainers"
+paths = ["internal/redis/**"]
+
+# ---------------------------------------------------------------------------
+# Core: execution authority (V2)
+# ---------------------------------------------------------------------------
+
+[[module]]
+name = "node-execution"
+tier = "core"
+audit_scope = "execution"
+summary = "OPS side of V2 execution: admission (principal, organization, linked signer), signed execution identities, the private node API client, the signed fact feed and its publisher, submission tracking and the simulation/diagnostic previews."
+owner = "OPS core maintainers"
+paths = [
+  "internal/nodepolicy/**",
+  "internal/rbac/admission.go",
+  "internal/server/jsonrpc_node_policy.go",
+  "internal/server/node_policy.go",
+  "internal/server/node_simulation.go",
+  "internal/server/node_dry_run.go",
+  "internal/server/node_transaction_status.go",
+  "internal/server/node_reconciler.go",
+]
+
+[[module]]
+name = "node-policy-store"
+tier = "core"
+audit_scope = "execution"
+data = true
+summary = "SQL for the fact export, submission intents, the publisher lease and node acknowledgements."
+owner = "OPS core maintainers"
+paths = [
+  "internal/db/node_policy_export.go",
+  "internal/db/node_submission.go",
+  "internal/db/node_policy_lease.go",
+  "internal/db/node_policy_progress.go",
+]
+
+[[module]]
+name = "policy-compiler"
+tier = "core"
+audit_scope = "execution"
+summary = "Execution-policy DSL: validation, Solidity generation, compilation with the pinned solc, artifacts. The bytecode it produces is what Reth enforces."
+owner = "OPS core maintainers"
+paths = ["internal/policydsl/**"]
+
+[[module]]
+name = "configuration"
+tier = "core"
+audit_scope = "execution"
+summary = "Reviewed configuration documents: parsing and validation, four-eyes review and trusted-CI approval, activation and projection into the directory, and the legacy execution-policy revisions that remain readable in Reth mode."
+owner = "OPS core maintainers"
+paths = [
+  "internal/configuration/**",
+  "internal/server/admin_configuration.go",
+  "internal/server/admin_configuration_auth.go",
+  "internal/server/admin_configuration_ci.go",
+  "internal/server/admin_configuration_platform.go",
+  "internal/server/configuration_capabilities.go",
+  "internal/server/configuration_viewer.go",
+  "internal/server/admin_execution_policy.go",
+]
+
+[[module]]
+name = "configuration-store"
+tier = "core"
+audit_scope = "execution"
+data = true
+summary = "SQL for configuration revisions, approvals, activation, projection and compiled execution artifacts."
+owner = "OPS core maintainers"
+paths = [
+  "internal/db/configuration_revision*.go",
+  "internal/db/execution_policy_store.go",
+]
+
+[[module]]
+name = "node-guard"
+tier = "core"
+audit_scope = "execution"
+summary = "Guarded Reth: verifies signed facts and identities, pins fact snapshots per candidate block and runs the policy programs on every actual call frame."
+owner = "OPS core maintainers"
+paths = ["node/reth/src/**"]
+
+# ---------------------------------------------------------------------------
+# Core: read privacy
+# ---------------------------------------------------------------------------
+
+[[module]]
+name = "rpc-gateway"
+tier = "core"
+audit_scope = "read"
+summary = "JSON-RPC ingress: method catalog and admission, the read-path access check, forwarding, response filtering and log/field redaction, the read privacy profile, and the shared evaluation used by live calls and previews."
+owner = "OPS core maintainers"
+paths = [
+  "internal/server/jsonrpc_processor.go",
+  "internal/server/response_filter.go",
+  "internal/server/rpc_log_field_redaction.go",
+  "internal/server/event_log_filter.go",
+  "internal/server/processor_event_rules.go",
+  "internal/server/read_profile.go",
+  "internal/server/read_profile_trace.go",
+  "internal/server/operation_evaluator.go",
+]
+
+[[module]]
+name = "access-rules"
+tier = "core"
+audit_scope = "read"
+summary = "RBAC decisions: effective permissions, contract and method rules, storage-slot tiers, event and log visibility, visibleTo unlocks, org context and the method catalog."
+owner = "OPS core maintainers"
+paths = ["internal/rbac/**"]
+except = ["internal/rbac/admission.go"]
+
+[[module]]
+name = "trace-validation"
+tier = "core"
+audit_scope = "read"
+summary = "Call-trace parsing, strict redaction and nested-call validation. V2 uses the strict parser and redaction; the runtime trace validator stays inside the perimeter while the admin test-request endpoint uses it in every mode."
+owner = "OPS core maintainers"
+paths = [
+  "internal/tracer/**",
+  "internal/server/jsonrpc_trace.go",
+]
+
+[[module]]
+name = "chain-access"
+tier = "core"
+audit_scope = "read"
+data = true
+summary = "Node RPC transport and request envelopes."
+owner = "OPS core maintainers"
+paths = [
+  "internal/proxy/**",
+  "internal/nodehttp/**",
+]
+
+[[module]]
+name = "explorer-privacy"
+tier = "core"
+audit_scope = "read"
+summary = "Explorer API: every handler that returns indexed chain data, the redaction engine and its resolvers, visibility rules, and the reconciler that records who may see pending transactions."
+owner = "OPS core maintainers"
+paths = [
+  "internal/explorer/redactor.go",
+  "internal/explorer/visibility.go",
+  "internal/explorer/types.go",
+  "internal/explorer/feed_cursor.go",
+  "internal/server/explorer_api.go",
+  "internal/server/explorer_abi_resolver.go",
+  "internal/server/explorer_admin_resolver.go",
+  "internal/server/explorer_dynamic_payload_resolver.go",
+  "internal/server/explorer_event_rule_resolver.go",
+  "internal/server/explorer_visibleto_unlock_resolver.go",
+  "internal/server/explorer_log_redact.go",
+  "internal/server/visibility_reconciler.go",
+]
+
+[[module]]
+name = "indexer-store"
+tier = "core"
+audit_scope = "read"
+data = true
+summary = "Reads indexed chain data from the indexer database or its gRPC API."
+owner = "OPS core maintainers"
+paths = [
+  "internal/explorer/store.go",
+  "internal/explorer/backend.go",
+  "internal/explorer/indexerclient/**",
+]
+
+[[module]]
+name = "indexer-protocol"
+tier = "core"
+audit_scope = "read"
+data = true
+generated = true
+generator = "protoc-gen-go"
+summary = "Generated gRPC client for the indexer."
+owner = "OPS core maintainers"
+paths = ["gen/**"]
+
+[[module]]
+name = "visibility-store"
+tier = "core"
+audit_scope = "read"
+data = true
+summary = "SQL visibility filters for explorer queries and the transaction visibility records."
+owner = "OPS core maintainers"
+paths = [
+  "internal/db/explorer_redaction.go",
+  "internal/db/tx_visibility.go",
+  "internal/db/pending_tx_visibility.go",
+]
+
+[[module]]
+name = "disclosure"
+tier = "core"
+audit_scope = "read"
+summary = "Disclosure requests and grants: scoping, approval and the grant APIs that are the only place a grant discloses data."
+owner = "OPS core maintainers"
+paths = [
+  "internal/disclosure/**",
+  "internal/server/disclosure.go",
+  "internal/server/disclosure_audit_store.go",
+  "internal/server/explorer_grants.go",
+  "internal/server/explorer_grant_access.go",
+  "internal/server/explorer_grant_detail.go",
+]
+
+[[module]]
+name = "disclosure-store"
+tier = "core"
+audit_scope = "read"
+data = true
+summary = "SQL for disclosure requests, grants and their events."
+owner = "OPS core maintainers"
+paths = [
+  "internal/db/disclosure_store.go",
+  "internal/db/disclosure_events.go",
+]
+
+# ---------------------------------------------------------------------------
+# Core: compliance
+# ---------------------------------------------------------------------------
+
+[[module]]
+name = "compliance"
+tier = "core"
+audit_scope = "compliance"
+summary = "Sanctions and transfer thresholds, travel-rule records and price feeds. Sanctions are Reth facts (removing one turns a deny into an allow) and the admin endpoints return org-scoped addresses."
+owner = "OPS core maintainers"
+paths = [
+  "internal/compliance/**",
+  "internal/pricing/**",
+  "internal/server/admin_compliance.go",
+]
+
+[[module]]
+name = "compliance-store"
+tier = "core"
+audit_scope = "compliance"
+data = true
+summary = "SQL for sanctions, thresholds, prices, travel-rule records and compliance logs."
+owner = "OPS core maintainers"
+paths = ["internal/db/compliance_store.go"]
+
+# ---------------------------------------------------------------------------
+# Legacy modes (not selected in a Reth-mode deployment)
+# ---------------------------------------------------------------------------
+
+[[module]]
+name = "legacy-execution"
+tier = "legacy"
+summary = "Legacy-mode execution authorization that Reth mode never reaches: the eth_sendRawTransaction path with runtime trace authorization, the cross-org authorization oracle (refused at startup and at runtime with OPS_NODE_POLICY_MODE=reth) and the OPS-side glue for V1 signed approvals."
+owner = "OPS core maintainers"
+paths = [
+  "internal/server/admin_policy_check.go",
+  "internal/server/approval_preflight_limit.go",
+  "internal/server/node_approvals.go",
+  "internal/server/jsonrpc_legacy_send.go",
+]
+
+[[module]]
+name = "v1-approvals"
+tier = "legacy"
+summary = "V1 signed preflight approvals: OPS signer and delivery, Besu and Reth plugins. Startup refuses V1 together with Reth mode."
+owner = "OPS core maintainers"
+paths = [
+  "internal/nodeapproval/*.go",
+  "internal/nodeapproval/approvalpb/generate.go",
+  "node-approvals/reth/src/**",
+  "node-approvals/besu/src/main/**",
+]
+
+[[module]]
+name = "v1-approvals-protocol"
+tier = "legacy"
+generated = true
+generator = "protoc-gen-go"
+summary = "Generated protocol buffers for V1 approval delivery."
+owner = "OPS core maintainers"
+paths = ["internal/nodeapproval/approvalpb/*.pb.go"]
+
+# ---------------------------------------------------------------------------
+# Outside the perimeter
+# ---------------------------------------------------------------------------
+
+[[module]]
+name = "api-tooling"
+tier = "outside"
+summary = "Commands that regenerate the OpenAPI document and the endpoint inventory."
+owner = "OPS core maintainers"
+paths = [
+  "cmd/api-inventory/**",
+  "cmd/api-spec-postprocess/**",
+]
+
+[[module]]
+name = "dev-build"
+tier = "outside"
+summary = "Mock login, dev admin, test identities and short token lifetimes. Compiled only with the mockauth build tag, never into the production image."
+owner = "OPS core maintainers"
+paths = [
+  "internal/server/auth_dev.go",
+  "internal/server/auth_dev_admin.go",
+  "internal/server/token_ttl_dev.go",
+  "internal/server/dev_test_identities.go",
+]
+
+[[module]]
+name = "dev-tools"
+tier = "outside"
+summary = "Test and build tooling that is not linked into a shipped binary."
+owner = "OPS core maintainers"
+paths = [
+  "internal/testutil/**",
+  "internal/archmap/**",
+  "cmd/loadtest/**",
+  "cmd/generate-verifier-did/**",
+  "cmd/perimeter-report/**",
+]
+
+[[module]]
+name = "clients"
+tier = "outside"
+summary = "Web UI and TypeScript SDK. They call the public API with the user's own credentials; the backend enforces every rule."
+owner = "OPS core maintainers"
+paths = ["frontend/src/**", "sdk/src/index.ts"]
+
+[[module]]
+name = "sdk-generated"
+tier = "outside"
+generated = true
+generator = "sdk/scripts/generate.mjs"
+summary = "TypeScript types generated from the OpenAPI document."
+owner = "OPS core maintainers"
+paths = ["sdk/src/generated.ts"]
+
+[[module]]
+name = "demo-contracts"
+tier = "outside"
+summary = "Example and demo Solidity contracts."
+owner = "OPS core maintainers"
+paths = ["contracts/src/**", "contracts/script/**", "demo/contracts/**"]
+
+# ---------------------------------------------------------------------------
+# Dispatch points
+# ---------------------------------------------------------------------------
+
+# The only perimeter functions that may name legacy-mode code, each limited to
+# the legacy objects it lists, with the condition that keeps the legacy path
+# out of a Reth-mode deployment.
+
+[[dispatch]]
+file = "internal/server/jsonrpc_processor.go"
+function = "JSONRPCProcessor.legacyRawTransaction"
+objects = ["JSONRPCProcessor.processRawTransaction"]
+reason = "Sends the transaction to the node path instead when node policy is enabled."
+
+[[dispatch]]
+file = "internal/server/server.go"
+function = "newNodeApprovals"
+objects = ["Service", "Service.Close", "preflightLimiter", "nodeApprovalsFromEnv", "newApprovalPreflightLimiter", "registerNodeApprovalMetrics"]
+reason = "Returns before calling any V1 constructor when OPS_NODE_POLICY_MODE=reth."
+
+[[dispatch]]
+file = "internal/server/server.go"
+function = "NewWithVerifier"
+objects = ["Service", "preflightLimiter"]
+reason = "Passes on what newNodeApprovals returns, which is nil in Reth mode."
+
+[[dispatch]]
+file = "internal/server/jsonrpc_processor.go"
+function = "NewJSONRPCProcessor"
+objects = ["Service", "preflightLimiter"]
+reason = "Stores the optional V1 approval service and preflight limiter it is given; both are nil in Reth mode."
+
+[[dispatch]]
+file = "internal/server/server.go"
+function = "Server.Stop"
+objects = ["Service.Close"]
+reason = "Closes V1 approval delivery only if it was built, which it never is in Reth mode."
+
+[[dispatch]]
+file = "internal/server/server.go"
+function = "Server.mountCrossOrgOracle"
+objects = ["Server.crossOrgAuthorizationOracleLimit", "Server.handlePolicyCheck"]
+reason = "Mounts the oracle behind crossOrgAuthorizationOracleAuthMiddleware, which answers 404 unless the oracle is enabled; configuration validation refuses enabling it with OPS_NODE_POLICY_MODE=reth."

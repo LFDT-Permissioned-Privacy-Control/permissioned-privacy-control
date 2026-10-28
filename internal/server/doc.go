@@ -20,6 +20,9 @@
 //     pipeline (access check, concurrency gate, compliance, visibleTo,
 //     circuit breaker, forward, response filter, audit).
 //   - jsonrpc_trace.go — trace-based validation for eth_call / debug_trace*.
+//   - jsonrpc_node_policy.go — the Reth-mode (V2) execution path.
+//   - jsonrpc_legacy_send.go — the legacy-mode eth_sendRawTransaction path
+//     (runtime trace authorization, V1 signed approvals).
 //   - response_filter.go, rpc_log_field_redaction.go, event_log_filter.go,
 //     processor_event_rules.go — response-side filtering and redaction.
 //

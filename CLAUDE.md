@@ -69,6 +69,22 @@ site at `/api-reference`).
   operator-focused descriptions (access + fail-closed semantics; no internal
   implementation detail).
 
+## Module Map (Security Perimeter)
+
+Every source file belongs to one module in `docs/architecture/modules.toml`,
+which also says whether it is inside the audited security perimeter (see
+`docs/architecture/security-perimeter.md`).
+
+- **New source file:** add it to a module's `paths`; if in doubt, choose a
+  core module. `internal/archtest` fails on unclassified files and on
+  boundary violations.
+- **Size changes:** run `make perimeter-report` and commit
+  `docs/architecture/perimeter-report.md` (CI fails on drift).
+- **Shipped Go code is never `outside`.** Core code names legacy-mode code
+  only in the `dispatch` functions listed in the map (keep new ones small);
+  moving code to a lower tier needs a security review of the map change
+  itself.
+
 ## Code Style
 
 - Go: idiomatic, explicit error handling, table-driven tests
