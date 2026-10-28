@@ -9,6 +9,9 @@ on:
     branches:
       - master
       - main
+  # Manual runs (Actions → CI → Run workflow) for branches whose PRs do not
+  # target main, such as long-lived feature branches.
+  workflow_dispatch:
 
 env:
   # Pinned to the patch release carrying the standard-library advisory fixes
