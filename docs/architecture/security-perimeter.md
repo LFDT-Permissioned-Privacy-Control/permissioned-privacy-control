@@ -87,7 +87,9 @@ the usual ways it could run in Reth mode, but they cannot rule out every one.
 Excluding the legacy tier from a Reth-mode audit therefore rests on a review
 of the legacy code for the effects below, and the checks support that review
 rather than replace it. A boundary that needs no such review requires the
-legacy code to be compiled out of the Reth-mode build, or removed.
+legacy code to be compiled out of the Reth-mode build. Removing it is not an
+option: legacy mode is how OPS protects a node without the guarded Reth build
+(any node with `debug_traceCall`, such as Geth, Erigon or Nethermind).
 
 - **Calls through interfaces.** Interface calls are not followed to their
   implementations. The checks catch legacy values handed to core code and
