@@ -265,6 +265,110 @@ can evaluate broader candidates within an independent organization boundary;
 strict read privacy refuses diagnostic call/estimate output and exposes only
 the permission verdict for diagnostic traces. Preview never activates a policy.
 
+## Where state lives
+
+OPS PostgreSQL is the authority for people, organizations, contracts and
+configuration. The node keeps two kinds of state: what it needs to execute now
+(memory) and the signed evidence it needs to prove or replay past execution
+(its policy state directory). Keys stay with their owners: the client keeps the
+wallet key, OPS keeps the signing key, and the node holds only OPS public keys.
+
+```mermaid
+flowchart TB
+    subgraph Client["Client"]
+        Wallet["Wallet key: signs transactions locally"]
+        Session["OPS session"]
+    end
+    subgraph OPSProc["OPS process"]
+        SignKey["Ed25519 signing private key file"]
+        NodeToken["Bearer token for the private node API"]
+        LastSnap["Elected publisher: last published snapshot,<br/>in memory, for building deltas"]
+    end
+    subgraph PG["OPS PostgreSQL, authoritative"]
+        Directory["Directory facts: users, memberships, linked addresses,<br/>groups and access, contracts and grants,<br/>shared infrastructure, preregistered addresses, sanctions"]
+        Config["Configuration revisions and active execution<br/>policy revisions with compiled per-group artifacts"]
+        Feed["node_policy_clock, node_policy_outbox,<br/>node_policy_cursors (acknowledged version)"]
+        Subs["node_submissions: raw transaction, identity envelope,<br/>principal, organization, signer, visibility, state"]
+        Visibility["pending_tx_visibility, tx_visible_to"]
+        Audit["rbac_audit_log, hash-chained"]
+        Lease["Publisher lease: session advisory lock"]
+    end
+    subgraph Runtime["Guarded Reth policy runtime"]
+        subgraph Memory["Memory"]
+            Facts["Installed fact snapshot with policy bytecode"]
+            Pending["Pending transaction identities, bounded"]
+            Trust["Trusted OPS public keys and bearer token, from configuration"]
+        end
+        subgraph StateDir["Policy state directory"]
+            Objects["objects: signed fact envelopes, checkpoints,<br/>identity envelopes, status records"]
+            Pointers["pointers: facts-head, tx-, status-, included-, terminal-"]
+            Blocks["blocks: one execution manifest per produced block"]
+        end
+    end
+    subgraph Reth["Reth"]
+        Chain["Datadir: chain database"]
+        Pool["Transaction pool, in memory"]
+    end
+    Client -->|"Raw transaction or call, with session"| OPSProc
+    OPSProc -->|"Reads and writes"| PG
+    OPSProc -->|"Signed facts and identities, private API"| Runtime
+    Trust -.->|"Verifies every signed envelope"| Objects
+    Runtime -->|"Executor inside the same process"| Reth
+```
+
+Every applied fact update is retained as a signed object, and `facts-head`
+points at the latest checkpoint, so a restarted node resumes the same fact
+chain. A transaction identity is stored as an object with a `tx-` pointer when
+the node accepts it. At startup the node reloads identities that are unexpired
+and not yet terminal. The transaction pool itself is Reth's in-memory pool. Reth
+saves local pool transactions only on graceful shutdown, so a crash loses
+pooled transactions while OPS keeps their submission rows. A block manifest names the facts checkpoint
+and the identity envelope behind every transaction in the block; self-import
+and forensic replay read it, ordinary queries do not.
+
+The next diagram follows the records of one transaction across these stores.
+
+```mermaid
+sequenceDiagram
+    participant OPS as OPS process
+    participant DB as OPS PostgreSQL
+    participant RT as Node runtime memory
+    participant Dir as Node policy state directory
+    participant Reth as Reth pool and chain
+    OPS->>DB: Read current fact version
+    OPS->>OPS: Sign identity bound to the transaction hash
+    OPS->>DB: Insert node_submissions row, state queued
+    OPS->>RT: ops_submitTransaction(identity, raw transaction)
+    RT->>Dir: Identity envelope object and tx- pointer
+    RT->>RT: Register pending identity
+    RT->>Reth: Insert raw transaction into pool
+    OPS->>DB: Mark row accepted
+    Reth->>RT: Build candidate block with pinned facts
+    RT->>Dir: status- record (pending or denied)
+    RT->>Dir: Block manifest, fact checkpoint, included- record
+    Note over RT,Dir: The manifest is durable before the block is returned
+    Reth->>Reth: Persist block in chain database
+    loop Reconciler until a final outcome
+        OPS->>RT: ops_transactionStatus(hash)
+        RT->>Reth: Canonical receipt and finalized head
+        RT->>Dir: terminal- pointer once a receipt is canonical
+        RT->>RT: Release pending identity slot
+        RT-->>OPS: included or reverted, finality, created contracts
+        OPS->>DB: Update row state and outcome
+    end
+    Note over OPS,DB: Final and included: one database transaction
+    OPS->>DB: Register created contracts and deploy grant
+    OPS->>DB: Queue visibility in pending_tx_visibility
+    OPS->>DB: Set reconciled_at on the submission row
+    DB->>DB: Visibility reconciler promotes to tx_visible_to
+```
+
+Ownership and visibility are written only from finalized node evidence, in
+the same database transaction that closes the submission row. A newly
+registered contract is itself a fact change: it advances the fact version, so
+the next publication carries its ownership to the node. Until finality, an
+included outcome stays provisional and can return to pending after a reorg.
+
 ## Capacity and trust boundaries
 
 - Each group's runtime bytecode must fit **24,576 bytes**. Separate artifacts
@@ -292,4 +396,6 @@ the permission verdict for diagnostic traces. Preview never activates a policy.
 | Database facts and publication | [`node_policy_export.go`](../../internal/db/node_policy_export.go), [`publisher.go`](../../internal/nodepolicy/publisher.go) |
 | Reth fact resolution and actual frame checks | [`facts.rs`](../../node/reth/src/facts.rs), [`policy.rs`](../../node/reth/src/policy.rs) |
 | Reth identity retention, candidate pinning and replay | [`runtime.rs`](../../node/reth/src/runtime.rs) |
+| Node evidence store (objects, pointers, block manifests) | [`archive.rs`](../../node/reth/src/archive.rs), [`stream.rs`](../../node/reth/src/stream.rs) |
+| Submission records and outcome reconciliation | [`node_submission.go`](../../internal/db/node_submission.go), [`node_reconciler.go`](../../internal/server/node_reconciler.go) |
 | Candidate/admin simulation privacy | [`node_simulation.go`](../../internal/server/node_simulation.go), [`simulation.rs`](../../node/reth/src/simulation.rs) |
