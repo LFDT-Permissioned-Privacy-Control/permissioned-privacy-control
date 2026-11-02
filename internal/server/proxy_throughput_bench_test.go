@@ -26,6 +26,10 @@ import (
 	"privacy-proxy/internal/tracer"
 )
 
+// HISTORICAL DIAGNOSTIC, NOT GATE 2: processor-only (no HTTP, real auth,
+// background workers or compliance configuration). Throughput gate 2 uses the
+// full-server runner in internal/perfgate (plan RD-1410 §9.5).
+//
 // PROXY THROUGHPUT BENCHMARK (RD-1112). Measures the OPEN PRIVACY SUITE's own
 // per-request cost end-to-end — decode + ecrecover + RBAC access check + audit
 // + forward — with the Ethereum node MOCKED (instant canned responses), so the

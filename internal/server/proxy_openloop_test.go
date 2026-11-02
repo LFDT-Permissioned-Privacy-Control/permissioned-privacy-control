@@ -20,6 +20,11 @@ import (
 	"privacy-proxy/internal/tracer"
 )
 
+// HISTORICAL DIAGNOSTIC, NOT GATE 2. This drives JSONRPCProcessor.Process
+// directly: no HTTP, real auth, sealer, publisher, reconciler or compliance
+// configuration. Its RD-1112 numbers are history. Throughput gate 2 uses the
+// full-server runner in internal/perfgate (plan RD-1410 §9.5).
+//
 // OPEN-LOOP LOAD TEST (RD-1112). Unlike the closed-loop benchmark
 // (proxy_throughput_bench_test.go), which holds a fixed number of requests in
 // flight and measures the completion rate, this injects requests at a FIXED
