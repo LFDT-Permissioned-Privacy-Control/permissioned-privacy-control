@@ -14,6 +14,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import threading
@@ -75,6 +76,21 @@ class Miner:
             raise RuntimeError("block driver did not stop")
 
 
+def host_context():
+    """Contention context recorded with every gate-1 run (plan RD-1410 §9.2)."""
+    free = shutil.disk_usage(ROOT).free / 2**30
+    load = os.getloadavg()
+    return {"free_disk_gib": round(free, 2), "load_average": [round(v, 2) for v in load], "at_ms": int(time.time() * 1000)}
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def read_metrics(stack):
     with urllib.request.urlopen(stack.url + "/metrics", timeout=10) as response:
         return response.read().decode()
@@ -82,7 +98,8 @@ def read_metrics(stack):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--node", choices=("besu", "reth"), required=True)
+    parser.add_argument("--node", choices=("besu", "reth", "reth-v2"), required=True,
+                        help="reth-v2: guarded ops-reth (policy in the node) and OPS in Reth policy mode")
     parser.add_argument("--rate", type=int, default=5000)
     parser.add_argument("--seconds", type=int, default=60)
     parser.add_argument("--no-gate", action="store_true")
@@ -96,13 +113,16 @@ def main():
         parser.error("rate must be 1..100000 and seconds must be 1..600")
     if min(args.retain, args.max_requests) < 1:
         parser.error("retain and max-requests must be positive")
+    if args.node == "reth-v2" and args.no_gate:
+        parser.error("reth-v2 has no gate-off mode; run --node reth --no-gate for vanilla Reth")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     os.environ.update(OPS_EVIDENCE_DIR=str(output), OPS_POC_KEEPALIVE="1", OPS_POC_GAS_LIMIT="200000000")
     os.environ["OPS_APPROVAL_VERIFY_WORKERS"] = str(args.verify_workers or 2)
     os.environ.setdefault("OPS_RETH_BINARY", str(ROOT / ".tmp/approval-target/release/ops-reth-approvals"))
     os.environ.setdefault("OPS_BESU_HOME", str(ROOT / ".tmp/besu-review-private"))
-    sys.path.insert(0, str(ROOT / "poc" / f"{args.node}-signed-approvals"))
+    sys.path.insert(0, str(ROOT / "poc" / (("reth" if args.node == "reth-v2" else args.node) + "-signed-approvals")))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     if args.node == "besu":
         import gasstorm as g
     else:
@@ -115,7 +135,7 @@ def main():
     ops_env = {"OPS_APPROVAL_RETAIN_MAX": str(args.retain), "OPS_APPROVAL_HOPS_FILE": "",
                "MAX_CONCURRENT_REQUESTS": str(args.max_requests)}
     name = "transactions-" + args.node
-    report = {"kind": "full-transaction-stack", "node": args.node, "requested_rate": args.rate,
+    report = {"kind": "full-transaction-stack", "node": args.node, "requested_rate": args.rate, "host_start": host_context(),
               "seconds": args.seconds, "gate": not args.no_gate, "retain": args.retain,
               "block_interval_seconds": 1, "build_window_seconds": .8,
               "loadgen_sha256": hashlib.sha256(g.LOADGEN_BINARY.read_bytes()).hexdigest()}
@@ -123,9 +143,19 @@ def main():
     report["max_concurrent_requests"] = args.max_requests
     node_options = {"extra": ["--plugin-ops-approval-verify-workers", str(args.verify_workers)]} if args.verify_workers else None
     with contextlib.ExitStack() as resources:
-        stack = resources.enter_context(contextlib.closing(
-            g.LoadStack(name, plugin=not args.no_gate, ops_env=ops_env, node_options=node_options) if args.node == "besu"
-            else g.GasstormStack(name, disabled=args.no_gate, ops_env=ops_env)))
+        if args.node == "reth-v2":
+            import v2stack
+            stack = resources.enter_context(contextlib.closing(v2stack.V2Stack(name, ops_env=ops_env)))
+            report["ops_binary_sha256"] = sha256_file(stack.ops_binary)
+            report["node_binary_sha256"] = sha256_file(v2stack.V2_BINARY)
+            report["verify_workers"] = None
+        else:
+            stack = resources.enter_context(contextlib.closing(
+                g.LoadStack(name, plugin=not args.no_gate, ops_env=ops_env, node_options=node_options) if args.node == "besu"
+                else g.GasstormStack(name, disabled=args.no_gate, ops_env=ops_env)))
+            report["ops_binary_sha256"] = sha256_file(ROOT / ".tmp/ops-server")
+            if args.node == "reth":
+                report["node_binary_sha256"] = sha256_file(os.environ["OPS_RETH_BINARY"])
         miner = resources.enter_context(contextlib.closing(Miner(stack.node, h.ZERO, h.ADMIN)))
         load = resources.enter_context(contextlib.closing(g.Loadgen(stack)))
         sampler = resources.enter_context(contextlib.closing(MemorySampler(
@@ -214,6 +244,17 @@ def main():
                 "included_during_sending_tps": within/args.seconds,
                 "queue_to_commit_ms": percentiles(latencies)}
             (output / "receipts.json").write_text(json.dumps(receipts) + "\n")
+            if args.node == "reth-v2":
+                # Lifecycle counts on the OPS side (plan §9.3, Codex 1.7) and node evidence size.
+                states = stack.psql("SELECT state || '=' || count(*) FROM node_submissions GROUP BY state")
+                report["v2"] = {"node_submissions_by_state": states.split("\n") if states else [],
+                                "node_submissions_reconciled": int(stack.psql("SELECT count(*) FROM node_submissions WHERE reconciled_at IS NOT NULL") or 0),
+                                "policy_archive_bytes": stack.node.archive_bytes(),
+                                "policy_archive_bytes_per_successful_tx": stack.node.archive_bytes() / max(good, 1),
+                                "ops_node_unavailable_lines": sum(1 for line in (stack.directory / "ops.log").open() if "private node execution failed" in line and "unavailable" in line),
+                                "ops_node_rejected_lines": sum(1 for line in (stack.directory / "ops.log").open() if "private node execution failed" in line and "rejected" in line),
+                                "node_decision_log": stack.node.decision_log,
+                                "policy_digest": getattr(stack, "policy_digest", None)}
             print(json.dumps(report["receipts"]), flush=True)
         except BaseException as error:
             report["error"] = str(error)
@@ -223,6 +264,7 @@ def main():
             report["memory_samples"] = sampler.samples
             report["memory_sampling_error"] = sampler.error
             report["blocks"] = miner.blocks
+            report["host_end"] = host_context()
             (output / "transactions-report.json").write_text(json.dumps(report, indent=2) + "\n")
 
 

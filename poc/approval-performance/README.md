@@ -243,6 +243,22 @@ python3 poc/approval-performance/transactions.py --node besu --verify-workers 4 
 python3 poc/approval-performance/report.py .tmp/performance/reth .tmp/performance/besu-four .tmp/performance/reth-on
 ```
 
+`--node reth-v2` runs the same harness against OPS V2: the guarded `ops-reth`
+node (policy enforced in the node, no preflight) and OPS in Reth policy mode.
+The PostgreSQL/Redis containers, OPS request settings, Gasstorm fixture seed,
+generator, Engine API driver (no `--dev`), gas limit and receipt verification
+are the V1 ones; the driver starts only after OPS reports `/ready`. It has no
+gate-off mode. Point `OPS_SERVER_BINARY` at an OPS build from the V2 tree and
+`OPS_RETH_V2_BINARY` at its node (default `node/reth/target/release/ops-reth`).
+Every report also records the OPS and node binary checksums, free disk space and
+load average at the start and end, and, for V2, the OPS submission states and
+the node's policy archive size.
+
+```sh
+go build -tags mockauth -o .tmp/ops-server-v2 ./cmd/server
+OPS_SERVER_BINARY=.tmp/ops-server-v2 python3 poc/approval-performance/transactions.py --node reth-v2 --rate 5000 --seconds 60 --output .tmp/performance/reth-v2
+```
+
 Use a new output directory for every run; existing directories are refused.
 Run cases sequentially, without other builds or benchmarks. The tools stop their
 owned nodes, senders and disposable database/cache containers on exit. Evidence
