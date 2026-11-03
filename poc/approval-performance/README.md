@@ -251,8 +251,15 @@ are the V1 ones; the driver starts only after OPS reports `/ready`. It has no
 gate-off mode. Point `OPS_SERVER_BINARY` at an OPS build from the V2 tree and
 `OPS_RETH_V2_BINARY` at its node (default `node/reth/target/release/ops-reth`).
 Every report also records the OPS and node binary checksums, free disk space and
-load average at the start and end, and, for V2, the OPS submission states and
-the node's policy archive size.
+load average at the start and end, the OPS `/rpc` answers per HTTP status during
+the run (429/503 are refusals), and, for V2, the OPS submission states, the
+identity history by actor and reason code (renewals, recoveries, renewal stops,
+client resubmissions), the pending-work counters at the end, and the node's
+policy archive per kind (block manifests, fact records, record lists). A check
+that fails after the load records its error in place of its value.
+`--ops-env KEY=VALUE` (repeatable) sets an OPS setting for a labelled
+sensitivity run; the overrides are recorded in the report. Keys the stacks or
+other flags own (`OPS_APPROVAL_*`, `MAX_CONCURRENT_REQUESTS`) are refused.
 
 ```sh
 go build -tags mockauth -o .tmp/ops-server-v2 ./cmd/server

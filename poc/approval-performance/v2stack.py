@@ -83,7 +83,14 @@ class V2Node(h.Node):
             raise
 
     def archive_bytes(self):
-        return sum(p.stat().st_size for p in self.state_dir.rglob("*") if p.is_file())
+        # The running node writes and prunes meanwhile: skip what vanished.
+        total = 0
+        for path in self.state_dir.rglob("*"):
+            try:
+                total += path.stat().st_size if path.is_file() else 0
+            except FileNotFoundError:
+                pass
+        return total
 
 
 class V2Stack(g.GasstormStack):

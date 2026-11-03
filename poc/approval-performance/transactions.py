@@ -14,7 +14,9 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -96,6 +98,69 @@ def read_metrics(stack):
         return response.read().decode()
 
 
+OPS_ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]*\Z")
+
+
+def parse_ops_env(values):
+    """--ops-env KEY=VALUE pairs: OPS settings for a labelled sensitivity run.
+    Keys the stacks own (OPS_APPROVAL_*: rewritten by the V1 stacks, dropped by
+    V2) or that have their own flag (MAX_CONCURRENT_REQUESTS: --max-requests)
+    are refused, so the report never records an override that did not apply."""
+    out = {}
+    for value in values or ():
+        key, sep, val = value.partition("=")
+        if not sep or not OPS_ENV_KEY.match(key) or key in out:
+            raise ValueError(f"--ops-env expects distinct KEY=VALUE with an upper-case key, got {value!r}")
+        if key.startswith("OPS_APPROVAL_") or key == "MAX_CONCURRENT_REQUESTS":
+            raise ValueError(f"--ops-env cannot set {key}: the stack or a flag owns it")
+        out[key] = val
+    return out
+
+
+def guarded(check):
+    """Run one report check; a failure is recorded in its place, never raised,
+    so a check taken after the load cannot fail a finished run."""
+    try:
+        return check()
+    except Exception as error:
+        return {"error": f"{type(error).__name__}: {error}"}
+
+
+RPC_STATUS = re.compile(r'^privacyproxy_http_requests_total\{(?=[^}]*path="/rpc/:org_id")[^}]*status="(\d+)"[^}]*\}\s+(\S+)$')
+
+
+def rpc_status_counts(before, after):
+    """/rpc responses per HTTP status between two OPS Prometheus scrapes."""
+    def read(text):
+        counts = {}
+        for line in text.splitlines():
+            if match := RPC_STATUS.match(line.strip()):
+                counts[match.group(1)] = counts.get(match.group(1), 0) + float(match.group(2))
+        return counts
+    start, end = read(before), read(after)
+    # A counter below its earlier value was reset (OPS restarted): count from zero.
+    delta = {status: end[status] - (start.get(status, 0) if end[status] >= start.get(status, 0) else 0) for status in sorted(end)}
+    return {status: int(value) for status, value in delta.items() if value}
+
+
+def archive_breakdown(state_dir):
+    """Files and bytes per kind in the V2 node's policy state directory:
+    per-block manifests/segments (blocks), fact records (facts), record lists
+    (lists), the facts-head pointer and leftovers (tmp)."""
+    out = {}
+    for kind in ("blocks", "facts", "lists", "pointers", "tmp"):
+        files, size = 0, 0
+        for path in (Path(state_dir) / kind).rglob("*"):
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                continue  # the running node pruned or renamed it after the listing
+            if stat.S_ISREG(info.st_mode):
+                files, size = files + 1, size + info.st_size
+        out[kind] = {"files": files, "bytes": size}
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--node", choices=("besu", "reth", "reth-v2"), required=True,
@@ -108,7 +173,13 @@ def main():
     parser.add_argument("--max-requests", type=int, default=5000,
                         help="OPS concurrent request ceiling; independent of the requested TPS")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--ops-env", action="append", metavar="KEY=VALUE",
+                        help="OPS setting for a labelled sensitivity run (repeatable); recorded in the report")
     args = parser.parse_args()
+    try:
+        overrides = parse_ops_env(args.ops_env)
+    except ValueError as error:
+        parser.error(str(error))
     if not 1 <= args.rate <= 100000 or not 1 <= args.seconds <= 600:
         parser.error("rate must be 1..100000 and seconds must be 1..600")
     if min(args.retain, args.max_requests) < 1:
@@ -133,9 +204,10 @@ def main():
     genesis["gasLimit"] = hex(200000000)  # avoid a 30M-gas/second ceiling below the requested ETH TPS
     (output / "genesis.json").write_text(json.dumps(genesis) + "\n")
     ops_env = {"OPS_APPROVAL_RETAIN_MAX": str(args.retain), "OPS_APPROVAL_HOPS_FILE": "",
-               "MAX_CONCURRENT_REQUESTS": str(args.max_requests)}
+               "MAX_CONCURRENT_REQUESTS": str(args.max_requests), **overrides}
     name = "transactions-" + args.node
     report = {"kind": "full-transaction-stack", "node": args.node, "requested_rate": args.rate, "host_start": host_context(),
+              "ops_env_overrides": overrides,
               "seconds": args.seconds, "gate": not args.no_gate, "retain": args.retain,
               "block_interval_seconds": 1, "build_window_seconds": .8,
               "loadgen_sha256": hashlib.sha256(g.LOADGEN_BINARY.read_bytes()).hexdigest()}
@@ -161,7 +233,8 @@ def main():
         sampler = resources.enter_context(contextlib.closing(MemorySampler(
             {"node": stack.node.process, "ops": stack.ops, "loadgen": load.process})))
         try:
-            (output / "metrics-before.txt").write_text(read_metrics(stack))
+            metrics_before = read_metrics(stack)
+            (output / "metrics-before.txt").write_text(metrics_before)
             config = {"pattern": "constant", "durationSec": args.seconds, "constantRate": args.rate,
                       "numAccounts": 10, "transactionType": "eth-transfer", "privacyMode": True}
             assert g.request(load.url + "/start", "POST", config)["status"] == "started"
@@ -196,7 +269,10 @@ def main():
             (output / "transactions.json").write_text(json.dumps(logs) + "\n")
             # Allow the final block builds to complete, then independently verify receipts.
             time.sleep(3)
-            (output / "metrics-after.txt").write_text(read_metrics(stack))
+            metrics_after = read_metrics(stack)
+            (output / "metrics-after.txt").write_text(metrics_after)
+            # OPS answers to the load (429/503 = refusals, incl. pending-work limits).
+            report["rpc_status_counts"] = rpc_status_counts(metrics_before, metrics_after)
             by_hash = {row["txHash"].lower(): row for row in logs if row.get("txHash")}
             local, connections, lock = threading.local(), [], threading.Lock()
 
@@ -249,10 +325,21 @@ def main():
                 # Execution tracking lives in its own database (RD-1410): in-flight
                 # bindings by state, then insert-once final status rows.
                 states = stack.psql_exec("SELECT 'binding_' || state || '=' || count(*) FROM node_tx_binding GROUP BY state UNION ALL SELECT 'final_' || state || '=' || count(*) FROM node_tx_status GROUP BY state")
+                # The identity history by actor (1 client, 2 system) and reason
+                # code (internal/db/node_tracking.go): system rows are renewals and
+                # recoveries (40-44) and renewal stops (8, 20-30); actor 1 rows are
+                # client resubmissions and revivals.
+                history = guarded(lambda: stack.psql_exec("SELECT actor || ':' || reason || '=' || count(*) FROM node_tx_identities GROUP BY actor, reason ORDER BY 1"))
+                quota = guarded(lambda: stack.psql_exec("SELECT 'global=' || used FROM pending_quota UNION ALL SELECT 'principals=' || coalesce(sum(used), 0) FROM pending_quota_principal UNION ALL SELECT 'orgs=' || coalesce(sum(used), 0) FROM pending_quota_org"))
+                archive = guarded(lambda: archive_breakdown(stack.node.state_dir))
                 report["v2"] = {"tracking_by_state": states.split("\n") if states else [],
+                                "identity_history_by_actor_reason": history.split("\n") if isinstance(history, str) and history else history or [],
+                                "pending_quota_at_end": quota.split("\n") if isinstance(quota, str) and quota else quota or [],
+                                "policy_archive": archive,
+                                "manifest_bytes_per_successful_tx": archive["blocks"]["bytes"] / max(good, 1) if "blocks" in archive else None,
                                 "tracking_final": int(stack.psql_exec("SELECT count(*) FROM node_tx_status") or 0),
-                                "policy_archive_bytes": stack.node.archive_bytes(),
-                                "policy_archive_bytes_per_successful_tx": stack.node.archive_bytes() / max(good, 1),
+                                "policy_archive_bytes": guarded(stack.node.archive_bytes),
+                                "policy_archive_bytes_per_successful_tx": guarded(lambda: stack.node.archive_bytes() / max(good, 1)),
                                 "ops_node_unavailable_lines": sum(1 for line in (stack.directory / "ops.log").open() if "private node execution failed" in line and "unavailable" in line),
                                 "ops_node_rejected_lines": sum(1 for line in (stack.directory / "ops.log").open() if "private node execution failed" in line and "rejected" in line),
                                 "node_decision_log": stack.node.decision_log,
