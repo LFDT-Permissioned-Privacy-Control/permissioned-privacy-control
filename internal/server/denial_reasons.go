@@ -70,6 +70,29 @@ const (
 	// imply that the authenticated caller lacks a method permission.
 	ReasonNodeRejected         = "node_rejected"
 	ReasonExecutionUnavailable = "execution_unavailable"
+	// ReasonPublicationPending: the execution node has not yet applied the
+	// policy facts the request needs (503 with Retry-After). It describes the
+	// deployment's publication, not any tenant's state.
+	ReasonPublicationPending = "publication_pending"
+	// ReasonPendingLimit: the execution path's global pending-work limit is
+	// reached (503); retry after Retry-After (RD-1410).
+	ReasonPendingLimit = "pending_limit"
+	// ReasonPrincipalPendingLimit: the caller's own pending transactions are
+	// at the per-principal cap (429); retry after Retry-After (RD-1410).
+	ReasonPrincipalPendingLimit = "principal_pending_limit"
+	// ReasonOrgPendingLimit: the pending transactions of the caller's
+	// organization (all its principals) are at the per-organization cap
+	// (429); retry after Retry-After (RD-1410).
+	ReasonOrgPendingLimit = "org_pending_limit"
+	// ReasonTransactionConflict: the signed transaction is already bound to an
+	// earlier submission it does not match (another principal, organisation,
+	// signer or visibility list), or can no longer execute (409). Collapsed on
+	// the wire.
+	ReasonTransactionConflict = "transaction_conflict"
+	// ReasonPoolRejected: the node's pool refused the transaction's nonce
+	// (used, or held by another transaction without a sufficient fee bump);
+	// not final (409). Collapsed on the wire.
+	ReasonPoolRejected = "pool_rejected"
 	// ReasonInternalError: an internal failure (500) — generic by construction.
 	ReasonInternalError = "internal_error"
 
@@ -114,7 +137,14 @@ func wireReason(code string) string {
 		ReasonConcurrencyLimited,
 		ReasonUpstreamError,
 		ReasonNodeRejected,
-		ReasonExecutionUnavailable:
+		ReasonExecutionUnavailable,
+		ReasonPublicationPending,
+		// Backpressure: the caller's own pending work, its organization's,
+		// or the deployment's as a whole (a load signal the 503 status
+		// already carries), never another identified tenant's state.
+		ReasonPendingLimit,
+		ReasonPrincipalPendingLimit,
+		ReasonOrgPendingLimit:
 		return code
 	default:
 		return ReasonWireGenericDenied

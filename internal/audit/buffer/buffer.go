@@ -20,6 +20,21 @@
 // wall-clock, so a skewed host clock cannot reorder the chain. (The verifier's
 // gap/count check is on the SEALED Postgres chain via signed checkpoints, not
 // on this internal buffer sequence.)
+//
+// Never deleting an unsealed append (RD-1410):
+//   - Completed-publication frontier. A sequence is allocated before its write
+//     lands, so a higher sequence can be persisted while a lower one is still
+//     being written. Drain and DeleteThrough never pass the frontier: the
+//     highest sequence at and below which every allocated sequence has
+//     completed (written, or failed and left as a hole).
+//   - Allocation high-water. DeleteThrough, the only operation that removes
+//     entries, records in the same synced batch a never-decreasing high-water
+//     key (outside the entry range). On Open the allocator resumes above
+//     max(high-water, last entry), so after a full drain and reopen a new
+//     entry never reuses a sequence the chain already sealed.
+//   - External seed. A buffer opened with RequireSeed refuses appends until
+//     SeedFloor gives it the chain's sealed high-water, which also covers a
+//     recreated, empty buffer directory.
 package buffer
 
 import (
@@ -27,8 +42,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
-	"sync/atomic"
+	"sync"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -40,10 +56,47 @@ const (
 	entryKeyLen = 1 + 8
 )
 
+// highWaterKey holds the persisted allocation high-water. Its prefix sorts
+// outside the entry range, so Drain and DeleteThrough never touch it.
+var highWaterKey = []byte{'h'}
+
+// ErrNotSeeded is returned by Append on a RequireSeed buffer before SeedFloor.
+var ErrNotSeeded = errors.New("audit buffer is not seeded: the sealed chain's high-water is not known yet")
+
 // Buffer is a durable, ordered, append-only staging buffer for audit entries.
 type Buffer struct {
-	db  *pebble.DB
-	seq atomic.Uint64 // last allocated sequence (0 = empty); monotonic
+	db *pebble.DB
+
+	mu       sync.Mutex
+	next     uint64              // last allocated (or seeded) sequence
+	frontier uint64              // every sequence <= frontier has completed
+	done     map[uint64]struct{} // completed sequences above the frontier
+	seeded   bool
+	appended bool // SeedFloor is refused once an append has been allocated
+
+	deleteMu sync.Mutex // serialises DeleteThrough and owns hw
+	hw       uint64     // persisted allocation high-water
+
+	beforeSet func(seq uint64) error // test seam: runs before an entry's write
+}
+
+type options struct {
+	requireSeed bool
+	beforeSet   func(seq uint64) error
+}
+
+// Option configures Open.
+type Option func(*options)
+
+// RequireSeed makes Append refuse (ErrNotSeeded) until SeedFloor is called
+// with the sealed chain's high-water. Use it wherever the sealed chain lives
+// outside the buffer (the server: the audit database).
+func RequireSeed() Option { return func(o *options) { o.requireSeed = true } }
+
+// WithBeforeSetForTest runs fn before each entry's write (a test seam to delay
+// or fail one sequence's write). Never used in production.
+func WithBeforeSetForTest(fn func(seq uint64) error) Option {
+	return func(o *options) { o.beforeSet = fn }
 }
 
 // Entry is a buffered audit record paired with its sequence number.
@@ -69,7 +122,11 @@ func prefixBounds() *pebble.IterOptions {
 
 // Open opens (or creates) the buffer at dir and recovers the last persisted
 // sequence so Append continues monotonically across restarts.
-func Open(dir string) (*Buffer, error) {
+func Open(dir string, opts ...Option) (*Buffer, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	// Fail fast with an actionable error if the dir isn't usable, rather than
 	// deep inside Pebble with a bare EACCES (the common non-root-volume case).
 	if err := ensureWritableDir(dir); err != nil {
@@ -79,7 +136,7 @@ func Open(dir string) (*Buffer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open audit buffer: %w", err)
 	}
-	b := &Buffer{db: db}
+	b := &Buffer{db: db, done: map[uint64]struct{}{}, seeded: !o.requireSeed, beforeSet: o.beforeSet}
 	if err := b.recoverSeq(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -122,45 +179,186 @@ func bufferDirError(dir string, err error) error {
 	return fmt.Errorf("prepare audit buffer dir %q: %w", dir, err)
 }
 
-// recoverSeq sets seq to the highest persisted entry sequence (0 if empty).
+// recoverSeq resumes allocation above max(persisted high-water, last entry):
+// every sequence ever persisted is at or below that, because only
+// DeleteThrough removes entries and it records the high-water atomically.
+// Nothing is in flight after Open, so the frontier starts there too.
 func (b *Buffer) recoverSeq() error {
+	value, closer, err := b.db.Get(highWaterKey)
+	switch {
+	case err == nil:
+		if len(value) != 8 {
+			_ = closer.Close()
+			return fmt.Errorf("audit buffer recover: high-water key has %d bytes, want 8", len(value))
+		}
+		b.hw = binary.BigEndian.Uint64(value)
+		_ = closer.Close()
+	case !errors.Is(err, pebble.ErrNotFound):
+		return fmt.Errorf("audit buffer recover high-water: %w", err)
+	}
 	it, err := b.db.NewIter(prefixBounds())
 	if err != nil {
 		return fmt.Errorf("audit buffer recover: %w", err)
 	}
 	defer it.Close()
+	floor := b.hw
 	if it.Last() && validEntryKey(it.Key()) {
-		b.seq.Store(seqFromKey(it.Key()))
+		floor = max(floor, seqFromKey(it.Key()))
 	}
+	b.next, b.frontier = floor, floor
 	return it.Error()
 }
 
+// SeedFloor raises the allocator and the frontier to at least floor (the
+// sealed chain's high-water) and marks the buffer seeded. It must run before
+// the first append: raising the floor under in-flight appends would skip them.
+func (b *Buffer) SeedFloor(floor uint64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.appended {
+		return errors.New("audit buffer seed refused: appends have already been allocated")
+	}
+	if floor > b.next {
+		if b.next > b.hw {
+			// Entries in (hw, floor] are now treated as sealed and will be
+			// deleted: the chain already holds those positions, so these
+			// entries reused sequences (a buffer restored from an older copy).
+			slog.Warn("audit buffer floor raised above entries still in the buffer; they are treated as sealed",
+				"local_last", b.next, "chain_high_water", floor)
+		}
+		b.next, b.frontier = floor, floor
+	}
+	b.seeded = true
+	return nil
+}
+
+// Seeded reports whether appends are accepted.
+func (b *Buffer) Seeded() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.seeded
+}
+
+// AllocatedThrough is the highest sequence allocated or seeded so far. A
+// sealed chain high-water above it means another writer shares the chain.
+func (b *Buffer) AllocatedThrough() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.next
+}
+
+func (b *Buffer) completedThrough() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.frontier
+}
+
+func (b *Buffer) complete(seq uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if seq != b.frontier+1 {
+		b.done[seq] = struct{}{}
+		return
+	}
+	b.frontier = seq
+	for {
+		if _, ok := b.done[b.frontier+1]; !ok {
+			return
+		}
+		delete(b.done, b.frontier+1)
+		b.frontier++
+	}
+}
+
 // Append durably stores data and returns its assigned sequence. The write is
-// fsync'd before returning, so the entry survives a crash. The sequence
-// advances only on success, keeping persisted sequences contiguous.
+// fsync'd before returning, so the entry survives a crash.
 func (b *Buffer) Append(data []byte) (uint64, error) {
-	// Atomic sequence allocation with NO lock held across the write, so
+	// Allocation takes a short lock but NO lock is held across the write, so
 	// concurrent appends are not serialized — this lets Pebble's WAL
 	// group-commit amortize the fsync across simultaneous writers. (A
 	// per-append mutex defeats group commit and collapses throughput to one
 	// F_FULLFSYNC per record — measured ~5x slower than the sync PG path it
-	// was meant to beat; RD-1112.) Pebble keys are sequence-ordered regardless
-	// of write order. A failed Set just leaves an unused sequence number,
-	// harmless: the sealer drains the keys that actually exist, in order.
-	seq := b.seq.Add(1)
+	// was meant to beat; RD-1112.) A failed write leaves a harmless hole; its
+	// sequence still completes, so it never holds the frontier back.
+	b.mu.Lock()
+	if !b.seeded {
+		b.mu.Unlock()
+		return 0, ErrNotSeeded
+	}
+	b.next++
+	seq := b.next
+	b.appended = true
+	b.mu.Unlock()
+	defer b.complete(seq)
+	if b.beforeSet != nil {
+		if err := b.beforeSet(seq); err != nil {
+			return 0, fmt.Errorf("audit buffer append: %w", err)
+		}
+	}
 	if err := b.db.Set(entryKey(seq), data, pebble.Sync); err != nil {
 		return 0, fmt.Errorf("audit buffer append: %w", err)
 	}
 	return seq, nil
 }
 
+// AppendBatch durably stores every entry of data in one fsync'd write and
+// returns their sequences, which are contiguous and in order. Either every
+// entry is stored or none is (one Pebble batch); the sequences of a failed
+// batch complete as holes, like a failed Append, so they never hold the
+// frontier back.
+func (b *Buffer) AppendBatch(data [][]byte) ([]uint64, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	b.mu.Lock()
+	if !b.seeded {
+		b.mu.Unlock()
+		return nil, ErrNotSeeded
+	}
+	first := b.next + 1
+	b.next += uint64(len(data))
+	b.appended = true
+	b.mu.Unlock()
+	seqs := make([]uint64, len(data))
+	for i := range data {
+		seqs[i] = first + uint64(i)
+	}
+	defer func() {
+		for _, seq := range seqs {
+			b.complete(seq)
+		}
+	}()
+	batch := b.db.NewBatch()
+	defer batch.Close()
+	for i, entry := range data {
+		if b.beforeSet != nil {
+			if err := b.beforeSet(seqs[i]); err != nil {
+				return nil, fmt.Errorf("audit buffer append: %w", err)
+			}
+		}
+		if err := batch.Set(entryKey(seqs[i]), entry, nil); err != nil {
+			return nil, fmt.Errorf("audit buffer append: %w", err)
+		}
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return nil, fmt.Errorf("audit buffer append: %w", err)
+	}
+	return seqs, nil
+}
+
 // Drain returns up to max buffered entries in ascending sequence order, starting
 // after afterSeq (pass 0 to start from the beginning). The sealer uses this to
 // read the next batch to chain and persist.
+//
+// Drain never returns an entry above the completed-publication frontier.
 func (b *Buffer) Drain(afterSeq uint64, max int) ([]Entry, error) {
+	frontier := b.completedThrough()
+	if afterSeq >= frontier {
+		return nil, nil
+	}
 	it, err := b.db.NewIter(&pebble.IterOptions{
 		LowerBound: entryKey(afterSeq + 1),
-		UpperBound: []byte{entryPrefix + 1},
+		UpperBound: entryKey(frontier + 1),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("audit buffer drain: %w", err)
@@ -179,13 +377,33 @@ func (b *Buffer) Drain(afterSeq uint64, max int) ([]Entry, error) {
 	return out, it.Error()
 }
 
-// DeleteThrough removes all entries with sequence <= throughSeq. The sealer
-// calls this only after the batch is durably committed to the audit Postgres,
-// so deletion never outruns the sealed chain.
+// DeleteThrough removes all entries with sequence <= throughSeq, clamped to
+// the completed-publication frontier. The sealer calls this only after the
+// batch is durably committed to the audit Postgres, so deletion never outruns
+// the sealed chain. The same synced batch records the allocation high-water,
+// which never decreases.
 func (b *Buffer) DeleteThrough(throughSeq uint64) error {
-	if err := b.db.DeleteRange(entryKey(0), entryKey(throughSeq+1), pebble.Sync); err != nil {
+	throughSeq = min(throughSeq, b.completedThrough())
+	b.deleteMu.Lock()
+	defer b.deleteMu.Unlock()
+	if throughSeq <= b.hw {
+		return nil // everything at or below the high-water is already deleted
+	}
+	hw := throughSeq
+	batch := b.db.NewBatch()
+	defer batch.Close()
+	var value [8]byte
+	binary.BigEndian.PutUint64(value[:], hw)
+	if err := batch.DeleteRange(entryKey(0), entryKey(throughSeq+1), nil); err != nil {
 		return fmt.Errorf("audit buffer delete-through: %w", err)
 	}
+	if err := batch.Set(highWaterKey, value[:], nil); err != nil {
+		return fmt.Errorf("audit buffer delete-through: %w", err)
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return fmt.Errorf("audit buffer delete-through: %w", err)
+	}
+	b.hw = hw
 	return nil
 }
 

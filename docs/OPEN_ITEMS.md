@@ -428,6 +428,43 @@ representative contracts on the intended hardware and block configuration.
 The reciprocal of an in-process policy-check time excludes this work and cannot
 be quoted as achieved node TPS.
 
+**Resolved on the OPS side (fact-change refusals):** the fact version now
+advances only when a column the fact export reads changes, once per database
+transaction. The publisher is woken by `LISTEN`/`NOTIFY` at commit instead of
+its one-second timer (in tests a fact change reached the node in a few
+milliseconds), and it exports only the keys changed since the generation the
+node acknowledged, with a full export at checkpoints, at least every five
+minutes, and whenever the change log cannot describe the gap. A request that
+needs facts the node has not applied yet is handed to the node's bounded wait
+(capability `fact_wait_v1`) and, if they do not arrive, answered with 503 and
+`Retry-After: 1` (reason `publication_pending`) instead of an immediate
+refusal; a node without that capability is refused the same way at once.
+
+**Resolved on the OPS side (delivery and recovery):** OPS keeps a pending
+transaction deliverable itself. The elected instance's lease keeper renews a
+pending transaction that the node no longer holds — never delivered, lost by a
+node restart (new boot id), evicted from the pool, or with an identity about
+to expire — after a full admission and compliance re-check, at the current
+fact version, audited before it takes effect, for at most
+`OPS_NODE_POLICY_MAX_AGE` (10 minutes by default). A refused re-check, the
+maximum age or a pool refusal stops renewal (`renewal_stopped`, not final);
+`dropped` is reported only on finalized nonce evidence. With a node that
+offers the batched status call, the evidence, pool membership and the
+finalized head come from the node itself; otherwise OPS polls one transaction
+per call and reads them from the public RPC.
+
+**Resolved on the OPS side (congestion):** under congestion an identity is
+renewed once half of its lifetime is left, within a renewal budget, earliest
+expiry first, and new transactions get backpressure (503 at the global
+pending-work limit, 429 at the per-principal and per-organization limits, all
+with `Retry-After`) before the pending work exceeds what the budget can renew
+in time. The guarantee holds only within those limits and while re-checks keep
+up with the budget; beyond them an identity can lapse (the transaction waits,
+nothing is lost). Accepted: two organizations together can fill the global
+limit, and a caller that varies its own pending work can estimate the other
+tenants' combined pending work from the 503 while that work is above the room
+it keeps.
+
 Evidence: [load results and durability analysis](implementation/evidence/reth-runtime.md#where-the-stacks-throughput-actually-goes-2026-09-17),
 [current policy cost and theoretical ceiling](implementation/evidence/per-group-live-2026-09-25.md#theoretical-throughput-from-policy-cost).
 

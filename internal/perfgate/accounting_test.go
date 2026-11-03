@@ -50,17 +50,18 @@ func TestAccountCountsRejectionsByCompletionPhase(t *testing.T) {
 		reject(start.Add(20*time.Second), 200, -32000),
 		reject(start.Add(21*time.Second), 429, 0),
 		{Scheduled: start.Add(22 * time.Second), Sent: start.Add(22 * time.Second), TransportError: true},
-		{Scheduled: start.Add(23 * time.Second)}, // never sent or answered before the run ended
+		{Scheduled: start.Add(23 * time.Second), Sent: start.Add(23 * time.Second)}, // sent, never answered before the run ended
+		{Scheduled: start.Add(24 * time.Second)},                                    // never sent: the offered schedule ended first
 		reject(start.Add(75*time.Second), 503, 0),
 	}
 	got := Account(records, p)
-	if got.Phase["warmup"].Rejected != 1 || got.Phase["window"].Rejected != 4 || got.Phase["drain"].Rejected != 1 {
+	if got.Phase["warmup"].Rejected != 1 || got.Phase["window"].Rejected != 5 || got.Phase["drain"].Rejected != 1 {
 		t.Fatalf("rejections %+v", got.Phase)
 	}
-	if got.Unfinished != 1 {
-		t.Fatalf("unfinished %d", got.Unfinished)
+	if got.Unfinished != 1 || got.NotSent != 1 {
+		t.Fatalf("unfinished %d, not sent %d", got.Unfinished, got.NotSent)
 	}
-	want := map[string]int{"http_503": 2, "rpc_-32000": 1, "http_429": 1, "transport": 1, "unfinished": 1}
+	want := map[string]int{"http_503": 2, "rpc_-32000": 1, "http_429": 1, "transport": 1, "unfinished": 1, "not_sent": 1}
 	for k, v := range want {
 		if got.Failures[k] != v {
 			t.Fatalf("failures %v, want %v", got.Failures, want)

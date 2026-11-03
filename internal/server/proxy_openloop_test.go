@@ -7,17 +7,10 @@ import (
 	"sort"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"privacy-proxy/internal/audit"
-	"privacy-proxy/internal/audit/buffer"
 	"privacy-proxy/internal/db"
-	"privacy-proxy/internal/proxy"
-	"privacy-proxy/internal/rbac"
-	"privacy-proxy/internal/server/middleware"
-	"privacy-proxy/internal/tracer"
 )
 
 // HISTORICAL DIAGNOSTIC, NOT GATE 2. This drives JSONRPCProcessor.Process
@@ -42,7 +35,12 @@ import (
 // Gated: runs only when BOTH PROXY_BENCH_DSN (a real migrated Postgres, Linux
 // in CI) and PROXY_LOADTEST=1 are set, so it stays out of the normal unit
 // suite. Tunables: PROXY_LOADTEST_RATE (req/sec), PROXY_LOADTEST_SECS,
-// PROXY_LOADTEST_USERS, PROXY_LOADTEST_AUDIT (async|sync).
+// PROXY_LOADTEST_USERS, PROXY_LOADTEST_AUDIT (async|sync), PROXY_LOADTEST_MODE
+// (legacy|v2: the legacy forwarding path or the V2 node-execution path against
+// the gate-2 mock private node) and PROXY_LOADTEST_WORKLOAD (historical, the
+// default for legacy: one transfer per user re-sent; unique, the default for
+// v2: unique transfers; the legacy-vs-V2 comparison uses unique for both). See
+// proxy_rd1112_paths_test.go.
 //
 //	PROXY_BENCH_DSN=postgres://... TEST_DATABASE_URL=postgres://... PROXY_LOADTEST=1 \
 //	  go test -run TestProxyOpenLoop -timeout 300s -v ./internal/server/
@@ -73,9 +71,11 @@ func (r openLoopResult) achievedTPS() float64 {
 	return float64(r.ok) / r.elapsed.Seconds()
 }
 
-// runOpenLoop injects len's worth of requests at offeredRate for durSecs,
-// round-robining across reqs, one goroutine per request, and returns latency
-// stats over the successful requests.
+// runOpenLoop injects offeredRate×durSecs requests at offeredRate, request i
+// being reqs[i % len(reqs)], one goroutine per request calling the processor
+// in process (its node calls still go over loopback to the mocks, whose
+// connection counts the harness checks), and returns latency stats over the
+// successful requests.
 func runOpenLoop(ctx context.Context, proc *JSONRPCProcessor, reqs []*ProcessRequest, offeredRate, durSecs int) openLoopResult {
 	total := offeredRate * durSecs
 	interval := time.Second / time.Duration(offeredRate)
@@ -151,6 +151,7 @@ func TestProxyOpenLoop(t *testing.T) {
 	durSecs := openLoopEnvInt("PROXY_LOADTEST_SECS", 5)
 	numUsers := openLoopEnvInt("PROXY_LOADTEST_USERS", 100)
 	async := os.Getenv("PROXY_LOADTEST_AUDIT") != "sync"
+	path := parseRD1112Path(t, os.Getenv("PROXY_LOADTEST_MODE"))
 
 	database, err := db.New(dsn)
 	if err != nil {
@@ -162,63 +163,26 @@ func TestProxyOpenLoop(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Seed many distinct users, each with its own signed value transfer.
-	reqs := make([]*ProcessRequest, numUsers)
-	for i := range reqs {
-		did := seedPermittedUser(t, ctx, database)
-		rawHex, body := signedValueTransfer(t)
-		reqs[i] = &ProcessRequest{UserID: did, Method: "eth_sendRawTransaction", Params: []any{rawHex}, Body: body, ClientIP: "127.0.0.1"}
-	}
-
-	node := mockNode(t)
-	rbacCtrl := rbac.NewAccessController(database, 5*time.Minute)
-	defer rbacCtrl.Stop()
-	rt := tracer.NewRuntimeTracer(tracer.RuntimeTracerConfig{NodeURL: node.URL, Enabled: true, TieredEnabled: true, Timeout: 5 * time.Second})
-	defer rt.Stop()
-	tv := rbac.NewTraceValidator(database)
-	procCfg := JSONRPCProcessorConfig{
-		RBACAccessCtrl:     rbacCtrl,
-		RateLimiter:        &noopRateLimiter{},
-		Proxy:              proxy.New(node.URL),
-		AccessLogger:       database,
-		RuntimeTracer:      rt,
-		TraceValidator:     tv,
-		CircuitBreaker:     middleware.NewCircuitBreaker(),
-		ConcurrencyLimiter: middleware.NewConcurrencyLimiter(50, 0),
-	}
+	workload := parseRD1112Workload(t, path, os.Getenv("PROXY_LOADTEST_WORKLOAD"))
+	h := newRD1112Harness(t, database, path, numUsers, async)
+	defer h.Close()
+	warm, reqs := h.requests(t, workload, rate*durSecs)
+	proc := h.Proc
 	auditMode := "async"
-	if async {
-		buf, err := buffer.Open(t.TempDir())
-		if err != nil {
-			t.Fatalf("buffer: %v", err)
-		}
-		defer buf.Close()
-		procCfg.AuditBuffer = buf
-	} else {
+	if !async {
 		auditMode = "sync"
-		seed, _ := database.GetLatestAccessLogHash(ctx)
-		procCfg.EnhancedAuditLogger = database
-		procCfg.HashChain = audit.NewHashChain(seed)
 	}
-	proc := NewJSONRPCProcessor(procCfg)
 
 	// Warm the perms cache + create each user's system-link row, so the
 	// measured run is steady-state (not paying first-touch costs).
-	var warmFail int32
-	for _, r := range reqs {
-		if res := proc.Process(ctx, r); res.StatusCode != http.StatusOK {
-			atomic.AddInt32(&warmFail, 1)
-		}
-	}
-	if warmFail > 0 {
-		t.Fatalf("warmup: %d/%d users not allowed (seeding/perms wrong)", warmFail, len(reqs))
-	}
+	h.warm(t, warm)
 
 	res := runOpenLoop(ctx, proc, reqs, rate, durSecs)
+	nodeConns := h.checkConnections(t)
 
-	t.Logf("OPEN-LOOP (%s audit, node mocked, %d users): offered=%d/s for %ds → "+
+	t.Logf("OPEN-LOOP (%s path, %s workload, %s audit, node mocked, %d users, node connections opened/pool: %s; historical RD-1112 legacy: 4,997/s at 5,000/s, Linux): offered=%d/s for %ds → "+
 		"achieved=%.0f/s (%d ok, %d rejected-429, %d other) in %s | latency p50=%s p99=%s max=%s",
-		auditMode, numUsers, rate, durSecs, res.achievedTPS(),
+		path, workload, auditMode, numUsers, nodeConns, rate, durSecs, res.achievedTPS(),
 		res.ok, res.rejected429, res.otherStatus, res.elapsed.Round(time.Millisecond),
 		res.p50.Round(time.Microsecond), res.p99.Round(time.Microsecond), res.max.Round(time.Microsecond))
 

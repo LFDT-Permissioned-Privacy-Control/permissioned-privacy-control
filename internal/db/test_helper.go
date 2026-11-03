@@ -122,7 +122,15 @@ func ResetTestDatabase(database *DB) error {
 		// Production projection guards intentionally reject direct writes while
 		// an active revision owns the stream.
 		"configuration_revisions",
-		"node_submissions",
+		// Effects markers and travel-rule claims of the execution path
+		// (RD-1410); the replay floor itself is never deleted (trigger).
+		"node_tx_effects_applied",
+		"node_tx_compliance_claims",
+		// Stand-alone or org-scoped rows that other tests leave behind on a
+		// shared Postgres; without them, counts and exports in later tests
+		// depend on test order (node_submission_test, node_policy_export_test).
+		"pending_tx_visibility",
+		"shared_infrastructure",
 		"tx_visible_to",
 		"rbac_audit_log",
 		"effective_permissions_cache",

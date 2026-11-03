@@ -21,6 +21,7 @@ re-establishing audit-chain integrity.
 |-------|----------|----------|
 | **Primary database** (`DATABASE_URL`) | RBAC, contracts, users, disclosure grants, compliance logs — the source of truth | **Yes** — this is the critical target |
 | **Audit database** (`AUDIT_DATABASE_URL`) | The append-only access log and its tamper-evident hash chain | **Yes** — required for audit/compliance continuity |
+| **Execution-tracking database** (`EXECUTION_DATABASE_URL`, Reth mode) | Per-transaction execution state: pending transactions and final statuses for owner lookups | **Your decision** — operational and lossable; record it in your backup policy. Losing it affects only transactions in flight (see [Configuration](/docs/configuration#execution-tracking-database-reth-mode)) |
 | **Redis** (`REDIS_URL`) | Sessions, OAuth flow state, RBAC permission cache | **No** — ephemeral; rebuilds from Postgres |
 | **Object/secret stores** | `JWT_SECRET`, `ADMIN_API_TOKEN`, DB credentials, `AUDIT_CHECKPOINT_KEY`, `EXPLORER_PSEUDONYM_KEY`, etc. | **Yes** — back up your secret manager independently |
 

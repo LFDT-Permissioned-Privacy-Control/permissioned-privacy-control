@@ -106,22 +106,28 @@ type Server struct {
 	policyCompiler *policydsl.Compiler
 	// compilerProbe shares one availability probe of policyCompiler between
 	// configuration context reads; see configuration_capabilities.go.
-	compilerProbe        compilerProbe
-	proxy                *proxy.Proxy
-	privadoVerifier      PrivadoVerifier
-	jwtService           *auth.JWTService
-	sessionStore         SessionManager
-	oauthSessionStore    OAuthSessionManager
-	challengeStore       ChallengeManager
-	rateLimiter          RateLimiterInterface
-	authRateLimiter      *AuthRateLimiter
-	disclosureService    *disclosure.DefaultService
-	complianceChecker    *compliance.Checker
-	priceService         *pricing.Service
-	config               *config.Config
-	ensResolver          *ens.Resolver
-	jsonrpcProcessor     *JSONRPCProcessor
-	nodeExecution        *nodeExecutionBridge
+	compilerProbe     compilerProbe
+	proxy             *proxy.Proxy
+	privadoVerifier   PrivadoVerifier
+	jwtService        *auth.JWTService
+	sessionStore      SessionManager
+	oauthSessionStore OAuthSessionManager
+	challengeStore    ChallengeManager
+	rateLimiter       RateLimiterInterface
+	authRateLimiter   *AuthRateLimiter
+	disclosureService *disclosure.DefaultService
+	complianceChecker *compliance.Checker
+	priceService      *pricing.Service
+	config            *config.Config
+	ensResolver       *ens.Resolver
+	jsonrpcProcessor  *JSONRPCProcessor
+	// nodeOwnershipEvidence reads finalized deployments from the node for
+	// the admin ownership recovery (RD-1410, Reth mode only).
+	nodeOwnershipEvidence nodeEvidence
+	nodeExecution         *nodeExecutionBridge
+	// tracking is the separate execution-tracking database (RD-1410), opened
+	// only in Reth mode.
+	tracking             *executionTracking
 	nodePolicyCancel     context.CancelFunc
 	nodePolicyDone       chan struct{}
 	zkRoleExtractor      *auth.ZKRoleExtractor
@@ -232,6 +238,14 @@ func (s *Server) Stop() {
 	if s.runtimeTracer != nil {
 		s.runtimeTracer.Stop()
 	}
+	// The audit sealer forwards to the SIEM: stop it first so the events of
+	// its final tick are flushed by the forwarder's Stop below.
+	if s.auditSealerCancel != nil {
+		s.auditSealerCancel()
+	}
+	if s.auditSealer != nil {
+		s.auditSealer.Wait()
+	}
 	if s.siemForwarder != nil {
 		s.siemForwarder.Stop()
 	}
@@ -247,14 +261,8 @@ func (s *Server) Stop() {
 	if s.visibilityReconciler != nil {
 		s.visibilityReconciler.Stop()
 	}
-	// RD-1112: stop the audit sealer's drain loop and wait for the in-flight
-	// tick to finish before closing its buffer, so Close never races a tick.
-	if s.auditSealerCancel != nil {
-		s.auditSealerCancel()
-	}
-	if s.auditSealer != nil {
-		s.auditSealer.Wait()
-	}
+	// RD-1112: the audit sealer stopped above (before the SIEM forwarder), so
+	// the buffer below is closed only after its last tick finished.
 	if s.auditCheckpointCancel != nil {
 		s.auditCheckpointCancel()
 	}
@@ -284,6 +292,9 @@ func (s *Server) Stop() {
 		(s.db == nil || s.auditAdminDB.Conn() != s.db.Conn()) &&
 		(s.auditDB == nil || s.auditAdminDB.Conn() != s.auditDB.Conn()) {
 		s.auditAdminDB.Close()
+	}
+	if s.tracking != nil && s.db != nil {
+		s.tracking.close(s.db)
 	}
 	if s.db != nil {
 		s.db.Close()
@@ -360,6 +371,24 @@ func buildExplorerBackend(sqlStore *explorer.Store, indexerURL string) (explorer
 	return b, nil
 }
 
+// warnIfPoolExceedsServer warns at startup when one instance's pool alone can
+// open more connections than the database server accepts (RD-1410). Several
+// instances, the audit pools on the same server and other clients all count
+// against the same limit; see the DB_MAX_OPEN_CONNS sizing guidance.
+func warnIfPoolExceedsServer(database *db.DB, setting string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	available, err := database.AvailableConnections(ctx)
+	if err != nil {
+		slog.Debug("database connection limit not read; pool size not checked", "database", setting, "error", err)
+		return
+	}
+	if pool := database.Conn().Stats().MaxOpenConnections; pool > available {
+		slog.Warn("database pool exceeds the server's connection limit; requests will fail with too many connections under load",
+			"database", setting, "pool", pool, "server_available", available)
+	}
+}
+
 // PrivadoVerifier interface for Privado ID operations
 type PrivadoVerifier interface {
 	CreateAuthorizationRequest(verifierID, callbackURL, reason string) (*protocol.AuthorizationRequestMessage, error)
@@ -387,6 +416,7 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database: %w", err)
 	}
+	warnIfPoolExceedsServer(database, "DATABASE_URL")
 
 	// RD-1147: access_logs ALWAYS lives in a SEPARATE, always-on append-only
 	// audit database — the main DB no longer has an access_logs table at all
@@ -758,9 +788,22 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 
 	// Initialize enhanced audit: hash chain, SIEM forwarder, retention cleaner.
 	// RD-1147: the access_logs chain lives in the audit DB — seed it from there.
-	hashChainSeed, err := auditDB.GetLatestAccessLogHashForChain(context.Background(), cfg.AuditChainName)
-	if err != nil {
-		slog.Warn("failed to seed hash chain from DB, starting fresh", "error", err)
+	// Fail closed: a chain started from "" while rows exist forks it, which
+	// the integrity verifier reports as tampering. The audit database is
+	// already required to start (RD-1410).
+	var hashChainSeed string
+	for attempt := 1; ; attempt++ {
+		headCtx, cancelHead := context.WithTimeout(context.Background(), 10*time.Second)
+		hashChainSeed, err = auditDB.GetLatestAccessLogHashForChain(headCtx, cfg.AuditChainName)
+		cancelHead()
+		if err == nil {
+			break
+		}
+		if attempt == 3 {
+			return nil, fmt.Errorf("seed the access-log hash chain from the audit database: %w", err)
+		}
+		slog.Warn("reading the access-log chain head failed; retrying", "attempt", attempt, "error", err)
+		time.Sleep(time.Second)
 	}
 	hashChain := audit.NewHashChain(hashChainSeed)
 
@@ -848,59 +891,33 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 	// the per-request chain mutex + 2 PG round-trips that capped throughput. A
 	// single-writer sealer means no chain fork. Empty dir = synchronous legacy path.
 	if cfg.AuditBufferDir != "" {
-		auditBuf, bufErr := buffer.Open(cfg.AuditBufferDir)
+		// RequireSeed: no append is accepted until the buffer's sequence floor
+		// is the chain's sealed high-water (seeded below, before the request
+		// path exists), so a drained or recreated buffer never reuses a
+		// sequence the chain already sealed (RD-1410).
+		auditBuf, bufErr := buffer.Open(cfg.AuditBufferDir, buffer.RequireSeed())
 		if bufErr != nil {
 			return nil, fmt.Errorf("async audit buffer init (AUDIT_BUFFER_DIR=%q): %w", cfg.AuditBufferDir, bufErr)
 		}
 		s.auditBuffer = auditBuf
 
-		sealFn := func(ctx context.Context, seq uint64, data []byte) error {
-			var rec db.AccessLogRecord
-			if err := json.Unmarshal(data, &rec); err != nil {
-				// A corrupt buffered record must not wedge the sealer. Log loudly
-				// and skip it; the high-water advances past it on the next drain.
-				slog.Error("audit sealer: corrupt buffered record skipped", "seq", seq, "error", err)
-				return nil
-			}
-			hash, err := auditDB.SealBufferedAccessLog(ctx, hashChain, rec, seq, cfg.AuditChainName)
-			if err != nil {
-				return err
-			}
-			// SIEM forwarding moved here from logAccess (off the hot path).
-			if siemForwarder != nil {
-				outcome := "success"
-				if rec.StatusCode >= 400 {
-					outcome = "denied"
-				}
-				if rec.StatusCode >= 500 {
-					outcome = "error"
-				}
-				respStatus := rec.StatusCode
-				if rec.ResponseStatus != nil {
-					respStatus = *rec.ResponseStatus
-				}
-				ev := audit.SIEMEvent{
-					Timestamp:     time.Now().UTC(),
-					EventType:     "access",
-					CorrelationID: rec.CorrelationID,
-					ActorID:       rec.ExternalID,
-					Action:        rec.Method,
-					Outcome:       outcome,
-					Details:       fmt.Sprintf("decision=%d response=%d", rec.StatusCode, respStatus),
-					SourceIP:      rec.IPAddress,
-					EntryHash:     hash,
-				}
-				if rbac.IsPassthroughMethod(rec.Method) {
-					ev.MatchedVia = "passthrough"
-				}
-				siemForwarder.Send(ev)
-			}
-			return nil
+		sealing := &accessLogSealing{auditDB: auditDB, chain: hashChain, name: cfg.AuditChainName}
+		if siemForwarder != nil {
+			sealing.siem = siemForwarder
 		}
-		highWater := func(ctx context.Context) (uint64, error) {
-			return auditDB.GetMaxAccessLogBufferSeq(ctx, cfg.AuditChainName)
+		// A tick drains the whole backlog in multi-row batch writes; a failed
+		// batch is sealed record by record, stopping at the failing one.
+		// Settle forwards rows whose seal outcome the sealer could not observe.
+		s.auditSealer = sealer.New(auditBuf, sealing.seal, sealing.highWater, sealer.Config{SealBatch: sealing.sealBatch, Settle: sealing.settle})
+		seedCtx, cancelSeed := context.WithTimeout(context.Background(), 15*time.Second)
+		seedErr := s.auditSealer.Seed(seedCtx)
+		cancelSeed()
+		if seedErr != nil {
+			_ = auditBuf.Close()
+			s.auditBuffer, s.auditSealer = nil, nil
+			s.Stop()
+			return nil, fmt.Errorf("async audit buffer: read the sealed chain high-water from the audit database: %w", seedErr)
 		}
-		s.auditSealer = sealer.New(auditBuf, sealFn, highWater, sealer.Config{})
 		sealerCtx, sealerCancel := context.WithCancel(context.Background())
 		s.auditSealerCancel = sealerCancel
 		go s.auditSealer.Run(sealerCtx)
@@ -1436,9 +1453,12 @@ const MaxRequestBodySize = 1 << 20 // 1MB
 // @Failure      403 {object} apimodels.APIError "runtime-trace, standard-profile trace-access (debug_traceTransaction for a non-participant or a missing transaction) or compliance denial"
 // @Failure      404 {object} apimodels.APIError "method not allowed for the caller (denials are masked as method not found), or a strict-profile mined trace unavailable to the caller"
 // @Failure      413 {object} apimodels.APIError "request body too large"
-// @Failure      429 {object} apimodels.APIError "concurrency limit, signed-approval simulation budget, or upstream rate limit"
+// @Failure      429 {object} apimodels.APIError "concurrency limit, signed-approval simulation budget, upstream rate limit, or in Reth policy mode the pending transactions of the caller, or of the caller's organization, at their limit (retry after Retry-After seconds, once some are included)"
 // @Failure      500 {object} apimodels.APIError "trace-validation or compliance-check error"
 // @Failure      502 {object} apimodels.APIError "failed to forward to the upstream node"
+// @Failure      503 {object} apimodels.APIError "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, or when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds); a transaction already recorded is never refused for the limit"
+// @Header       503 {integer} Retry-After "seconds before the same request may succeed (set when publication of policy facts is pending or the pending-work limit is reached)"
+// @Header       429 {integer} Retry-After "seconds before the same request may succeed (set at the per-principal or per-organization pending-work limit)"
 // @Security     BearerAuth
 // @Router       /rpc [post]
 // @Router       /rpc/{org_id} [post]
@@ -1542,12 +1562,20 @@ func (s *Server) handleJSONRPC(c *gin.Context) {
 				respBody["reason"] = wireReason(procReq.denialReason)
 			}
 		}
+		writeProcessErrorHeaders(c, result.Error)
 		c.JSON(result.Error.StatusCode, respBody)
 		return
 	}
 
 	// Return response from node
 	c.Data(result.StatusCode, "application/json", result.ResponseBody)
+}
+
+// writeProcessErrorHeaders sets the headers a processing error carries.
+func writeProcessErrorHeaders(c *gin.Context, e *ProcessError) {
+	if e != nil && e.RetryAfter > 0 {
+		c.Header("Retry-After", strconv.Itoa(e.RetryAfter))
+	}
 }
 
 // getLogs returns a filtered, paginated page of RBAC access-log rows.

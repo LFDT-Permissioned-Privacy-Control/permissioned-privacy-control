@@ -58,6 +58,7 @@ func OpenDB(dsn string) (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8) // keep them: the runner must not churn host ports itself
 	return db, nil
 }
 

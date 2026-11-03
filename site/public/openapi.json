@@ -2736,6 +2736,30 @@
                 },
                 "type": "object"
             },
+            "privacy-proxy_internal_apimodels.NodeOwnershipRecoveryRequest": {
+                "properties": {
+                    "transactionHash": {
+                        "type": "string"
+                    }
+                },
+                "type": "object"
+            },
+            "privacy-proxy_internal_apimodels.NodeOwnershipRecoveryResponse": {
+                "properties": {
+                    "conflicts": {
+                        "description": "Conflicts counts created addresses another organization already owns;\nthey were not registered.",
+                        "type": "integer"
+                    },
+                    "registered": {
+                        "description": "Registered: the ownership effect was applied by this call (false when it\nhad already been applied, for example by normal reconciliation).",
+                        "type": "boolean"
+                    },
+                    "transactionHash": {
+                        "type": "string"
+                    }
+                },
+                "type": "object"
+            },
             "privacy-proxy_internal_apimodels.NodeSimulationRequest": {
                 "properties": {
                     "candidateRevisionId": {
@@ -2784,12 +2808,23 @@
                         "$ref": "#/components/schemas/privacy-proxy_internal_nodepolicy.ExecutionOutcome"
                     },
                     "reconciled": {
+                        "description": "Reconciled: the status is final and OPS bookkeeping for it is committed.",
                         "type": "boolean"
                     },
                     "reconciliation_note": {
+                        "description": "ReconciliationNote: why renewal stopped (for example max_age,\nprincipal_banned, compliance_denied, nonce_conflict), nonce_consumed for\ndropped, or effects_not_applied.",
                         "type": "string"
                     },
                     "status": {
+                        "description": "Status: pending (waiting for inclusion; OPS keeps it deliverable),\nprovisional (in a block that is not final yet), renewal_stopped (OPS will\nnot renew it; it may still settle), included or reverted (in a finalized\nblock; final), dropped (a finalized transaction used its nonce; final).",
+                        "enum": [
+                            "pending",
+                            "provisional",
+                            "renewal_stopped",
+                            "included",
+                            "reverted",
+                            "dropped"
+                        ],
                         "type": "string"
                     },
                     "transaction_hash": {
@@ -15027,6 +15062,123 @@
                 ]
             }
         },
+        "/api/v1/admin/orgs/{org_id}/execution/ownership-recovery": {
+            "post": {
+                "description": "After the execution-tracking database was lost or recreated, a deployment that finalized meanwhile is not registered automatically. A named human with current full authority over the organization can register it from the node's finalized evidence: the node must report the transaction as included and final, deployed by a principal of this organization, within the node's evidence retention. Ownership is applied exactly once (a deployment already registered, by reconciliation or an earlier recovery, is not registered again), never below the replay floor, and never for an address another organization owns. Any transaction that is unknown, not final, not a deployment or not this organization's is answered with the same 404. The action is recorded in the RBAC audit log.",
+                "parameters": [
+                    {
+                        "description": "Organization UUID",
+                        "in": "path",
+                        "name": "org_id",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "oneOf": [
+                                    {
+                                        "type": "object"
+                                    },
+                                    {
+                                        "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.NodeOwnershipRecoveryRequest",
+                                        "description": "Deployment transaction",
+                                        "summary": "request"
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    "description": "Deployment transaction",
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.NodeOwnershipRecoveryResponse"
+                                }
+                            }
+                        },
+                        "description": "OK"
+                    },
+                    "400": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "Bad Request"
+                    },
+                    "403": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "Forbidden"
+                    },
+                    "404": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "Not Found"
+                    },
+                    "409": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "the deployment is older than the recovery window (replay floor)"
+                    },
+                    "429": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "Too Many Requests"
+                    },
+                    "503": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "Service Unavailable"
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "summary": "Recover deployment ownership from node evidence",
+                "tags": [
+                    "Admin: Configuration"
+                ]
+            }
+        },
         "/api/v1/admin/orgs/{org_id}/execution/simulate": {
             "post": {
                 "description": "Named organization administrators can preview their own calls and stored execution revisions. Current active permissions remain mandatory for candidate previews. dryRun permits a full human organization administrator to diagnose another current member; independent organization isolation remains mandatory. Under the strict read profile, dryRun read methods are refused and debug_traceCall diagnostics return only policy.would_allow, with result null. This never submits a transaction or changes active policy. Candidate previews use current facts, including current memberships and registry state.",
@@ -15120,7 +15272,15 @@
                                 }
                             }
                         },
-                        "description": "Service Unavailable"
+                        "description": "node or simulation audit unavailable, or the node has not yet applied the policy facts (retry after Retry-After seconds)",
+                        "headers": {
+                            "Retry-After": {
+                                "description": "seconds before the same request may succeed (set when publication of policy facts is pending)",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
                     }
                 },
                 "security": [
@@ -22645,7 +22805,7 @@
         },
         "/api/v1/me/transactions/{hash}/execution": {
             "get": {
-                "description": "Status for a transaction submitted by this named principal, with current organization membership and KYC required. Shared signing addresses do not share status access. Queued, pending, denied and expired are nonterminal: an execution already started may still be included. Included or reverted reflects canonical node evidence; reconciled means OPS bookkeeping is committed. This endpoint never returns raw transactions, signing envelopes or visibility recipients.",
+                "description": "Status for a transaction submitted by this named principal, with current organization membership and KYC required. Shared signing addresses do not share status access. pending, provisional (included in a block that is not final yet) and renewal_stopped (OPS will not renew its identity, but it may still settle; reconciliation_note names why, e.g. max_age, principal_banned, compliance_denied, nonce_conflict) are nonterminal: a provisional transaction can return to pending after a reorganization, and a renewal_stopped one can still be included while its last identity is valid. Wait for a final status rather than treating renewal_stopped as a failure. included and reverted (in a finalized block) and dropped (reported only once a finalized block used the transaction's nonce and the transaction itself was never included; an expired identity alone is never final) are final; reconciled means OPS bookkeeping for the final status is committed, and reconciliation_note effects_not_applied means a deployment or visibility effect was refused. Final statuses are kept for the configured retention (RETENTION_NODE_SUBMISSIONS), after which the transaction is not found. This endpoint never returns raw transactions, signing envelopes or visibility recipients.",
                 "parameters": [
                     {
                         "description": "Lowercase transaction hash",
@@ -23679,7 +23839,15 @@
                                 }
                             }
                         },
-                        "description": "concurrency limit, signed-approval simulation budget, or upstream rate limit"
+                        "description": "concurrency limit, signed-approval simulation budget, upstream rate limit, or in Reth policy mode the pending transactions of the caller, or of the caller's organization, at their limit (retry after Retry-After seconds, once some are included)",
+                        "headers": {
+                            "Retry-After": {
+                                "description": "seconds before the same request may succeed (set at the per-principal or per-organization pending-work limit)",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
                     },
                     "500": {
                         "content": {
@@ -23700,6 +23868,24 @@
                             }
                         },
                         "description": "failed to forward to the upstream node"
+                    },
+                    "503": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, or when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds); a transaction already recorded is never refused for the limit",
+                        "headers": {
+                            "Retry-After": {
+                                "description": "seconds before the same request may succeed (set when publication of policy facts is pending or the pending-work limit is reached)",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
                     }
                 },
                 "security": [
@@ -23815,7 +24001,15 @@
                                 }
                             }
                         },
-                        "description": "concurrency limit, signed-approval simulation budget, or upstream rate limit"
+                        "description": "concurrency limit, signed-approval simulation budget, upstream rate limit, or in Reth policy mode the pending transactions of the caller, or of the caller's organization, at their limit (retry after Retry-After seconds, once some are included)",
+                        "headers": {
+                            "Retry-After": {
+                                "description": "seconds before the same request may succeed (set at the per-principal or per-organization pending-work limit)",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
                     },
                     "500": {
                         "content": {
@@ -23836,6 +24030,24 @@
                             }
                         },
                         "description": "failed to forward to the upstream node"
+                    },
+                    "503": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, or when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds); a transaction already recorded is never refused for the limit",
+                        "headers": {
+                            "Retry-After": {
+                                "description": "seconds before the same request may succeed (set when publication of policy facts is pending or the pending-work limit is reached)",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
                     }
                 },
                 "security": [

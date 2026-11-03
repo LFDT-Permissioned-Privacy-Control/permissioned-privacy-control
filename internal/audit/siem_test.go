@@ -256,3 +256,34 @@ func TestNewSIEMForwarder_AcceptsGoodURL(t *testing.T) {
 		t.Fatal("NewSIEMForwarder returned nil forwarder with nil error")
 	}
 }
+
+// The sealer sends SIEM events on its own goroutine: a full batch is flushed
+// by the forwarder's goroutine, never inline, so a slow SIEM endpoint cannot
+// stall audit sealing (RD-1410). Events past the bounded queue go
+// the failed-batch way (fallback log, dropped counter), never block.
+func TestSIEM_SendNeverWaitsForTheWebhook(t *testing.T) {
+	release := make(chan struct{})
+	var received atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		var events []SIEMEvent
+		_ = json.NewDecoder(r.Body).Decode(&events)
+		received.Add(int64(len(events)))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	fwd := mustNewForwarder(t, SIEMConfig{WebhookURL: srv.URL, BatchSize: 10, FlushInterval: time.Hour})
+	fwd.Start()
+	began := time.Now()
+	for i := 0; i < 300; i++ {
+		fwd.Send(SIEMEvent{Action: "a", Outcome: "success"})
+	}
+	if took := time.Since(began); took > 500*time.Millisecond {
+		t.Fatalf("300 sends took %s against a stalled webhook", took)
+	}
+	close(release)
+	fwd.Stop()
+	if got := received.Load(); got != 300 {
+		t.Fatalf("webhook received %d events, want all 300 after the stall", got)
+	}
+}

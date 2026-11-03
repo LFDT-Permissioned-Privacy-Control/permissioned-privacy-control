@@ -13,6 +13,9 @@
 //     keyed hash-chain tables (audit_chain_anchor, audit_chain_checkpoint,
 //     audit_chain_reanchor), and the runtime role's APPEND-ONLY grants — the
 //     seal: SELECT+INSERT on access_logs, NO UPDATE/DELETE.
+//   - 003: access_logs.id and its sequence widened to bigint (RD-1410); a table
+//     rewrite that needs ownership of access_logs (run it with `migrate -audit`
+//     in a maintenance window on a large deployment).
 //
 // Applied versions are tracked in a SEPARATE tern version table
 // (schema_version_audit) so the sequence is independent of the main schema.

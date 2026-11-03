@@ -24,13 +24,13 @@ type mockRetentionStore struct {
 	// (maxRows, batchSize). trimReturns drives the per-call deletion count;
 	// each entry is consumed in order and the last value is replayed once
 	// exhausted (so a single-element slice means "always return that").
-	countTotal       atomic.Int64
-	trimMaxRows      atomic.Int64
-	trimBatchSize    atomic.Int64
-	trimCallCount    atomic.Int64
-	trimReturnsMu    sync.Mutex
-	trimReturns      []int64
-	trimReturnsIdx   int
+	countTotal     atomic.Int64
+	trimMaxRows    atomic.Int64
+	trimBatchSize  atomic.Int64
+	trimCallCount  atomic.Int64
+	trimReturnsMu  sync.Mutex
+	trimReturns    []int64
+	trimReturnsIdx int
 
 	// auditOfTheAudit captures every LogAuditAction invocation so tests can
 	// assert that retention prunes record themselves in rbac_audit_log. Each
@@ -366,5 +366,58 @@ func TestRetention_StopChannelWorks(t *testing.T) {
 		// OK
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop() did not return in time")
+	}
+}
+
+type fakeTracking struct {
+	mu         sync.Mutex
+	retentions []time.Duration
+	prunes     []time.Time
+}
+
+func (f *fakeTracking) MaintainTracking(_ context.Context, retention time.Duration) (TrackingMaintenanceResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.retentions = append(f.retentions, retention)
+	return TrackingMaintenanceResult{}, nil
+}
+
+func (f *fakeTracking) PruneNodeEffects(_ context.Context, olderThan time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prunes = append(f.prunes, olderThan)
+	return 0, nil
+}
+
+// TestRetention_TrackingRunsInTheCleanupJob is G41 (scheduling half): the
+// existing cleanup job, at its interval, drops expired execution-tracking
+// partitions with RETENTION_NODE_SUBMISSIONS and prunes the effects markers
+// older than it; retention 0 keeps both forever.
+func TestRetention_TrackingRunsInTheCleanupJob(t *testing.T) {
+	for _, retention := range []time.Duration{7 * 24 * time.Hour, 0} {
+		tracking := &fakeTracking{}
+		mgr := NewRetentionManager(RetentionConfig{CleanupInterval: 40 * time.Millisecond}, &mockRetentionStore{})
+		mgr.Start()
+		mgr.AttachTracking(tracking, retention)
+		time.Sleep(130 * time.Millisecond)
+		mgr.Stop()
+		tracking.mu.Lock()
+		if len(tracking.retentions) < 2 {
+			t.Fatalf("retention %v: %d maintenance passes, want one per cleanup tick", retention, len(tracking.retentions))
+		}
+		for _, r := range tracking.retentions {
+			if r != retention {
+				t.Fatalf("maintenance ran with retention %v, want %v", r, retention)
+			}
+		}
+		if retention == 0 && len(tracking.prunes) != 0 {
+			t.Fatal("retention 0 must never prune effects markers")
+		}
+		if retention > 0 {
+			if len(tracking.prunes) == 0 || time.Since(tracking.prunes[0]) < retention {
+				t.Fatalf("effects markers pruned before %v: %v", retention, tracking.prunes)
+			}
+		}
+		tracking.mu.Unlock()
 	}
 }

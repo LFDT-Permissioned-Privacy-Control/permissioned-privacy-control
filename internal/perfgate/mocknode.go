@@ -3,6 +3,7 @@ package perfgate
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
@@ -35,6 +37,10 @@ type MockNodeConfig struct {
 	// MaxBlockTxs caps transactions per block (0 = unlimited).
 	MaxBlockTxs int
 	Clock       func() time.Time
+	// FactWait is how long a submission whose identity requires newer facts
+	// than installed waits for them before -32012, like the node's
+	// OPS_NODE_POLICY_FACT_WAIT (default 1 s).
+	FactWait time.Duration
 }
 
 // MockNode answers the public JSON-RPC methods the legacy path forwards and the
@@ -45,6 +51,16 @@ type MockNodeConfig struct {
 // verified: the mock stands in for node behaviour, not node security.
 type MockNode struct {
 	cfg MockNodeConfig
+
+	// factsVersion mirrors facts.version for fact waiters, without m.mu.
+	factsVersion atomic.Uint64
+
+	// bootID changes at every Restart, like the node's per-process boot id;
+	// epoch counts non-append canonical changes (Reorg); salt keeps rival
+	// blocks' hashes distinct from the blocks they replace.
+	bootID string
+	epoch  uint64
+	salt   uint64
 
 	mu       sync.Mutex
 	txs      map[string]*mockTx
@@ -77,9 +93,16 @@ type mockTx struct {
 	raw                     []byte
 	principal, org, context string
 	identity                bool
-	block                   *MockBlock
-	index                   int
-	factsVersion            uint64
+	// guarded: submitted through the private API, so it executes only under
+	// a live identity (a restart empties the registry, I3); the identity's
+	// floor and expiry decide dominance (T17).
+	guarded      bool
+	idMin        uint64
+	idExpires    int64
+	idSigner     string
+	block        *MockBlock
+	index        int
+	factsVersion uint64
 	// First submission's arrival (unix ns), for per-stage timing.
 	arrivedNS     int64
 	finalAnswered bool
@@ -135,6 +158,9 @@ type MockStats struct {
 	FinalizedTxs   int64                 `json:"finalized_txs"`
 	StalledSenders int                   `json:"stalled_senders"`
 	StalledTxs     int                   `json:"stalled_txs"`
+	// ConnectionsOpened counts TCP connections accepted per listener (public,
+	// private): OPS's node clients churning connections show up here.
+	ConnectionsOpened map[string]int64 `json:"connections_opened,omitempty"`
 }
 
 func NewMockNode(cfg MockNodeConfig) *MockNode {
@@ -144,14 +170,111 @@ func NewMockNode(cfg MockNodeConfig) *MockNode {
 	if cfg.BlockTime <= 0 {
 		cfg.BlockTime = time.Second
 	}
-	genesis := &MockBlock{Number: 0, Hash: blockHash(0, ""), Time: cfg.Clock()}
-	return &MockNode{cfg: cfg, txs: map[string]*mockTx{}, accounts: map[string]*mockAccount{}, dirty: map[string]struct{}{}, blocks: []*MockBlock{genesis}, index: map[string]indexedTx{}, methods: map[string]*methodStat{}, unknown: map[string]int{}, replies: map[string]int64{}}
+	if cfg.FactWait <= 0 {
+		cfg.FactWait = time.Second
+	}
+	genesis := &MockBlock{Number: 0, Hash: blockHash(0, "", 0), Time: cfg.Clock()}
+	return &MockNode{cfg: cfg, bootID: newBootID(), txs: map[string]*mockTx{}, accounts: map[string]*mockAccount{}, dirty: map[string]struct{}{}, blocks: []*MockBlock{genesis}, index: map[string]indexedTx{}, methods: map[string]*methodStat{}, unknown: map[string]int{}, replies: map[string]int64{}}
 }
 
-func blockHash(number uint64, parent string) string {
-	var b [8]byte
+func blockHash(number uint64, parent string, salt uint64) string {
+	var b, s [8]byte
 	binary.BigEndian.PutUint64(b[:], number)
-	return "0x" + hex.EncodeToString(crypto.Keccak256([]byte("perfgate-block"), b[:], []byte(parent)))
+	binary.BigEndian.PutUint64(s[:], salt)
+	return "0x" + hex.EncodeToString(crypto.Keccak256([]byte("perfgate-block"), b[:], []byte(parent), s[:]))
+}
+
+func newBootID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// BootID is the mock process's current boot id.
+func (m *MockNode) BootID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.bootID
+}
+
+// Restart models a node process restart: a new boot id and an empty identity
+// registry (identities live in memory only). A graceful restart keeps the pool
+// (Reth restores it from its backup); a crash (dropPool) loses it. Included
+// transactions keep the identity their block's manifest records.
+func (m *MockNode) Restart(dropPool bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bootID = newBootID()
+	m.epoch = 0 // an in-memory counter restarts with the process
+	for _, tx := range m.txs {
+		if tx.block == nil {
+			tx.identity = false
+		}
+	}
+	if dropPool {
+		for sender, account := range m.accounts {
+			m.pooledCount -= int64(len(account.pooled))
+			account.pooled = map[uint64]*mockTx{}
+			delete(m.dirty, sender)
+		}
+	}
+}
+
+// Evict drops a pooled transaction from the pool (same boot); its identity
+// stays registered. Reports whether it was pooled.
+func (m *MockNode) Evict(hash string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tx := m.txs[strings.ToLower(hash)]
+	if tx == nil || tx.block != nil {
+		return false
+	}
+	account := m.accounts[tx.sender]
+	if account == nil || account.pooled[tx.nonce] != tx {
+		return false
+	}
+	delete(account.pooled, tx.nonce)
+	m.pooledCount--
+	return true
+}
+
+// Reorg removes the newest depth blocks (never a finalized one) and puts their
+// transactions back into the pool, except those in omit, which leave the pool
+// (a rival chain that never carried them). The next blocks are rivals with
+// new hashes, and the canonical epoch advances. Returns the blocks removed.
+func (m *MockNode) Reorg(depth int, omit ...string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	skip := map[string]bool{}
+	for _, hash := range omit {
+		skip[strings.ToLower(hash)] = true
+	}
+	finalized := m.finalizedLocked()
+	removed := 0
+	for ; removed < depth && len(m.blocks) > 1; removed++ {
+		block := m.blocks[len(m.blocks)-1]
+		if finalized != nil && block.Number <= finalized.Number {
+			break
+		}
+		for _, hash := range block.Transactions {
+			tx := m.txs[hash]
+			tx.block, tx.index = nil, 0
+			m.includedCount--
+			account := m.accounts[tx.sender]
+			account.confirmed = min(account.confirmed, tx.nonce)
+			if !skip[hash] {
+				account.pooled[tx.nonce] = tx
+				m.pooledCount++
+				m.dirty[tx.sender] = struct{}{}
+			}
+		}
+		m.blocks = m.blocks[:len(m.blocks)-1]
+	}
+	if removed > 0 {
+		m.salt++
+		m.epoch++
+	}
+	return removed
 }
 
 // Index registers a pre-signed transaction so submission avoids signature
@@ -183,7 +306,8 @@ func (m *MockNode) ProduceBlock() MockBlock {
 	defer m.mu.Unlock()
 	parent := m.blocks[len(m.blocks)-1]
 	block := &MockBlock{Number: parent.Number + 1, Parent: parent.Hash, Time: m.cfg.Clock()}
-	block.Hash = blockHash(block.Number, parent.Hash)
+	block.Hash = blockHash(block.Number, parent.Hash, m.salt)
+	now := m.cfg.Clock().Unix()
 	senders := make([]string, 0, len(m.dirty))
 	for sender := range m.dirty {
 		senders = append(senders, sender)
@@ -197,6 +321,11 @@ func (m *MockNode) ProduceBlock() MockBlock {
 			}
 			tx, ok := account.pooled[account.confirmed]
 			if !ok {
+				break
+			}
+			if tx.guarded && (!tx.identity || tx.idExpires <= now) {
+				// No live identity: denied at build, it stays pooled and
+				// holds back the sender's later nonces (I3).
 				break
 			}
 			delete(account.pooled, account.confirmed)
@@ -288,7 +417,16 @@ type rpcRequest struct {
 type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
+
+// poolRejected is the node's -32013 (T18 wire).
+func poolRejected(reason string) *rpcError {
+	return &rpcError{Code: -32013, Message: "transaction pool rejected", Data: map[string]string{"reason": reason}}
+}
+
+// errRejected is the node's opaque -32000.
+var errRejected = &rpcError{Code: -32000, Message: "private execution request rejected"}
 
 func (e *rpcError) Error() string { return e.Message }
 
@@ -489,11 +627,35 @@ func (m *MockNode) transactionCount(params []json.RawMessage, _ *callInfo) (any,
 		return nil, e
 	}
 	tag := "latest"
+	var byHash struct {
+		BlockHash string `json:"blockHash"`
+	}
 	if len(params) > 1 {
-		_ = json.Unmarshal(params[1], &tag)
+		if json.Unmarshal(params[1], &tag) != nil && json.Unmarshal(params[1], &byHash) != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid block selector"}
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if byHash.BlockHash != "" {
+		// EIP-1898: the nonce at exactly this canonical block.
+		tag = ""
+		for _, block := range m.blocks {
+			if strings.EqualFold(block.Hash, byHash.BlockHash) {
+				tag = hexUint(block.Number)
+			}
+		}
+		if tag == "" {
+			return nil, &rpcError{Code: -32001, Message: "block not found"}
+		}
+	}
+	if n, err := strconv.ParseUint(strings.TrimPrefix(tag, "0x"), 16, 64); err == nil && strings.HasPrefix(tag, "0x") {
+		// The nonce at a block: transactions of the sender included up to it.
+		if n >= uint64(len(m.blocks)) {
+			return nil, &rpcError{Code: -32000, Message: "header not found"}
+		}
+		return hexUint(m.nonceAtLocked(strings.ToLower(address), n)), nil
+	}
 	account := m.accounts[strings.ToLower(address)]
 	if account == nil {
 		return "0x0", nil
@@ -516,11 +678,15 @@ type identity struct {
 		ChainID      uint64 `json:"chain_id"`
 		DeploymentID string `json:"deployment_id"`
 	} `json:"network"`
-	Scope       string `json:"scope"`
-	ContextID   string `json:"context_id"`
-	PrincipalID string `json:"principal_id"`
-	OrgID       string `json:"org_id"`
-	BindingHash string `json:"binding_hash"`
+	IssuedAt           int64  `json:"issued_at"`
+	ExpiresAt          int64  `json:"expires_at"`
+	Scope              string `json:"scope"`
+	ContextID          string `json:"context_id"`
+	PrincipalID        string `json:"principal_id"`
+	OrgID              string `json:"org_id"`
+	Signer             string `json:"signer"`
+	BindingHash        string `json:"binding_hash"`
+	MinSnapshotVersion uint64 `json:"min_snapshot_version"`
 }
 
 type envelope struct {
@@ -528,11 +694,112 @@ type envelope struct {
 	Payload []byte `json:"payload"`
 }
 
-var errUnknownTransaction = &rpcError{Code: -32602, Message: "unknown transaction"}
+// decodeRaw decodes raw transaction bytes and their sender (from the
+// pre-signed index when registered).
+func (m *MockNode) decodeRaw(rawHex string) ([]byte, string, indexedTx, *rpcError) {
+	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimPrefix(rawHex, "0x"), "0X"))
+	if err != nil || len(raw) == 0 {
+		return nil, "", indexedTx{}, &rpcError{Code: -32602, Message: "invalid raw transaction"}
+	}
+	hash := "0x" + hex.EncodeToString(crypto.Keccak256(raw))
+	m.mu.Lock()
+	known, ok := m.index[hash]
+	m.mu.Unlock()
+	if !ok {
+		var tx types.Transaction
+		if tx.UnmarshalBinary(raw) != nil {
+			return nil, "", indexedTx{}, &rpcError{Code: -32602, Message: "invalid raw transaction"}
+		}
+		from, err := types.Sender(types.LatestSignerForChainID(new(big.Int).SetUint64(m.cfg.ChainID)), &tx)
+		if err != nil {
+			return nil, "", indexedTx{}, &rpcError{Code: -32000, Message: "invalid sender"}
+		}
+		known = indexedTx{sender: strings.ToLower(from.Hex()), nonce: tx.Nonce()}
+	}
+	return raw, hash, known, nil
+}
 
-// pool admits raw bytes. Known bytes are idempotent (the identity, if any, is
-// replaced by the newer one); a different transaction at a consumed or
-// occupied nonce is refused like a real pool.
+// submitGuarded is ops_submitTransaction: register the identity (dominance,
+// T17), then offer the bytes to the pool (T18). A definitive pool refusal
+// undoes exactly this registration.
+func (m *MockNode) submitGuarded(rawHex string, id *identity, arrived time.Time) (string, *rpcError) {
+	raw, hash, known, e := m.decodeRaw(rawHex)
+	if e != nil {
+		return "", e
+	}
+	if id.BindingHash != hash {
+		return "", &rpcError{Code: -32003, Message: "identity is bound to another transaction"}
+	}
+	now := m.cfg.Clock().Unix()
+	if id.ExpiresAt != 0 && id.ExpiresAt <= now {
+		return "", errRejected // expired envelope
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tx := m.txs[hash]
+	fresh := tx == nil
+	if fresh {
+		tx = &mockTx{hash: hash, sender: known.sender, nonce: known.nonce, raw: raw, arrivedNS: arrived.UnixNano()}
+	}
+	prior := *tx
+	live := tx.identity && (tx.idExpires == 0 || tx.idExpires > now)
+	install := true
+	if live {
+		if tx.principal != id.PrincipalID || tx.org != id.OrgID || tx.idSigner != strings.ToLower(id.Signer) {
+			return "", errRejected // bound to another identity
+		}
+		attemptCovers := id.MinSnapshotVersion >= tx.idMin && id.ExpiresAt >= tx.idExpires
+		storedCovers := tx.idMin >= id.MinSnapshotVersion && tx.idExpires >= id.ExpiresAt
+		switch {
+		case attemptCovers:
+		case storedCovers:
+			install = false // dominated: idempotent success, registration unchanged
+		default:
+			return "", errRejected // incomparable
+		}
+	}
+	if install {
+		tx.principal, tx.org, tx.context, tx.identity, tx.guarded = id.PrincipalID, id.OrgID, id.ContextID, true, true
+		tx.idMin, tx.idExpires, tx.idSigner = id.MinSnapshotVersion, id.ExpiresAt, strings.ToLower(id.Signer)
+	}
+	undo := func(reason string) (string, *rpcError) {
+		if !fresh {
+			*tx = prior
+		}
+		return "", poolRejected(reason)
+	}
+	if tx.block != nil {
+		return hash, nil // nonce used by its own canonical receipt: accepted
+	}
+	account := m.accounts[tx.sender]
+	if account == nil {
+		account = &mockAccount{pooled: map[uint64]*mockTx{}}
+		m.accounts[tx.sender] = account
+	}
+	if account.pooled[tx.nonce] == tx {
+		return hash, nil // already known
+	}
+	if tx.nonce < account.confirmed {
+		return undo("nonce_used")
+	}
+	if _, occupied := account.pooled[tx.nonce]; occupied {
+		return undo("replaced")
+	}
+	if fresh {
+		m.txs[hash] = tx
+	}
+	if tx.raw == nil {
+		tx.raw = raw
+	}
+	account.pooled[tx.nonce] = tx
+	m.pooledCount++
+	m.dirty[tx.sender] = struct{}{}
+	return hash, nil
+}
+
+// pool admits raw bytes on the public path. Known bytes are idempotent; a
+// different transaction at a consumed or occupied nonce is refused like a
+// real pool.
 func (m *MockNode) pool(rawHex string, id *identity, arrived time.Time) (string, *rpcError) {
 	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimPrefix(rawHex, "0x"), "0X"))
 	if err != nil || len(raw) == 0 {
@@ -610,8 +877,8 @@ func (m *MockNode) transactionByHash(params []json.RawMessage, _ *callInfo) (any
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	tx := m.txs[strings.ToLower(hash)]
-	if tx == nil {
-		return nil, nil
+	if tx == nil || (tx.block == nil && m.accounts[tx.sender].pooled[tx.nonce] != tx) {
+		return nil, nil // neither pooled nor included (evicted, or lost in a crash)
 	}
 	out := map[string]any{"hash": tx.hash, "from": tx.sender, "nonce": hexUint(tx.nonce), "blockHash": nil, "blockNumber": nil, "transactionIndex": nil}
 	if tx.block != nil {
@@ -678,9 +945,10 @@ func (m *MockNode) privateMethods() map[string]handlerFunc {
 	}
 }
 
-// Capabilities mirrors nodepolicy.RequiredCapabilities at 22a0adbb. The
-// compatibility test in internal/nodepolicy fails if they drift.
-var Capabilities = []string{"per_frame_a5", "signed_identity_v1", "fact_stream_v1", "simulation_v1", "archive_v1", "candidate_simulation_v1", "scoped_diagnostics_v1", "finalized_status_v1"}
+// Capabilities mirrors nodepolicy.RequiredCapabilities plus the optional
+// fact_wait_v1 (RD-1411). The compatibility test in internal/nodepolicy
+// fails if they drift.
+var Capabilities = []string{"per_frame_a5", "signed_identity_v1", "fact_stream_v1", "simulation_v1", "archive_v1", "candidate_simulation_v1", "scoped_diagnostics_v1", "finalized_status_v1", "boot_id_v1", "fact_wait_v1", "transaction_statuses_v1"}
 
 type network struct {
 	ChainID      uint64 `json:"chain_id"`
@@ -689,7 +957,7 @@ type network struct {
 
 func (m *MockNode) policyStatus([]json.RawMessage, *callInfo) (any, *rpcError) {
 	m.mu.Lock()
-	facts := m.facts
+	facts, boot := m.facts, m.bootID
 	m.mu.Unlock()
 	ready := facts.version > 0 && facts.expiresAt > m.cfg.Clock().Unix()
 	reason := ""
@@ -705,7 +973,8 @@ func (m *MockNode) policyStatus([]json.RawMessage, *callInfo) (any, *rpcError) {
 		ExpiresAt       int64    `json:"expires_at"`
 		Ready           bool     `json:"ready"`
 		Reason          string   `json:"reason"`
-	}{1, network{m.cfg.ChainID, m.cfg.DeploymentID}, Capabilities, facts.version, facts.digest, facts.expiresAt, ready, reason}, nil
+		BootID          string   `json:"boot_id"`
+	}{1, network{m.cfg.ChainID, m.cfg.DeploymentID}, Capabilities, facts.version, facts.digest, facts.expiresAt, ready, reason, boot}, nil
 }
 
 func (m *MockNode) decodeEnvelope(raw json.RawMessage, kinds ...string) (envelope, *rpcError) {
@@ -758,12 +1027,32 @@ func (m *MockNode) policyApply(params []json.RawMessage, _ *callInfo) (any, *rpc
 		}
 		digest := sha256.Sum256(e.Payload)
 		m.facts = mockFacts{version: payload.Version, digest: hex.EncodeToString(digest[:]), expiresAt: payload.ExpiresAt}
+		m.factsVersion.Store(payload.Version)
 	}
 	return struct {
 		Version   uint64 `json:"version"`
 		Digest    string `json:"digest"`
 		ExpiresAt int64  `json:"expires_at"`
-	}{m.facts.version, m.facts.digest, m.facts.expiresAt}, nil
+		BootID    string `json:"boot_id"`
+	}{m.facts.version, m.facts.digest, m.facts.expiresAt, m.bootID}, nil
+}
+
+// waitForFacts waits up to FactWait for the installed facts to reach version,
+// then answers -32012, as the node does (T14). Before any facts were
+// published the mock does not enforce versions (its own unit tests submit
+// without a publisher; the real node refuses).
+func (m *MockNode) waitForFacts(version uint64) *rpcError {
+	deadline := time.Now().Add(m.cfg.FactWait)
+	for {
+		installed := m.factsVersion.Load()
+		if installed == 0 || installed >= version {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return &rpcError{Code: -32012, Message: "policy facts pending"}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 func (m *MockNode) submitTransaction(params []json.RawMessage, call *callInfo) (any, *rpcError) {
@@ -782,7 +1071,10 @@ func (m *MockNode) submitTransaction(params []json.RawMessage, call *callInfo) (
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
-	hash, rpcErr := m.pool(raw, &id, call.arrived)
+	if rpcErr := m.waitForFacts(id.MinSnapshotVersion); rpcErr != nil {
+		return nil, rpcErr
+	}
+	hash, rpcErr := m.submitGuarded(raw, &id, call.arrived)
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
@@ -791,7 +1083,8 @@ func (m *MockNode) submitTransaction(params []json.RawMessage, call *callInfo) (
 		TransactionHash string `json:"transaction_hash"`
 		ContextID       string `json:"context_id"`
 		Status          string `json:"status"`
-	}{hash, id.ContextID, "accepted"}, nil
+		BootID          string `json:"boot_id"`
+	}{hash, id.ContextID, "accepted", m.BootID()}, nil
 }
 
 type executionOutcome struct {
@@ -816,10 +1109,15 @@ type transactionStatus struct {
 
 func (m *MockNode) statusLocked(hash string, finalized *MockBlock) *transactionStatus {
 	tx := m.txs[hash]
-	if tx == nil || !tx.identity {
+	// Not included: only a live registration answers (a restart empties the
+	// registry); included: the block's manifest names the executed identity.
+	if tx == nil || tx.principal == "" || (tx.block == nil && !tx.identity) {
 		return nil
 	}
 	out := &transactionStatus{TransactionHash: tx.hash, PrincipalID: tx.principal, OrgID: tx.org, ContextID: tx.context, Execution: executionOutcome{Status: "pending", FactsVersion: m.facts.version, Created: []string{}}}
+	if tx.block == nil && tx.idExpires != 0 && tx.idExpires <= m.cfg.Clock().Unix() {
+		out.Execution.Status, out.Execution.ReasonCode = "expired", "IDENTITY_EXPIRED"
+	}
 	if finalized != nil {
 		number, hash := finalized.Number, finalized.Hash
 		out.Execution.FinalizedBlockHash, out.Execution.FinalizedBlockNumber = &hash, &number
@@ -846,29 +1144,112 @@ func (m *MockNode) transactionStatus(params []json.RawMessage, _ *callInfo) (any
 	defer m.mu.Unlock()
 	status := m.statusLocked(strings.ToLower(hash), m.finalizedLocked())
 	if status == nil {
-		return nil, errUnknownTransaction
+		return nil, errRejected
 	}
-	return status, nil
+	return struct {
+		*transactionStatus
+		BootID string `json:"boot_id"`
+	}{status, m.bootID}, nil
 }
 
 // MaxStatusBatch is the per-call cap of the batched status prototype.
 const MaxStatusBatch = 256
 
-// transactionStatuses is the option-A prototype API: one row per hash, null
-// for an unknown hash, at most MaxStatusBatch hashes.
+type batchedEntry struct {
+	*transactionStatus
+	Pooled bool `json:"pooled"`
+}
+
+type finalizedHead struct {
+	Number    uint64 `json:"number"`
+	Hash      string `json:"hash"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+// transactionStatuses is ops_transactionStatuses (capability
+// transaction_statuses_v1, the final A3 wire): the boot id, the finalized
+// head (null while only genesis is final), the canonical epoch and one entry
+// per hash (null when unknown), at most MaxStatusBatch hashes. With the
+// optional senders parameter it adds receipts (a canonical block holds the
+// hash) and the senders' nonces after the finalized block (null without one).
+// Malformed parameters are the node's opaque -32000.
 func (m *MockNode) transactionStatuses(params []json.RawMessage, _ *callInfo) (any, *rpcError) {
-	var hashes []string
-	if len(params) != 1 || json.Unmarshal(params[0], &hashes) != nil || len(hashes) == 0 || len(hashes) > MaxStatusBatch {
-		return nil, &rpcError{Code: -32602, Message: "invalid params"}
+	var hashes, senders []string
+	valid := func(raw json.RawMessage, size int, out *[]string) bool {
+		if json.Unmarshal(raw, out) != nil || len(*out) == 0 || len(*out) > MaxStatusBatch {
+			return false
+		}
+		for _, v := range *out {
+			if len(v) != 2+2*size || !strings.HasPrefix(v, "0x") || strings.ToLower(v) != v {
+				return false
+			}
+			if _, err := hex.DecodeString(v[2:]); err != nil {
+				return false
+			}
+		}
+		return true
+	}
+	if len(params) < 1 || len(params) > 2 || !valid(params[0], 32, &hashes) || (len(params) == 2 && !valid(params[1], 20, &senders)) {
+		return nil, errRejected
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	finalized := m.finalizedLocked()
-	out := make([]*transactionStatus, len(hashes))
-	for i, hash := range hashes {
-		out[i] = m.statusLocked(strings.ToLower(hash), finalized)
+	if finalized != nil && finalized.Number == 0 {
+		finalized = nil // only genesis is final: no finality to report
 	}
-	return out, nil
+	out := make([]*batchedEntry, len(hashes))
+	for i, hash := range hashes {
+		if status := m.statusLocked(hash, finalized); status != nil {
+			tx := m.txs[hash]
+			out[i] = &batchedEntry{transactionStatus: status, Pooled: tx.block == nil && m.accounts[tx.sender].pooled[tx.nonce] == tx}
+		}
+	}
+	var head *finalizedHead
+	if finalized != nil {
+		head = &finalizedHead{Number: finalized.Number, Hash: finalized.Hash, Timestamp: max(finalized.Time.Unix(), 1)}
+	}
+	type batch struct {
+		BootID         string          `json:"boot_id"`
+		Finalized      *finalizedHead  `json:"finalized"`
+		CanonicalEpoch uint64          `json:"canonical_epoch"`
+		Statuses       []*batchedEntry `json:"statuses"`
+	}
+	answer := batch{m.bootID, head, m.epoch, out}
+	if senders == nil {
+		return answer, nil
+	}
+	receipts := make([]bool, len(hashes))
+	for i, hash := range hashes {
+		tx := m.txs[hash]
+		receipts[i] = tx != nil && tx.block != nil
+	}
+	var nonces []uint64
+	if finalized != nil {
+		nonces = make([]uint64, len(senders))
+		for j, sender := range senders {
+			nonces[j] = m.nonceAtLocked(sender, finalized.Number)
+		}
+	}
+	return struct {
+		batch
+		Receipts     []bool   `json:"receipts"`
+		SenderNonces []uint64 `json:"sender_nonces"`
+	}{answer, receipts, nonces}, nil
+}
+
+// nonceAtLocked is a sender's account nonce after block number: its
+// transactions included up to it (the mock's senders start at nonce 0).
+func (m *MockNode) nonceAtLocked(sender string, number uint64) uint64 {
+	var count uint64
+	for _, block := range m.blocks[1 : min(number, uint64(len(m.blocks)-1))+1] {
+		for _, hash := range block.Transactions {
+			if m.txs[hash].sender == sender {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // Stalled reports senders whose pooled transactions wait behind a nonce gap
@@ -886,6 +1267,24 @@ func (m *MockNode) Stalled() (senders, txs int) {
 		}
 	}
 	return senders, txs
+}
+
+// Lapsed returns the pooled guarded transactions whose identity has expired
+// (a lease gap: the node would not include them, and they hold back their
+// sender's later nonces).
+func (m *MockNode) Lapsed() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.cfg.Clock().Unix()
+	var out []string
+	for _, account := range m.accounts {
+		for _, tx := range account.pooled {
+			if tx.guarded && tx.identity && tx.idExpires != 0 && tx.idExpires <= now {
+				out = append(out, tx.hash)
+			}
+		}
+	}
+	return out
 }
 
 // Stamp is one transaction's mock-side timeline (unix ns; 0 = never).

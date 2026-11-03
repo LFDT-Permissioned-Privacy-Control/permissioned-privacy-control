@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
+	"privacy-proxy/internal/compliance"
 	"privacy-proxy/internal/nodepolicy"
 	"privacy-proxy/internal/rbac"
 	"privacy-proxy/internal/tracer"
@@ -111,7 +112,9 @@ func (p *JSONRPCProcessor) processNodeExecution(ctx context.Context, req *Proces
 	} // Existing raw-tx method equivalence.
 	admission, err := p.rbacAccessCtrl.CheckExecutionAdmission(ctx, &rbac.AccessCheckRequest{UserExternalID: req.UserID, OrgID: req.OrgID, Method: allowlistMethod, AccessMethod: method, Params: params, TargetAddress: to, BypassCache: req.BypassPermsCache})
 	if err != nil || admission == nil {
-		slog.Warn("node execution admission unavailable", "method", req.Method, "error", err)
+		if suppressed, ok := p.nodeFailureLog.Allow("admission:"+nodeErrorClass(err), time.Now(), failureLogEvery); ok {
+			slog.Warn("node execution admission unavailable", "method", req.Method, "error", err, "suppressed", suppressed)
+		}
 		return p.nodeExecutionError(ctx, req, http.StatusNotFound, "method not found", ReasonMethodNotAllowed)
 	}
 	req.resolvedOrgID = admission.OrgID
@@ -157,7 +160,28 @@ func (p *JSONRPCProcessor) processNodeExecution(ctx context.Context, req *Proces
 		if denied := p.strictProfileRejectsVisibleTo(ctx, req, true); denied != nil {
 			return denied
 		}
-		if denied := p.checkCompliance(ctx, req, admission.OrgID, admission.UserID, admission.Signer, to, data, value); denied != nil {
+		// The travel-rule step is bound to this signed transaction: a retry
+		// of the same raw transaction re-uses its record (RD-1410, G60).
+		binding := compliance.TransactionBinding{Hash: strings.ToLower(transaction.Hash().Hex())}
+		if n, ok := p.nodeExecution.(interface{ Network() nodepolicy.Network }); ok {
+			binding.ChainID, binding.DeploymentID = n.Network().ChainID, n.Network().DeploymentID
+		}
+		if binding.ChainID == 0 {
+			binding = compliance.TransactionBinding{}
+		}
+		// A hash already bound to another submitter is refused before the
+		// compliance step, which could otherwise consume and bind a
+		// travel-rule record to that transaction for this caller (G13).
+		if prober, ok := p.nodeExecution.(bindingProber); ok {
+			conflict, err := prober.BindingConflicts(ctx, transaction.Hash().Bytes(), admission.UserID, admission.OrgID, admission.Signer)
+			if err != nil {
+				return p.nodeExecutionFailure(ctx, req, nodepolicy.ErrNodeUnavailable)
+			}
+			if conflict {
+				return p.nodeExecutionFailure(ctx, req, errBindingConflict)
+			}
+		}
+		if denied := p.checkComplianceFor(ctx, req, admission.OrgID, admission.UserID, admission.Signer, to, data, value, binding); denied != nil {
 			return denied
 		}
 		top := extractAndStripTopLevelVisibleTo(req)
@@ -260,6 +284,14 @@ func (p *JSONRPCProcessor) processNodeExecution(ctx context.Context, req *Proces
 	return &ProcessResult{StatusCode: http.StatusOK, ResponseBody: body}
 }
 
+// bindingProber reports whether a transaction hash is already bound to an
+// earlier submission of another principal, organisation or signer (or can no
+// longer execute); a different visibility list is caught at admission. An
+// error refuses the request as unavailable.
+type bindingProber interface {
+	BindingConflicts(ctx context.Context, hash []byte, principalID, orgID, signer string) (bool, error)
+}
+
 // The caller's options have already been vetted. Match the public RPC's
 // plain callTracer output without exposing logs, storage or stack snapshots.
 func nodeCallTraceParams(params []any) []any {
@@ -270,8 +302,55 @@ func nodeCallTraceParams(params []any) []any {
 	return []any{params[0], block, map[string]any{"tracer": "callTracer"}}
 }
 
+// nodeExecutionFailure answers a node-path failure. The warning is
+// rate-limited per error class: a failing node costs one line per
+// interval, while every request is still answered and audited.
 func (p *JSONRPCProcessor) nodeExecutionFailure(ctx context.Context, req *ProcessRequest, err error) *ProcessResult {
-	slog.Warn("private node execution failed", "method", req.Method, "error", err)
+	if suppressed, ok := p.nodeFailureLog.Allow("failure:"+nodeErrorClass(err), time.Now(), failureLogEvery); ok {
+		slog.Warn("private node execution failed", "method", req.Method, "error", err, "suppressed", suppressed)
+	}
+	if errors.Is(err, nodepolicy.ErrFactsPending) {
+		// The node has not applied the facts this request needs yet (its
+		// bounded wait expired): retryable, not a policy decision.
+		result := p.nodeExecutionError(ctx, req, http.StatusServiceUnavailable, "execution facts are being published; retry shortly", ReasonPublicationPending)
+		result.Error.RetryAfter = 1
+		return result
+	}
+	if errors.Is(err, errBindingConflict) {
+		// One opaque answer for every cause (another principal, organisation,
+		// signer or visibility list, or a hash that can no longer execute).
+		return p.nodeExecutionError(ctx, req, http.StatusConflict, "transaction conflicts with an earlier submission", ReasonTransactionConflict)
+	}
+	if errors.Is(err, errPoolRejected) {
+		return p.nodeExecutionError(ctx, req, http.StatusConflict, "transaction nonce is already used or held by another pending transaction", ReasonPoolRejected)
+	}
+	if errors.Is(err, errSubmissionPending) {
+		// The intent is saved and OPS delivers it: the transaction may still
+		// execute. Check its status, or resend the same signed transaction.
+		result := p.nodeExecutionError(ctx, req, http.StatusServiceUnavailable, "execution service unavailable; the transaction may still execute: check its status or resend it unchanged", ReasonExecutionUnavailable)
+		result.Error.RetryAfter = 1
+		return result
+	}
+	if errors.Is(err, errPendingLimit) {
+		// Backpressure before renewal debt (plan §4.8.2): retryable.
+		result := p.nodeExecutionError(ctx, req, http.StatusServiceUnavailable, "execution queue is full; retry shortly", ReasonPendingLimit)
+		result.Error.RetryAfter = 1
+		return result
+	}
+	if errors.Is(err, errPrincipalPendingLimit) {
+		// This principal's own pending work is at its cap; others are still
+		// admitted. Retryable once some of its transactions are included.
+		result := p.nodeExecutionError(ctx, req, http.StatusTooManyRequests, "too many pending transactions for this principal; retry once some are included", ReasonPrincipalPendingLimit)
+		result.Error.RetryAfter = 1
+		return result
+	}
+	if errors.Is(err, errOrgPendingLimit) {
+		// The organization's pending work (all its principals) is at its cap;
+		// other organizations are still admitted.
+		result := p.nodeExecutionError(ctx, req, http.StatusTooManyRequests, "too many pending transactions for this organization; retry once some are included", ReasonOrgPendingLimit)
+		result.Error.RetryAfter = 1
+		return result
+	}
 	if errors.Is(err, nodepolicy.ErrNodeRejected) {
 		return p.nodeExecutionError(ctx, req, http.StatusForbidden, "request rejected by execution node", ReasonNodeRejected)
 	}

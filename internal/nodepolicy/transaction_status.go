@@ -1,6 +1,9 @@
 package nodepolicy
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 type CreatedContract struct {
 	Address     string `json:"address"`
@@ -24,6 +27,7 @@ type TransactionStatus struct {
 	OrgID           string           `json:"org_id"`
 	ContextID       string           `json:"context_id"`
 	Execution       ExecutionOutcome `json:"execution"`
+	BootID          string           `json:"boot_id"`
 }
 
 func (c *Client) TransactionStatus(ctx context.Context, hash string) (TransactionStatus, error) {
@@ -38,7 +42,7 @@ func (c *Client) TransactionStatus(ctx context.Context, hash string) (Transactio
 	if err := decodeStrict(raw, &status); err != nil {
 		return TransactionStatus{}, ErrNodeResponse
 	}
-	if status.TransactionHash != hash || !identifier(status.PrincipalID) || !identifier(status.OrgID) || !identifier(status.ContextID) {
+	if status.TransactionHash != hash || !identifier(status.PrincipalID) || !identifier(status.OrgID) || !identifier(status.ContextID) || !ValidBootID(status.BootID) {
 		return TransactionStatus{}, ErrNodeResponse
 	}
 	if err := status.Validate(); err != nil {
@@ -84,4 +88,167 @@ func (status TransactionStatus) Validate() error {
 		seen[created.Address] = true
 	}
 	return nil
+}
+
+// MaxStatusBatch bounds one ops_transactionStatuses call.
+const MaxStatusBatch = 256
+
+// FinalizedHead is the node's effective finalized block (final and written).
+type FinalizedHead struct {
+	Number    uint64 `json:"number"`
+	Hash      string `json:"hash"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+// BatchedStatus is one entry of a batched status answer: the single-call
+// status (with the batch's boot id) and, for a transaction not included,
+// whether the node's pool holds it.
+type BatchedStatus struct {
+	Status TransactionStatus
+	Pooled bool
+}
+
+// TransactionStatusBatch is the answer of ops_transactionStatuses: one entry
+// per requested hash in request order. A nil entry is no answer for that hash
+// in this call (unknown, a failed lookup, a block that left the chain while
+// the answer was prepared, or the node's per-call budget): never evidence of
+// absence. Finalized is nil while finality is unknown or only genesis is
+// final.
+type TransactionStatusBatch struct {
+	BootID         string
+	Finalized      *FinalizedHead
+	CanonicalEpoch uint64
+	Statuses       []*BatchedStatus
+	// With TransactionEvidence only: Receipts[i] reports whether a canonical
+	// block holds hash i (nil: the lookup failed); SenderNonces[j] is sender
+	// j's account nonce after the Finalized block (nil when Finalized is nil
+	// or that state could not be read).
+	Receipts     []*bool
+	SenderNonces []uint64
+}
+
+type batchEntryWire struct {
+	TransactionHash string           `json:"transaction_hash"`
+	PrincipalID     string           `json:"principal_id"`
+	OrgID           string           `json:"org_id"`
+	ContextID       string           `json:"context_id"`
+	Execution       ExecutionOutcome `json:"execution"`
+	Pooled          bool             `json:"pooled"`
+}
+
+type batchWire struct {
+	BootID         string          `json:"boot_id"`
+	Finalized      *FinalizedHead  `json:"finalized"`
+	CanonicalEpoch uint64          `json:"canonical_epoch"`
+	Statuses       json.RawMessage `json:"statuses"` // entries may be null
+}
+
+// evidenceWire is the answer with the senders parameter: two more fields,
+// both required (sender_nonces may be null).
+type evidenceWire struct {
+	batchWire
+	Receipts     json.RawMessage  `json:"receipts"`      // entries may be null
+	SenderNonces *json.RawMessage `json:"sender_nonces"` // required, may be null
+}
+
+// TransactionStatuses polls up to MaxStatusBatch hashes in one call (plan
+// §4.5 option A). Call it only for a node that advertises
+// CapabilityTransactionStatuses. Every entry is validated like a single
+// answer and must name the hash requested at its position.
+func (c *Client) TransactionStatuses(ctx context.Context, hashes []string) (TransactionStatusBatch, error) {
+	if !validBatch(hashes, 32) {
+		return TransactionStatusBatch{}, ErrIdentity
+	}
+	raw, err := c.call(ctx, "ops_transactionStatuses", []any{hashes})
+	if err != nil {
+		return TransactionStatusBatch{}, err
+	}
+	var wire batchWire
+	if err := decodeStrict(raw, &wire); err != nil {
+		return TransactionStatusBatch{}, ErrNodeResponse
+	}
+	return decodeBatch(wire, hashes)
+}
+
+// TransactionEvidence is ops_transactionStatuses with the senders parameter:
+// the statuses plus, read at the answer's finalized block, whether a
+// canonical block holds each hash and each sender's account nonce (plan
+// §4.8.1 dropped evidence, from the private node itself). Senders are 1 to
+// MaxStatusBatch lowercase addresses.
+func (c *Client) TransactionEvidence(ctx context.Context, hashes, senders []string) (TransactionStatusBatch, error) {
+	if !validBatch(hashes, 32) || !validBatch(senders, 20) {
+		return TransactionStatusBatch{}, ErrIdentity
+	}
+	raw, err := c.call(ctx, "ops_transactionStatuses", []any{hashes, senders})
+	if err != nil {
+		return TransactionStatusBatch{}, err
+	}
+	var wire evidenceWire
+	var receipts []*bool
+	// decodeStrict has checked that both fields are present.
+	if err := decodeStrict(raw, &wire); err != nil || json.Unmarshal(wire.Receipts, &receipts) != nil || len(receipts) != len(hashes) {
+		return TransactionStatusBatch{}, ErrNodeResponse
+	}
+	out, err := decodeBatch(wire.batchWire, hashes)
+	if err != nil {
+		return TransactionStatusBatch{}, err
+	}
+	out.Receipts = receipts
+	if wire.SenderNonces != nil {
+		var nonces []*uint64 // a null entry is a protocol error, never 0
+		if out.Finalized == nil || json.Unmarshal(*wire.SenderNonces, &nonces) != nil || len(nonces) != len(senders) {
+			return TransactionStatusBatch{}, ErrNodeResponse
+		}
+		out.SenderNonces = make([]uint64, len(nonces))
+		for i, n := range nonces {
+			if n == nil {
+				return TransactionStatusBatch{}, ErrNodeResponse
+			}
+			out.SenderNonces[i] = *n
+		}
+	}
+	return out, nil
+}
+
+// validBatch reports 1..MaxStatusBatch lowercase 0x-hex values of size bytes.
+func validBatch(values []string, size int) bool {
+	if len(values) == 0 || len(values) > MaxStatusBatch {
+		return false
+	}
+	for _, v := range values {
+		if !hexField(v, size) {
+			return false
+		}
+	}
+	return true
+}
+
+func decodeBatch(wire batchWire, hashes []string) (TransactionStatusBatch, error) {
+	var entries []json.RawMessage
+	if !ValidBootID(wire.BootID) || json.Unmarshal(wire.Statuses, &entries) != nil || len(entries) != len(hashes) {
+		return TransactionStatusBatch{}, ErrNodeResponse
+	}
+	// Only a block above genesis is ever reported final (genesis: null).
+	if f := wire.Finalized; f != nil && (!hexField(f.Hash, 32) || f.Number == 0 || f.Timestamp <= 0) {
+		return TransactionStatusBatch{}, ErrNodeResponse
+	}
+	out := TransactionStatusBatch{BootID: wire.BootID, Finalized: wire.Finalized, CanonicalEpoch: wire.CanonicalEpoch, Statuses: make([]*BatchedStatus, len(hashes))}
+	for i, entry := range entries {
+		if string(entry) == "null" {
+			continue
+		}
+		var e batchEntryWire
+		if err := decodeStrict(entry, &e); err != nil || e.TransactionHash != hashes[i] {
+			return TransactionStatusBatch{}, ErrNodeResponse
+		}
+		status := TransactionStatus{TransactionHash: e.TransactionHash, PrincipalID: e.PrincipalID, OrgID: e.OrgID, ContextID: e.ContextID, Execution: e.Execution, BootID: wire.BootID}
+		if err := status.Validate(); err != nil {
+			return TransactionStatusBatch{}, err
+		}
+		if e.Pooled && status.Execution.Status != "pending" && status.Execution.Status != "denied" && status.Execution.Status != "expired" {
+			return TransactionStatusBatch{}, ErrNodeResponse
+		}
+		out.Statuses[i] = &BatchedStatus{Status: status, Pooled: e.Pooled}
+	}
+	return out, nil
 }

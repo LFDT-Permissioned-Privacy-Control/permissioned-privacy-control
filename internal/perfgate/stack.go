@@ -26,6 +26,14 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+// setupClient serves seeding and control calls: a small keep-alive pool, so
+// setup does not leave TIME_WAIT sockets behind for the timed phases.
+var setupClient = func() *http.Client {
+	c := NewLoadClient(16)
+	c.Timeout = 60 * time.Second
+	return c
+}()
+
 // StackOptions describes one full-server stack: real OPS binary, real
 // Postgres (main, audit, tracking), real Redis, mocked node.
 type StackOptions struct {
@@ -58,6 +66,7 @@ type Stack struct {
 	AuditDB    *sql.DB
 	Admin      *sql.DB // superuser on the main instance (postgres DB)
 	ExecAdmin  *sql.DB // superuser on the tracking instance
+	ExecDB     *sql.DB // owner connection to the execution-tracking database
 	mainName   string
 	opsLog     *os.File
 	opsExited  chan struct{}
@@ -157,14 +166,18 @@ func StartStack(ctx context.Context, o StackOptions) (*Stack, error) {
 		"ENVIRONMENT": "development", "GIN_MODE": "release", "PORT": port, "BASE_URL": s.URL, "NODE_URL": publicURL,
 		"DATABASE_URL":       s.PG.DSN(s.mainName, "postgres", s.PG.Password),
 		"AUDIT_DATABASE_URL": s.PG.DSN(s.mainName+"_audit", "privacy_proxy_app", appPassword),
-		// Provisioned for the execution-tracking design (plan §4.11). Today's
-		// code does not read it; the runner measures the database either way.
-		"EXECUTION_DATABASE_URL": s.ExecPG.DSN(s.mainName+"_exec", "postgres", s.ExecPG.Password),
-		"REDIS_URL":              fmt.Sprintf("redis://:%s@127.0.0.1:%s/0", redisPassword, s.Redis.Port),
-		"JWT_SECRET":             "perfgate-access-secret-" + randomHex(16), "JWT_REFRESH_SECRET": "perfgate-refresh-secret-" + randomHex(16),
+		// The execution-tracking database (plan §4.11), on its own instance
+		// with SeparateDB; Reth mode migrates and uses it.
+		"EXECUTION_DATABASE_URL":       s.ExecPG.DSN(s.mainName+"_exec", "postgres", s.ExecPG.Password),
+		"EXECUTION_ADMIN_DATABASE_URL": s.ExecPG.DSN(s.mainName+"_exec", "postgres", s.ExecPG.Password),
+		"REDIS_URL":                    fmt.Sprintf("redis://:%s@127.0.0.1:%s/0", redisPassword, s.Redis.Port),
+		"JWT_SECRET":                   "perfgate-access-secret-" + randomHex(16), "JWT_REFRESH_SECRET": "perfgate-refresh-secret-" + randomHex(16),
 		"ADMIN_API_TOKEN": s.AdminToken, "ALLOW_MOCK_LOGIN": "true", "MOCK_SIGNATURES": "false", "ENABLE_TRAVEL_RULE": "true",
 		"VERIFIER_ID": "did:privado:verifier:dev-0000000000000000", "DISABLE_COINGECKO": "true",
-		"MAX_CONCURRENT_REQUESTS": "5000", "EXPLORER_DATABASE_URL": "", "DB_MAX_OPEN_CONNS": "30",
+		// The database pool is the product default (DB_MAX_OPEN_CONNS unset) on
+		// both trees; P0 ran gate 2 with the gate-1 harness's 30. Override it
+		// with OPS_GATE2_EXTRA_ENV for a labelled sensitivity run.
+		"MAX_CONCURRENT_REQUESTS": "5000", "EXPLORER_DATABASE_URL": "",
 		"AUDIT_BUFFER_DIR": filepath.Join(o.Dir, "audit-buffer"),
 	}
 	if o.Mode == "reth" {
@@ -191,6 +204,9 @@ func StartStack(ctx context.Context, o StackOptions) (*Stack, error) {
 		return nil, err
 	}
 	if s.AuditDB, err = OpenDB(s.PG.DSN(s.mainName+"_audit", "postgres", s.PG.Password)); err != nil {
+		return nil, err
+	}
+	if s.ExecDB, err = OpenDB(s.ExecPG.DSN(s.mainName+"_exec", "postgres", s.ExecPG.Password)); err != nil {
 		return nil, err
 	}
 	if err := s.startOPS(ctx); err != nil {
@@ -233,7 +249,7 @@ func (s *Stack) startOPS(ctx context.Context) error {
 			return ctx.Err()
 		default:
 		}
-		resp, err := http.Get(ready)
+		resp, err := setupClient.Get(ready)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -260,7 +276,7 @@ func (s *Stack) Close() {
 		s.opsLog.Close()
 	}
 	s.Node.Close()
-	for _, db := range []*sql.DB{s.MainDB, s.AuditDB, s.Admin, s.ExecAdmin} {
+	for _, db := range []*sql.DB{s.MainDB, s.AuditDB, s.Admin, s.ExecAdmin, s.ExecDB} {
 		if db != nil {
 			db.Close()
 		}
@@ -300,7 +316,7 @@ func (s *Stack) api(method, path string, body any, token string, admin bool, out
 		} else if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := setupClient.Do(req)
 		if err != nil {
 			return err
 		}
@@ -544,7 +560,7 @@ func (s *Stack) WaitFactsCurrent(ctx context.Context, limit time.Duration) (uint
 
 // Metrics scrapes the OPS Prometheus endpoint.
 func (s *Stack) Metrics() (string, error) {
-	resp, err := http.Get(s.URL + "/metrics")
+	resp, err := setupClient.Get(s.URL + "/metrics")
 	if err != nil {
 		return "", err
 	}

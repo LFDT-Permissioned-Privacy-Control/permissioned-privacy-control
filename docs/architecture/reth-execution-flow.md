@@ -110,13 +110,38 @@ same registered ABI or configuration workflow.
 
 ## How changing facts reach Reth
 
-PostgreSQL remains authoritative. Relevant row changes update a commit-ordered
-version and outbox in the same database transaction. The publisher exports one
-consistent database generation, including active policy artifacts. It sends a
-full snapshot to bootstrap or resynchronize, otherwise a delta containing
-upserts and explicit deletions. Each envelope is signed with the OPS Ed25519
-key and bound to the chain and deployment. Reth verifies it using configured
-public keys over a separate authenticated private endpoint.
+PostgreSQL remains authoritative. A change to a column the fact export reads
+(the dependency set in `node_policy_export.go`) advances one commit-ordered
+version, once per database transaction, and records the changed keys
+(principal, DID, group, contract, organisation policy, sanction) in a change
+log, in that same transaction. Changes to anything else (names, notes,
+metadata, login timestamps) do not move the version.
+
+Publication is event driven. The transaction that advances the version sends
+`node_policy_changed` at commit; the elected publisher listens on its own
+database session and publishes at once. Notifications that arrive while it is
+publishing collapse into one more publication. The one-second publication
+interval remains as the heartbeat and the fallback when the subscription is
+lost; a resubscription publishes at once, because changes may have been
+missed meanwhile. The publisher exports only the keys changed since the
+generation the node acknowledged, in one consistent database snapshot,
+including active policy artifacts. It reads every fact again when the change
+log cannot describe the gap (it was pruned past that generation, a fact table
+was truncated, or the change is large), when the incremental read fails, at
+every checkpoint, after a publisher restart or failover (it cannot know how
+the node's facts were built), and at least every five minutes, when it also
+compares the incrementally published facts with a full export and republishes
+in full on any difference. The change log is written only through
+security-definer functions, so the runtime role can add keys or prune through
+an acknowledged version but cannot remove a change unseen; without a
+publisher it keeps the last 8,192 versions. It sends a full snapshot
+to bootstrap or resynchronize, otherwise a delta containing upserts and
+explicit deletions. Each envelope is signed with the OPS Ed25519 key and bound
+to the chain and deployment. Reth verifies it using configured public keys over
+a separate authenticated private endpoint. Recording the node's acknowledgement
+prunes the change log through that version and sends `node_policy_applied`,
+which makes every OPS instance re-read the node's status at once instead of at
+its next one-second check.
 
 ```mermaid
 sequenceDiagram
@@ -126,32 +151,46 @@ sequenceDiagram
     participant Node as Reth fact receiver
     participant Exec as Reth execution
     Admin->>DB: Remove membership or activate rules
-    DB->>DB: Commit rows and ordered change version together
-    Pub->>DB: Read consistent committed generation
+    DB->>DB: Commit rows, ordered change version and changed keys together
+    DB-->>Pub: node_policy_changed (at commit)
+    Pub->>DB: Read the changed keys in one consistent generation
     Pub->>Node: Signed snapshot or delta via ops_policyApply
     Node->>Node: Verify signature, network, version and complete graph
     Node->>Node: Write the update durably, then install it
     Node-->>Pub: Acknowledge applied version and digest
-    Pub->>DB: Record acknowledgement
+    Pub->>DB: Record acknowledgement, prune the change log
+    DB-->>Pub: node_policy_applied (every OPS instance refreshes node status)
     Exec->>Node: Pin fresh immutable snapshot for next candidate
     loop No new changes
         Pub->>Node: Signed heartbeat for installed version and digest
     end
 ```
 
-Defaults are a **one-second publication interval**, **30-second fact freshness
-lease** and **one-minute identity lifetime**. A heartbeat renews freshness; it
+Defaults are a **one-second heartbeat interval**, **30-second fact freshness
+lease**, a **one-minute simulation identity lifetime** and a **five-minute
+transaction identity lifetime** (renewed while pending, see below). A heartbeat renews freshness; it
 does not change facts. Missing versions require resynchronization. Invalid,
 missing or expired facts prevent new execution.
 
-Before minting a request identity, OPS checks that the node has acknowledged
-the current database version and is ready. That version becomes the identity's
-minimum required snapshot version. A configuration being active in PostgreSQL
-and applied on Reth are separate states, exposed by publication/readiness status.
-A node whose fresh facts are still below a request's minimum version holds the
-request, without a worker, until publication brings that version or its bounded
-wait ends (default one second, at most 32 requests at once), then admits it or
-answers that facts are pending; stale or missing facts are refused at once.
+Before minting a request identity, OPS reads the current database version and
+the database clock in one statement; the version becomes the identity's minimum
+required snapshot version, so a revocation committed before the request always
+binds it, and the clock is the issue time, so identities from every OPS
+instance are ordered by one clock. A later identity for the same transaction
+replaces the stored one only if it dominates it (floor and expiry both at
+least as high); an earlier one is still sent, and the node answers it as a
+duplicate. Readiness comes from a cached
+node status (refreshed every second and on every acknowledgement), not a node
+call per request. If the node is ready but has not applied that version yet,
+OPS hands the request on when the node advertises `fact_wait_v1`: the node
+holds the request, without a worker, until publication brings that version or
+its bounded wait ends (default one second, at most 32 requests at once), then
+admits it or answers -32012, which OPS returns as 503 with `Retry-After: 1` and
+reason `publication_pending`; stale or missing facts are refused at once. OPS
+refuses the same way itself once it has seen the node behind for longer than
+that wait, or at once for a node without the capability. A configuration being
+active in PostgreSQL and applied on Reth are separate states, exposed by
+publication/readiness status.
 
 A candidate block pins one coherent snapshot; it never adopts half a policy
 set or changes memberships halfway through execution. A revocation affects
@@ -170,6 +209,7 @@ sequenceDiagram
     participant User as User / application
     participant OPS as OPS RPC
     participant DB as OPS PostgreSQL
+    participant TDB as Execution-tracking PostgreSQL
     participant Node as Private Reth API and pool
     participant EVM as Guarded Reth EVM
     User->>OPS: eth_sendRawTransaction + authenticated session
@@ -177,7 +217,7 @@ sequenceDiagram
     OPS->>OPS: Admission and transaction compliance checks
     OPS->>Node: Verify readiness at current DB fact version
     OPS->>OPS: Sign identity bound to exact transaction hash
-    OPS->>DB: Persist submission and visibility intent
+    OPS->>TDB: Persist the transaction binding and visibility intent (group commit)
     OPS->>Node: ops_submitTransaction(identity, raw transaction)
     Node->>Node: Verify identity once, register it in memory, admit to pool
     Node-->>OPS: Accepted transaction hash
@@ -190,7 +230,8 @@ sequenceDiagram
     end
     Note over Node,EVM: Permitted execution can still revert in application code
     OPS->>Node: Poll canonical execution and finality status
-    OPS->>DB: Reconcile finalized creations and visibility
+    OPS->>DB: Apply finalized creations and visibility once
+    OPS->>TDB: Record the final status
 ```
 
 The signed identity names the **OPS principal**, organization, Ethereum signer,
@@ -220,7 +261,84 @@ Pool acceptance is not permission or finality. A denied pending transaction may
 be reconsidered if facts change while its identity remains valid. A current
 denial or expired identity also does not cancel a candidate already executing.
 OPS distinguishes these states from canonical inclusion, finality and completed
-bookkeeping; it does not automatically resubmit the transaction.
+bookkeeping, and keeps a pending transaction deliverable itself (next section).
+
+## Renewal and recovery
+
+The node keeps pending identities in memory only, so a node restart, a lost
+pool entry or a lapsing identity would leave a pending transaction unable to
+execute. The elected OPS instance runs one lease keeper, sharing the
+reconciler's in-memory schedule, that renews such a transaction.
+
+```mermaid
+sequenceDiagram
+    participant Rec as Reconciler (elected OPS)
+    participant Keep as Lease keeper (same term)
+    participant TDB as Execution-tracking PostgreSQL
+    participant DB as OPS PostgreSQL
+    participant AUD as Durable audit buffer
+    participant Node as Private Reth API and pool
+    participant Pub as Node public RPC (NODE_URL)
+    Rec->>Node: Status polls (batched where the node supports it)
+    Node-->>Rec: Outcome, boot id, finalized head, pool flag
+    Rec->>Pub: Still in the pool? (when the node reports no pool flag)
+    Rec->>Keep: Candidates: undelivered for this boot, boot changed, evicted, lease ending
+    Keep->>TDB: Re-read the candidates (delivery, claim, generation)
+    Keep->>DB: Full admission re-check, compliance renewal mode
+    Keep->>DB: Fact version and database clock (after every re-check)
+    Keep->>Keep: Sign: same principal, organization, signer, hash; lease capped at the maximum age
+    Keep->>AUD: ops.system.recovery / identity_renewal / renewal_refused / renewal_stopped
+    Keep->>TDB: New generation + history row + delivery claim (fenced by generation and context)
+    Keep->>Node: ops_submitTransaction on the recovery lane
+    Node-->>Keep: accepted + boot id, or -32013 (nonce_used / replaced)
+    Keep->>TDB: Acknowledgement against the answering boot (batched), or stop
+```
+
+- **Triggers.** A pending binding is renewed when its current generation is not
+  acknowledged by the node's current boot and no unexpired delivery claim for
+  that boot holds it (an OPS crash between recording and sending, a failed
+  send, a node restart), when the node's pool no longer holds it while its
+  identity is still registered (same-boot eviction), or when its lease has at
+  most half of the transaction identity lifetime left and a renewal would
+  extend it (congestion). A reorg back to pending keeps the delivery record of
+  the boot that observed the inclusion: that node process holds the identity
+  until finality.
+- **Budget and limits.** Renewals of every trigger are spent within the
+  renewal budget, earliest expiry first; re-checks start only in the first two
+  seconds of a tick, each bounded on its own, so a slow checker defers
+  renewals instead of stalling reconciliation. Admission keeps the pending
+  work within what the budget can renew in time: a global limit (budget ×
+  lifetime / 4 minus a reorg's worth of blocks) and per-principal and
+  per-organization limits, all counted per state transition in the tracking
+  database (`pending_quota`, `pending_quota_principal`, `pending_quota_org`)
+  in the batch that changes the binding. Retries of a recorded transaction and reorgs back to pending are
+  never refused.
+- **Delivery claims and acknowledgements.** Recording an intent claims the row
+  for the delivering instance and node boot for 20 seconds; the keeper honours
+  any claim for the current boot, its own included, and a claim is void once
+  the boot changes. An acknowledgement is recorded against the boot id of the
+  node response that carried it, and only for the generation it delivered.
+- **Decisions.** Every renewal re-runs the full admission check and compliance
+  in renewal mode (only the travel-rule record bound to this transaction counts)
+  before signing at the current fact version. A refusal, the maximum age, or a
+  pool refusal stops renewal (`renewal_stopped`, not final). Every decision is
+  appended to the durable audit buffer before it is recorded, and recorded
+  before the identity is sent. A failed send of a recorded generation is
+  retried unchanged while the node keeps its boot.
+- **Final failure.** `dropped` is written only for a stopped binding whose
+  signer's nonce at the finalized block has passed its own nonce with no own
+  receipt, on two reads at least 30 seconds apart. A node with
+  `transaction_statuses_v1` answers both in the batched status call, at its own
+  finalized block; otherwise OPS reads them from the public RPC by the
+  node-reported finalized block's hash and confirms with a definitive private
+  status answer. A lookup the node could not answer is never evidence. Lease expiry alone never
+  makes a transaction final, and a finalized own receipt beats a stop.
+- **Option A reconciliation.** Where the node advertises
+  `transaction_statuses_v1`, the reconciler polls up to 256 transactions per
+  call and up to 16,384 per tick; a change of the node's canonical epoch
+  re-polls every provisional row, and an entry the node could not answer is
+  polled again. Otherwise it polls one transaction per call, up to 4,096 per
+  tick.
 
 ## What happens for an RPC call
 
@@ -278,7 +396,12 @@ the permission verdict for diagnostic traces. Preview never activates a policy.
 ## Where state lives
 
 OPS PostgreSQL is the authority for people, organizations, contracts and
-configuration. The node keeps two kinds of state: what it needs to execute now
+configuration. Per-transaction execution state — who submitted each pending
+transaction, its delivery and inclusion, and the final status kept for owner
+lookups — lives in a separate execution-tracking database, so no
+per-transaction write stream reaches the main database. Losing the tracking
+database loses only in-flight follow-up, never configuration, identity or
+audit. The node keeps two kinds of state: what it needs to execute now
 (memory) and the signed evidence it needs to prove or replay past execution
 (its policy state directory). Keys stay with their owners: the client keeps the
 wallet key, OPS keeps the signing key, and the node holds only OPS public keys.
@@ -292,16 +415,26 @@ flowchart TB
     subgraph OPSProc["OPS process"]
         SignKey["Ed25519 signing private key file"]
         NodeToken["Bearer token for the private node API"]
-        LastSnap["Elected publisher: last published snapshot,<br/>in memory, for building deltas"]
+        LastSnap["Elected publisher: last published snapshot,<br/>in memory, patched with changed keys into deltas"]
     end
     subgraph PG["OPS PostgreSQL, authoritative"]
         Directory["Directory facts: users, memberships, linked addresses,<br/>groups and access, contracts and grants,<br/>shared infrastructure, preregistered addresses, sanctions"]
         Config["Configuration revisions and active execution<br/>policy revisions with compiled per-group artifacts"]
-        Feed["node_policy_clock, node_policy_outbox,<br/>node_policy_cursors (acknowledged version)"]
-        Subs["node_submissions: raw transaction, identity envelope,<br/>principal, organization, signer, visibility, state"]
+        Feed["node_policy_clock, node_policy_changes (changed keys,<br/>pruned at acknowledgement), node_policy_cursors (acknowledged version)"]
+        Effects["node_tx_effects_applied (one marker per finalized<br/>transaction with side effects), node_tx_effects_floor,<br/>node_tx_compliance_claims (one travel-rule record per transaction)"]
         Visibility["pending_tx_visibility, tx_visible_to"]
         Audit["rbac_audit_log, hash-chained"]
         Lease["Publisher lease: session advisory lock"]
+    end
+    subgraph TDB["Execution-tracking PostgreSQL, operational and lossable"]
+        Binding["node_tx_binding: one row per pending transaction<br/>(principal, organization, signer, generation, state)"]
+        Payload["node_tx_payload: raw transaction, insert-once,<br/>dropped by time bucket"]
+        Status["node_tx_status: final status, daily partitions,<br/>dropped after RETENTION_NODE_SUBMISSIONS"]
+        History["node_tx_identities: later generations, stops"]
+        Quota["pending_quota (global, per principal, per organization), tracking_meta (network, incarnation)"]
+    end
+    subgraph AuditDB["Audit PostgreSQL, append-only"]
+        AccessLogs["access_logs, hash-chained: requests and<br/>system decisions such as finalization"]
     end
     subgraph Runtime["Guarded Reth policy runtime"]
         subgraph Memory["Memory"]
@@ -321,6 +454,8 @@ flowchart TB
     end
     Client -->|"Raw transaction or call, with session"| OPSProc
     OPSProc -->|"Reads and writes"| PG
+    OPSProc -->|"Per-transaction writes, batched"| TDB
+    OPSProc -->|"Through the durable audit buffer"| AuditDB
     OPSProc -->|"Signed facts and identities, private API"| Runtime
     Trust -.->|"Verifies every signed envelope"| Objects
     Runtime -->|"Executor inside the same process"| Reth
@@ -345,15 +480,17 @@ and a later admission reclaims it; admission does no storage I/O. The node
 reports finality only up to the height Reth has written, so a crash never loses
 a block reported final. A
 restarted node holds no pending identities: a transaction not yet included
-cannot execute until the principal that submitted it sends it again through OPS
-(OPS does not resubmit it), and OPS's submission row keeps the principal binding
-meanwhile. Each process start has a new random `boot_id`, kept in memory only;
+cannot execute until OPS renews it. OPS sees the new `boot_id`, re-checks the
+principal's admission at the current facts and redelivers every pending
+transaction with no client action; its binding row in the execution-tracking
+database keeps the principal binding meanwhile. Each process start has a new random `boot_id`, kept in memory only;
 every successful status, fact-apply and submission result names it. A
 definitive pool rejection of the transaction's bytes (its nonce is used without
 its own receipt, or a replacement is underpriced) undoes exactly that
 registration. The transaction pool itself is Reth's in-memory pool. Reth saves
 local pool transactions only on graceful shutdown and restores them at start, so
-a crash loses pooled transactions while OPS keeps their submission rows. The
+a crash loses pooled transactions while OPS keeps their binding rows and raw
+transactions and redelivers them. The
 node accepts a resend even when the transaction is still pooled. A block's
 manifest, published once before the block is returned, embeds the
 signed identity and outcome of every transaction in the block and names the
@@ -366,16 +503,18 @@ The next diagram follows the records of one transaction across these stores.
 sequenceDiagram
     participant OPS as OPS process
     participant DB as OPS PostgreSQL
+    participant TDB as Execution-tracking PostgreSQL
+    participant AUD as Durable audit buffer
     participant RT as Node runtime memory
     participant Dir as Node policy state directory
     participant Reth as Reth pool and chain
     OPS->>DB: Read current fact version
     OPS->>OPS: Sign identity bound to the transaction hash
-    OPS->>DB: Insert node_submissions row, state queued
+    OPS->>TDB: Insert binding and payload rows, pending (one commit per batch of requests)
     OPS->>RT: ops_submitTransaction(identity, raw transaction)
     RT->>RT: Register pending identity, memory only
     RT->>Reth: Insert raw transaction into pool
-    OPS->>DB: Mark row accepted
+    Note over OPS: The acceptance is kept in memory and written only<br/>if no later transition records it first
     Reth->>RT: Build candidate block with pinned facts
     RT->>RT: Candidate outcome (pending or denied), memory only
     RT->>Dir: One compressed block manifest: identities, outcomes, facts, lease
@@ -387,17 +526,22 @@ sequenceDiagram
         RT->>Reth: Canonical receipt and finalized head
         RT->>RT: Finality capped at the height Reth has written
         RT-->>OPS: included or reverted, finality, created contracts
-        OPS->>DB: Update row state and outcome
+        OPS->>TDB: Included, not final: mark provisional (batched; nothing for unchanged polls)
     end
-    Note over OPS,DB: Final and included: one database transaction
+    OPS->>AUD: ops.system.finalized event, before the decision commits
+    Note over OPS,DB: With side effects: one main-database transaction, once per transaction (marker)
     OPS->>DB: Register created contracts and deploy grant
     OPS->>DB: Queue visibility in pending_tx_visibility
-    OPS->>DB: Set reconciled_at on the submission row
+    OPS->>TDB: Delete the binding, insert the final status (batched)
     DB->>DB: Visibility reconciler promotes to tx_visible_to
 ```
 
-Ownership and visibility are written only from finalized node evidence, in
-the same database transaction that closes the submission row. A newly
+Ownership and visibility are written only from finalized node evidence, in a
+main-database transaction guarded by a per-transaction marker, so a crash
+before the tracking database records the final status re-runs it without
+applying anything twice; the marker's effect bits also keep a grant an
+administrator revoked from coming back. Transactions without side effects
+write nothing to the main database. A newly
 registered contract is itself a fact change: it advances the fact version, so
 the next publication carries its ownership to the node. Until finality, an
 included outcome stays provisional and can return to pending after a reorg.

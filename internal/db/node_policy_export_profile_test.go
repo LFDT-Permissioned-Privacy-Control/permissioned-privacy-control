@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,6 +108,36 @@ func TestNodePolicyExportTimingAtScale(t *testing.T) {
 		"export_ms_p50": float64(durations[len(durations)/2].Microseconds()) / 1e3, "export_ms_max": float64(durations[len(durations)-1].Microseconds()) / 1e3,
 		"pin_ms": float64(pin.Microseconds()) / 1e3, "fact_queries_only_ms_p50": float64(queries[len(queries)/2].Microseconds()) / 1e3,
 		"note": "export_ms includes one Pin inside the transaction; artifact_set is NULL (org-wide policies), shared_infrastructure/preregistered_addresses empty", "snapshot_json_bytes": len(encoded), "threshold_ms": 25}
+	// Incremental export (RD-1411 §5.6) of one typical change: one ban, one
+	// new contract with its grant. Read, patch and the publisher's one Pin.
+	var incremental []time.Duration
+	base := snapshot
+	for i := 0; i < 6; i++ {
+		if _, err := d.conn.ExecContext(ctx, `UPDATE users SET banned=NOT banned WHERE external_id='did:test:perf-7'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.conn.ExecContext(ctx, `WITH c AS (INSERT INTO contracts (id, org_id, address, name) SELECT gen_random_uuid(), g.org_id, '0x' || lpad(to_hex(9000000 + $1::int), 40, '0'), 'N' FROM groups g JOIN organizations o ON o.id = g.org_id WHERE o.slug = 'perf-org-1' RETURNING id, org_id)
+ INSERT INTO contract_grants (group_id, contract_id) SELECT g.id, c.id FROM c JOIN groups g ON g.org_id = c.org_id`, i); err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		changes, err := d.ExportNodePolicyChanges(ctx, base)
+		if err != nil || changes.Full {
+			t.Fatalf("incremental export: %v full=%v", err, changes.Full)
+		}
+		next, _, err := nodepolicy.ApplyChanges(base, strings.Repeat("ab", 32), base.Header, changes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := nodepolicy.Pin(next); err != nil {
+			t.Fatal(err)
+		}
+		incremental = append(incremental, time.Since(start))
+		base = next
+	}
+	sort.Slice(incremental, func(i, j int) bool { return incremental[i] < incremental[j] })
+	result["incremental_ms_p50"] = float64(incremental[len(incremental)/2].Microseconds()) / 1e3
+	result["incremental_ms_max"] = float64(incremental[len(incremental)-1].Microseconds()) / 1e3
 	t.Logf("full export: %+v", result)
 	if out := os.Getenv("OPS_P0_OUTPUT"); out != "" {
 		data, _ := json.MarshalIndent(result, "", "  ")

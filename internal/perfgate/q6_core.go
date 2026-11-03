@@ -391,7 +391,8 @@ func (r *Q6Run) Run(ctx context.Context, phases Phases, stamps func() (map[strin
 		go instances[i].ackLoop(runCtx)
 	}
 	client := NewLoadClient(1024)
-	var delivered sync.Map // hash hex -> workload index, only for committed, node-accepted rows
+	client.Timeout = 60 * time.Second // the prototype's node calls carry no run deadline of their own
+	var delivered sync.Map            // hash hex -> workload index, only for committed, node-accepted rows
 	reconcileCtx, stopReconcile := context.WithCancel(ctx)
 	reconcileDone := make(chan struct{})
 	go func() {
@@ -789,10 +790,13 @@ func q6Reconcile(ctx context.Context, db *sql.DB, client *http.Client, c Q6Confi
 			if err != nil {
 				continue
 			}
-			var rows []*q6StatusRow
-			if json.Unmarshal(raw, &rows) != nil {
+			var batch struct {
+				Statuses []*q6StatusRow `json:"statuses"`
+			}
+			if json.Unmarshal(raw, &batch) != nil {
 				continue
 			}
+			rows := batch.Statuses
 			for i, row := range rows {
 				if row == nil {
 					continue

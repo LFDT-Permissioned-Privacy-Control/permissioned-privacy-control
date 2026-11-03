@@ -354,8 +354,14 @@ func lockConfigurationScope(ctx context.Context, q DBTX, scope configuration.Sco
 	if err != nil || id == uuid.Nil || id.String() != scope.ID {
 		return ConfigurationConflict("invalid organization scope")
 	}
+	// FOR NO KEY UPDATE, not FOR UPDATE (RD-1410): it
+	// excludes every other scope locker (they all come through here), the
+	// projection guard's FOR UPDATE and organisation deletion exactly as before,
+	// but not the FOR KEY SHARE that foreign-key checks take, so a held scope
+	// never stalls request-path writes that reference the organisation
+	// (compliance_logs). Nothing holding the scope changes organizations.id.
 	var locked string
-	if err := q.QueryRowContext(ctx, `SELECT id FROM organizations WHERE id=$1 FOR UPDATE`, scope.ID).Scan(&locked); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT id FROM organizations WHERE id=$1 FOR NO KEY UPDATE`, scope.ID).Scan(&locked); err != nil {
 		return fmt.Errorf("configuration scope not found: %w", err)
 	}
 	return nil

@@ -16,7 +16,8 @@
 #
 # SECRETS ARE NOT ALLOWED HERE. Keep JWT_SECRET, JWT_REFRESH_SECRET,
 # ADMIN_API_TOKEN, OPERATOR_API_TOKEN, AZURE_AD_CLIENT_SECRET, DATABASE_URL,
-# AUDIT_DATABASE_URL, AUDIT_ADMIN_DATABASE_URL, EXPLORER_DATABASE_URL,
+# AUDIT_DATABASE_URL, AUDIT_ADMIN_DATABASE_URL, EXECUTION_DATABASE_URL,
+# EXECUTION_ADMIN_DATABASE_URL, EXPLORER_DATABASE_URL,
 # REDIS_URL / REDIS_PASSWORD, RPC_API_KEY, OAUTH_FIRST_PARTY_CLIENTS and similar in the
 # environment or your secrets manager. The proxy REFUSES TO START if it finds
 # one of these in this file.
@@ -54,6 +55,14 @@ PORT = "8080"                                    # server listen port
 # server (reusing DATABASE_URL's owner credentials, so the seal is NOT enforced
 # on the derived default). The app connects to an already-provisioned audit
 # database and migrates it — it NEVER runs CREATE DATABASE (infra provisions it).
+#
+# Execution-tracking database (RD-1410), Reth mode only: per-transaction
+# execution state of OPS_NODE_POLICY_MODE=reth. Both DSNs are secrets:
+#   EXECUTION_ADMIN_DATABASE_URL — owner role: tracking migrations and partition
+#                                  maintenance.
+#   EXECUTION_DATABASE_URL       — runtime role (privacy_proxy_app).
+# Unset, both are DERIVED as "<name>_exec" on the same server as DATABASE_URL;
+# production needs a separate Postgres instance (load isolation).
 
 # -----------------------------------------------------------------------------
 # Authentication (Privado ID / Billions)

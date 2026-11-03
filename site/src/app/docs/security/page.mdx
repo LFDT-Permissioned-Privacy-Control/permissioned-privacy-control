@@ -632,6 +632,7 @@ A standalone verifier CLI is planned.
 - [ ] Set `CORS_ALLOWED_ORIGINS` to the block explorer's origin
 - [ ] Set `RPC_API_KEY_ENCRYPTION_KEY` if using per-group RPC API keys (generate with `openssl rand -hex 32`)
 - [ ] Configure PostgreSQL with SSL (`sslmode=require`)
+- [ ] With `OPS_NODE_POLICY_MODE=reth`: provision the execution-tracking database on a **separate PostgreSQL instance** and set `EXECUTION_DATABASE_URL` / `EXECUTION_ADMIN_DATABASE_URL` (see [Configuration](/docs/configuration#execution-tracking-database-reth-mode)); the derived same-server default is for development only
 - [ ] Place behind reverse proxy with TLS termination (Caddy included in prod compose)
 - [ ] Verify backend port 8080 is NOT publicly accessible (only via reverse proxy)
 - [ ] Set `TRUSTED_INTERNAL_CIDRS` if block explorer or monitoring is outside Docker network

@@ -1300,3 +1300,88 @@ func TestExtraRPCNamespaces_NormalizedAliasesRegister(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutionDatabaseURLDerivedLikeAudit is G51 (RD-1410): the
+// execution-tracking DSNs follow the audit-database mechanism — unset means
+// "<name>_exec" on the same server with DATABASE_URL's credentials, an
+// explicit value overrides, and runtime and admin identities are separate
+// settings.
+func TestExecutionDatabaseURLDerivedLikeAudit(t *testing.T) {
+	t.Run("derived from DATABASE_URL when unset", func(t *testing.T) {
+		t.Setenv("DATABASE_URL", "postgres://u:p@dbhost:5432/privacy_proxy?sslmode=disable")
+		t.Setenv("EXECUTION_DATABASE_URL", "")
+		os.Unsetenv("EXECUTION_DATABASE_URL")
+		t.Setenv("EXECUTION_ADMIN_DATABASE_URL", "")
+		os.Unsetenv("EXECUTION_ADMIN_DATABASE_URL")
+		cfg := Load()
+		want := "postgres://u:p@dbhost:5432/privacy_proxy_exec?sslmode=disable"
+		if cfg.ExecutionDatabaseURL != want || cfg.ExecutionAdminDatabaseURL != want {
+			t.Fatalf("execution DSNs = %q / %q, want derived %q", cfg.ExecutionDatabaseURL, cfg.ExecutionAdminDatabaseURL, want)
+		}
+	})
+	t.Run("explicit runtime and admin identities override", func(t *testing.T) {
+		t.Setenv("DATABASE_URL", "postgres://u:p@dbhost:5432/privacy_proxy?sslmode=disable")
+		t.Setenv("EXECUTION_DATABASE_URL", "postgres://privacy_proxy_app:x@exechost:5432/exec?sslmode=require")
+		t.Setenv("EXECUTION_ADMIN_DATABASE_URL", "postgres://privacy_proxy_admin:y@exechost:5432/exec?sslmode=require")
+		cfg := Load()
+		if cfg.ExecutionDatabaseURL != "postgres://privacy_proxy_app:x@exechost:5432/exec?sslmode=require" ||
+			cfg.ExecutionAdminDatabaseURL != "postgres://privacy_proxy_admin:y@exechost:5432/exec?sslmode=require" {
+			t.Fatalf("explicit execution DSNs not honoured: %q / %q", cfg.ExecutionDatabaseURL, cfg.ExecutionAdminDatabaseURL)
+		}
+	})
+	for _, c := range []struct{ in, want string }{
+		{"postgres://u:p@h:5432/db", "postgres://u:p@h:5432/db_exec"},
+		{"postgres://u:p@h:5432/", ""},
+		{"not a url with spaces", ""},
+	} {
+		if got := deriveExecutionDatabaseURL(c.in); got != c.want {
+			t.Errorf("deriveExecutionDatabaseURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	t.Run("retention default", func(t *testing.T) {
+		t.Setenv("RETENTION_NODE_SUBMISSIONS", "")
+		os.Unsetenv("RETENTION_NODE_SUBMISSIONS")
+		if got := Load().RetentionNodeSubmissions; got != 7*24*time.Hour {
+			t.Fatalf("RETENTION_NODE_SUBMISSIONS default = %v, want 7 days", got)
+		}
+	})
+}
+
+// TestProductionWarnsWhenExecutionDatabaseURLUnset is G55 (RD-1410): Reth mode
+// in production warns, exactly like the audit database, when the tracking
+// database is the derived same-server default; legacy mode and an explicit
+// URL do not.
+func TestProductionWarnsWhenExecutionDatabaseURLUnset(t *testing.T) {
+	base := func(mode string) *Config {
+		policy := NodePolicyConfig{Mode: mode}
+		if mode == "reth" {
+			policy = NodePolicyConfig{Mode: "reth", URL: "http://127.0.0.1:8551", Token: "0123456789abcdef", PrivateKeyFile: "policy.key", KeyID: "k1", ChainID: 1, DeploymentID: "d1", ConsumerID: "producer", FactTTL: 30 * time.Second, IdentityTTL: time.Minute, PublishInterval: time.Second}
+		}
+		return &Config{Environment: "production", JWTSecret: "secret", JWTRefreshSecret: "refresh-secret", VerifierID: "did:test:verifier", AdminAPIToken: "admin-token", NodeURL: "https://node.example.com", BaseURL: "https://api.example.com", NodePolicy: policy}
+	}
+	capture := func(c *Config) string {
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(prev)
+		_ = c.Validate()
+		return buf.String()
+	}
+	t.Setenv("AUDIT_DATABASE_URL", "postgres://audit:pw@auditdb:5432/audit?sslmode=disable")
+	t.Setenv("EXECUTION_DATABASE_URL", "")
+	t.Setenv("EXECUTION_ADMIN_DATABASE_URL", "")
+	if out := capture(base("reth")); !strings.Contains(out, "EXECUTION_DATABASE_URL") {
+		t.Fatalf("Reth mode with a derived tracking database must warn, got:\n%s", out)
+	}
+	if out := capture(base("legacy")); strings.Contains(out, "EXECUTION_DATABASE_URL") {
+		t.Fatalf("legacy mode has no tracking database and must not warn, got:\n%s", out)
+	}
+	t.Setenv("EXECUTION_DATABASE_URL", "postgres://privacy_proxy_app:x@exechost:5432/exec?sslmode=require")
+	if out := capture(base("reth")); !strings.Contains(out, "only one of EXECUTION_DATABASE_URL") {
+		t.Fatalf("only one tracking DSN set must warn, got:\n%s", out)
+	}
+	t.Setenv("EXECUTION_ADMIN_DATABASE_URL", "postgres://privacy_proxy_admin:y@exechost:5432/exec?sslmode=require")
+	if out := capture(base("reth")); strings.Contains(out, "EXECUTION_DATABASE_URL") {
+		t.Fatalf("an explicit tracking database must not warn, got:\n%s", out)
+	}
+}

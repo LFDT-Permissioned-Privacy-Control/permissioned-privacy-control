@@ -10,6 +10,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -129,7 +131,7 @@ func mustOK(t *testing.T, r rpcReply) {
 func identityEnvelope(t *testing.T, binding, context string) json.RawMessage {
 	t.Helper()
 	payload, _ := json.Marshal(map[string]any{
-		"network": map[string]any{"chain_id": 31337, "deployment_id": "perfgate-test"}, "issued_at": 1, "expires_at": 2,
+		"network": map[string]any{"chain_id": 31337, "deployment_id": "perfgate-test"}, "issued_at": 1, "expires_at": 4_000_000_000,
 		"scope": "transaction", "context_id": context, "principal_id": "11111111-1111-4111-8111-111111111111",
 		"org_id": "22222222-2222-4222-8222-222222222222", "signer": "0x0000000000000000000000000000000000000001",
 		"binding_hash": binding, "min_snapshot_version": 1,
@@ -233,7 +235,7 @@ func TestMockNodeReceiptAfterBlockAndFinalityAfterLag(t *testing.T) {
 }
 
 func TestMockNodeSubmitTransactionChecksAuthAndBinding(t *testing.T) {
-	_, _, _, private := testNode(t, time.Second)
+	node, _, _, private := testNode(t, time.Second)
 	key, _ := crypto.GenerateKey()
 	tx, raw := signedTransfer(t, key, 0)
 	hash := strings.ToLower(tx.Hash().Hex())
@@ -248,7 +250,7 @@ func TestMockNodeSubmitTransactionChecksAuthAndBinding(t *testing.T) {
 	if r.Error != nil || json.Unmarshal(r.Result, &out) != nil {
 		t.Fatalf("submit failed: %v", r.Error)
 	}
-	if out["transaction_hash"] != hash || out["context_id"] != "ctx-7" || out["status"] != "accepted" || len(out) != 3 {
+	if out["transaction_hash"] != hash || out["context_id"] != "ctx-7" || out["status"] != "accepted" || len(out) != 4 || out["boot_id"] != node.BootID() {
 		t.Fatalf("submission %v", out)
 	}
 }
@@ -266,10 +268,14 @@ func TestMockNodeBatchedStatus(t *testing.T) {
 	node.ProduceBlock()
 	unknown := "0x" + strings.Repeat("cd", 32)
 	r := call(t, private.URL, "private-token-0123456789", "ops_transactionStatuses", append(hashes, unknown))
-	var rows []json.RawMessage
-	if r.Error != nil || json.Unmarshal(r.Result, &rows) != nil || len(rows) != 4 {
+	var batch struct {
+		BootID   string            `json:"boot_id"`
+		Statuses []json.RawMessage `json:"statuses"`
+	}
+	if r.Error != nil || json.Unmarshal(r.Result, &batch) != nil || len(batch.Statuses) != 4 || batch.BootID != node.BootID() {
 		t.Fatalf("batched status %s %v", r.Result, r.Error)
 	}
+	rows := batch.Statuses
 	for i, hash := range hashes {
 		var row map[string]any
 		_ = json.Unmarshal(rows[i], &row)
@@ -290,7 +296,7 @@ func TestMockNodeBatchedStatus(t *testing.T) {
 }
 
 func TestMockNodePolicyApplyAndStatusAreCoherent(t *testing.T) {
-	_, clock, _, private := testNode(t, time.Second)
+	node, clock, _, private := testNode(t, time.Second)
 	token := "private-token-0123456789"
 	status := func() map[string]any {
 		var out map[string]any
@@ -304,7 +310,7 @@ func TestMockNodePolicyApplyAndStatusAreCoherent(t *testing.T) {
 	snapshot, digest := factEnvelope(t, "snapshot", map[string]any{"network": header["network"], "issued_at": header["issued_at"], "expires_at": header["expires_at"], "version": 3})
 	var ack map[string]any
 	_ = json.Unmarshal(call(t, private.URL, token, "ops_policyApply", snapshot).Result, &ack)
-	if ack["version"] != float64(3) || ack["digest"] != digest || ack["expires_at"] != float64(clock.Now().Unix()+30) || len(ack) != 3 {
+	if ack["version"] != float64(3) || ack["digest"] != digest || ack["expires_at"] != float64(clock.Now().Unix()+30) || len(ack) != 4 || ack["boot_id"] != node.BootID() {
 		t.Fatalf("snapshot ack %v", ack)
 	}
 	if s := status(); s["ready"] != true || s["version"] != float64(3) || s["digest"] != digest {
@@ -345,5 +351,183 @@ func TestMockNodeBase64PayloadMatchesGoEncoding(t *testing.T) {
 	}{payload})
 	if !strings.Contains(string(encoded), base64.StdEncoding.EncodeToString(payload)) {
 		t.Fatalf("unexpected encoding %s", encoded)
+	}
+}
+
+func identityEnvelopeAt(t *testing.T, binding, context string, minVersion uint64, expires int64) json.RawMessage {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{
+		"network": map[string]any{"chain_id": 31337, "deployment_id": "perfgate-test"}, "issued_at": 1, "expires_at": expires,
+		"scope": "transaction", "context_id": context, "principal_id": "11111111-1111-4111-8111-111111111111",
+		"org_id": "22222222-2222-4222-8222-222222222222", "signer": "0x0000000000000000000000000000000000000001",
+		"binding_hash": binding, "min_snapshot_version": minVersion,
+	})
+	envelope, _ := json.Marshal(map[string]any{"version": 1, "kind": "identity", "key_id": "k", "payload": payload, "signature": make([]byte, 64)})
+	return envelope
+}
+
+// The mock reproduces the node behaviour recovery depends on: a restart
+// (new boot id, empty registry: a pooled transaction no longer executes and
+// its status is unknown), same-boot eviction, a reorg (rival blocks, epoch),
+// dominated attempts (T17) and -32013 pool rejections (T18).
+func TestMockNodeRestartEvictionReorgAndPoolRejections(t *testing.T) {
+	node, clock, public, private := testNode(t, time.Hour)
+	token := "private-token-0123456789"
+	key := mustKey(t)
+	far := clock.Now().Unix() + 300
+	tx0, raw0 := signedTransfer(t, key, 0)
+	h0 := strings.ToLower(tx0.Hash().Hex())
+	mustOK(t, call(t, private.URL, token, "ops_submitTransaction", identityEnvelopeAt(t, h0, "ctx-a", 5, far), raw0))
+	// Dominated attempt (lower floor, same expiry): accepted with its own context.
+	r := call(t, private.URL, token, "ops_submitTransaction", identityEnvelopeAt(t, h0, "ctx-old", 4, far), raw0)
+	var out map[string]any
+	if r.Error != nil || json.Unmarshal(r.Result, &out) != nil || out["context_id"] != "ctx-old" {
+		t.Fatalf("dominated attempt %v %v", out, r.Error)
+	}
+	// Incomparable (higher floor, lower expiry): refused.
+	if r := call(t, private.URL, token, "ops_submitTransaction", identityEnvelopeAt(t, h0, "ctx-x", 6, far-10), raw0); r.Error == nil || r.Error.Code != -32000 {
+		t.Fatalf("incomparable attempt %+v", r.Error)
+	}
+	boot := node.BootID()
+	node.Restart(false)
+	if node.BootID() == boot || !ValidBootIDForTest(node.BootID()) {
+		t.Fatal("restart kept the boot id")
+	}
+	if r := call(t, private.URL, token, "ops_transactionStatus", h0); r.Error == nil {
+		t.Fatal("a restarted node answered an unregistered transaction")
+	}
+	node.ProduceBlock()
+	if r := call(t, public.URL, "", "eth_getTransactionReceipt", h0); string(r.Result) != "null" {
+		t.Fatal("pooled transaction executed without an identity after the restart")
+	}
+	mustOK(t, call(t, private.URL, token, "ops_submitTransaction", identityEnvelopeAt(t, h0, "ctx-b", 5, far), raw0)) // "already known"
+	node.ProduceBlock()
+	if r := call(t, public.URL, "", "eth_getTransactionReceipt", h0); string(r.Result) == "null" {
+		t.Fatal("re-admitted transaction not included")
+	}
+	// Eviction: the identity stays, the pool loses the bytes; a resend re-pools.
+	tx1, raw1 := signedTransfer(t, key, 1)
+	h1 := strings.ToLower(tx1.Hash().Hex())
+	mustOK(t, call(t, private.URL, token, "ops_submitTransaction", identityEnvelopeAt(t, h1, "ctx-c", 5, far), raw1))
+	if !node.Evict(h1) {
+		t.Fatal("not evicted")
+	}
+	if r := call(t, public.URL, "", "eth_getTransactionByHash", h1); string(r.Result) != "null" {
+		t.Fatal("evicted transaction still visible")
+	}
+	mustOK(t, call(t, private.URL, token, "ops_submitTransaction", identityEnvelopeAt(t, h1, "ctx-c", 5, far), raw1))
+	block := node.ProduceBlock()
+	if len(block.Transactions) != 1 || block.Transactions[0] != h1 {
+		t.Fatalf("resent transaction not included: %v", block.Transactions)
+	}
+	// Reorg: the rival chain omits h1; the next block carries nonce 1 again.
+	if n := node.Reorg(1, h1); n != 1 {
+		t.Fatalf("reorg removed %d blocks", n)
+	}
+	if r := call(t, public.URL, "", "eth_getTransactionReceipt", h1); string(r.Result) != "null" {
+		t.Fatal("orphaned transaction still has a receipt")
+	}
+	var batch struct {
+		CanonicalEpoch uint64 `json:"canonical_epoch"`
+	}
+	_ = json.Unmarshal(call(t, private.URL, token, "ops_transactionStatuses", []string{h1}).Result, &batch)
+	if batch.CanonicalEpoch != 1 {
+		t.Fatalf("canonical epoch %d after a reorg", batch.CanonicalEpoch)
+	}
+	// Nonce 1 is free again: a competitor takes it; h1 is then nonce_used.
+	competitor, rawC := signedTransferValue(t, key, 1, 2)
+	hc := strings.ToLower(competitor.Hash().Hex())
+	mustOK(t, call(t, private.URL, token, "ops_submitTransaction", identityEnvelopeAt(t, hc, "ctx-d", 5, far), rawC))
+	if r := call(t, private.URL, token, "ops_submitTransaction", identityEnvelopeAt(t, h1, "ctx-e", 6, far+1), raw1); r.Error == nil || r.Error.Code != -32013 {
+		t.Fatalf("occupied nonce: %+v", r.Error)
+	}
+	node.ProduceBlock()
+	if r := call(t, private.URL, token, "ops_submitTransaction", identityEnvelopeAt(t, h1, "ctx-f", 6, far+2), raw1); r.Error == nil || r.Error.Code != -32013 {
+		t.Fatalf("used nonce: %+v", r.Error)
+	}
+	clock.Advance(time.Second)
+	node.ProduceBlock()
+	sender := "0x" + hex.EncodeToString(crypto.PubkeyToAddress(key.PublicKey).Bytes())
+	for block, want := range map[string]uint64{"0x1": 0, "0x2": 1, "0x3": 2} {
+		if n := hexNonce(t, call(t, public.URL, "", "eth_getTransactionCount", sender, block)); n != want {
+			t.Fatalf("nonce at block %s: %d, want %d", block, n, want)
+		}
+	}
+}
+
+func ValidBootIDForTest(s string) bool {
+	_, err := hex.DecodeString(s)
+	return len(s) == 32 && err == nil && strings.ToLower(s) == s
+}
+
+func hexNonce(t *testing.T, r rpcReply) uint64 {
+	t.Helper()
+	n, err := strconv.ParseUint(strings.TrimPrefix(resultString(t, r), "0x"), 16, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// The final ops_transactionStatuses wire (track A, A3): with a senders
+// parameter the answer adds receipts and the senders' nonces at the finalized
+// block; finalized is null while only genesis is final (and the nonces with
+// it); malformed parameters are the opaque -32000.
+func TestMockNodeTransactionEvidence(t *testing.T) {
+	node, clock, _, private := testNode(t, time.Second)
+	const token = "private-token-0123456789"
+	key := mustKey(t)
+	sender := strings.ToLower(crypto.PubkeyToAddress(key.PublicKey).Hex())
+	other := "0x" + strings.Repeat("0b", 20)
+	var hashes []string
+	for nonce := uint64(0); nonce < 2; nonce++ {
+		tx, raw := signedTransfer(t, key, nonce)
+		hash := strings.ToLower(tx.Hash().Hex())
+		hashes = append(hashes, hash)
+		mustOK(t, call(t, private.URL, token, "ops_submitTransaction", identityEnvelope(t, hash, "ctx-"+hash[2:10]), raw))
+	}
+	unknown := "0x" + strings.Repeat("cd", 32)
+	type evidence struct {
+		Finalized    *struct{ Number uint64 } `json:"finalized"`
+		Statuses     []json.RawMessage        `json:"statuses"`
+		Receipts     []*bool                  `json:"receipts"`
+		SenderNonces []uint64                 `json:"sender_nonces"`
+	}
+	read := func() (evidence, map[string]json.RawMessage) {
+		r := call(t, private.URL, token, "ops_transactionStatuses", append(slices.Clone(hashes), unknown), []string{sender, other})
+		var e evidence
+		var fields map[string]json.RawMessage
+		if r.Error != nil || json.Unmarshal(r.Result, &e) != nil || json.Unmarshal(r.Result, &fields) != nil {
+			t.Fatalf("evidence %s %+v", r.Result, r.Error)
+		}
+		return e, fields
+	}
+	if e, fields := read(); e.Finalized != nil || string(fields["sender_nonces"]) != "null" || len(e.Receipts) != 3 || *e.Receipts[0] {
+		t.Fatalf("only genesis final: %s", fields)
+	}
+	node.ProduceBlock()
+	clock.Advance(2 * time.Second)
+	node.ProduceBlock() // the first block is final now
+	e, _ := read()
+	if e.Finalized == nil || e.Finalized.Number != 1 || !*e.Receipts[0] || !*e.Receipts[1] || *e.Receipts[2] || len(e.SenderNonces) != 2 || e.SenderNonces[0] != 2 || e.SenderNonces[1] != 0 {
+		t.Fatalf("evidence after finality %+v", e)
+	}
+	// Statuses-only calls carry neither evidence field.
+	r := call(t, private.URL, token, "ops_transactionStatuses", hashes)
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(r.Result, &fields)
+	if _, ok := fields["receipts"]; ok || r.Error != nil {
+		t.Fatalf("statuses-only answer %s", r.Result)
+	}
+	for _, bad := range [][]any{
+		{[]string{strings.ToUpper(unknown)}},
+		{[]string{}},
+		{hashes, []string{"0xab"}},
+		{hashes, []string{sender}, []string{sender}},
+		{"not-an-array"},
+	} {
+		if r := call(t, private.URL, token, "ops_transactionStatuses", bad...); r.Error == nil || r.Error.Code != -32000 {
+			t.Fatalf("malformed params %v answered %+v", bad, r.Error)
+		}
 	}
 }

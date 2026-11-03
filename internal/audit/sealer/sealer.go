@@ -12,21 +12,47 @@
 // cannot double-seal — entries at or below the high-water are skipped on the
 // next drain. SealFunc must additionally be idempotent on the sequence (e.g.
 // INSERT ... ON CONFLICT (buffer_seq) DO NOTHING) as defense in depth.
+//
+// Throughput (RD-1410): a tick drains the whole backlog, batch
+// after batch, and a configured SealBatch writes each batch at once; a failed
+// batch falls back to per-record sealing for that batch, so failure semantics
+// (seal everything before a failing entry, stop there) are unchanged.
 package sealer
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"privacy-proxy/internal/audit/buffer"
 )
 
+// ErrChainAhead means the sealed chain's high-water is above every sequence
+// this buffer ever allocated: another writer shares the chain (two instances
+// with one chain name) or the buffer was not seeded. The sealer then neither
+// drains nor deletes, because entries at or below that high-water would be
+// skipped as sealed and deleted unsealed.
+var ErrChainAhead = errors.New("audit chain high-water is ahead of this buffer")
+
 // Drainer is the subset of *buffer.Buffer the sealer needs.
 type Drainer interface {
 	Drain(afterSeq uint64, max int) ([]buffer.Entry, error)
 	DeleteThrough(throughSeq uint64) error
 }
+
+// Seeder is implemented by buffers whose allocator is seeded from the chain
+// (*buffer.Buffer).
+type Seeder interface {
+	SeedFloor(floor uint64) error
+	Seeded() bool
+	AllocatedThrough() uint64
+}
+
+// BatchSealFunc persists a whole batch into the chain atomically, in order:
+// either every entry is sealed or none is.
+type BatchSealFunc func(ctx context.Context, entries []buffer.Entry) error
 
 // SealFunc persists one buffered record into the durable chain, idempotently
 // keyed by seq. Returning an error stops the current batch; the entry (and the
@@ -39,9 +65,27 @@ type HighWaterFunc func(ctx context.Context) (uint64, error)
 
 // Config tunes the seal loop.
 type Config struct {
-	Batch    int           // max entries sealed per tick (default 500)
-	Interval time.Duration // delay between ticks (default 1s)
+	Batch    int           // max entries per batch (default 2000); a tick drains batch after batch
+	Interval time.Duration // delay between ticks once the buffer is drained (default 1s)
+	// SealBatch, when set, writes each batch at once; SealFunc remains the
+	// per-record fallback for a batch that fails.
+	SealBatch BatchSealFunc
+	// Settle, when set, runs after the chain check at the start of every tick
+	// and again at its end, with the chain high-water the tick last read or
+	// sealed through. On the first tick it also receives the buffer entries at
+	// or below that high-water: sealed before a restart but not yet deleted,
+	// so possibly never handed on. It never runs while the chain is refused
+	// (ErrChainAhead) and must return promptly.
+	Settle SettleFunc
 }
+
+// SettleFunc follows up seals whose outcome the sealer could not observe. It
+// returns the lowest buffer sequence it still has to follow up (0 for none):
+// the sealer then keeps that entry and every later one in the buffer, so a
+// crash before the follow-up finds them again on restart. An error wrapping
+// ErrChainAhead (a chain row under this buffer's sequence holds another
+// writer's record) stops the sealer like a foreign high-water.
+type SettleFunc func(ctx context.Context, highWater uint64, recovered []buffer.Entry) (keepFrom uint64, err error)
 
 // Sealer drains a buffer into a chain via SealFunc.
 type Sealer struct {
@@ -50,12 +94,24 @@ type Sealer struct {
 	highWater HighWaterFunc
 	cfg       Config
 	done      chan struct{} // closed when Run returns
+
+	// Run's goroutine owns the fields below (Tick is not concurrent).
+	started   bool   // the first tick checked the chain against the buffer
+	attempted uint64 // highest sequence this sealer seeded or tried to seal
+	ahead     error  // sticky: another writer was seen on the chain
+	// keepFrom is the lowest sequence Settle still follows up (0: none); the
+	// buffer keeps it and everything after it.
+	keepFrom uint64
+	// perRecordFrom is the sequence of a record that failed alone: batches
+	// starting at or before it are sealed record by record, so a record that
+	// can never be stored does not burn a batch's worth of ids every tick.
+	perRecordFrom uint64
 }
 
 // New constructs a Sealer with defaults applied.
 func New(buf Drainer, seal SealFunc, highWater HighWaterFunc, cfg Config) *Sealer {
 	if cfg.Batch <= 0 {
-		cfg.Batch = 500
+		cfg.Batch = 2000
 	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = 1 * time.Second
@@ -84,47 +140,170 @@ func (s *Sealer) Run(ctx context.Context) {
 	}
 }
 
-// Tick seals one batch and returns the number of entries sealed. Crash-safe:
-// it resumes from the chain high-water, so already-sealed entries are never
-// re-sealed even if a previous run died before deleting them from the buffer.
+// Seed raises a seeded buffer's allocation floor to the chain's high-water,
+// so a drained-and-reopened or recreated buffer never reuses a sequence the
+// chain already sealed. It is a no-op for buffers that do not seed.
+func (s *Sealer) Seed(ctx context.Context) error {
+	seeder, ok := s.buf.(Seeder)
+	if !ok || seeder.Seeded() {
+		return nil
+	}
+	hw, err := s.highWater(ctx)
+	if err != nil {
+		return fmt.Errorf("audit buffer seed: %w", err)
+	}
+	return seeder.SeedFloor(hw)
+}
+
+// Tick drains the buffer batch by batch until it is empty, a seal fails or
+// ctx ends, and returns the number of entries sealed. Crash-safe: it resumes
+// from the chain high-water, so already-sealed entries are never re-sealed
+// even if a previous run died before deleting them from the buffer.
 func (s *Sealer) Tick(ctx context.Context) (int, error) {
+	if err := s.Seed(ctx); err != nil {
+		return 0, err
+	}
+	if s.ahead != nil {
+		return 0, s.ahead
+	}
 	hw, err := s.highWater(ctx)
 	if err != nil {
 		return 0, err
 	}
-	entries, err := s.buf.Drain(hw, s.cfg.Batch)
-	if err != nil {
-		return 0, err
+	// The chain may only hold what this sealer sealed: at the first tick
+	// nothing above what the buffer allocated (its floor came from the chain),
+	// afterwards nothing above what this sealer itself tried to seal. Anything
+	// more is another writer on the chain, and draining from its high-water
+	// would skip and delete this buffer's own unsealed entries. The refusal
+	// holds until restart.
+	limit := s.attempted
+	if !s.started {
+		if seeder, ok := s.buf.(Seeder); ok {
+			limit = seeder.AllocatedThrough()
+		} else {
+			limit = hw
+		}
 	}
-
-	var lastSealed uint64
+	if hw > limit {
+		s.ahead = fmt.Errorf("%w: chain high-water %d, this sealer accounts for %d", ErrChainAhead, hw, limit)
+		slog.Error("audit sealer stopped: another writer is sealing this chain; its own entries are kept in the buffer", "error", s.ahead)
+		return 0, s.ahead
+	}
+	first := !s.started
+	s.started = true
+	s.attempted = max(s.attempted, hw)
+	if s.cfg.Settle != nil {
+		var recovered []buffer.Entry
+		if first {
+			recovered = s.recovered(hw)
+		}
+		if err := s.settle(ctx, hw, recovered); err != nil {
+			return 0, err
+		}
+	}
 	sealed := 0
-	for _, e := range entries {
-		if err := s.seal(ctx, e.Seq, e.Data); err != nil {
-			// Stop the batch; the failed entry and the rest are retried next
-			// tick. Do NOT advance past it (preserves chain order).
-			slog.Error("audit seal failed; will retry", "seq", e.Seq, "error", err)
+	for ctx.Err() == nil {
+		entries, err := s.buf.Drain(hw, s.cfg.Batch)
+		if err != nil {
+			return sealed, err
+		}
+		n, last, failed := s.sealBatch(ctx, entries)
+		sealed += n
+		// Clean up the buffer through the durable high-water OR what we just
+		// sealed, whichever is greater. Deleting through hw reclaims any orphans
+		// left by a prior crash between the chain commit and the buffer delete
+		// (those entries are already in Postgres and skipped by Drain, so
+		// they'd otherwise leak). Buffer cleanup is safe to lag or fail: the
+		// Postgres high-water, not buffer membership, is the source of truth
+		// for what's sealed.
+		hw = max(hw, last)
+		through := hw
+		if s.keepFrom > 0 && s.keepFrom <= through {
+			through = s.keepFrom - 1 // still being followed up by Settle
+		}
+		if through > 0 {
+			if err := s.buf.DeleteThrough(through); err != nil {
+				slog.Warn("audit buffer delete-through failed (not a loss; retried next tick)",
+					"through", through, "error", err)
+			}
+		}
+		if failed || len(entries) < s.cfg.Batch {
 			break
 		}
-		lastSealed = e.Seq
-		sealed++
 	}
-
-	// Clean up the buffer through the durable high-water OR what we just sealed,
-	// whichever is greater. Deleting through hw reclaims any orphans left by a
-	// prior crash between the chain commit and the buffer delete (those entries
-	// are already in Postgres and skipped by Drain, so they'd otherwise leak).
-	// Buffer cleanup is safe to lag or fail: the Postgres high-water, not buffer
-	// membership, is the source of truth for what's sealed.
-	cleanThrough := hw
-	if lastSealed > cleanThrough {
-		cleanThrough = lastSealed
-	}
-	if cleanThrough > 0 {
-		if err := s.buf.DeleteThrough(cleanThrough); err != nil {
-			slog.Warn("audit buffer delete-through failed (not a loss; retried next tick)",
-				"through", cleanThrough, "error", err)
+	if s.cfg.Settle != nil {
+		if err := s.settle(ctx, hw, nil); err != nil {
+			return sealed, err
 		}
 	}
 	return sealed, nil
+}
+
+// settle runs the Settle hook, records what it still follows up, and turns a
+// foreign record under this buffer's sequence into the sticky refusal.
+func (s *Sealer) settle(ctx context.Context, hw uint64, recovered []buffer.Entry) error {
+	keep, err := s.cfg.Settle(ctx, hw, recovered)
+	s.keepFrom = keep
+	if errors.Is(err, ErrChainAhead) {
+		s.ahead = err
+		slog.Error("audit sealer stopped: the chain holds another writer's record under this buffer's sequence; its own entries are kept in the buffer", "error", err)
+		return err
+	}
+	return nil
+}
+
+// recovered returns the buffer entries at or below hw. It runs before the
+// first DeleteThrough, which removes them.
+func (s *Sealer) recovered(hw uint64) []buffer.Entry {
+	var out []buffer.Entry
+	var after uint64
+	for {
+		entries, err := s.buf.Drain(after, s.cfg.Batch)
+		if err != nil {
+			slog.Error("audit sealer: could not read sealed entries back from the buffer for SIEM follow-up", "error", err)
+			return out
+		}
+		if len(entries) == 0 {
+			return out
+		}
+		for _, e := range entries {
+			if e.Seq > hw {
+				return out
+			}
+			out = append(out, e)
+		}
+		after = entries[len(entries)-1].Seq
+		if len(entries) < s.cfg.Batch {
+			return out
+		}
+	}
+}
+
+// sealBatch seals entries in order: at once through SealBatch when set,
+// otherwise (or when the batch write fails) one by one, stopping at the first
+// failure without advancing past it (preserves chain order). It returns how
+// many were sealed, the last sealed sequence and whether a seal failed.
+func (s *Sealer) sealBatch(ctx context.Context, entries []buffer.Entry) (int, uint64, bool) {
+	if len(entries) == 0 {
+		return 0, 0, false
+	}
+	if s.cfg.SealBatch != nil && entries[0].Seq > s.perRecordFrom {
+		s.attempted = max(s.attempted, entries[len(entries)-1].Seq)
+		err := s.cfg.SealBatch(ctx, entries)
+		if err == nil {
+			return len(entries), entries[len(entries)-1].Seq, false
+		}
+		slog.Error("audit batch seal failed; sealing that batch record by record", "first_seq", entries[0].Seq, "count", len(entries), "error", err)
+	}
+	var last uint64
+	for i, e := range entries {
+		s.attempted = max(s.attempted, e.Seq)
+		if err := s.seal(ctx, e.Seq, e.Data); err != nil {
+			slog.Error("audit seal failed; will retry", "seq", e.Seq, "error", err)
+			s.perRecordFrom = e.Seq
+			return i, last, true
+		}
+		last = e.Seq
+	}
+	return len(entries), last, false
 }

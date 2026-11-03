@@ -7,6 +7,34 @@ export type ConfigurationContext = Schemas['privacy-proxy_internal_apimodels.Con
 export type CIApproval = Schemas['privacy-proxy_internal_configuration.CIApproval'];
 export type NodeSimulation = Schemas['privacy-proxy_internal_apimodels.NodeSimulationRequest'];
 export type TransactionProgress = Schemas['privacy-proxy_internal_apimodels.NodeTransactionProgress'];
+type ProgressView = Pick<TransactionProgress,'status'|'reconciled'|'reconciliation_note'|'execution'>;
+
+// The statuses that can never change (OPS §4.8.1). Everything else may still
+// move: provisional can return to pending after a reorganization, and
+// renewal_stopped can still be included while its last identity is valid.
+export const FINAL_STATUSES: readonly string[] = Object.freeze(['included','reverted','dropped']);
+
+// isFinal: the status is final and OPS bookkeeping for it is committed;
+// included and reverted additionally require the finalized block.
+export function isFinal(progress: ProgressView): boolean {
+  if(!progress.reconciled) return false;
+  if(progress.status==='dropped') return true;
+  return (progress.status==='included'||progress.status==='reverted')&&progress.execution?.finalized===true;
+}
+
+// describeStatus is a one-line operator-facing meaning of a status.
+export function describeStatus(progress: Pick<ProgressView,'status'|'reconciliation_note'>): string {
+  const note=progress.reconciliation_note?` (${progress.reconciliation_note})`:'';
+  switch(progress.status) {
+    case 'pending': return 'pending: waiting for inclusion; OPS keeps it deliverable';
+    case 'provisional': return 'provisional: included in a block that is not final yet; a reorganization can return it to pending';
+    case 'renewal_stopped': return `renewal_stopped: will not be renewed; may still settle${note}`;
+    case 'included': return `included: executed in a finalized block${note}`;
+    case 'reverted': return `reverted: reverted in a finalized block${note}`;
+    case 'dropped': return `dropped: can never execute; a finalized transaction used its nonce${note}`;
+    default: return `unknown status ${String(progress.status)}`;
+  }
+}
 export interface Session { accessToken: string; refreshToken?: string }
 export interface ClientOptions { baseUrl: string; session?: Session; fetch?: typeof globalThis.fetch }
 export interface ReviewedConfiguration {
@@ -146,14 +174,18 @@ export class OpsClient {
     return response.result as T;
   }
   transactionStatus(hash:string,signal?:AbortSignal):Promise<TransactionProgress> {return this.#send('GET',`/api/v1/me/transactions/${encodeURIComponent(hash)}/execution`,undefined,{signal});}
-  async waitForFinality(hash:string,options:{pollIntervalMs?:number;timeoutMs?:number;signal?:AbortSignal}={}):Promise<TransactionProgress> {
+  // waitForFinality polls until the status is final (included or reverted in a
+  // finalized block, or dropped), each with OPS reconciliation committed.
+  // renewal_stopped is not final: it is passed to onStatus and polling goes on.
+  async waitForFinality(hash:string,options:{pollIntervalMs?:number;timeoutMs?:number;signal?:AbortSignal;onStatus?:(status:TransactionProgress)=>void}={}):Promise<TransactionProgress> {
     const interval=options.pollIntervalMs??1000,timeout=options.timeoutMs??120000;
     if(interval<=0||timeout<=0)throw Error('Positive polling interval and timeout required');
     const signal=AbortSignal.any([AbortSignal.timeout(timeout),...(options.signal?[options.signal]:[])]);
     while(true) {
       signal.throwIfAborted();
       const status=await this.transactionStatus(hash,signal);
-      if(status.reconciled&&status.execution?.finalized&&['included','reverted'].includes(status.status??''))return status;
+      options.onStatus?.(status);
+      if(isFinal(status))return status;
       await new Promise<void>((resolve,reject)=>{
         const abort=()=>{clearTimeout(timer);reject(signal.reason);};
         const timer=setTimeout(()=>{signal.removeEventListener('abort',abort);resolve();},interval);

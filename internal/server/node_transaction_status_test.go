@@ -1,11 +1,13 @@
 package server
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -27,8 +29,14 @@ func TestMyNodeTransactionStatusRequiresOriginalLivePrincipal(t *testing.T) {
 	user, err := s.db.GetUser(t.Context(), f.readonlyUserID)
 	require.NoError(t, err)
 	network := nodepolicy.Network{ChainID: 31337, DeploymentID: "status-test"}
-	hash := "0x" + strings.Repeat("11", 32)
-	require.NoError(t, s.db.SaveNodeSubmission(t.Context(), db.NodeSubmission{Network: network, TransactionHash: hash, PrincipalID: user.ID, OrgID: f.orgID, Signer: "0x" + strings.Repeat("22", 20), ContextID: uuid.NewString(), RawTransaction: "0xdeadbeef", IdentityEnvelope: []byte("private-signed-envelope"), SenderDID: user.ExternalID, VisibleTo: []string{"private-recipient"}}))
+	tracking := newTestTracking(t, network)
+	s.tracking = &executionTracking{runtime: tracking.runtime, admin: tracking.admin, meta: tracking.meta}
+	transfer := newSignedTransfer(t, 0)
+	hash := transfer.hash
+	key := hashBytes(t, hash)
+	results, err := tracking.runtime.AdmitBatch(t.Context(), tracking.meta.Incarnation, db.TrackLimits{}, []db.TrackAdmission{{Hash: key, PrincipalID: uuid.MustParse(user.ID), OrgID: uuid.MustParse(f.orgID), Signer: hashBytes(t, transfer.signer), ContextID: uuid.New(), EnvelopeHash: key, ExpiresAt: time.Now().Add(time.Minute), MinVersion: 7, Raw: []byte("private-raw-transaction"), VisibleTo: []string{"private-recipient"}, VisibleSender: user.ExternalID}})
+	require.NoError(t, err)
+	require.Equal(t, db.AdmitInserted, results[0].Outcome)
 	router := gin.New()
 	s.registerUserProfileRoutes(router)
 	request := func(token, target string) *httptest.ResponseRecorder {
@@ -42,10 +50,23 @@ func TestMyNodeTransactionStatusRequiresOriginalLivePrincipal(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &got))
-	require.Equal(t, "queued", got["status"])
-	for _, secret := range []string{"deadbeef", "private-signed-envelope", "private-recipient"} {
+	require.Equal(t, "pending", got["status"])
+	require.Equal(t, false, got["reconciled"])
+	for _, secret := range []string{hex.EncodeToString([]byte("private-raw-transaction")), "private-recipient", user.ExternalID} {
 		require.NotContains(t, response.Body.String(), secret)
 	}
+	// Final status rows answer the owner until retention (G44).
+	block := uint64(9)
+	applied, err := tracking.runtime.FinalizeBatch(t.Context(), tracking.meta.Incarnation, []db.TrackFinal{{Hash: key, State: db.TrackIncluded, BlockNumber: &block, PrincipalID: uuid.MustParse(user.ID), OrgID: uuid.MustParse(f.orgID)}})
+	require.NoError(t, err)
+	require.True(t, applied[0])
+	response = request(f.readonly, hash)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	got = map[string]any{}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &got))
+	require.Equal(t, "included", got["status"])
+	require.Equal(t, true, got["reconciled"])
+	require.EqualValues(t, 9, got["execution"].(map[string]any)["block_number"])
 	require.Equal(t, http.StatusNotFound, request(f.admin, hash).Code, "other admin does not inherit submitter's status")
 	require.Equal(t, http.StatusNotFound, request(f.readonly, "0x"+strings.Repeat("00", 32)).Code)
 	_, err = s.db.Conn().ExecContext(t.Context(), `DELETE FROM user_memberships WHERE user_id=$1`, user.ID)

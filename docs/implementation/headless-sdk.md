@@ -115,12 +115,19 @@ ordinary transactions must be signed locally and sent with
 `eth_sendTransaction`. Shared signers retain the current named principal's
 identity and cannot read each other's transaction status.
 
-Acceptance is not inclusion or finality. `waitForFinality` waits for an
-`included` or `reverted` outcome with `execution.finalized` and completed OPS
-reconciliation. Reverts are returned as finalized failed outcomes for the caller
-to handle. Pending, denied and expired tickets remain nonterminal because an
-already started execution may settle later. The helper has a bounded timeout and
-accepts an `AbortSignal`; HTTP/authentication errors are returned to the caller.
+Acceptance is not inclusion or finality. `waitForFinality` ends only on a final
+status with completed OPS reconciliation: `included` or `reverted` with
+`execution.finalized`, or `dropped` (a finalized transaction used the nonce; the
+transaction can never execute). Reverts and drops are returned for the caller to
+handle. `pending`, `provisional` and `renewal_stopped` are nonterminal:
+`renewal_stopped` means OPS will not renew the transaction's identity, but it
+may still settle, so the helper keeps polling and passes every status to the
+optional `onStatus` callback. `isFinal` and `describeStatus` expose the same
+rules, and `FINAL_STATUSES` lists the final values. The helper has a bounded
+timeout (two minutes by default) and accepts an `AbortSignal`; a transaction
+can stay pending for up to OPS's maximum age (ten minutes by default) plus the
+finality delay, so pass a longer `timeoutMs` to wait for every outcome.
+HTTP/authentication errors are returned to the caller.
 Permanent ownership, deployment grants and visibility records are reconciled
 only from finalized node evidence. A status response never exposes raw
 transactions, execution identity envelopes or visibility recipients.

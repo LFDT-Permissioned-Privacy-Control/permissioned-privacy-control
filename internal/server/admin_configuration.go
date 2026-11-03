@@ -21,6 +21,7 @@ import (
 
 func (s *Server) registerConfigurationRoutes(api *gin.RouterGroup) {
 	api.POST("/orgs/:org_id/execution/simulate", s.simulateNodeExecution)
+	api.POST("/orgs/:org_id/execution/ownership-recovery", s.recoverNodeOwnership)
 	base := "/orgs/:org_id/configuration/:kind"
 	api.GET(base+"/context", s.getConfigurationContext)
 	api.GET(base+"/managed", s.getConfigurationManaged)

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"slices"
@@ -33,7 +34,8 @@ import (
 // @Failure 403 {object} apimodels.APIError
 // @Failure 404 {object} apimodels.APIError
 // @Failure 429 {object} apimodels.APIError
-// @Failure 503 {object} apimodels.APIError
+// @Failure 503 {object} apimodels.APIError "node or simulation audit unavailable, or the node has not yet applied the policy facts (retry after Retry-After seconds)"
+// @Header 503 {integer} Retry-After "seconds before the same request may succeed (set when publication of policy facts is pending)"
 // @Security BearerAuth
 // @Router /api/v1/admin/orgs/{org_id}/execution/simulate [post]
 func (s *Server) simulateNodeExecution(c *gin.Context) {
@@ -218,6 +220,9 @@ func (s *Server) executeNodePreview(c *gin.Context, req apimodels.NodeSimulation
 	binding := nodepolicy.SimulationHash(wire)
 	identity, err := s.nodeExecution.PrepareIdentity(ctx, NodeExecutionIdentityRequest{Scope: "simulation", PrincipalID: target.ID, OrgID: org, Signer: signer, BindingHash: binding})
 	if err != nil {
+		if errors.Is(err, nodepolicy.ErrFactsPending) {
+			c.Header("Retry-After", "1")
+		}
 		return fail(http.StatusServiceUnavailable, "node simulation is not ready")
 	}
 	// Commit an actor-attributed intent before executing privileged diagnostics.
@@ -227,6 +232,10 @@ func (s *Server) executeNodePreview(c *gin.Context, req apimodels.NodeSimulation
 		return fail(http.StatusServiceUnavailable, "simulation audit unavailable")
 	}
 	result, err := s.nodeExecution.Simulate(ctx, identity, wire)
+	if errors.Is(err, nodepolicy.ErrFactsPending) {
+		c.Header("Retry-After", "1")
+		return fail(http.StatusServiceUnavailable, "execution facts are being published; retry shortly")
+	}
 	if err != nil || !json.Valid(result) {
 		return fail(http.StatusForbidden, "simulation denied or unavailable")
 	}

@@ -3,6 +3,7 @@ package audit
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sync"
 	"testing"
 )
@@ -103,5 +104,52 @@ func TestHashChain_ThreadSafety(t *testing.T) {
 			t.Fatalf("duplicate hash at index %d: %s", i, h)
 		}
 		seen[h] = true
+	}
+}
+
+// AppendBatch links contents exactly as successive Appends would, and keeps
+// Append's commit/rollback contract for the whole batch.
+func TestHashChainAppendBatchMatchesSequentialAppends(t *testing.T) {
+	contents := []string{"a", "b", "c"}
+	sequential := NewHashChain("seed")
+	var want []string
+	for _, c := range contents {
+		h, err := sequential.Append(func(string) (string, func(string) error, error) {
+			return c, func(string) error { return nil }, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, h)
+	}
+	batch := NewHashChain("seed")
+	var prevSeen string
+	got, err := batch.AppendBatch(func(prev string) ([]string, func([]string) error, error) {
+		prevSeen = prev
+		return contents, func([]string) error { return nil }, nil
+	})
+	if err != nil || prevSeen != "seed" {
+		t.Fatalf("batch %v, prev %q", err, prevSeen)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("hash %d: %s, want %s", i, got[i], want[i])
+		}
+	}
+	if batch.LastHash() != want[len(want)-1] {
+		t.Fatal("head not advanced to the last hash")
+	}
+	failing := NewHashChain("seed")
+	if _, err := failing.AppendBatch(func(string) ([]string, func([]string) error, error) {
+		return contents, func([]string) error { return errors.New("write failed") }, nil
+	}); err == nil {
+		t.Fatal("write failure not returned")
+	}
+	if failing.LastHash() != "seed" {
+		t.Fatal("a failed batch advanced the head")
+	}
+	failing.Reset("reloaded")
+	if failing.LastHash() != "reloaded" {
+		t.Fatal("Reset did not set the head")
 	}
 }

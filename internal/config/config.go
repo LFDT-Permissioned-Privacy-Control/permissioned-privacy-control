@@ -232,6 +232,9 @@ type Config struct {
 	DBMaxOpenConns    int
 	DBMaxIdleConns    int
 	DBConnMaxLifetime time.Duration
+	// dbPoolErr is an invalid DB_MAX_OPEN_CONNS / DB_MAX_IDLE_CONNS value,
+	// reported by Validate.
+	dbPoolErr error
 	// Upstream node HTTP transport pool (RD-1112). proxy + tracer talk to one
 	// node host at high concurrency; Go's default caps idle keep-alive at 2
 	// per host, churning TCP connections. These tune the pool.
@@ -274,7 +277,21 @@ type Config struct {
 	// NEVER runs CREATE DATABASE — infra must have provisioned the audit database
 	// already; the app only connects and migrates it.
 	AuditAdminDatabaseURL string
-	ExplorerDatabaseURL   string
+	// ExecutionDatabaseURL is the RUNTIME identity for the SEPARATE
+	// execution-tracking database (RD-1410): per-transaction bindings, status
+	// and history of the Reth execution path. It is used only in Reth mode
+	// (OPS_NODE_POLICY_MODE=reth). Like AUDIT_DATABASE_URL it is DERIVED from
+	// DATABASE_URL as "<name>_exec" on the SAME server when unset, reusing
+	// DATABASE_URL's credentials; an explicit URL may point at another
+	// server. The data is operational and lossable; a production deployment
+	// needs a separate Postgres instance for load isolation.
+	ExecutionDatabaseURL string
+	// ExecutionAdminDatabaseURL is the ADMIN/owner identity for the tracking
+	// database: it runs the tracking migrations and the partition maintenance
+	// (create ahead, drop expired). Derived the same way when unset. The app
+	// never runs CREATE DATABASE.
+	ExecutionAdminDatabaseURL string
+	ExplorerDatabaseURL       string
 	// IndexerURL, when non-empty, enables the gRPC chain-indexer backend for
 	// explorer reads. Methods not yet ported to gRPC fall back to direct
 	// SQL on the explorer postgres. Leave empty to use SQL exclusively.
@@ -406,6 +423,10 @@ type Config struct {
 	RetentionRBACAuditLogs   time.Duration // Retention for rbac_audit_log (default: 1 year)
 	RetentionTravelRecords   time.Duration // Retention for used travel_rule_records (default: 7 years)
 	RetentionCleanupInterval time.Duration // How often retention cleanup runs (default: 1 hour)
+	// RetentionNodeSubmissions is how long final transaction status records
+	// (and operational history) of the Reth execution path are kept in the
+	// tracking database (RD-1410; default 7 days, 0 = keep forever).
+	RetentionNodeSubmissions time.Duration
 	// MaxAccessLogRows caps the access_logs table at this row count using a
 	// FIFO sweep that runs alongside the time-based prune. 0 = unlimited
 	// (time-based retention only). The hash chain anchor table preserves the
@@ -634,6 +655,7 @@ func Load() *Config {
 	retentionRBACAuditLogs := parseDurationEnv("RETENTION_RBAC_AUDIT_LOGS", 365*24*time.Hour)    // 1 year
 	retentionTravelRecords := parseDurationEnv("RETENTION_TRAVEL_RECORDS", 7*365*24*time.Hour)   // ~7 years
 	retentionCleanupInterval := parseDurationEnv("RETENTION_CLEANUP_INTERVAL", 1*time.Hour)
+	retentionNodeSubmissions := parseDurationEnv("RETENTION_NODE_SUBMISSIONS", 7*24*time.Hour)
 
 	// FIFO row cap on access_logs (0 = unlimited).
 	var maxAccessLogRows int64
@@ -754,6 +776,7 @@ func Load() *Config {
 
 	dbMaxOpen := getEnvInt("DB_MAX_OPEN_CONNS", 50)
 	dbMaxIdle := getEnvInt("DB_MAX_IDLE_CONNS", dbMaxOpen) // default = MaxOpen to avoid connection churn
+	dbPoolErr := poolEnvError()
 	dbConnMaxLifetime := parseDurationEnv("DB_CONN_MAX_LIFETIME", 5*time.Minute)
 	nodeMaxIdleConns := getEnvInt("NODE_HTTP_MAX_IDLE_CONNS", 512)
 	nodeMaxIdleConnsPerHost := getEnvInt("NODE_HTTP_MAX_IDLE_CONNS_PER_HOST", 256)
@@ -773,6 +796,16 @@ func Load() *Config {
 	if auditAdminDatabaseURL == "" {
 		auditAdminDatabaseURL = deriveAuditDatabaseURL(databaseURL)
 	}
+	// RD-1410: the execution-tracking database follows the same mechanism,
+	// "<name>_exec" on the same server when unset.
+	executionDatabaseURL := getEnv("EXECUTION_DATABASE_URL", "")
+	if executionDatabaseURL == "" {
+		executionDatabaseURL = deriveExecutionDatabaseURL(databaseURL)
+	}
+	executionAdminDatabaseURL := getEnv("EXECUTION_ADMIN_DATABASE_URL", "")
+	if executionAdminDatabaseURL == "" {
+		executionAdminDatabaseURL = deriveExecutionDatabaseURL(databaseURL)
+	}
 
 	return &Config{
 		NodePolicy:                          loadNodePolicy(os.Getenv),
@@ -780,6 +813,7 @@ func Load() *Config {
 		DatabaseURL:                         databaseURL,
 		DBMaxOpenConns:                      dbMaxOpen,
 		DBMaxIdleConns:                      dbMaxIdle,
+		dbPoolErr:                           dbPoolErr,
 		DBConnMaxLifetime:                   dbConnMaxLifetime,
 		NodeMaxIdleConns:                    nodeMaxIdleConns,
 		NodeMaxIdleConnsPerHost:             nodeMaxIdleConnsPerHost,
@@ -846,6 +880,7 @@ func Load() *Config {
 		RetentionRBACAuditLogs:              retentionRBACAuditLogs,
 		RetentionTravelRecords:              retentionTravelRecords,
 		RetentionCleanupInterval:            retentionCleanupInterval,
+		RetentionNodeSubmissions:            retentionNodeSubmissions,
 		MaxAccessLogRows:                    maxAccessLogRows,
 		SIEMWebhookURL:                      siemWebhookURL,
 		SIEMAuthHeader:                      siemAuthHeader,
@@ -856,6 +891,8 @@ func Load() *Config {
 		AuditTamperWebhookURL:               auditTamperWebhookURL,
 		AuditDatabaseURL:                    auditDatabaseURL,
 		AuditAdminDatabaseURL:               auditAdminDatabaseURL,
+		ExecutionDatabaseURL:                executionDatabaseURL,
+		ExecutionAdminDatabaseURL:           executionAdminDatabaseURL,
 		ExplorerDatabaseURL:                 getEnv("EXPLORER_DATABASE_URL", ""),
 		IndexerURL:                          getEnv("INDEXER_URL", ""),
 		TunnelURLFile:                       getEnv("TUNNEL_URL_FILE", ""),
@@ -970,6 +1007,9 @@ func (c *Config) Validate() error {
 	if err := c.NodePolicy.Validate(); err != nil {
 		return err
 	}
+	if err := c.validatePool(); err != nil {
+		return err
+	}
 	// A configured-but-unreadable CONFIG_FILE is a fatal misconfiguration: the
 	// operator intended to use it, so fail fast instead of silently ignoring it.
 	if fileConfigErr != nil {
@@ -1049,6 +1089,12 @@ func (c *Config) Validate() error {
 	}
 	if getEnv("AUDIT_DATABASE_URL", "") == "" {
 		slog.Warn("AUDIT_DATABASE_URL is not set in production: the append-only audit database is DERIVED on the same server reusing DATABASE_URL's owner credentials, so the INSERT-only seal is not enforced. Provision a separate audit DB and set AUDIT_DATABASE_URL to its restricted-role DSN (RD-1164 #18).")
+	}
+	if c.NodePolicy.Enabled() && (getEnv("EXECUTION_DATABASE_URL", "") == "") != (getEnv("EXECUTION_ADMIN_DATABASE_URL", "") == "") {
+		slog.Warn("only one of EXECUTION_DATABASE_URL / EXECUTION_ADMIN_DATABASE_URL is set in production: the other is derived as <name>_exec on the main server, so the two can name different databases (startup then refuses). Set both (RD-1410).")
+	}
+	if c.NodePolicy.Enabled() && getEnv("EXECUTION_DATABASE_URL", "") == "" {
+		slog.Warn("EXECUTION_DATABASE_URL is not set in production: the execution-tracking database is DERIVED as <name>_exec on the same server as DATABASE_URL, so its per-transaction write load shares the main database's WAL, disk and replication. Provision a separate Postgres instance and set EXECUTION_DATABASE_URL / EXECUTION_ADMIN_DATABASE_URL (RD-1410).")
 	}
 
 	return nil
@@ -1172,6 +1218,43 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+// maxDBPoolConns bounds DB_MAX_OPEN_CONNS; beyond it a pooler is the answer.
+const maxDBPoolConns = 10_000
+
+// poolEnvError refuses pool sizes that would otherwise silently fall back to
+// the default (an unparseable or non-positive DB_MAX_OPEN_CONNS) or that
+// cannot take effect (a non-positive DB_MAX_IDLE_CONNS).
+func poolEnvError() error {
+	if v := os.Getenv("DB_MAX_OPEN_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil || n < 1 || n > maxDBPoolConns {
+			return fmt.Errorf("DB_MAX_OPEN_CONNS must be an integer in 1..%d", maxDBPoolConns)
+		}
+	}
+	if v := os.Getenv("DB_MAX_IDLE_CONNS"); v != "" {
+		// 0 would keep no idle connection (one connect per query), and the
+		// pool option treats it as "use the default" anyway: refuse it.
+		if n, err := strconv.Atoi(v); err != nil || n < 1 {
+			return fmt.Errorf("DB_MAX_IDLE_CONNS must be a positive integer")
+		}
+	}
+	return nil
+}
+
+// validatePool checks the database pool sizes (RD-1410). Zero sizes in a
+// literal configuration take the defaults.
+func (c *Config) validatePool() error {
+	if c.dbPoolErr != nil {
+		return c.dbPoolErr
+	}
+	if c.DBMaxOpenConns < 0 || c.DBMaxOpenConns > maxDBPoolConns || c.DBMaxIdleConns < 0 {
+		return fmt.Errorf("DB_MAX_OPEN_CONNS must be 1..%d and DB_MAX_IDLE_CONNS positive", maxDBPoolConns)
+	}
+	if c.DBMaxOpenConns > 0 && c.DBMaxIdleConns > c.DBMaxOpenConns {
+		return fmt.Errorf("DB_MAX_IDLE_CONNS (%d) must not exceed DB_MAX_OPEN_CONNS (%d)", c.DBMaxIdleConns, c.DBMaxOpenConns)
+	}
+	return nil
+}
+
 // getEnvInt reads an environment variable as an int, returning defaultValue if
 // the variable is unset or not a valid integer.
 func getEnvInt(key string, defaultValue int) int {
@@ -1218,6 +1301,19 @@ func parseDurationEnv(key string, defaultValue time.Duration) time.Duration {
 // only when AUDIT_DATABASE_URL is set explicitly to connect as the restricted
 // privacy_proxy_app role. See docs/configuration.
 func deriveAuditDatabaseURL(databaseURL string) string {
+	return deriveSiblingDatabaseURL(databaseURL, "_audit")
+}
+
+// deriveExecutionDatabaseURL derives the default execution-tracking DSN,
+// "<name>_exec" on the same server with DATABASE_URL's credentials (RD-1410),
+// exactly as deriveAuditDatabaseURL does for the audit database.
+func deriveExecutionDatabaseURL(databaseURL string) string {
+	return deriveSiblingDatabaseURL(databaseURL, "_exec")
+}
+
+// deriveSiblingDatabaseURL swaps the database name of a postgres:// URL to
+// "<name><suffix>"; "" when the URL has no host or database name.
+func deriveSiblingDatabaseURL(databaseURL, suffix string) string {
 	u, err := url.Parse(databaseURL)
 	if err != nil || u.Host == "" {
 		return ""
@@ -1226,6 +1322,6 @@ func deriveAuditDatabaseURL(databaseURL string) string {
 	if name == "" {
 		return ""
 	}
-	u.Path = "/" + name + "_audit"
+	u.Path = "/" + name + suffix
 	return u.String()
 }

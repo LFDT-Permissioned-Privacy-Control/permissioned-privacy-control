@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"privacy-proxy/internal/loggate"
 	"privacy-proxy/internal/nodeapproval/approvalpb"
 )
 
@@ -799,24 +800,8 @@ func sleep(ctx context.Context, d time.Duration) bool {
 
 // logGate lets one line per key through every logEvery and says how many it held back, so a
 // producer refusing every batch costs one line per interval, not one per batch.
-type logGate struct {
-	mu   sync.Mutex
-	next map[string]time.Time
-	held map[string]int
-}
+type logGate struct{ gate loggate.Gate }
 
 func (g *logGate) allow(key string, now time.Time) (int, bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if now.Before(g.next[key]) {
-		g.held[key]++
-		return 0, false
-	}
-	if g.next == nil {
-		g.next, g.held = map[string]time.Time{}, map[string]int{}
-	}
-	g.next[key] = now.Add(logEvery)
-	held := g.held[key]
-	g.held[key] = 0
-	return held, true
+	return g.gate.Allow(key, now, logEvery)
 }

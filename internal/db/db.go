@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -131,10 +133,17 @@ func parseConfigUTC(databaseURL string) (*pgx.ConnConfig, error) {
 
 // openPostgres opens a pgx-backed *sql.DB with the session timezone pinned to
 // UTC (see parseConfigUTC).
-func openPostgres(databaseURL string) (*sql.DB, error) {
+func openPostgres(databaseURL string, opts ...Option) (*sql.DB, error) {
 	cfg, err := parseConfigUTC(databaseURL)
 	if err != nil {
 		return nil, err
+	}
+	p := defaultPoolConfig()
+	for _, o := range opts {
+		o(&p)
+	}
+	if p.tracer != nil {
+		cfg.Tracer = p.tracer
 	}
 	return stdlib.OpenDB(*cfg), nil
 }
@@ -154,6 +163,7 @@ type poolConfig struct {
 	maxOpenConns    int
 	maxIdleConns    int
 	connMaxLifetime time.Duration
+	tracer          pgx.QueryTracer
 }
 
 // defaultPoolConfig returns the default pool sizing. MaxIdle equals MaxOpen so
@@ -182,6 +192,21 @@ func WithPool(maxOpen, maxIdle int, connMaxLifetime time.Duration) Option {
 	}
 }
 
+// AvailableConnections is how many connections the server accepts for
+// ordinary roles (max_connections less the superuser reserve), the ceiling
+// for the sum of every pool that connects to it (RD-1410).
+func (d *DB) AvailableConnections(ctx context.Context) (int, error) {
+	var n int
+	err := d.conn.QueryRowContext(ctx, `SELECT current_setting('max_connections')::int - current_setting('superuser_reserved_connections')::int`).Scan(&n)
+	return n, err
+}
+
+// WithQueryTracer installs a pgx query tracer on every connection of the
+// handle; tests use it to count database round trips.
+func WithQueryTracer(tracer pgx.QueryTracer) Option {
+	return func(p *poolConfig) { p.tracer = tracer }
+}
+
 func applyPool(conn *sql.DB, opts ...Option) {
 	p := defaultPoolConfig()
 	for _, o := range opts {
@@ -193,7 +218,7 @@ func applyPool(conn *sql.DB, opts ...Option) {
 }
 
 func New(databaseURL string, opts ...Option) (*DB, error) {
-	conn, err := openPostgres(databaseURL)
+	conn, err := openPostgres(databaseURL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -246,7 +271,7 @@ func New(databaseURL string, opts ...Option) (*DB, error) {
 // already proven Postgres is up (server audit pools) or are interactive tools
 // where waiting 30s on a bad DSN is worse than an immediate error.
 func NewWithoutMigrate(databaseURL string, opts ...Option) (*DB, error) {
-	conn, err := openPostgres(databaseURL)
+	conn, err := openPostgres(databaseURL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -285,13 +310,55 @@ func (d *DB) Migrate(ctx context.Context) error {
 // the main DB and break the main-DB retention worker — but under RD-1147 the
 // main DB no longer even has access_logs, so this simply must not point at main).
 func (d *DB) MigrateAuditOnly(ctx context.Context, auditFS fs.FS) error {
-	return d.migrateFS(ctx, auditFS, "schema_version_audit")
+	return d.migrateFS(ctx, auditFS, "schema_version_audit", checkAccessLogsOwnership)
+}
+
+// accessLogsBigintVersion is audit migration 003, which widens access_logs.id
+// and needs ownership of the table and its sequence.
+const accessLogsBigintVersion = 3
+
+// checkAccessLogsOwnership turns the bare "must be owner of table
+// access_logs" failure of audit migration 003 into an error carrying the fix,
+// before tern attempts it. Privileges are not enough to ALTER a table: the
+// connected role must own access_logs and access_logs_id_seq or be a member
+// of their owner.
+func checkAccessLogsOwnership(ctx context.Context, conn *pgx.Conn, current int32) error {
+	if current >= accessLogsBigintVersion {
+		return nil
+	}
+	rows, err := conn.Query(ctx, `
+		SELECT c.oid::regclass::text, quote_ident(pg_get_userbyid(c.relowner)), quote_ident(current_user),
+		       pg_has_role(current_user, c.relowner, 'USAGE')
+		  FROM pg_class c
+		 WHERE c.oid IN (to_regclass('access_logs'), to_regclass('access_logs_id_seq'))`)
+	if err != nil {
+		return fmt.Errorf("failed to inspect access_logs ownership: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var object, owner, currentUser string
+		var canActAsOwner bool
+		if err := rows.Scan(&object, &owner, &currentUser, &canActAsOwner); err != nil {
+			return fmt.Errorf("failed to inspect access_logs ownership: %w", err)
+		}
+		if !canActAsOwner {
+			return fmt.Errorf(
+				"cannot apply audit migration 003 (access_logs.id to bigint): %[1]s is owned by %[2]s but "+
+					"this connection is %[3]s, and widening it needs ownership. Point AUDIT_ADMIN_DATABASE_URL at "+
+					"the owner, or, as a superuser in the audit database: ALTER TABLE access_logs OWNER TO %[3]s; "+
+					"(its sequence follows). REASSIGN OWNED BY %[2]s TO %[3]s; moves the whole audit schema instead, "+
+					"but also everything else %[2]s owns in that database and the databases it owns. "+
+					"The migration rewrites the table: on a large deployment run it in a maintenance window, "+
+					"instances stopped, with `migrate -audit` (make db-migrate-audit).", object, owner, currentUser)
+		}
+	}
+	return rows.Err()
 }
 
 // migrateFS runs the pending migrations in fsys, tracking applied versions in
 // the given tern version table. Kept private; callers use Migrate /
 // MigrateAuditOnly which pin the FS + version table together.
-func (d *DB) migrateFS(ctx context.Context, fsys fs.FS, versionTable string) error {
+func (d *DB) migrateFS(ctx context.Context, fsys fs.FS, versionTable string, preflight ...func(context.Context, *pgx.Conn, int32) error) error {
 	pgxConn, err := d.connectPgxUTC(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to connect for migrations: %w", err)
@@ -305,6 +372,19 @@ func (d *DB) migrateFS(ctx context.Context, fsys fs.FS, versionTable string) err
 
 	if err := migrator.LoadMigrations(fsys); err != nil {
 		return fmt.Errorf("failed to load migrations: %w", err)
+	}
+	if len(preflight) > 0 {
+		current, err := migrator.GetCurrentVersion(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read migration version: %w", err)
+		}
+		if int(current) < len(migrator.Migrations) {
+			for _, check := range preflight {
+				if err := check(ctx, pgxConn, current); err != nil {
+					return err
+				}
+			}
+		}
 	}
 
 	if err := migrator.Migrate(ctx); err != nil {
@@ -889,6 +969,7 @@ func (d *DB) SealBufferedAccessLog(ctx context.Context, chain RBACAuditChain, re
 	if chain == nil {
 		return "", fmt.Errorf("seal access log: nil chain")
 	}
+	rec = ClampAccessLogRecord(rec)
 
 	var corrID *string
 	if rec.CorrelationID != "" {
@@ -935,6 +1016,194 @@ func (d *DB) SealBufferedAccessLog(ctx context.Context, chain RBACAuditChain, re
 		return "", err
 	}
 	return hash, nil
+}
+
+// ClampAccessLogRecord makes a buffered record storable before it is hashed:
+// text fields cut to their access_logs column widths by character, NUL bytes
+// (which Postgres text rejects) replaced with U+FFFD, and invalid UTF-8
+// replaced the same way. Such a value (a method name reaches logAccess
+// unchecked) would otherwise fail its INSERT on every attempt and wedge the
+// single sealer. The stored row, its hash and its SIEM event all use the
+// clamped record.
+func ClampAccessLogRecord(rec AccessLogRecord) AccessLogRecord {
+	clean := func(s string, n int) string {
+		s = strings.ReplaceAll(strings.ToValidUTF8(s, "\uFFFD"), "\x00", "\uFFFD")
+		if n > 0 && utf8.RuneCountInString(s) > n {
+			s = string([]rune(s)[:n])
+		}
+		return s
+	}
+	rec.ExternalID = clean(rec.ExternalID, 255)
+	rec.Method = clean(rec.Method, 100)
+	rec.IPAddress = clean(rec.IPAddress, 45)
+	rec.CorrelationID = clean(rec.CorrelationID, 128)
+	rec.OrgID = clean(rec.OrgID, 0)
+	rec.DenialReason = clean(rec.DenialReason, 0)
+	if len(rec.Params) > 0 {
+		if cleaned := clean(string(rec.Params), 0); cleaned != string(rec.Params) {
+			rec.Params = []byte(cleaned)
+		}
+	}
+	return rec
+}
+
+// BatchAuditChain is a hash chain that links several entries in one step
+// (audit.HashChain).
+type BatchAuditChain interface {
+	AppendBatch(build func(prevHash string) (contents []string, write func(hashes []string) error, err error)) ([]string, error)
+}
+
+// BufferedAccessLog is one buffered access-log record and its buffer sequence.
+type BufferedAccessLog struct {
+	Seq    uint64
+	Record AccessLogRecord
+}
+
+// SealedAccessLog is what a batch seal stored for one record.
+type SealedAccessLog struct {
+	Hash      string
+	CreatedAt time.Time
+}
+
+// SealBufferedAccessLogs seals a batch of buffered records into the chain in
+// one statement (RD-1410): one round trip reserves their ids in
+// ascending order (id order = chain order), the hashes are linked in process
+// with the canonical v2 content of SealBufferedAccessLog, and one multi-row
+// INSERT writes every row. Under the chain's mutex the head advances only if
+// that INSERT succeeds; otherwise nothing is sealed and the chain is
+// unchanged. created_at is one timestamp per batch (the verifier orders the
+// chain by id, not by time). buffer_seq stays UNIQUE, so a double seal fails
+// the whole batch loudly. Records must be in ascending buffer sequence.
+func (d *DB) SealBufferedAccessLogs(ctx context.Context, chain BatchAuditChain, records []BufferedAccessLog, chainName string) ([]SealedAccessLog, error) {
+	if chain == nil {
+		return nil, fmt.Errorf("seal access logs: nil chain")
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+	n := len(records)
+	var sealed []SealedAccessLog
+	_, err := chain.AppendBatch(func(string) ([]string, func([]string) error, error) {
+		rows, err := d.conn.QueryContext(ctx, `SELECT nextval('access_logs_id_seq') FROM generate_series(1, $1)`, n)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reserve access_logs ids: %w", err)
+		}
+		ids := make([]int64, 0, n)
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, nil, fmt.Errorf("reserve access_logs ids: %w", err)
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil || len(ids) != n {
+			return nil, nil, fmt.Errorf("reserve access_logs ids: got %d of %d: %v", len(ids), n, err)
+		}
+		slices.Sort(ids)
+		createdAt := time.Now().UTC().Truncate(time.Microsecond)
+		contents := make([]string, n)
+		externalIDs, methods, ips, entryHashes := make([]string, n), make([]string, n), make([]string, n), make([]string, n)
+		statuses := make([]int32, n)
+		correlations, params, orgIDs, denials := make([]*string, n), make([]*string, n), make([]*string, n), make([]*string, n)
+		responses := make([]*int32, n)
+		created := make([]time.Time, n)
+		seqs := make([]int64, n)
+		for i, buffered := range records {
+			rec := ClampAccessLogRecord(buffered.Record)
+			respStatus := rec.StatusCode
+			if rec.ResponseStatus != nil {
+				respStatus = *rec.ResponseStatus
+				r := int32(*rec.ResponseStatus)
+				responses[i] = &r
+			}
+			paramsDigest := ""
+			if len(rec.Params) > 0 {
+				paramsDigest = string(rec.Params)
+				params[i] = &paramsDigest
+			}
+			contents[i] = AccessLogChainContent(ids[i], rec.ExternalID, rec.Method, rec.IPAddress, rec.StatusCode, respStatus, createdAt, rec.CorrelationID, paramsDigest)
+			externalIDs[i], methods[i], ips[i], statuses[i] = rec.ExternalID, rec.Method, rec.IPAddress, int32(rec.StatusCode)
+			correlations[i], orgIDs[i], denials[i] = nullableText(rec.CorrelationID), nullableText(rec.OrgID), nullableText(rec.DenialReason)
+			created[i], seqs[i] = createdAt, int64(buffered.Seq)
+		}
+		write := func(hashes []string) error {
+			copy(entryHashes, hashes)
+			res, err := d.conn.ExecContext(ctx, `INSERT INTO access_logs
+				(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, hash_format_version, created_at, entry_hash, buffer_seq, chain_name, org_id, denial_reason)
+				SELECT u.id, u.external_id, u.method, u.status_code, u.ip_address, u.correlation_id, u.request_params, u.response_status, 2, u.created_at, u.entry_hash, u.buffer_seq, $12, u.org_id, u.denial_reason
+				FROM unnest($1::bigint[], $2::text[], $3::text[], $4::int[], $5::text[], $6::text[], $7::text[], $8::int[], $9::timestamp[], $10::text[], $11::bigint[], $13::text[], $14::text[])
+				  AS u(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, created_at, entry_hash, buffer_seq, org_id, denial_reason)`,
+				ids, externalIDs, methods, statuses, ips, correlations, params, responses, created, entryHashes, seqs, chainName, orgIDs, denials)
+			if err != nil {
+				return fmt.Errorf("insert access_logs (batch seal): %w", err)
+			}
+			if affected, _ := res.RowsAffected(); affected != int64(n) {
+				return fmt.Errorf("insert access_logs (batch seal): expected %d rows, got %d", n, affected)
+			}
+			sealed = make([]SealedAccessLog, n)
+			for i := range sealed {
+				sealed[i] = SealedAccessLog{Hash: hashes[i], CreatedAt: createdAt}
+			}
+			return nil
+		}
+		return contents, write, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return sealed, nil
+}
+
+// SealedAccessLogRow is a sealed access-log row as stored, with its buffer
+// sequence: what the sealer forwards when it could not observe the write.
+type SealedAccessLogRow struct {
+	Seq            uint64
+	ExternalID     string
+	Method         string
+	StatusCode     int
+	ResponseStatus *int
+	IPAddress      string
+	CorrelationID  string
+	EntryHash      string
+	CreatedAt      time.Time
+}
+
+// SealedAccessLogsBySeq returns the rows of chainName sealed under the given
+// buffer sequences (the sealer settles writes whose outcome it could not
+// observe; RD-1410).
+func (d *DB) SealedAccessLogsBySeq(ctx context.Context, chainName string, seqs []uint64) ([]SealedAccessLogRow, error) {
+	if len(seqs) == 0 {
+		return nil, nil
+	}
+	keys := make([]int64, len(seqs))
+	for i, seq := range seqs {
+		keys[i] = int64(seq)
+	}
+	rows, err := d.conn.QueryContext(ctx, `SELECT buffer_seq, external_id, method, status_code, response_status,
+		COALESCE(ip_address, ''), COALESCE(correlation_id, ''), COALESCE(entry_hash, ''), created_at
+		FROM access_logs WHERE chain_name = $1 AND buffer_seq = ANY($2::bigint[])`, chainName, keys)
+	if err != nil {
+		return nil, fmt.Errorf("read sealed access logs: %w", err)
+	}
+	defer rows.Close()
+	var out []SealedAccessLogRow
+	for rows.Next() {
+		var r SealedAccessLogRow
+		var seq int64
+		var response sql.NullInt64
+		if err := rows.Scan(&seq, &r.ExternalID, &r.Method, &r.StatusCode, &response, &r.IPAddress, &r.CorrelationID, &r.EntryHash, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("read sealed access logs: %w", err)
+		}
+		r.Seq = uint64(seq)
+		if response.Valid {
+			v := int(response.Int64)
+			r.ResponseStatus = &v
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // AuditChainCheckpointRow is a persisted signed checkpoint (RD-1112 #8),

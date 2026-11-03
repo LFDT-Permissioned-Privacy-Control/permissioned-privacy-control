@@ -21,6 +21,7 @@ import (
 	"privacy-proxy/internal/audit"
 	"privacy-proxy/internal/compliance"
 	"privacy-proxy/internal/db"
+	"privacy-proxy/internal/loggate"
 	"privacy-proxy/internal/metrics"
 	"privacy-proxy/internal/nodeapproval"
 	"privacy-proxy/internal/proxy"
@@ -41,6 +42,8 @@ type AuditBuffer interface {
 // and reusable.
 type JSONRPCProcessor struct {
 	nodeExecution     NodeExecutionService
+	nodeFailureLog    loggate.Gate // rate-limits node-path failure lines
+	systemLinks       *systemLinkCache
 	nodeApprovals     *nodeapproval.Service
 	rbacAccessCtrl    *rbac.AccessController
 	rateLimiter       RateLimiterInterface
@@ -224,6 +227,9 @@ type ProcessError struct {
 	// an out-of-scope frame, its owner, for audit records only.
 	TraceDeniedTarget string
 	TraceDeniedOrgID  string
+	// RetryAfter, when positive, is sent as the Retry-After header (seconds):
+	// the request may succeed unchanged after that long.
+	RetryAfter int
 }
 
 func (e *ProcessError) Error() string {
@@ -300,6 +306,7 @@ type JSONRPCProcessorConfig struct {
 func NewJSONRPCProcessor(cfg JSONRPCProcessorConfig) *JSONRPCProcessor {
 	p := &JSONRPCProcessor{
 		nodeExecution:          cfg.NodeExecution,
+		systemLinks:            newSystemLinkCache(),
 		rbacAccessCtrl:         cfg.RBACAccessCtrl,
 		rateLimiter:            cfg.RateLimiter,
 		proxy:                  cfg.Proxy,
@@ -1409,6 +1416,12 @@ func visibleToFieldPresent(req *ProcessRequest, rawTx bool) bool {
 // Called from both eth_sendTransaction and eth_sendRawTransaction paths.
 // Returns nil if compliance passes or is disabled, or a ProcessResult with an error.
 func (p *JSONRPCProcessor) checkCompliance(ctx context.Context, req *ProcessRequest, orgID, userID, from, to, data, value string) *ProcessResult {
+	return p.checkComplianceFor(ctx, req, orgID, userID, from, to, data, value, compliance.TransactionBinding{})
+}
+
+// checkComplianceFor is checkCompliance with the travel-rule step bound to a
+// signed transaction (the Reth path: one record per transaction, RD-1410).
+func (p *JSONRPCProcessor) checkComplianceFor(ctx context.Context, req *ProcessRequest, orgID, userID, from, to, data, value string, tx compliance.TransactionBinding) *ProcessResult {
 	if p.complianceChecker == nil {
 		return nil
 	}
@@ -1422,6 +1435,7 @@ func (p *JSONRPCProcessor) checkCompliance(ctx context.Context, req *ProcessRequ
 		Data:          data,
 		Value:         value,
 		CorrelationID: req.CorrelationID,
+		Transaction:   tx,
 	})
 	if p.metrics != nil {
 		p.metrics.ComplianceCheckDuration.WithLabelValues().Observe(time.Since(compStart).Seconds())
@@ -1961,10 +1975,13 @@ func (p *JSONRPCProcessor) processRawTransaction(ctx context.Context, req *Proce
 		}
 	}
 
-	// System-link the sender's ETH address to their DID.
-	if statusCode == http.StatusOK && from != "" && req.UserID != "" {
+	// System-link the sender's ETH address to their DID, once per cache
+	// lifetime per (DID, sender) rather than on every transaction.
+	if statusCode == http.StatusOK && from != "" && req.UserID != "" && !p.systemLinks.known(req.UserID, from) {
 		if err := p.rbacAccessCtrl.Store().SystemLinkEthAddress(ctx, req.UserID, from); err != nil {
 			slog.Warn("failed to system-link eth address", "user", req.UserID, "address", from, "error", err)
+		} else {
+			p.systemLinks.remember(req.UserID, from)
 		}
 	}
 
