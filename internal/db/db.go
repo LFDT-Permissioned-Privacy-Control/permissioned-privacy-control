@@ -1101,6 +1101,56 @@ func (d *DB) SealBufferedAccessLogs(ctx context.Context, chain BatchAuditChain, 
 	return sealed, nil
 }
 
+// SealedAccessLogRow is a sealed access-log row as stored, with its buffer
+// sequence: what the sealer forwards when it could not observe the write.
+type SealedAccessLogRow struct {
+	Seq            uint64
+	ExternalID     string
+	Method         string
+	StatusCode     int
+	ResponseStatus *int
+	IPAddress      string
+	CorrelationID  string
+	EntryHash      string
+	CreatedAt      time.Time
+}
+
+// SealedAccessLogsBySeq returns the rows of chainName sealed under the given
+// buffer sequences (the sealer settles writes whose outcome it could not
+// observe; RD-1410).
+func (d *DB) SealedAccessLogsBySeq(ctx context.Context, chainName string, seqs []uint64) ([]SealedAccessLogRow, error) {
+	if len(seqs) == 0 {
+		return nil, nil
+	}
+	keys := make([]int64, len(seqs))
+	for i, seq := range seqs {
+		keys[i] = int64(seq)
+	}
+	rows, err := d.conn.QueryContext(ctx, `SELECT buffer_seq, external_id, method, status_code, response_status,
+		COALESCE(ip_address, ''), COALESCE(correlation_id, ''), COALESCE(entry_hash, ''), created_at
+		FROM access_logs WHERE chain_name = $1 AND buffer_seq = ANY($2::bigint[])`, chainName, keys)
+	if err != nil {
+		return nil, fmt.Errorf("read sealed access logs: %w", err)
+	}
+	defer rows.Close()
+	var out []SealedAccessLogRow
+	for rows.Next() {
+		var r SealedAccessLogRow
+		var seq int64
+		var response sql.NullInt64
+		if err := rows.Scan(&seq, &r.ExternalID, &r.Method, &r.StatusCode, &response, &r.IPAddress, &r.CorrelationID, &r.EntryHash, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("read sealed access logs: %w", err)
+		}
+		r.Seq = uint64(seq)
+		if response.Valid {
+			v := int(response.Int64)
+			r.ResponseStatus = &v
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // AuditChainCheckpointRow is a persisted signed checkpoint (RD-1112 #8),
 // exchanged as primitives so the db package need not import internal/audit
 // (the audit package reconstructs its signed Checkpoint from this).

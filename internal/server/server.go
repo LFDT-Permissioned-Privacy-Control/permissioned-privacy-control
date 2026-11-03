@@ -892,10 +892,14 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 		}
 		s.auditBuffer = auditBuf
 
-		sealing := &accessLogSealing{auditDB: auditDB, chain: hashChain, name: cfg.AuditChainName, siem: siemForwarder}
+		sealing := &accessLogSealing{auditDB: auditDB, chain: hashChain, name: cfg.AuditChainName}
+		if siemForwarder != nil {
+			sealing.siem = siemForwarder
+		}
 		// A tick drains the whole backlog in multi-row batch writes; a failed
 		// batch is sealed record by record, stopping at the failing one.
-		s.auditSealer = sealer.New(auditBuf, sealing.seal, sealing.highWater, sealer.Config{SealBatch: sealing.sealBatch})
+		// Settle forwards rows whose seal outcome the sealer could not observe.
+		s.auditSealer = sealer.New(auditBuf, sealing.seal, sealing.highWater, sealer.Config{SealBatch: sealing.sealBatch, Settle: sealing.settle})
 		seedCtx, cancelSeed := context.WithTimeout(context.Background(), 15*time.Second)
 		seedErr := s.auditSealer.Seed(seedCtx)
 		cancelSeed()

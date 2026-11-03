@@ -404,3 +404,86 @@ func TestFailingRecordIsRetriedAloneNotInBatches(t *testing.T) {
 		t.Fatalf("after the record could be stored: %d %v %v", n, err, rec.sealed)
 	}
 }
+
+// Settle runs after the chain check and at the end of every tick; the first
+// tick hands it the entries at or below the chain's high-water (sealed before
+// a restart, not yet deleted). It never runs on a refused chain.
+func TestSettleSeesRecoveredEntriesOnceAndNeverARefusedChain(t *testing.T) {
+	type call struct {
+		hw        uint64
+		recovered []uint64
+	}
+	var calls []call
+	settle := func(_ context.Context, hw uint64, recovered []buffer.Entry) (uint64, error) {
+		c := call{hw: hw}
+		for _, e := range recovered {
+			c.recovered = append(c.recovered, e.Seq)
+		}
+		calls = append(calls, c)
+		return 0, nil
+	}
+	b := newBuf(t, 5)
+	defer b.Close()
+	rec := &recorder{sealed: []uint64{1, 2}} // sealed before the restart, still buffered
+	s := New(b, rec.seal, rec.highWater, Config{Settle: settle})
+	if _, err := s.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 4 || fmt.Sprint(calls[0].recovered) != "[1 2]" || calls[0].hw != 2 || calls[1].hw != 5 || calls[1].recovered != nil || calls[2].recovered != nil {
+		t.Fatalf("settle calls %+v", calls)
+	}
+
+	calls = nil
+	ahead := newBuf(t, 1)
+	defer ahead.Close()
+	foreign := &recorder{sealed: []uint64{50}}
+	if _, err := New(ahead, foreign.seal, foreign.highWater, Config{Settle: settle}).Tick(context.Background()); !errors.Is(err, ErrChainAhead) {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("settle ran on a refused chain: %+v", calls)
+	}
+}
+
+// Entries Settle still follows up stay in the buffer, and a foreign record
+// under this buffer's sequence stops the sealer before it deletes anything.
+func TestSettleKeepsFollowedUpEntriesAndStopsOnAForeignRecord(t *testing.T) {
+	b := newBuf(t, 5)
+	defer b.Close()
+	rec := &recorder{}
+	keep := uint64(3)
+	s := New(b, rec.seal, rec.highWater, Config{Settle: func(context.Context, uint64, []buffer.Entry) (uint64, error) { return keep, nil }})
+	if _, err := s.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := b.PendingCount(); pending != 3 {
+		t.Fatalf("%d entries left, want 3..5 kept for follow-up", pending)
+	}
+	keep = 0
+	if _, err := s.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := b.PendingCount(); pending != 0 {
+		t.Fatalf("%d entries left after the follow-up", pending)
+	}
+
+	other := newBuf(t, 2)
+	defer other.Close()
+	sealed := &recorder{sealed: []uint64{1}}
+	foreign := func(context.Context, uint64, []buffer.Entry) (uint64, error) {
+		return 1, fmt.Errorf("%w: foreign record", ErrChainAhead)
+	}
+	fs := New(other, sealed.seal, sealed.highWater, Config{Settle: foreign})
+	if _, err := fs.Tick(context.Background()); !errors.Is(err, ErrChainAhead) {
+		t.Fatalf("tick: %v, want ErrChainAhead", err)
+	}
+	if pending, _ := other.PendingCount(); pending != 2 {
+		t.Fatalf("%d entries left: the sealer deleted after a foreign record", pending)
+	}
+	if _, err := fs.Tick(context.Background()); !errors.Is(err, ErrChainAhead) {
+		t.Fatalf("the refusal must stick: %v", err)
+	}
+}

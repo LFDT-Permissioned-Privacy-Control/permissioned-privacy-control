@@ -124,6 +124,10 @@ func (a *AuditDB) SealBufferedAccessLogs(ctx context.Context, chain BatchAuditCh
 	return a.pool.SealBufferedAccessLogs(ctx, chain, records, chainName)
 }
 
+func (a *AuditDB) SealedAccessLogsBySeq(ctx context.Context, chainName string, seqs []uint64) ([]SealedAccessLogRow, error) {
+	return a.pool.SealedAccessLogsBySeq(ctx, chainName, seqs)
+}
+
 func (a *AuditDB) GetMaxAccessLogBufferSeq(ctx context.Context, chainName string) (uint64, error) {
 	return a.pool.GetMaxAccessLogBufferSeq(ctx, chainName)
 }
