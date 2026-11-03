@@ -4,7 +4,7 @@ use alloy_rpc_types_trace::geth::GethDebugTracingCallOptions;
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ops_reth_policy::{
-    api::{ExecutionBackend, PoolRejection, PoolSubmission, PrivateApi, serve},
+    api::{ExecutionBackend, MAX_FACT_WAIT, PoolRejection, PoolSubmission, PrivateApi, serve},
     archive::{ArtifactStore, Retention},
     context::ExecutionBinding,
     runtime::PolicyRuntime,
@@ -101,6 +101,15 @@ fn now() -> i64 {
 }
 fn required(name: &str) -> eyre::Result<String> {
     std::env::var(name).map_err(|_| eyre::eyre!("{name} is required"))
+}
+
+/// An optional setting: its default when unset, refused when not Unicode.
+fn optional(name: &str, default: &str) -> eyre::Result<String> {
+    match std::env::var(name) {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => Ok(default.into()),
+        Err(std::env::VarError::NotUnicode(_)) => eyre::bail!("{name} is not valid text"),
+    }
 }
 
 /// The pool's answer to a submission, from its typed error only (never an
@@ -210,6 +219,28 @@ fn force_rpc_settings(rpc: &mut RpcServerArgs) -> eyre::Result<()> {
     Ok(())
 }
 
+/// `OPS_NODE_POLICY_FACT_WAIT`: a whole number of `ms` or `s`, at most 5 s.
+fn parse_fact_wait(value: &str) -> eyre::Result<std::time::Duration> {
+    let invalid = || eyre::eyre!("OPS_NODE_POLICY_FACT_WAIT must be 0s to 5s, in ms or s");
+    let (number, millis) = if let Some(number) = value.strip_suffix("ms") {
+        (number, 1)
+    } else if let Some(number) = value.strip_suffix('s') {
+        (number, 1000)
+    } else {
+        return Err(invalid());
+    };
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    number
+        .parse::<u64>()
+        .ok()
+        .and_then(|number| number.checked_mul(millis))
+        .map(std::time::Duration::from_millis)
+        .filter(|wait| *wait <= MAX_FACT_WAIT)
+        .ok_or_else(invalid)
+}
+
 /// The pooled form of `raw`, whose signer the private API already recovered
 /// from these exact bytes: no second recovery on the way into the pool.
 fn recovered_pooled(
@@ -266,10 +297,8 @@ fn main() -> eyre::Result<()> {
         .map_err(eyre::Report::msg)?;
         // How long block evidence is kept after its block (`forever` for an
         // archive node); pruned on the maintenance thread.
-        let retention = Retention::parse(
-            &std::env::var("OPS_NODE_POLICY_MANIFEST_RETENTION").unwrap_or_else(|_| "7d".into()),
-        )
-        .map_err(eyre::Report::msg)?;
+        let retention = Retention::parse(&optional("OPS_NODE_POLICY_MANIFEST_RETENTION", "7d")?)
+            .map_err(eyre::Report::msg)?;
         let runtime = Arc::new(
             PolicyRuntime::open(Verifier::new(network, keys), archive, capacity, now())
                 .map_err(eyre::Report::msg)?
@@ -280,6 +309,7 @@ fn main() -> eyre::Result<()> {
         refuse_unsafe_database(&builder.config().db)?;
         force_rpc_settings(&mut builder.config_mut().rpc)?;
         let listener = tokio::net::TcpListener::bind(required("OPS_NODE_POLICY_LISTEN")?).await?;
+        let fact_wait = parse_fact_wait(&optional("OPS_NODE_POLICY_FACT_WAIT", "1s")?)?;
         let token = required("OPS_NODE_POLICY_TOKEN")?;
         let eth_builder: EthereumEthApiBuilder = Default::default();
         let engine_builder: BasicEngineApiBuilder<EthereumEngineValidatorBuilder> =
@@ -548,7 +578,8 @@ fn main() -> eyre::Result<()> {
                 Arc::new(now),
             )
             .map_err(eyre::Report::msg)?
-            .with_cpu_pool(ops_reth_policy::api::CpuPool::new(workers)),
+            .with_cpu_pool(ops_reth_policy::api::CpuPool::new(workers))
+            .with_fact_wait(fact_wait),
         );
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let mut private = tokio::spawn(serve(listener, api, async move {
@@ -715,5 +746,20 @@ mod tests {
         assert!(refuse_unsafe_database(&database(&[])).is_ok());
         assert!(refuse_unsafe_database(&database(&["--db.sync-mode", "durable"])).is_ok());
         assert!(refuse_unsafe_database(&database(&["--db.sync-mode", "safe-no-sync"])).is_err());
+    }
+
+    #[test]
+    fn fact_wait_setting_is_bounded() {
+        use std::time::Duration;
+        assert_eq!(parse_fact_wait("1s").unwrap(), Duration::from_secs(1));
+        assert_eq!(
+            parse_fact_wait("250ms").unwrap(),
+            Duration::from_millis(250)
+        );
+        assert_eq!(parse_fact_wait("0s").unwrap(), Duration::ZERO);
+        assert_eq!(parse_fact_wait("5s").unwrap(), Duration::from_secs(5));
+        for invalid in ["6s", "5001ms", "1", "s", "1.5s", "-1s", "1m", ""] {
+            assert!(parse_fact_wait(invalid).is_err(), "{invalid:?}");
+        }
     }
 }

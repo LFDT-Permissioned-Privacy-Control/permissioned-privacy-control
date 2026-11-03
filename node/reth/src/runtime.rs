@@ -35,6 +35,20 @@ const MAINTENANCE_BACKSTOP: Duration = Duration::from_secs(10);
 /// finality window at the default expected load), and at most this many blocks.
 const STATUS_CACHE_TRANSACTIONS: usize = 262_144;
 const STATUS_CACHE_BLOCKS: usize = 1024;
+/// Produced blocks whose verified execution is kept for their self-import.
+const OWN_BLOCKS: usize = 8;
+
+/// A block this process produced and published, kept so that importing it
+/// reuses the verified facts and identities instead of reading and
+/// re-verifying its manifest. Exactly what the manifest records.
+#[derive(Debug)]
+struct OwnBlock {
+    descriptor: BlockDescriptor,
+    facts: Arc<AppliedFacts>,
+    policy: Arc<PinnedPolicySnapshot>,
+    captured: HashMap<ExecutionBinding, CapturedIdentity>,
+    expected: HashMap<ExecutionBinding, ExecutionOutcome>,
+}
 
 /// Who a status answer names for a transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +127,8 @@ pub struct PolicyRuntime {
     /// Serialises fact ingestion. Identity admission never takes it.
     facts: Mutex<()>,
     status: Mutex<StatusCache>,
+    /// The last few produced blocks, for their self-import.
+    own_blocks: Mutex<VecDeque<Arc<OwnBlock>>>,
     /// Random per process start: every private response names it, so OPS
     /// knows which boot an acknowledgement belongs to.
     boot_id: String,
@@ -298,6 +314,7 @@ impl PolicyRuntime {
             verifier,
             facts: Mutex::new(()),
             status: Mutex::new(StatusCache::default()),
+            own_blocks: Mutex::new(VecDeque::new()),
             boot_id: new_boot_id(),
             chain: OnceLock::new(),
             finality: Finality::default(),
@@ -372,6 +389,11 @@ impl PolicyRuntime {
             return Ok(MaintenanceReport::default());
         };
         self.release(chain.as_ref(), finalized)?;
+        // A produced block at or below finality is no longer imported from
+        // memory (its other builds' evidence is being removed).
+        if let Ok(mut own_blocks) = self.own_blocks.lock() {
+            own_blocks.retain(|own| own.descriptor.number > finalized);
+        }
         // The installed facts and every pinned candidate, read before the
         // archive lists anything: a root that appears later is newer.
         let live = self.feed.roots()?;
@@ -625,8 +647,22 @@ impl PolicyRuntime {
         {
             return Err("produced block at or below the finalized height".into());
         }
-        let (status, published) = handle.publish(&self.archive, block)?;
+        let (status, published, own) = handle.publish(&self.archive, block)?;
         self.wake.notify();
+        // Only evidence this build published: an existing manifest from an
+        // earlier build may differ in lease or identity times, and import
+        // must use exactly the archived evidence (the earlier build's entry,
+        // if still cached, matches it).
+        if published == Published::New {
+            let mut own_blocks = self
+                .own_blocks
+                .lock()
+                .map_err(|_| "execution status unavailable")?;
+            own_blocks.push_back(Arc::new(own));
+            while own_blocks.len() > OWN_BLOCKS {
+                own_blocks.pop_front();
+            }
+        }
         let mut cache = self
             .status
             .lock()
@@ -821,9 +857,46 @@ impl PolicyRuntime {
                 Arc::new(block.transactions.iter().copied().collect()),
             )));
         }
-        self.replay(block).map(ImportExecution::Replay)
+        self.self_import(block).map(ImportExecution::Replay)
     }
 
+    /// Execution for importing a block through the engine or block path. A
+    /// block this process just produced and published (the same hash, parent,
+    /// timestamp and transactions) reuses the execution its manifest records,
+    /// already verified, once; anything else replays its manifest.
+    pub fn self_import(&self, block: &BlockDescriptor) -> Result<Arc<ExecutionHandle>, String> {
+        if &block.network != self.network() {
+            return Err("execution replay network mismatch".into());
+        }
+        let own = {
+            let mut own_blocks = self
+                .own_blocks
+                .lock()
+                .map_err(|_| "execution status unavailable")?;
+            own_blocks
+                .iter()
+                .position(|own| own.descriptor == *block)
+                .and_then(|index| own_blocks.remove(index))
+        };
+        let at = i64::try_from(block.timestamp).map_err(|_| "invalid block timestamp")?;
+        // At or below finality other builds' evidence is being removed: only
+        // the archive decides.
+        let below_finality = self
+            .finality
+            .current()
+            .is_some_and(|(finalized, _)| block.number <= finalized);
+        match own.filter(|_| !below_finality) {
+            // Replay would refuse a record issued after the block (beyond
+            // the clock tolerance); so does the cached path.
+            Some(own) if own.facts.max_issued() <= at.saturating_add(5) => {
+                Ok(ExecutionHandle::replaying(&own, block))
+            }
+            _ => self.replay(block),
+        }
+    }
+
+    /// Forensic replay: always from the block's manifest, re-verifying its
+    /// records and identities.
     pub fn replay(&self, block: &BlockDescriptor) -> Result<Arc<ExecutionHandle>, String> {
         if &block.network != self.network() {
             return Err("execution replay network mismatch".into());
@@ -943,6 +1016,27 @@ impl ExecutionHandle {
         PolicyFactory::new(self.policy.clone(), self.identities.clone())
     }
 
+    /// The replay of `own`, a block this process published: its facts and
+    /// policy as pinned, only its transactions' captured identities, and the
+    /// recorded outcomes as the expected ones.
+    fn replaying(own: &OwnBlock, block: &BlockDescriptor) -> Arc<Self> {
+        Arc::new(Self {
+            facts: own.facts.clone(),
+            policy: own.policy.clone(),
+            identities: Arc::new(RecordingResolver {
+                source: None,
+                at: block.timestamp as i64,
+                captured: Mutex::new(own.captured.clone()),
+                outcomes: Mutex::new(HashMap::new()),
+                expected: Some(own.expected.clone()),
+                facts_version: own.facts.version(),
+            }),
+            network: block.network.clone(),
+            at: block.timestamp as i64,
+            _pin: None,
+        })
+    }
+
     pub fn candidate_factory(
         &self,
         candidate: &PolicyArtifact,
@@ -978,6 +1072,17 @@ impl ExecutionHandle {
         self.facts.version()
     }
 
+    /// The context of the identity this handle holds for transaction `hash`
+    /// (captured, or embedded in the replayed evidence).
+    pub fn identity_context(&self, hash: B256) -> Option<String> {
+        self.identities
+            .captured
+            .lock()
+            .ok()?
+            .get(&ExecutionBinding::Transaction(hash))
+            .map(|captured| captured.identity.context_id.clone())
+    }
+
     /// Publish this candidate's manifest for the assembled `block` before the
     /// block is returned; the manifest itself is one publication.
     pub fn persist(&self, archive: &ArtifactStore, block: &BlockDescriptor) -> Result<(), String> {
@@ -988,7 +1093,7 @@ impl ExecutionHandle {
         &self,
         archive: &ArtifactStore,
         block: &BlockDescriptor,
-    ) -> Result<(BlockStatus, Published), String> {
+    ) -> Result<(BlockStatus, Published, OwnBlock), String> {
         if block.network != self.network || block.timestamp != self.at as u64 {
             return Err("produced block execution context mismatch".into());
         }
@@ -1004,6 +1109,8 @@ impl ExecutionHandle {
             .map_err(|_| "execution outcomes unavailable")?;
         let mut entries = Vec::with_capacity(block.transactions.len());
         let mut transactions = HashMap::with_capacity(block.transactions.len());
+        let mut own_captured = HashMap::with_capacity(block.transactions.len());
+        let mut own_expected = HashMap::with_capacity(block.transactions.len());
         for hash in &block.transactions {
             let binding = ExecutionBinding::Transaction(*hash);
             let identity = captured
@@ -1025,6 +1132,17 @@ impl ExecutionHandle {
                 reason_code: outcome.reason_code.clone(),
                 created: outcome.created.clone(),
             });
+            own_captured.insert(binding.clone(), identity.clone());
+            // The outcome replay expects, as the manifest records it.
+            own_expected.insert(
+                binding.clone(),
+                ExecutionOutcome {
+                    success: outcome.success,
+                    denied: false,
+                    reason_code: outcome.reason_code.clone(),
+                    created: outcome.created.clone(),
+                },
+            );
             let included = IncludedTransaction {
                 identity: (&identity.identity).into(),
                 reason_code: outcome.reason_code.clone(),
@@ -1055,6 +1173,13 @@ impl ExecutionHandle {
                 transactions,
             },
             published,
+            OwnBlock {
+                descriptor: block.clone(),
+                facts: self.facts.clone(),
+                policy: self.policy.clone(),
+                captured: own_captured,
+                expected: own_expected,
+            },
         ))
     }
 }

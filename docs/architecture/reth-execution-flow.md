@@ -148,12 +148,18 @@ Before minting a request identity, OPS checks that the node has acknowledged
 the current database version and is ready. That version becomes the identity's
 minimum required snapshot version. A configuration being active in PostgreSQL
 and applied on Reth are separate states, exposed by publication/readiness status.
+A node whose fresh facts are still below a request's minimum version holds the
+request, without a worker, until publication brings that version or its bounded
+wait ends (default one second, at most 32 requests at once), then admits it or
+answers that facts are pending; stale or missing facts are refused at once.
 
 A candidate block pins one coherent snapshot; it never adopts half a policy
 set or changes memberships halfway through execution. A revocation affects
 subsequent candidates once published. An already pinned candidate can still
 finish under its snapshot. Self-import and replay of unfinalized blocks use the
-retained signed evidence of the original execution; finalized history the node
+retained signed evidence of the original execution (a block this node has just
+produced and published imports once from the verified execution it recorded,
+without reading it back); finalized history the node
 already holds re-executes without it; ordinary user queries use current
 permissions.
 

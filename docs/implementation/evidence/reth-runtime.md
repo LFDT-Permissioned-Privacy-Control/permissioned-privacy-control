@@ -444,6 +444,23 @@ payload and another network's block still need the manifest
 `another_networks_block_is_never_trusted`). This applies to history the node
 already holds; first-time imports have no known finality for their blocks.
 
+## Bounded fact wait and self-import (2026-11-03)
+
+| Behaviour | Test |
+|---|---|
+| A submission whose floor is above the fresh installed facts waits and is admitted when publication brings the version; after the bounded wait it gets `-32012` and nothing is registered | `admission_waits_for_min_version_then_fails_with_32012` |
+| Stale or missing facts are refused at once with the generic error | `stale_or_missing_facts_fail_at_once_without_waiting` |
+| At most the configured number of requests wait (default 32); more, and a zero wait, get `-32012` at once; `fact_wait_v1` is not advertised with a zero wait | `waiters_are_bounded_and_zero_wait_refuses_at_once` |
+| Simulations wait for their floor too | `simulation_waits_for_its_floor_too` |
+| A block the node has just published imports once from its recorded, verified execution, without reads or signature checks; any other body, hash or network, a second import and forensic replay read the manifest | `own_block_imports_from_memory_without_reading_or_verifying`, `another_block_body_or_hash_never_uses_the_cached_execution` |
+| A rebuild that kept the earlier archived evidence imports that evidence; at most 8 blocks are held | `a_rebuild_that_kept_earlier_evidence_imports_that_evidence`, `the_cache_is_bounded` |
+
+Measured in process (`self_import_cost`, release build, the fixture's policy):
+preparing the import of a 2,000-transaction block (reading and verifying its
+manifest's evidence, not executing it) took 78 ms from the manifest and 0.5 ms
+from memory, so the cache is kept. At or below finality the cache is not used. With the wait disabled the three wait tests fail;
+caching a rebuild's execution fails the rebuild test.
+
 ## Retention, compaction and fact-record collection (2026-11-03)
 
 Tests in `node/reth/tests/retention.rs`, against the in-memory filesystem

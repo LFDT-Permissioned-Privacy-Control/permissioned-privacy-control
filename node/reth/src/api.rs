@@ -43,8 +43,16 @@ const REQUIRED_CAPABILITIES: [&str; 8] = [
 ];
 
 /// Capabilities the private API itself implements, advertised with the
-/// backend's.
+/// backend's (`fact_wait_v1` only while a fact wait is configured).
 const API_CAPABILITIES: [&str; 1] = ["boot_id_v1"];
+const FACT_WAIT_CAPABILITY: &str = "fact_wait_v1";
+/// Default and largest bounded wait for a request's fact floor.
+pub const DEFAULT_FACT_WAIT: Duration = Duration::from_secs(1);
+pub const MAX_FACT_WAIT: Duration = Duration::from_secs(5);
+/// Requests waiting for facts at once by default: each holds a connection,
+/// so waiters alone can never fill the listener and block the publication
+/// they wait for.
+pub const DEFAULT_FACT_WAITERS: usize = 32;
 
 /// What the transaction pool did with a submitted transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +122,12 @@ pub struct PrivateApi {
     bearer: Vec<u8>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     cpu: CpuPool,
+    /// How long a submission or simulation whose fact floor is above the
+    /// installed facts waits for publication before `-32012`.
+    fact_wait: Duration,
+    /// Bounds concurrent waiters; beyond it a lagging request gets `-32012`
+    /// at once.
+    waiters: Arc<Semaphore>,
 }
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -190,6 +204,8 @@ pub struct ApiResponse {
 enum Failure {
     Message(String),
     PoolRejected(PoolRejection),
+    /// The request's fact floor did not arrive within the bounded wait.
+    FactsPending,
 }
 
 impl From<String> for Failure {
@@ -237,7 +253,44 @@ impl PrivateApi {
             bearer: format!("Bearer {bearer}").into_bytes(),
             clock,
             cpu: CpuPool::new(DEFAULT_CPU_WORKERS),
+            fact_wait: DEFAULT_FACT_WAIT,
+            waiters: Arc::new(Semaphore::new(DEFAULT_FACT_WAITERS)),
         })
+    }
+
+    /// Set how many requests may wait for facts at once (at least 1).
+    pub fn with_fact_waiters(mut self, waiters: usize) -> Self {
+        self.waiters = Arc::new(Semaphore::new(waiters.max(1)));
+        self
+    }
+
+    /// Set the bounded fact wait (at most `MAX_FACT_WAIT`; zero refuses a
+    /// lagging request at once, still with `-32012`).
+    pub fn with_fact_wait(mut self, wait: Duration) -> Self {
+        self.fact_wait = wait.min(MAX_FACT_WAIT);
+        self
+    }
+
+    /// Wait, holding no worker or lock, until the installed facts reach
+    /// `minimum`, at most the configured fact wait.
+    async fn wait_for_facts(&self, minimum: u64) -> Result<(), Failure> {
+        let Ok(_waiting) = self.waiters.clone().try_acquire_owned() else {
+            return Err(Failure::FactsPending);
+        };
+        let mut versions = self.runtime.feed.versions();
+        match tokio::time::timeout(
+            self.fact_wait,
+            versions.wait_for(|version| *version >= minimum),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            // Facts that went stale meanwhile are refused, not pending.
+            _ if self.runtime.feed.pin((self.clock)(), 0).is_err() => {
+                Err("policy facts are stale".into())
+            }
+            _ => Err(Failure::FactsPending),
+        }
     }
 
     /// Replace the CPU pool (sizing, or a test spawner).
@@ -286,6 +339,7 @@ impl PrivateApi {
                 body: serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"result":result}))
                     .expect("serializable RPC result"),
             },
+            Err(Failure::FactsPending) => rpc_error(id, -32012, "policy facts pending"),
             Err(Failure::PoolRejected(rejection)) => rpc_error_data(
                 id,
                 -32013,
@@ -307,6 +361,9 @@ impl PrivateApi {
                 let latest = self.runtime.feed.latest()?;
                 let mut capabilities = self.backend.capabilities();
                 capabilities.extend(API_CAPABILITIES.map(str::to_owned));
+                if !self.fact_wait.is_zero() {
+                    capabilities.push(FACT_WAIT_CAPABILITY.to_owned());
+                }
                 capabilities.sort();
                 capabilities.dedup();
                 let complete = REQUIRED_CAPABILITIES
@@ -402,10 +459,29 @@ impl PrivateApi {
                 let (runtime, clock) = (self.runtime.clone(), self.clock.clone());
                 // Verification, decoding, signer recovery and admission are CPU
                 // work: one pool job, with the clock read when it runs.
-                let (admission, raw, hash, signer) = self
+                let first = self
                     .cpu
-                    .run(move || admit_transaction(&runtime, &identity, &raw, clock()))
+                    .run({
+                        let (runtime, clock) = (runtime.clone(), clock.clone());
+                        move || admit_transaction(&runtime, &identity, &raw, clock())
+                    })
                     .await??;
+                // A floor above the installed (fresh) facts waits for
+                // publication without holding a worker, then admits once.
+                let (admission, raw, hash, signer) = match first {
+                    Admit::Done(admitted) => admitted,
+                    Admit::Behind(prepared) => {
+                        self.wait_for_facts(prepared.minimum()).await?;
+                        match self
+                            .cpu
+                            .run(move || readmit_transaction(&runtime, prepared, clock()))
+                            .await??
+                        {
+                            Admit::Done(admitted) => admitted,
+                            Admit::Behind(_) => return Err(Failure::FactsPending),
+                        }
+                    }
+                };
                 let (identity, registration) = match admission {
                     Admission::Installed {
                         identity,
@@ -458,10 +534,27 @@ impl PrivateApi {
                 // The registration is created inside the job, so a request
                 // cancelled while the job runs still releases its slot: the
                 // undelivered result is dropped with it.
-                let (identity, request, exact, _registration) = self
+                let first = self
                     .cpu
-                    .run(move || admit_simulation(&runtime, &identity, &encoded, clock()))
+                    .run({
+                        let (runtime, clock) = (runtime.clone(), clock.clone());
+                        move || admit_simulation(&runtime, &identity, &encoded, clock())
+                    })
                     .await??;
+                let (identity, request, exact, _registration) = match first {
+                    Admit::Done(admitted) => admitted,
+                    Admit::Behind(prepared) => {
+                        self.wait_for_facts(prepared.minimum()).await?;
+                        match self
+                            .cpu
+                            .run(move || readmit_simulation(&runtime, prepared, clock()))
+                            .await??
+                        {
+                            Admit::Done(admitted) => admitted,
+                            Admit::Behind(_) => return Err(Failure::FactsPending),
+                        }
+                    }
+                };
                 Ok(self
                     .backend
                     .simulate(identity, request, exact.into())
@@ -474,6 +567,53 @@ impl PrivateApi {
 
 type AdmittedTransaction = (Admission, Vec<u8>, B256, Address);
 
+/// An admission job's result: done, or verified but waiting for facts.
+enum Admit<T, P> {
+    Done(T),
+    Behind(P),
+}
+
+/// A verified transaction whose fact floor is above the installed facts.
+struct PreparedTransaction {
+    verified: crate::wire::VerifiedIdentity,
+    raw: Vec<u8>,
+    hash: B256,
+    signer: Address,
+}
+
+impl PreparedTransaction {
+    fn minimum(&self) -> u64 {
+        self.verified.identity().min_snapshot_version
+    }
+}
+
+/// Second admission job, once the awaited facts are installed: the identity
+/// is not verified again, only its validity window at `now`.
+fn readmit_transaction(
+    runtime: &PolicyRuntime,
+    prepared: PreparedTransaction,
+    now: i64,
+) -> Result<Admit<AdmittedTransaction, PreparedTransaction>, String> {
+    let minimum = prepared.minimum();
+    if runtime.feed.behind(now, minimum) {
+        return Ok(Admit::Behind(prepared));
+    }
+    runtime.feed.pin(now, minimum)?;
+    let PreparedTransaction {
+        verified,
+        raw,
+        hash,
+        signer,
+    } = prepared;
+    // The identity is registered before pool insertion, so a pooled
+    // transaction never runs without it. An ambiguous pool result keeps the
+    // registration; rebinding is refused by OPS's durable submission row, saved
+    // before transport. A request cancelled after this point
+    // leaves an identity without a pooled transaction: harmless, it expires.
+    let admission = runtime.admit_transaction(verified, now)?;
+    Ok(Admit::Done((admission, raw, hash, signer)))
+}
+
 /// Pool job: verify the identity once, decode the raw transaction, recover its
 /// signer, check the binding and facts, then register the identity.
 fn admit_transaction(
@@ -481,7 +621,7 @@ fn admit_transaction(
     identity: &Value,
     raw: &str,
     now: i64,
-) -> Result<AdmittedTransaction, String> {
+) -> Result<Admit<AdmittedTransaction, PreparedTransaction>, String> {
     let wire = serde_json::to_vec(identity).map_err(|_| "invalid identity envelope")?;
     let verified = runtime.verifier().verify_identity(&wire, now)?;
     let identity = verified.identity();
@@ -511,17 +651,61 @@ fn admit_transaction(
     {
         return Err("transaction identity mismatch".into());
     }
-    runtime.feed.pin(now, identity.min_snapshot_version)?;
-    // The identity is registered before pool insertion, so a pooled
-    // transaction never runs without it. An ambiguous pool result keeps the
-    // registration; rebinding is refused by OPS's durable submission row, saved
-    // before transport. A request cancelled after this point
-    // leaves an identity without a pooled transaction: harmless, it expires.
-    let admission = runtime.admit_transaction(verified, now)?;
-    Ok((admission, raw, hash, recovered))
+    readmit_transaction(
+        runtime,
+        PreparedTransaction {
+            verified,
+            raw,
+            hash,
+            signer: recovered,
+        },
+        now,
+    )
 }
 
 type AdmittedSimulation = (Identity, SimulationRequest, Vec<u8>, SimulationRegistration);
+
+/// A verified simulation whose fact floor is above the installed facts.
+struct PreparedSimulation {
+    verified: crate::wire::VerifiedIdentity,
+    request: SimulationRequest,
+    exact: Vec<u8>,
+    digest: B256,
+}
+
+impl PreparedSimulation {
+    fn minimum(&self) -> u64 {
+        self.verified.identity().min_snapshot_version
+    }
+}
+
+/// Second simulation job, once the awaited facts are installed.
+fn readmit_simulation(
+    runtime: &PolicyRuntime,
+    prepared: PreparedSimulation,
+    now: i64,
+) -> Result<Admit<AdmittedSimulation, PreparedSimulation>, String> {
+    let minimum = prepared.minimum();
+    if runtime.feed.behind(now, minimum) {
+        return Ok(Admit::Behind(prepared));
+    }
+    runtime.feed.pin(now, minimum)?;
+    let PreparedSimulation {
+        verified,
+        request,
+        exact,
+        digest,
+    } = prepared;
+    let identity = runtime.admit_identity(verified, now)?;
+    let registration = SimulationRegistration {
+        identities: runtime.identities.clone(),
+        binding: ExecutionBinding::Simulation {
+            context_id: identity.context_id.clone(),
+            digest,
+        },
+    };
+    Ok(Admit::Done((identity, request, exact, registration)))
+}
 
 /// Pool job for a signed simulation; the returned registration owns the slot.
 fn admit_simulation(
@@ -529,7 +713,7 @@ fn admit_simulation(
     identity: &Value,
     encoded: &str,
     now: i64,
-) -> Result<AdmittedSimulation, String> {
+) -> Result<Admit<AdmittedSimulation, PreparedSimulation>, String> {
     let wire = serde_json::to_vec(identity).map_err(|_| "invalid identity envelope")?;
     let verified = runtime.verifier().verify_identity(&wire, now)?;
     let identity = verified.identity();
@@ -550,16 +734,16 @@ fn admit_simulation(
     if request.params[0].get("from").and_then(Value::as_str) != Some(identity.signer.as_str()) {
         return Err("simulation signer mismatch".into());
     }
-    runtime.feed.pin(now, identity.min_snapshot_version)?;
-    let identity = runtime.admit_identity(verified, now)?;
-    let registration = SimulationRegistration {
-        identities: runtime.identities.clone(),
-        binding: ExecutionBinding::Simulation {
-            context_id: identity.context_id.clone(),
+    readmit_simulation(
+        runtime,
+        PreparedSimulation {
+            verified,
+            request,
+            exact,
             digest,
         },
-    };
-    Ok((identity, request, exact, registration))
+        now,
+    )
 }
 
 fn require_count(params: &[Value], count: usize) -> Result<(), String> {

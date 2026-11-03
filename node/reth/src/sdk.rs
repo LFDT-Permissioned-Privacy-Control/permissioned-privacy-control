@@ -362,7 +362,9 @@ impl ConfigureEngineEvm<ExecutionData> for OpsEvmConfig {
                 .context_for_payload(payload)
                 .expect("infallible Ethereum context"),
             execution: Execution::Handle(
-                self.runtime.replay(&descriptor).map_err(io::Error::other)?,
+                self.runtime
+                    .self_import(&descriptor)
+                    .map_err(io::Error::other)?,
             ),
         })
     }

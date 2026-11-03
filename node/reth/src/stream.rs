@@ -50,6 +50,9 @@ pub struct AppliedFacts {
     /// The durable record-list object, once the records are on disk. Only
     /// durable facts may be pinned by a candidate block.
     checkpoint: Option<ArtifactId>,
+    /// The latest issue time of the snapshot and deltas this generation was
+    /// built from (replay refuses a record issued after the block).
+    max_issued: i64,
 }
 
 impl AppliedFacts {
@@ -73,6 +76,10 @@ impl AppliedFacts {
     /// written separately: block manifests embed it.
     pub fn heartbeat(&self) -> Option<&SignedEnvelope> {
         self.heartbeat.as_deref()
+    }
+    /// The latest issue time among this generation's records.
+    pub fn max_issued(&self) -> i64 {
+        self.max_issued
     }
     /// The version of the snapshot this generation's chain starts from.
     pub fn base_version(&self) -> u64 {
@@ -130,6 +137,8 @@ struct Current {
 pub struct FactStream {
     verifier: Verifier,
     current: Mutex<Current>,
+    /// The installed facts version, for requests waiting on a fact floor.
+    versions: tokio::sync::watch::Sender<u64>,
 }
 
 /// Keeps the facts a candidate pinned collectable only after it is dropped.
@@ -152,7 +161,22 @@ impl FactStream {
         Self {
             verifier,
             current: Mutex::new(Current::default()),
+            versions: tokio::sync::watch::Sender::new(0),
         }
+    }
+
+    /// The installed facts version as it changes.
+    pub fn versions(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.versions.subscribe()
+    }
+
+    /// Whether the installed facts are fresh at `now` but below `minimum`:
+    /// a request with that floor can wait for publication. Stale or missing
+    /// facts cannot be waited out.
+    pub fn behind(&self, now: i64, minimum: u64) -> bool {
+        self.latest().ok().flatten().is_some_and(|facts| {
+            facts.version() < minimum && self.verifier.validate_header(&facts.lease, now).is_ok()
+        })
     }
 
     /// Reverify archived signatures and the entire linked stream. `at` is the
@@ -355,7 +379,14 @@ impl FactStream {
         if !unchanged {
             return Err("policy facts changed concurrently".into());
         }
+        let version = next.version();
         current.facts = Some(next);
+        // Only a version change wakes waiters (not a heartbeat).
+        self.versions.send_if_modified(|installed| {
+            let changed = *installed != version;
+            *installed = version;
+            changed
+        });
         Ok(())
     }
 
@@ -388,6 +419,7 @@ impl FactStream {
                 }]);
                 AppliedFacts {
                     lease: snapshot.header.clone(),
+                    max_issued: snapshot.header.issued_at,
                     snapshot: Arc::new(snapshot),
                     digest,
                     records,
@@ -429,6 +461,7 @@ impl FactStream {
                     envelope: id,
                 });
                 AppliedFacts {
+                    max_issued: old.max_issued.max(delta.header.issued_at),
                     lease: delta.header,
                     snapshot: Arc::new(snapshot),
                     digest,

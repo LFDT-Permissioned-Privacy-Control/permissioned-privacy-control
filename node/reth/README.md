@@ -54,6 +54,7 @@ belongs to OPS; the node only receives trusted public keys.
 | `OPS_NODE_POLICY_PUBLIC_KEYS` | JSON object mapping key ID to base64 Ed25519 public key |
 | `OPS_NODE_POLICY_LISTEN` | Private listener, for example `127.0.0.1:8555` |
 | `OPS_NODE_POLICY_TOKEN` | Bearer token shared with OPS |
+| `OPS_NODE_POLICY_FACT_WAIT` | Optional bounded wait of a submission or simulation whose fact floor is above the installed, fresh facts: `0s`–`5s`, as a whole number of `ms` or `s`; default `1s`. Then error `-32012` (capability `fact_wait_v1`, advertised unless `0s`). At most 32 requests wait at once; more, and stale or missing facts, are answered at once |
 | `OPS_NODE_POLICY_VERIFY_WORKERS` | Optional concurrent identity-admission jobs (signature verification, transaction decoding, signer recovery), 1–64; default `4` |
 | `OPS_NODE_POLICY_STATE_DIR` | Dedicated durable policy/archive directory on a local filesystem (a subdirectory, not a volume's root), used by one node process at a time: it is locked. Start from an empty directory: one written in an older layout is refused, there is no importer |
 | `OPS_NODE_POLICY_MANIFEST_RETENTION` | Optional: how long a block's evidence (its manifest, and fact records only retained blocks use) is kept after the block's timestamp, `forever` or a whole number of `s`, `m`, `h` or `d`, at least one hour; default `7d`, a proposal until the record-retention policy sets it. Only finalized blocks are pruned; `forever` never prunes canonical evidence |
@@ -189,7 +190,8 @@ retain the exact verified snapshot chain and executed identity envelopes before
 publication. Snapshots and deltas are durable before they are installed. Heartbeats
 are not written: each block's manifest carries the heartbeat, if one renewed the
 lease. After a restart the node therefore reports ready again at the next heartbeat
-if the latest snapshot or delta's own lease has expired. Self-import reuses that archive; ordinary simulations use current
+if the latest snapshot or delta's own lease has expired. Self-import reuses that archive (a block the node has just produced
+imports once from the execution it recorded, without reading the manifest back); ordinary simulations use current
 permissions even when querying historical chain state.
 
 The state directory (layout 3; a directory from an earlier build is refused)
