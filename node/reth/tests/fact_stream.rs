@@ -170,23 +170,32 @@ fn record_list_restart_reverifies_signed_chain_and_freshness() {
     let renewed = runtime.accept_facts("heartbeat", &beat, 1080).unwrap();
     let records = renewed.checkpoint().expect("durable record list");
     let store = &runtime.archive;
-    let restored = FactStream::restore(verifier(), store, records, 1110).unwrap();
+    let restored = FactStream::restore(verifier(), store, 3, records, 1110).unwrap();
     assert_eq!(
         hex::encode(restored.pin(1110, 3).unwrap().digest()),
         delta_digest
     );
     // The heartbeat is not in the record list: alone, the chain's own lease
     // has expired at 1150; with the heartbeat a block embeds, it is fresh.
-    assert!(FactStream::restore(verifier(), store, records, 1150).is_err());
+    assert!(FactStream::restore(verifier(), store, 3, records, 1150).is_err());
     let lease = verifier().open_envelope("heartbeat", &beat).unwrap();
     let block =
-        FactStream::restore_for_block(verifier(), store, records, Some(&lease), 1150).unwrap();
+        FactStream::restore_for_block(verifier(), store, 3, records, Some(&lease), 1150).unwrap();
     assert_eq!(block.expires_at(), 1180);
-    assert!(FactStream::restore_for_block(verifier(), store, records, Some(&lease), 1180).is_err());
-    let mut doc: Value = serde_json::from_slice(&store.get(records).unwrap()).unwrap();
+    assert!(
+        FactStream::restore_for_block(verifier(), store, 3, records, Some(&lease), 1180).is_err()
+    );
+    let mut doc: Value = serde_json::from_slice(&store.get_list(3, records).unwrap()).unwrap();
     doc["facts_version"] = json!(4);
-    let altered = store.put(&serde_json::to_vec(&doc).unwrap()).unwrap();
-    assert!(FactStream::restore(verifier(), store, altered, 1110).is_err());
+    let altered = store
+        .put_list(4, &serde_json::to_vec(&doc).unwrap())
+        .unwrap();
+    assert!(FactStream::restore(verifier(), store, 4, altered, 1110).is_err());
+    // A list read under another version than the one it completes is refused.
+    let moved = store
+        .put_list(4, &store.get_list(3, records).unwrap())
+        .unwrap();
+    assert!(FactStream::restore(verifier(), store, 4, moved, 1110).is_err());
     drop(runtime);
     std::fs::remove_dir_all(directory).unwrap();
 }

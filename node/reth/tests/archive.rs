@@ -27,6 +27,13 @@ impl Drop for Temp {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+/// A stored record list completing facts `version`.
+fn list(store: &ArtifactStore, version: u64) -> ArtifactId {
+    store
+        .put_list(version, b"exact retained snapshot + delta record list")
+        .unwrap()
+}
+
 fn manifest(store: &ArtifactStore) -> BlockManifest {
     let verifier = common::fixture::verifier();
     let envelope = |hash: B256| {
@@ -43,10 +50,9 @@ fn manifest(store: &ArtifactStore) -> BlockManifest {
         number: 3,
         timestamp: 1020,
         facts_version: 7,
+        base_version: 7,
         facts_digest: B256::repeat_byte(6),
-        records: store
-            .put(b"exact retained snapshot + delta record list")
-            .unwrap(),
+        records: list(store, 7),
         lease: None,
         entries: [B256::repeat_byte(4), B256::repeat_byte(5)]
             .into_iter()
@@ -72,13 +78,22 @@ fn manifest_survives_restart_and_republish_is_idempotent() {
     let mut rebuilt = expected.clone();
     rebuilt.lease = None;
     rebuilt.facts_version = 8;
+    rebuilt.records = list(&store, 8);
     store.publish_manifest(&rebuilt).unwrap();
     drop(store);
     let reopened = ArtifactStore::open(&temp.0).unwrap();
     assert_eq!(reopened.manifest(3, expected.hash).unwrap(), Some(expected));
+    let lists: usize = fs::read_dir(temp.0.join("lists"))
+        .unwrap()
+        .map(|bucket| fs::read_dir(bucket.unwrap().path()).unwrap().count())
+        .sum();
     assert_eq!(
-        fs::read_dir(temp.0.join("objects")).unwrap().count(),
-        1,
+        lists, 2,
+        "the record lists of versions 7 and 8, nothing else"
+    );
+    assert_eq!(
+        fs::read_dir(temp.0.join("facts")).unwrap().count(),
+        0,
         "identities live only inside the manifest"
     );
 }
@@ -139,7 +154,7 @@ fn only_synced_objects_survive_a_crash() {
     let root = Path::new("/state");
     let store = ArtifactStore::open_with(root, storage.clone()).unwrap();
     let before = storage.counts();
-    let kept = store.put(b"durable evidence").unwrap();
+    let kept = store.put_list(1, b"durable evidence").unwrap();
     assert_eq!(
         (storage.counts() - before).syncs,
         2,
@@ -149,17 +164,17 @@ fn only_synced_objects_survive_a_crash() {
         Op::SyncDir => Action::Fail,
         _ => Action::Proceed,
     });
-    assert!(store.put(b"entry never made durable").is_err());
+    assert!(store.put_list(1, b"entry never made durable").is_err());
     storage.crash();
     storage.restart();
     let reopened = ArtifactStore::open_with(root, storage.clone()).unwrap();
-    assert_eq!(reopened.get(kept).unwrap(), b"durable evidence");
+    assert_eq!(reopened.get_list(1, kept).unwrap(), b"durable evidence");
     let lost = ArtifactStore::open_with(root, MemoryStorage::new())
         .unwrap()
-        .put(b"entry never made durable")
+        .put_list(1, b"entry never made durable")
         .unwrap();
     assert!(
-        reopened.get(lost).is_err(),
+        reopened.get_list(1, lost).is_err(),
         "unsynced directory entry survived"
     );
 }
@@ -175,15 +190,15 @@ fn retry_after_a_failed_directory_sync_makes_the_object_durable() {
         Op::SyncDir => Action::Fail,
         _ => Action::Proceed,
     });
-    assert!(store.put(b"evidence").is_err());
+    assert!(store.put_list(1, b"evidence").is_err());
     storage.clear_hook();
-    let id = store.put(b"evidence").unwrap();
+    let id = store.put_list(1, b"evidence").unwrap();
     storage.crash();
     storage.restart();
     assert_eq!(
         ArtifactStore::open_with(root, storage.clone())
             .unwrap()
-            .get(id)
+            .get_list(1, id)
             .unwrap(),
         b"evidence"
     );
@@ -258,8 +273,8 @@ fn crash_at_every_step_of_initialisation_recovers() {
         storage.restart();
         let store = ArtifactStore::open_with(root, storage.clone())
             .unwrap_or_else(|error| panic!("crash after step {step}: {error}"));
-        let id = store.put(b"evidence").unwrap();
-        assert_eq!(store.get(id).unwrap(), b"evidence");
+        let id = store.put_list(1, b"evidence").unwrap();
+        assert_eq!(store.get_list(1, id).unwrap(), b"evidence");
         if step >= operations {
             break;
         }
@@ -275,7 +290,7 @@ fn interrupted_initialisation_and_tmp_leftovers_recover() {
     // A crash before the marker was durable leaves at most a temp name.
     storage.plant(&root.join(".pending-1-2-3"), b"partial");
     let store = ArtifactStore::open_with(root, storage.clone()).unwrap();
-    let id = store.put(b"evidence").unwrap();
+    let id = store.put_list(1, b"evidence").unwrap();
     drop(store);
     storage.plant(&root.join("tmp").join(".pending-9-9-9"), b"leftover");
     let store = ArtifactStore::open_with(root, storage.clone()).unwrap();
@@ -283,7 +298,7 @@ fn interrupted_initialisation_and_tmp_leftovers_recover() {
         storage.names(&root.join("tmp")).is_empty(),
         "tmp/ cleared at open"
     );
-    assert_eq!(store.get(id).unwrap(), b"evidence");
+    assert_eq!(store.get_list(1, id).unwrap(), b"evidence");
 }
 
 #[test]
@@ -307,6 +322,7 @@ fn republish_keeps_equivalent_evidence_and_refuses_another_principal() {
     );
     let mut renewed = original.clone();
     renewed.facts_version += 1;
+    renewed.records = list(&store, renewed.facts_version);
     let verifier = common::fixture::verifier();
     let mut later = common::fixture::identity(B256::repeat_byte(4), "ctx-later");
     later["issued_at"] = serde_json::json!(1800000005);

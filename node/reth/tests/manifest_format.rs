@@ -18,6 +18,7 @@ fn manifest(number: u64, transactions: u64) -> BlockManifest {
         number,
         timestamp: AT as u64,
         facts_version: 3,
+        base_version: 1,
         facts_digest: B256::repeat_byte(6),
         records: ArtifactId::of(b"record list"),
         lease: Some(
@@ -156,7 +157,7 @@ fn structurally_invalid_segments_are_refused_even_with_valid_checksums() {
     let footer = segment.len() - 52;
     let index_offset =
         u64::from_be_bytes(segment[footer + 12..footer + 20].try_into().unwrap()) as usize;
-    const ROW: usize = 8 + 32 + 8 + 4 + 32 + 32;
+    const ROW: usize = 8 + 32 + 8 + 4 + 32 + 32 + 8 + 8 + 8;
     // Swapped rows: unsorted and with offsets out of order.
     let mut swapped = segment.clone();
     let (first, second) = (index_offset, index_offset + ROW);
@@ -181,7 +182,7 @@ fn structurally_invalid_segments_are_refused_even_with_valid_checksums() {
     let mut bare = manifest(4, 0);
     bare.lease = None;
     let mut encoded = bare.encode().unwrap();
-    assert_eq!(encoded.len(), 8 + 32 + 32 + 8 + 8 + 8 + 32 + 32 + 1 + 4);
+    assert_eq!(encoded.len(), 8 + 32 + 32 + 8 + 8 + 8 + 8 + 32 + 32 + 1 + 4);
     let count = encoded.len() - 4;
     encoded[count..].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(BlockManifest::decode(&encoded).is_err());

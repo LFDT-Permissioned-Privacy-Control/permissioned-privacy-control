@@ -56,6 +56,7 @@ belongs to OPS; the node only receives trusted public keys.
 | `OPS_NODE_POLICY_TOKEN` | Bearer token shared with OPS |
 | `OPS_NODE_POLICY_VERIFY_WORKERS` | Optional concurrent identity-admission jobs (signature verification, transaction decoding, signer recovery), 1–64; default `4` |
 | `OPS_NODE_POLICY_STATE_DIR` | Dedicated durable policy/archive directory on a local filesystem (a subdirectory, not a volume's root), used by one node process at a time: it is locked. Start from an empty directory: one written in an older layout is refused, there is no importer |
+| `OPS_NODE_POLICY_MANIFEST_RETENTION` | Optional: how long a block's evidence (its manifest, and fact records only retained blocks use) is kept after the block's timestamp, `forever` or a whole number of `s`, `m`, `h` or `d`, at least one hour; default `7d`, a proposal until the record-retention policy sets it. Only finalized blocks are pruned; `forever` never prunes canonical evidence |
 | `OPS_NODE_POLICY_CAPACITY` | Optional pending identity limit; default `262144` (estimated at about 370 MB when full). A slot is held until the transaction's block is final and written by Reth, or until its lease expires. Startup refuses a value below ⌈1.25 × (expected tx/s × (2 s + finality bound) + pending limit)⌉ |
 | `OPS_NODE_POLICY_EXPECTED_TPS` | Optional sustained transactions per second the capacity must cover; default `2000` |
 | `OPS_NODE_POLICY_FINALITY_BOUND` | Optional seconds from inclusion until a block is both final and written by Reth (the larger of finality depth × block time and Reth's persistence lag), at least `1`; default `64`. Set it from the deployed consensus, which has no universal fixed depth |
@@ -190,6 +191,19 @@ are not written: each block's manifest carries the heartbeat, if one renewed the
 lease. After a restart the node therefore reports ready again at the next heartbeat
 if the latest snapshot or delta's own lease has expired. Self-import reuses that archive; ordinary simulations use current
 permissions even when querying historical chain state.
+
+The state directory (layout 3; a directory from an earlier build is refused)
+keeps signed snapshot and delta records and their record lists by fact version,
+and one compressed manifest file per produced block. Final and written blocks'
+manifests are compacted, in batches of at least 256 or a full 4096-height
+range, into segment files of finalized canonical blocks (a lookup reads the
+segment's footer, index and one entry); other builds of a final height, which
+can no longer become canonical, are removed at once.
+Segments whose newest block is older than `OPS_NODE_POLICY_MANIFEST_RETENTION`
+are deleted, and so are fact records and lists that no retained block, the
+installed facts or a block still being built uses. This runs on the
+maintenance thread after writes, at most 1,024 removals per run, never on block
+publication; with `forever` canonical evidence is never deleted.
 
 Record-party getters run against live candidate storage. Every descendant code
 and storage account must belong to the policy organization; active standard

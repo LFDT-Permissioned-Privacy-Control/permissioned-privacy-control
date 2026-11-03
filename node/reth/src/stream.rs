@@ -12,7 +12,7 @@ use alloy_primitives::{B256, hex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
@@ -20,8 +20,8 @@ const MAX_CHAIN_BYTES: usize = 256 << 20;
 const MAX_CHAIN_RECORDS: usize = 8192;
 
 /// The durable record list: the snapshot and deltas a generation was built
-/// from, by content address. Written once per snapshot/delta; every block
-/// manifest built on that generation references it by id.
+/// from, by version and content address. Written once per snapshot/delta;
+/// every block manifest built on that generation references it by id.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordList {
@@ -34,6 +34,8 @@ struct RecordList {
 #[serde(deny_unknown_fields)]
 struct ArchivedRecord {
     kind: String,
+    /// The record's own version (a snapshot's or delta's `version`).
+    version: u64,
     envelope: ArtifactId,
 }
 
@@ -72,10 +74,17 @@ impl AppliedFacts {
     pub fn heartbeat(&self) -> Option<&SignedEnvelope> {
         self.heartbeat.as_deref()
     }
+    /// The version of the snapshot this generation's chain starts from.
+    pub fn base_version(&self) -> u64 {
+        self.records
+            .first()
+            .map(|record| record.version)
+            .unwrap_or(0)
+    }
 
     pub(crate) fn record_list(&self) -> Result<Vec<u8>, String> {
         serde_json::to_vec(&RecordList {
-            format_version: 2,
+            format_version: 3,
             facts_version: self.version(),
             facts_digest: self.digest,
             records: self.records.as_ref().clone(),
@@ -106,17 +115,43 @@ pub enum Prepared {
     },
 }
 
+/// The installed generation and the (facts, base) versions every live
+/// candidate pinned, under one lock: collection reads both at once, so a
+/// record a pinned candidate may still publish a manifest for is never
+/// collected.
+#[derive(Debug, Default)]
+struct Current {
+    facts: Option<Arc<AppliedFacts>>,
+    pins: HashMap<u64, (u64, u64)>,
+    next_pin: u64,
+}
+
 #[derive(Debug)]
 pub struct FactStream {
     verifier: Verifier,
-    current: Mutex<Option<Arc<AppliedFacts>>>,
+    current: Mutex<Current>,
+}
+
+/// Keeps the facts a candidate pinned collectable only after it is dropped.
+#[derive(Debug)]
+pub struct FactPin {
+    stream: Arc<FactStream>,
+    id: u64,
+}
+
+impl Drop for FactPin {
+    fn drop(&mut self) {
+        if let Ok(mut current) = self.stream.current.lock() {
+            current.pins.remove(&self.id);
+        }
+    }
 }
 
 impl FactStream {
     pub fn new(verifier: Verifier) -> Self {
         Self {
             verifier,
-            current: Mutex::new(None),
+            current: Mutex::new(Current::default()),
         }
     }
 
@@ -126,10 +161,11 @@ impl FactStream {
     pub fn restore(
         verifier: Verifier,
         store: &ArtifactStore,
+        version: u64,
         checkpoint: ArtifactId,
         at: i64,
     ) -> Result<Self, String> {
-        let stream = Self::restore_records(verifier, store, checkpoint, at)?;
+        let stream = Self::restore_records(verifier, store, version, checkpoint, at)?;
         let facts = stream.latest()?.ok_or("missing retained policy facts")?;
         stream.verifier.validate_header(&facts.lease, at)?;
         Ok(stream)
@@ -138,10 +174,11 @@ impl FactStream {
     pub(crate) fn restore_retained(
         verifier: Verifier,
         store: &ArtifactStore,
+        version: u64,
         checkpoint: ArtifactId,
         at: i64,
     ) -> Result<Self, String> {
-        Self::restore_records(verifier, store, checkpoint, at)
+        Self::restore_records(verifier, store, version, checkpoint, at)
     }
 
     /// The facts a block was built on: its record list, then the embedded
@@ -150,11 +187,12 @@ impl FactStream {
     pub fn restore_for_block(
         verifier: Verifier,
         store: &ArtifactStore,
+        version: u64,
         checkpoint: ArtifactId,
         lease: Option<&SignedEnvelope>,
         at: i64,
     ) -> Result<Arc<AppliedFacts>, String> {
-        let stream = Self::restore_records(verifier, store, checkpoint, at)?;
+        let stream = Self::restore_records(verifier, store, version, checkpoint, at)?;
         if let Some(lease) = lease {
             stream.restore_record("heartbeat", &lease.to_wire(), at)?;
         }
@@ -169,11 +207,13 @@ impl FactStream {
     fn restore_records(
         verifier: Verifier,
         store: &ArtifactStore,
+        version: u64,
         checkpoint: ArtifactId,
         at: i64,
     ) -> Result<Self, String> {
-        let list: RecordList = decode_strict(&store.get(checkpoint)?)?;
-        if list.format_version != 2
+        let list: RecordList = decode_strict(&store.get_list(version, checkpoint)?)?;
+        if list.format_version != 3
+            || list.facts_version != version
             || list.records.is_empty()
             || list.records.len() > MAX_CHAIN_RECORDS
         {
@@ -184,7 +224,11 @@ impl FactStream {
             if record.kind != if index == 0 { "snapshot" } else { "delta" } {
                 return Err("invalid checkpoint record order".into());
             }
-            stream.restore_record(&record.kind, &store.get(record.envelope)?, at)?;
+            stream.restore_record(
+                &record.kind,
+                &store.get_record(record.version, record.envelope)?,
+                at,
+            )?;
         }
         let facts = stream.latest()?.ok_or("missing retained policy facts")?;
         if facts.version() != list.facts_version
@@ -193,8 +237,8 @@ impl FactStream {
                 .records
                 .as_ref()
                 .iter()
-                .map(|r| r.envelope)
-                .ne(list.records.iter().map(|r| r.envelope))
+                .map(|r| (r.version, r.envelope))
+                .ne(list.records.iter().map(|r| (r.version, r.envelope)))
         {
             return Err("policy checkpoint state mismatch".into());
         }
@@ -218,11 +262,52 @@ impl FactStream {
 
     pub fn pin(&self, now: i64, minimum_version: u64) -> Result<Arc<AppliedFacts>, String> {
         let facts = self.latest()?.ok_or("missing policy facts")?;
+        self.check(&facts, now, minimum_version)?;
+        Ok(facts)
+    }
+
+    fn check(&self, facts: &AppliedFacts, now: i64, minimum_version: u64) -> Result<(), String> {
         self.verifier.validate_header(&facts.lease, now)?;
         if facts.version() < minimum_version {
             return Err("policy facts are behind execution context".into());
         }
-        Ok(facts)
+        Ok(())
+    }
+
+    /// `pin`, registering the pinned versions as a collection root until the
+    /// returned guard is dropped (a candidate block's whole life).
+    pub fn pin_tracked(
+        self: &Arc<Self>,
+        now: i64,
+        minimum_version: u64,
+    ) -> Result<(Arc<AppliedFacts>, FactPin), String> {
+        let mut current = self.current.lock().map_err(|_| "fact stream unavailable")?;
+        let facts = current.facts.clone().ok_or("missing policy facts")?;
+        self.check(&facts, now, minimum_version)?;
+        current.next_pin += 1;
+        let id = current.next_pin;
+        current
+            .pins
+            .insert(id, (facts.version(), facts.base_version()));
+        Ok((
+            facts,
+            FactPin {
+                stream: self.clone(),
+                id,
+            },
+        ))
+    }
+
+    /// The lowest (facts version, base version) over the installed
+    /// generation and every pinned candidate: what collection must keep.
+    pub fn roots(&self) -> Result<Option<(u64, u64)>, String> {
+        let current = self.current.lock().map_err(|_| "fact stream unavailable")?;
+        Ok(current
+            .facts
+            .iter()
+            .map(|facts| (facts.version(), facts.base_version()))
+            .chain(current.pins.values().copied())
+            .reduce(|(facts, base), (f, b)| (facts.min(f), base.min(b))))
     }
 
     /// Watermark/status only; this does not authorize execution with expired facts.
@@ -231,6 +316,7 @@ impl FactStream {
             .current
             .lock()
             .map_err(|_| "fact stream unavailable")?
+            .facts
             .clone())
     }
 
@@ -261,7 +347,7 @@ impl FactStream {
         next: Arc<AppliedFacts>,
     ) -> Result<(), String> {
         let mut current = self.current.lock().map_err(|_| "fact stream unavailable")?;
-        let unchanged = match (current.as_ref(), base) {
+        let unchanged = match (current.facts.as_ref(), base) {
             (None, None) => true,
             (Some(current), Some(base)) => Arc::ptr_eq(current, base),
             _ => false,
@@ -269,7 +355,7 @@ impl FactStream {
         if !unchanged {
             return Err("policy facts changed concurrently".into());
         }
-        *current = Some(next);
+        current.facts = Some(next);
         Ok(())
     }
 
@@ -295,14 +381,16 @@ impl FactStream {
                         return Err("conflicting or stale policy snapshot".into());
                     }
                 }
+                let records = Arc::new(vec![ArchivedRecord {
+                    kind: kind.into(),
+                    version: snapshot.version,
+                    envelope: id,
+                }]);
                 AppliedFacts {
                     lease: snapshot.header.clone(),
                     snapshot: Arc::new(snapshot),
                     digest,
-                    records: Arc::new(vec![ArchivedRecord {
-                        kind: kind.into(),
-                        envelope: id,
-                    }]),
+                    records,
                     chain_bytes: wire.len(),
                     heartbeat: None,
                     checkpoint: None,
@@ -337,6 +425,7 @@ impl FactStream {
                 let mut records = old.records.as_ref().clone();
                 records.push(ArchivedRecord {
                     kind: kind.into(),
+                    version: delta.version,
                     envelope: id,
                 });
                 AppliedFacts {

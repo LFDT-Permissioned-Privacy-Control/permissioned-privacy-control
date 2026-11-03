@@ -2,7 +2,9 @@
 //! each candidate block. Replay handles are built only from exact block manifests.
 
 use crate::{
-    archive::{ArtifactStore, BlockDescriptor, Published},
+    archive::{
+        ArtifactStore, BlockDescriptor, MaintenanceInput, MaintenanceReport, Published, Retention,
+    },
     chain::{ChainState, Finality},
     context::{
         CreatedContract, ExecutionBinding, ExecutionIdentity, ExecutionOutcome, IdentityResolver,
@@ -12,7 +14,7 @@ use crate::{
     identity::{Admission, CandidateNote, CapturedIdentity, IdentityRegistry},
     manifest::{BlockManifest, ManifestEntry},
     policy::{DiagnosticReport, PolicyFactory},
-    stream::{AppliedFacts, FactStream, Prepared},
+    stream::{AppliedFacts, FactPin, FactStream, Prepared},
     wire::{Identity, Network, PolicyArtifact, VerifiedIdentity, Verifier},
 };
 use alloy_evm::revm::context::TxEnv;
@@ -124,6 +126,8 @@ pub struct PolicyRuntime {
     /// persisted-block notification starts empty).
     persisted_at_start: OnceLock<(u64, B256)>,
     wake: Arc<Wake>,
+    /// How long compacted manifests are kept after their block.
+    retention: Retention,
 }
 
 /// Wake-ups of the maintenance thread.
@@ -300,7 +304,14 @@ impl PolicyRuntime {
             released_through: Mutex::new(None),
             persisted_at_start: OnceLock::new(),
             wake: Arc::new(Wake::default()),
+            retention: Retention::default(),
         }
+    }
+
+    /// Set the manifest retention (default 7 days).
+    pub fn with_retention(mut self, retention: Retention) -> Self {
+        self.retention = retention;
+        self
     }
 
     /// Attach the node's canonical chain (once). Heights already final now
@@ -355,11 +366,25 @@ impl PolicyRuntime {
     /// final canonical blocks (a reorganization before finality keeps them,
     /// so the transaction executes again without OPS). Runs on the
     /// maintenance thread, never on the block path.
-    pub fn maintain(&self, _now: i64) -> Result<(), String> {
+    pub fn maintain(&self, now: i64) -> Result<MaintenanceReport, String> {
         let chain = self.chain.get().ok_or("node chain unavailable")?;
         let Some((finalized, _)) = self.finality.observe(chain.as_ref()) else {
-            return Ok(());
+            return Ok(MaintenanceReport::default());
         };
+        self.release(chain.as_ref(), finalized)?;
+        // The installed facts and every pinned candidate, read before the
+        // archive lists anything: a root that appears later is newer.
+        let live = self.feed.roots()?;
+        self.archive.maintain(&MaintenanceInput {
+            finalized,
+            canonical: &|number| chain.canonical_hash(number),
+            now,
+            retention: self.retention,
+            live,
+        })
+    }
+
+    fn release(&self, chain: &dyn ChainState, finalized: u64) -> Result<(), String> {
         let mut released = self
             .released_through
             .lock()
@@ -408,14 +433,25 @@ impl PolicyRuntime {
                     let Some(runtime) = runtime.upgrade() else {
                         return;
                     };
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        runtime.maintain(clock())
-                    })) {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(error)) => eprintln!("ops policy maintenance failed: {error}"),
-                        Err(_) => eprintln!(
-                            "ops policy maintenance panicked; retrying at the next wake-up"
-                        ),
+                    // A run stops at its bounds: continue while work is left,
+                    // a bounded number of runs per wake-up.
+                    for _ in 0..64 {
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            runtime.maintain(clock())
+                        })) {
+                            Ok(Ok(report)) if report.pending => continue,
+                            Ok(Ok(_)) => break,
+                            Ok(Err(error)) => {
+                                eprintln!("ops policy maintenance failed: {error}");
+                                break;
+                            }
+                            Err(_) => {
+                                eprintln!(
+                                    "ops policy maintenance panicked; retrying at the next wake-up"
+                                );
+                                break;
+                            }
+                        }
                     }
                 }
             })
@@ -442,10 +478,11 @@ impl PolicyRuntime {
         now: i64,
     ) -> Result<Self, String> {
         let mut runtime = Self::new(verifier.clone(), archive, capacity);
-        if let Some(checkpoint) = runtime.archive.pointer("facts-head")? {
+        if let Some((version, checkpoint)) = runtime.archive.head()? {
             runtime.feed = Arc::new(FactStream::restore_retained(
                 verifier.clone(),
                 &runtime.archive,
+                version,
                 checkpoint,
                 now,
             )?);
@@ -629,9 +666,12 @@ impl PolicyRuntime {
                     return Err("policy facts are not durable".into());
                 }
                 let next = if record {
-                    self.archive.put(wire)?;
-                    let list = self.archive.put(&next.record_list()?)?;
-                    self.archive.set_pointer("facts-head", list)?;
+                    // The record's own version is the new generation's.
+                    self.archive.put_record(next.version(), wire)?;
+                    let list = self
+                        .archive
+                        .put_list(next.version(), &next.record_list()?)?;
+                    self.archive.set_head(next.version(), list)?;
                     next.with_checkpoint(list)
                 } else {
                     next
@@ -696,7 +736,9 @@ impl PolicyRuntime {
     }
 
     pub fn pin_candidate(&self, at: i64) -> Result<Arc<ExecutionHandle>, String> {
-        let facts = self.feed.pin(at, 1)?;
+        // Registered as a collection root for the candidate's whole life: it
+        // publishes a manifest naming these facts.
+        let (facts, pin) = self.feed.pin_tracked(at, 1)?;
         // A block may only reference facts whose records are durable.
         if facts.checkpoint().is_none() {
             return Err("policy facts are not durable".into());
@@ -706,6 +748,7 @@ impl PolicyRuntime {
             facts,
             at,
             self.network().clone(),
+            Some(pin),
             RecordingResolver {
                 source: Some(self.identities.clone()),
                 at,
@@ -740,6 +783,7 @@ impl PolicyRuntime {
             facts,
             at,
             self.network().clone(),
+            None,
             RecordingResolver {
                 source: None,
                 at,
@@ -800,11 +844,15 @@ impl PolicyRuntime {
         let facts = FactStream::restore_for_block(
             self.verifier.clone(),
             &self.archive,
+            manifest.facts_version,
             manifest.records,
             manifest.lease.as_ref(),
             at,
         )?;
-        if facts.digest() != manifest.facts_digest || facts.version() != manifest.facts_version {
+        if facts.digest() != manifest.facts_digest
+            || facts.version() != manifest.facts_version
+            || facts.base_version() != manifest.base_version
+        {
             return Err("execution replay facts mismatch".into());
         }
         let mut captured = HashMap::new();
@@ -844,6 +892,7 @@ impl PolicyRuntime {
             facts,
             at,
             block.network.clone(),
+            None,
             RecordingResolver {
                 source: None,
                 at,
@@ -863,6 +912,8 @@ pub struct ExecutionHandle {
     identities: Arc<RecordingResolver>,
     network: Network,
     at: i64,
+    /// A candidate's facts stay a collection root while it lives.
+    _pin: Option<FactPin>,
 }
 
 impl ExecutionHandle {
@@ -870,6 +921,7 @@ impl ExecutionHandle {
         facts: Arc<AppliedFacts>,
         at: i64,
         network: Network,
+        pin: Option<FactPin>,
         identities: RecordingResolver,
     ) -> Result<Arc<Self>, String> {
         let adapter = FactsPolicy::new(facts.clone(), at)?;
@@ -884,6 +936,7 @@ impl ExecutionHandle {
             identities: Arc::new(identities),
             network,
             at,
+            _pin: pin,
         }))
     }
     pub fn factory(&self) -> PolicyFactory {
@@ -987,6 +1040,7 @@ impl ExecutionHandle {
             number: block.number,
             timestamp: block.timestamp,
             facts_version: self.facts.version(),
+            base_version: self.facts.base_version(),
             facts_digest: self.facts.digest(),
             records: self
                 .facts

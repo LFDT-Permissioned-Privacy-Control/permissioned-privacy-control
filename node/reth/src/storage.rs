@@ -17,6 +17,11 @@ pub trait Storage: Send + Sync + fmt::Debug {
     fn list(&self, dir: &Path) -> io::Result<Vec<String>>;
     /// `None` when absent. A non-regular, empty or larger-than-`limit` file is an error.
     fn read(&self, path: &Path, limit: usize) -> io::Result<Option<Vec<u8>>>;
+    /// A regular file's length; `None` when absent.
+    fn size(&self, path: &Path) -> io::Result<Option<u64>>;
+    /// Exactly `length` bytes at `offset` (a positional read); `None` when
+    /// absent, an error when the file is shorter.
+    fn read_at(&self, path: &Path, offset: u64, length: usize) -> io::Result<Option<Vec<u8>>>;
     /// Create a new 0600 file with these bytes and `sync_all` it.
     fn write_synced(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     /// Hard-link `from` to `to`; `false` when `to` already exists.
@@ -24,6 +29,8 @@ pub trait Storage: Send + Sync + fmt::Debug {
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
     /// `false` when absent.
     fn remove(&self, path: &Path) -> io::Result<bool>;
+    /// Remove an empty directory; `false` when absent or not empty.
+    fn remove_dir(&self, path: &Path) -> io::Result<bool>;
     /// `sync_all` on the directory, making its entries durable.
     fn sync_dir(&self, dir: &Path) -> io::Result<()>;
     /// Take an exclusive advisory lock on `path` (created if missing) for the
@@ -79,12 +86,38 @@ impl Storage for DiskStorage {
             return Err(io::ErrorKind::InvalidData.into());
         }
         let mut bytes = Vec::new();
-        File::open(path)?
-            .take(limit as u64 + 1)
-            .read_to_end(&mut bytes)?;
+        // Removed between the stat and the open: absent, not damaged.
+        let file = match File::open(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            other => other?,
+        };
+        file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
         if bytes.is_empty() || bytes.len() > limit {
             return Err(io::ErrorKind::InvalidData.into());
         }
+        Ok(Some(bytes))
+    }
+
+    fn size(&self, path: &Path) -> io::Result<Option<u64>> {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+            Ok(meta) if !meta.is_file() => Err(io::ErrorKind::InvalidData.into()),
+            Ok(meta) => Ok(Some(meta.len())),
+        }
+    }
+
+    fn read_at(&self, path: &Path, offset: u64, length: usize) -> io::Result<Option<Vec<u8>>> {
+        use std::os::unix::fs::FileExt;
+        if self.size(path)?.is_none() {
+            return Ok(None);
+        }
+        let file = match File::open(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            other => other?,
+        };
+        let mut bytes = vec![0; length];
+        file.read_exact_at(&mut bytes, offset)?;
         Ok(Some(bytes))
     }
 
@@ -114,6 +147,21 @@ impl Storage for DiskStorage {
         match fs::remove_file(path) {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn remove_dir(&self, path: &Path) -> io::Result<bool> {
+        match fs::remove_dir(path) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                Ok(false)
+            }
             Err(error) => Err(error),
         }
     }

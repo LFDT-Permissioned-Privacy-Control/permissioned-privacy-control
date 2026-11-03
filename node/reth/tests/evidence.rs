@@ -120,14 +120,20 @@ fn replay_uses_embedded_envelopes() {
     storage.restart();
     // No identity object exists outside the manifests: every object is a fact
     // record or a record list.
-    for name in storage.names(Path::new("/state/objects")) {
-        let bytes =
-            String::from_utf8_lossy(&storage_read(&storage, &format!("/state/objects/{name}")))
-                .into_owned();
-        assert!(
-            !bytes.contains(r#""kind":"identity""#),
-            "identity object {name} outside a manifest"
-        );
+    for area in ["facts", "lists"] {
+        let area = Path::new("/state").join(area);
+        for bucket in storage.names(&area) {
+            for name in storage.names(&area.join(&bucket)) {
+                let path = area.join(&bucket).join(&name);
+                let bytes =
+                    String::from_utf8_lossy(&storage_read(&storage, path.to_str().unwrap()))
+                        .into_owned();
+                assert!(
+                    !bytes.contains(r#""kind":"identity""#),
+                    "identity object {name} outside a manifest"
+                );
+            }
+        }
     }
     let restarted = open(&storage);
     for number in 1..=5u64 {

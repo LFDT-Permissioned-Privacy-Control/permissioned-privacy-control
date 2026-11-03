@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ops_reth_policy::{
     api::{ExecutionBackend, PoolRejection, PoolSubmission, PrivateApi, serve},
-    archive::ArtifactStore,
+    archive::{ArtifactStore, Retention},
     context::ExecutionBinding,
     runtime::PolicyRuntime,
     sdk::{OpsExecutorBuilder, ProviderChain},
@@ -264,9 +264,16 @@ fn main() -> eyre::Result<()> {
             setting("OPS_NODE_POLICY_PENDING_LIMIT", "37500")?,
         )
         .map_err(eyre::Report::msg)?;
+        // How long block evidence is kept after its block (`forever` for an
+        // archive node); pruned on the maintenance thread.
+        let retention = Retention::parse(
+            &std::env::var("OPS_NODE_POLICY_MANIFEST_RETENTION").unwrap_or_else(|_| "7d".into()),
+        )
+        .map_err(eyre::Report::msg)?;
         let runtime = Arc::new(
             PolicyRuntime::open(Verifier::new(network, keys), archive, capacity, now())
-                .map_err(eyre::Report::msg)?,
+                .map_err(eyre::Report::msg)?
+                .with_retention(retention),
         );
         refuse_unsafe_rpc(&builder.config().rpc)?;
         refuse_unsafe_debug(&builder.config().debug)?;

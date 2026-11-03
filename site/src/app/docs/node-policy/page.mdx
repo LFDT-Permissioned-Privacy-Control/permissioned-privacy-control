@@ -203,6 +203,11 @@ Size the node for the expected load:
 | `OPS_NODE_POLICY_FINALITY_BOUND` | Seconds from inclusion until a block is final and written by the node: the larger of the deployed consensus's finality (finality depth × block time) and the node's write lag, at least 1 | 64 |
 | `OPS_NODE_POLICY_PENDING_LIMIT` | Allowance for submissions still waiting for inclusion | 37500 |
 | `OPS_NODE_POLICY_VERIFY_WORKERS` | Submissions and simulations admitted in parallel, 1–64 | 4 |
+| `OPS_NODE_POLICY_MANIFEST_RETENTION` | How long the node keeps each finalized block's execution evidence after the block, `forever` (archive nodes) or a whole number of `s`, `m`, `h` or `d`, at least one hour | 7d |
+
+The retention of block execution evidence is a record-retention control: set it
+from your documented retention policy. Evidence of blocks that are not yet
+final is never removed, and `forever` keeps all canonical evidence.
 
 A submission holds its slot until its block is final and written by the node,
 or until its lease expires. The node reports a transaction as finalized only

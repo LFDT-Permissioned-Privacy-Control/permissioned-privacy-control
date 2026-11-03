@@ -444,6 +444,39 @@ payload and another network's block still need the manifest
 `another_networks_block_is_never_trusted`). This applies to history the node
 already holds; first-time imports have no known finality for their blocks.
 
+## Retention, compaction and fact-record collection (2026-11-03)
+
+Tests in `node/reth/tests/retention.rs`, against the in-memory filesystem
+model:
+
+| Behaviour | Test |
+|---|---|
+| Finalized canonical manifests are compacted into segments; segments past the retention are deleted, and the record list and records no retained block uses go with them; retained blocks still replay | `prune_removes_manifests_after_retention_and_unreachable_records` |
+| A candidate still building on older facts keeps their records and publishes its block, which replays | `pinned_old_facts_build_keeps_records` |
+| Blocks on unchanged facts share one record list, kept while any of them is retained | `parent_record_list_survives_parent_prune` |
+| Discarded builds at a final height are removed; above finality nothing is | `repeated_discarded_payloads_are_reclaimed_below_finalized` |
+| A run removes at most 1,024 files in total and reports more work | `prune_run_is_bounded` |
+| A retained segment, or an unfinalized block file, alone keeps the older facts it uses | `a_retained_segment_alone_keeps_its_older_facts`, `an_unfinalized_block_file_alone_keeps_its_older_facts` |
+| A crash after each storage operation of a prune and collection keeps the installed facts and retained evidence; the first run after a restart collects what the crash left | `crash_during_collection_keeps_the_head_and_retained_evidence` |
+| `forever` never deletes canonical evidence | `forever_never_prunes_canonical` |
+| A segment lookup reads the footer, the index and one entry, not the segment | `segment_lookup_reads_footer_index_and_one_entry` |
+| A crash after every storage operation of a compaction (temp write, link, directory syncs, each unlink) recovers with every canonical block found exactly and no discarded build resurrected | `crash_at_each_segment_publication_step_recovers_with_exact_lookups` |
+| The retention setting and an earlier layout | `retention_setting_accepts_forever_and_whole_durations`, `an_earlier_layout_is_refused` |
+
+Collection deletes by version range: snapshot versions strictly increase, so
+each fact chain occupies its own version range, and a record list never names a
+record older than its chain's snapshot. Lists below the lowest facts version and
+records below the lowest snapshot version over every root (retained segments and
+block files, the installed facts, every candidate still building, registered
+under the fact-stream lock and read before any listing) are deleted. With the
+tests' maintenance disabled, seven of them fail; with pinned candidates ignored
+as roots, the pinned-build test fails; with segments and block files ignored as
+roots, the two single-root tests fail. Live runs (`crash.py`, `smoke.py`) are
+shorter than a compaction batch (256 finalized blocks), so compaction is proven
+in process only. `crash.py` passes on this layout (2026-11-03, seed 1410, 36
+transactions, binary `3302374c6a66…`, report
+`.tmp/ops-reth-crash-ted0o6q2/result.json`).
+
 ## Delivery contract on the node (2026-11-03)
 
 Tests in `node/reth/tests/delivery.rs` and the `identity` unit tests:

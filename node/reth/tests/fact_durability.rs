@@ -315,7 +315,8 @@ fn fact_writer_is_serialized_and_never_regresses() {
         let live = runtime.feed.latest().unwrap().unwrap();
         assert_eq!(live.version(), 2);
         let head = live.checkpoint().expect("installed facts are durable");
-        let durable = FactStream::restore(verifier(), &runtime.archive, head, AT).unwrap();
+        let durable =
+            FactStream::restore(verifier(), &runtime.archive, live.version(), head, AT).unwrap();
         assert_eq!(durable.latest().unwrap().unwrap().version(), 2);
         drop(runtime);
         storage.crash();

@@ -96,6 +96,8 @@ pub struct Counts {
     pub reads: u64,
     pub lists: u64,
     pub others: u64,
+    /// Bytes returned by whole-file and positional reads.
+    pub read_bytes: u64,
 }
 
 impl std::ops::Sub for Counts {
@@ -107,6 +109,7 @@ impl std::ops::Sub for Counts {
             reads: self.reads - other.reads,
             lists: self.lists - other.lists,
             others: self.others - other.others,
+            read_bytes: self.read_bytes - other.read_bytes,
         }
     }
 }
@@ -307,12 +310,59 @@ impl Storage for MemoryStorage {
             {
                 None => Ok(None),
                 Some(inode) => {
-                    let data = &state.inodes[inode].data;
+                    let data = state.inodes[inode].data.clone();
                     if data.is_empty() || data.len() > limit {
                         Err(io::ErrorKind::InvalidData.into())
                     } else {
-                        Ok(Some(data.clone()))
+                        state.counts.read_bytes += data.len() as u64;
+                        Ok(Some(data))
                     }
+                }
+            },
+        )
+    }
+
+    fn size(&self, path: &Path) -> io::Result<Option<u64>> {
+        let (parent, name) = split(path)?;
+        self.run(
+            Op::Read,
+            path,
+            |c| c.reads += 1,
+            |state| {
+                Ok(state
+                    .directories
+                    .get(&parent)
+                    .and_then(|d| d.live.get(&name))
+                    .map(|inode| state.inodes[inode].data.len() as u64))
+            },
+        )
+    }
+
+    fn read_at(&self, path: &Path, offset: u64, length: usize) -> io::Result<Option<Vec<u8>>> {
+        let (parent, name) = split(path)?;
+        self.run(
+            Op::Read,
+            path,
+            |c| c.reads += 1,
+            |state| match state
+                .directories
+                .get(&parent)
+                .and_then(|d| d.live.get(&name))
+                .copied()
+            {
+                None => Ok(None),
+                Some(inode) => {
+                    let data = &state.inodes[&inode].data;
+                    let start = usize::try_from(offset).map_err(|_| io::ErrorKind::InvalidInput)?;
+                    let end = start
+                        .checked_add(length)
+                        .ok_or(io::ErrorKind::InvalidInput)?;
+                    if end > data.len() {
+                        return Err(io::ErrorKind::UnexpectedEof.into());
+                    }
+                    let bytes = data[start..end].to_vec();
+                    state.counts.read_bytes += length as u64;
+                    Ok(Some(bytes))
                 }
             },
         )
@@ -416,6 +466,27 @@ impl Storage for MemoryStorage {
                     .directories
                     .get_mut(&parent)
                     .is_some_and(|d| d.live.remove(&name).is_some()))
+            },
+        )
+    }
+
+    fn remove_dir(&self, path: &Path) -> io::Result<bool> {
+        self.run(
+            Op::Remove,
+            path,
+            |c| c.others += 1,
+            |state| {
+                let has_children = state
+                    .directories
+                    .keys()
+                    .any(|other| other.parent() == Some(path));
+                match state.directories.get(path) {
+                    Some(directory) if directory.live.is_empty() && !has_children => {
+                        state.directories.remove(path);
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
             },
         )
     }

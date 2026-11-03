@@ -1,4 +1,4 @@
-//! Block manifest v2 and the single-file segment that stores it.
+//! Block manifest (format 3) and the single-file segment that stores it.
 //!
 //! A manifest is the replay evidence of one block: the decoded identity
 //! envelope and outcome of every transaction (in block order), the id of the
@@ -8,19 +8,22 @@
 //!
 //! A segment is `[entry]* [index row]* footer`. Each entry is one zstd frame
 //! of one manifest. Index rows are sorted by (number, hash) and carry each
-//! entry's offset, length, SHA-256 and record-list id, so a lookup reads one
-//! entry and later compaction or pruning can work from indexes alone. The
-//! footer checksums the index. Today every block is published as a one-entry
-//! segment; the format is the same for many entries.
+//! entry's offset, length, SHA-256, record-list id, fact versions and block
+//! timestamp, so a lookup reads the footer, the index and one entry
+//! (positional reads, never the whole segment), and compaction, pruning and
+//! fact-record collection work from indexes alone. The footer checksums the
+//! index. A produced block is published as a one-entry segment; compaction
+//! copies finalized entries' frames, unchanged, into many-entry segments.
 
 use crate::{archive::ArtifactId, context::CreatedContract, wire::SignedEnvelope};
 use alloy_primitives::{Address, B256};
 use sha2::{Digest, Sha256};
 
-const ENTRY_MAGIC: &[u8; 8] = b"OPSMAN02";
-const SEGMENT_MAGIC: &[u8; 8] = b"OPSSEG02";
-const ROW: usize = 8 + 32 + 8 + 4 + 32 + 32;
-const FOOTER: usize = 8 + 4 + 8 + 32;
+const ENTRY_MAGIC: &[u8; 8] = b"OPSMAN03";
+const SEGMENT_MAGIC: &[u8; 8] = b"OPSSEG03";
+const ROW: usize = 8 + 32 + 8 + 4 + 32 + 32 + 8 + 8 + 8;
+/// Bytes of a segment footer.
+pub const FOOTER: usize = 8 + 4 + 8 + 32;
 /// Decoded size accepted for one manifest. Reading never allocates more than
 /// the frame's declared content size, and never more than this.
 const MAX_DECODED: u64 = 1 << 30;
@@ -41,6 +44,9 @@ pub struct BlockManifest {
     pub number: u64,
     pub timestamp: u64,
     pub facts_version: u64,
+    /// The version of the snapshot the fact chain starts from: every record
+    /// the record list names has at least this version.
+    pub base_version: u64,
     pub facts_digest: B256,
     /// The durable record-list object the candidate's facts were built from.
     pub records: ArtifactId,
@@ -59,6 +65,9 @@ pub struct IndexRow {
     pub length: u32,
     pub checksum: B256,
     pub records: ArtifactId,
+    pub facts_version: u64,
+    pub base_version: u64,
+    pub timestamp: u64,
 }
 
 fn invalid() -> String {
@@ -166,6 +175,9 @@ impl<'a> Reader<'a> {
 impl BlockManifest {
     /// Exact binary encoding (uncompressed).
     pub fn encode(&self) -> Result<Vec<u8>, String> {
+        if self.base_version == 0 || self.base_version > self.facts_version {
+            return Err(invalid());
+        }
         let mut out = Writer(Vec::with_capacity(256 + self.entries.len() * 768));
         out.bytes(ENTRY_MAGIC);
         out.bytes(self.hash.as_slice());
@@ -173,6 +185,7 @@ impl BlockManifest {
         out.u64(self.number);
         out.u64(self.timestamp);
         out.u64(self.facts_version);
+        out.u64(self.base_version);
         out.bytes(self.facts_digest.as_slice());
         out.bytes(self.records.as_b256().as_slice());
         match &self.lease {
@@ -214,6 +227,10 @@ impl BlockManifest {
         let number = input.u64()?;
         let timestamp = input.u64()?;
         let facts_version = input.u64()?;
+        let base_version = input.u64()?;
+        if base_version == 0 || base_version > facts_version {
+            return Err(invalid());
+        }
         let facts_digest = input.b256()?;
         let records = ArtifactId::from_b256(input.b256()?);
         let lease = match input.flag()? {
@@ -253,6 +270,7 @@ impl BlockManifest {
             number,
             timestamp,
             facts_version,
+            base_version,
             facts_digest,
             records,
             lease,
@@ -264,28 +282,56 @@ impl BlockManifest {
 /// Encode manifests as one segment file. Rows are sorted by (number, hash);
 /// duplicates are refused.
 pub fn write_segment(manifests: &[&BlockManifest]) -> Result<Vec<u8>, String> {
-    let mut order = manifests.to_vec();
-    order.sort_by_key(|manifest| (manifest.number, manifest.hash));
-    if order
-        .windows(2)
-        .any(|pair| (pair[0].number, pair[0].hash) == (pair[1].number, pair[1].hash))
-        || order.is_empty()
+    let entries = manifests
+        .iter()
+        .map(|manifest| {
+            let frame = zstd::bulk::compress(&manifest.encode()?, LEVEL).map_err(|_| invalid())?;
+            Ok((row_for(manifest, &frame)?, frame))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    assemble_segment(entries)
+}
+
+/// The index row of `manifest` stored as `frame` (offset filled in later).
+fn row_for(manifest: &BlockManifest, frame: &[u8]) -> Result<IndexRow, String> {
+    Ok(IndexRow {
+        number: manifest.number,
+        hash: manifest.hash,
+        offset: 0,
+        length: u32::try_from(frame.len()).map_err(|_| invalid())?,
+        checksum: B256::from_slice(&Sha256::digest(frame)),
+        records: manifest.records,
+        facts_version: manifest.facts_version,
+        base_version: manifest.base_version,
+        timestamp: manifest.timestamp,
+    })
+}
+
+/// A segment from already verified (row, frame) entries: compaction copies
+/// frames unchanged. Rows are sorted by (number, hash) and offsets assigned;
+/// duplicates and mismatched rows are refused.
+pub fn assemble_segment(mut entries: Vec<(IndexRow, Vec<u8>)>) -> Result<Vec<u8>, String> {
+    entries.sort_by_key(|(row, _)| (row.number, row.hash));
+    if entries.is_empty()
+        || entries
+            .windows(2)
+            .any(|pair| (pair[0].0.number, pair[0].0.hash) == (pair[1].0.number, pair[1].0.hash))
     {
         return Err(invalid());
     }
-    let mut out = Vec::new();
-    let mut rows = Vec::with_capacity(order.len());
-    for manifest in order {
-        let frame = zstd::bulk::compress(&manifest.encode()?, LEVEL).map_err(|_| invalid())?;
-        rows.push(IndexRow {
-            number: manifest.number,
-            hash: manifest.hash,
-            offset: out.len() as u64,
-            length: u32::try_from(frame.len()).map_err(|_| invalid())?,
-            checksum: B256::from_slice(&Sha256::digest(&frame)),
-            records: manifest.records,
-        });
+    let mut out = Vec::with_capacity(
+        entries.iter().map(|(_, frame)| frame.len()).sum::<usize>() + entries.len() * ROW + FOOTER,
+    );
+    let mut rows = Vec::with_capacity(entries.len());
+    for (mut row, frame) in entries {
+        if row.length as usize != frame.len()
+            || B256::from_slice(&Sha256::digest(&frame)) != row.checksum
+        {
+            return Err(invalid());
+        }
+        row.offset = out.len() as u64;
         out.extend_from_slice(&frame);
+        rows.push(row);
     }
     let index_offset = out.len() as u64;
     let start = out.len();
@@ -296,6 +342,9 @@ pub fn write_segment(manifests: &[&BlockManifest]) -> Result<Vec<u8>, String> {
         out.extend_from_slice(&row.length.to_be_bytes());
         out.extend_from_slice(row.checksum.as_slice());
         out.extend_from_slice(row.records.as_b256().as_slice());
+        out.extend_from_slice(&row.facts_version.to_be_bytes());
+        out.extend_from_slice(&row.base_version.to_be_bytes());
+        out.extend_from_slice(&row.timestamp.to_be_bytes());
     }
     let index_checksum = Sha256::digest(&out[start..]);
     out.extend_from_slice(SEGMENT_MAGIC);
@@ -305,28 +354,40 @@ pub fn write_segment(manifests: &[&BlockManifest]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// The verified index of a segment (footer magic, index checksum, row order
-/// and bounds; entries are checked when read).
-pub fn read_index(segment: &[u8]) -> Result<Vec<IndexRow>, String> {
-    if segment.len() < FOOTER {
+/// Where a segment's index is: (row count, index offset, index checksum),
+/// from its footer, for a segment of `size` bytes.
+fn parse_footer(footer: &[u8], size: u64) -> Result<(usize, u64, B256), String> {
+    if footer.len() != FOOTER {
         return Err(invalid());
     }
-    let mut footer = Reader(&segment[segment.len() - FOOTER..]);
+    let mut footer = Reader(footer);
     if footer.take(8)? != SEGMENT_MAGIC {
         return Err(invalid());
     }
     let count = footer.u32()?;
-    let index_offset = usize::try_from(footer.u64()?).map_err(|_| invalid())?;
+    let index_offset = footer.u64()?;
     let checksum = footer.b256()?;
-    let index_end = segment.len() - FOOTER;
+    let index_end = size.checked_sub(FOOTER as u64).ok_or_else(invalid)?;
     if count == 0
         || index_offset > index_end
-        || (index_end - index_offset) != count.checked_mul(ROW).ok_or_else(invalid)?
-        || B256::from_slice(&Sha256::digest(&segment[index_offset..index_end])) != checksum
+        || index_end - index_offset != (count as u64).checked_mul(ROW as u64).ok_or_else(invalid)?
     {
         return Err(invalid());
     }
-    let mut input = Reader(&segment[index_offset..index_end]);
+    Ok((count, index_offset, checksum))
+}
+
+/// The verified rows of an index read from `index_offset`.
+fn parse_index(
+    index: &[u8],
+    count: usize,
+    index_offset: u64,
+    checksum: B256,
+) -> Result<Vec<IndexRow>, String> {
+    if index.len() != count * ROW || B256::from_slice(&Sha256::digest(index)) != checksum {
+        return Err(invalid());
+    }
+    let mut input = Reader(index);
     let mut rows: Vec<IndexRow> = Vec::with_capacity(count);
     for _ in 0..count {
         let row = IndexRow {
@@ -336,6 +397,9 @@ pub fn read_index(segment: &[u8]) -> Result<Vec<IndexRow>, String> {
             length: input.u32()? as u32,
             checksum: input.b256()?,
             records: ArtifactId::from_b256(input.b256()?),
+            facts_version: input.u64()?,
+            base_version: input.u64()?,
+            timestamp: input.u64()?,
         };
         let end = row
             .offset
@@ -346,7 +410,9 @@ pub fn read_index(segment: &[u8]) -> Result<Vec<IndexRow>, String> {
             .map(|previous| previous.offset + previous.length as u64)
             .unwrap_or(0);
         if row.offset != previous_end
-            || end > index_offset as u64
+            || end > index_offset
+            || row.base_version == 0
+            || row.base_version > row.facts_version
             || rows
                 .last()
                 .is_some_and(|previous| (previous.number, previous.hash) >= (row.number, row.hash))
@@ -355,25 +421,55 @@ pub fn read_index(segment: &[u8]) -> Result<Vec<IndexRow>, String> {
         }
         rows.push(row);
     }
-    if rows.last().map(|row| row.offset + row.length as u64) != Some(index_offset as u64) {
+    if rows.last().map(|row| row.offset + row.length as u64) != Some(index_offset) {
         return Err(invalid());
     }
     Ok(rows)
 }
 
-/// The manifest of block (number, hash) in `segment`, if present.
-pub fn read_entry(
-    segment: &[u8],
-    number: u64,
-    hash: B256,
-) -> Result<Option<BlockManifest>, String> {
-    let rows = read_index(segment)?;
-    let Ok(position) = rows.binary_search_by_key(&(number, hash), |row| (row.number, row.hash))
-    else {
-        return Ok(None);
-    };
-    let row = &rows[position];
-    let frame = &segment[row.offset as usize..(row.offset + row.length as u64) as usize];
+/// The verified index of a segment held in memory.
+pub fn read_index(segment: &[u8]) -> Result<Vec<IndexRow>, String> {
+    if segment.len() < FOOTER {
+        return Err(invalid());
+    }
+    let size = segment.len() as u64;
+    let (count, index_offset, checksum) = parse_footer(&segment[segment.len() - FOOTER..], size)?;
+    parse_index(
+        &segment[index_offset as usize..segment.len() - FOOTER],
+        count,
+        index_offset,
+        checksum,
+    )
+}
+
+/// The verified index of a segment of `size` bytes through positional reads
+/// (`read(offset, length)`): the footer, then the index; never the entries.
+pub fn read_index_at(
+    read: &dyn Fn(u64, usize) -> Result<Vec<u8>, String>,
+    size: u64,
+) -> Result<Vec<IndexRow>, String> {
+    let footer_at = size.checked_sub(FOOTER as u64).ok_or_else(invalid)?;
+    let (count, index_offset, checksum) = parse_footer(&read(footer_at, FOOTER)?, size)?;
+    let length = usize::try_from(footer_at - index_offset).map_err(|_| invalid())?;
+    parse_index(&read(index_offset, length)?, count, index_offset, checksum)
+}
+
+/// One entry's frame, checked against its row.
+pub fn read_frame_at(
+    read: &dyn Fn(u64, usize) -> Result<Vec<u8>, String>,
+    row: &IndexRow,
+) -> Result<Vec<u8>, String> {
+    let frame = read(row.offset, row.length as usize)?;
+    if frame.len() != row.length as usize
+        || B256::from_slice(&Sha256::digest(&frame)) != row.checksum
+    {
+        return Err(invalid());
+    }
+    Ok(frame)
+}
+
+/// Decode a verified frame and check it is the manifest its row names.
+pub fn decode_frame(frame: &[u8], row: &IndexRow) -> Result<BlockManifest, String> {
     if B256::from_slice(&Sha256::digest(frame)) != row.checksum {
         return Err(invalid());
     }
@@ -391,8 +487,50 @@ pub fn read_entry(
         return Err(invalid());
     }
     let manifest = BlockManifest::decode(&decoded)?;
-    if manifest.number != number || manifest.hash != hash || manifest.records != row.records {
+    if manifest.number != row.number
+        || manifest.hash != row.hash
+        || manifest.records != row.records
+        || manifest.facts_version != row.facts_version
+        || manifest.base_version != row.base_version
+        || manifest.timestamp != row.timestamp
+    {
         return Err(invalid());
     }
-    Ok(Some(manifest))
+    Ok(manifest)
+}
+
+/// The manifest of block (number, hash) in an in-memory `segment`, if present.
+pub fn read_entry(
+    segment: &[u8],
+    number: u64,
+    hash: B256,
+) -> Result<Option<BlockManifest>, String> {
+    let rows = read_index(segment)?;
+    let Ok(position) = rows.binary_search_by_key(&(number, hash), |row| (row.number, row.hash))
+    else {
+        return Ok(None);
+    };
+    let row = &rows[position];
+    decode_frame(
+        &segment[row.offset as usize..(row.offset + row.length as u64) as usize],
+        row,
+    )
+    .map(Some)
+}
+
+/// The manifest of block (number, hash) in a segment of `size` bytes, through
+/// positional reads: footer, index, then that one entry.
+pub fn read_entry_at(
+    read: &dyn Fn(u64, usize) -> Result<Vec<u8>, String>,
+    size: u64,
+    number: u64,
+    hash: B256,
+) -> Result<Option<BlockManifest>, String> {
+    let rows = read_index_at(read, size)?;
+    let Ok(position) = rows.binary_search_by_key(&(number, hash), |row| (row.number, row.hash))
+    else {
+        return Ok(None);
+    };
+    let row = &rows[position];
+    decode_frame(&read_frame_at(read, row)?, row).map(Some)
 }
