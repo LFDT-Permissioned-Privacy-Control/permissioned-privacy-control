@@ -1,6 +1,15 @@
 //! Durable local evidence for produced blocks. This layer authenticates content
 //! addresses, not issuer signatures. Replay must also verify the retained signed
 //! checkpoint and identities before constructing an execution handle.
+//!
+//! Layout of the state directory (version 2; older layouts are refused, there
+//! is no importer):
+//! - `LAYOUT`: the layout marker, written first on initialisation;
+//! - `LOCK`: held exclusively by the one node process using the directory;
+//! - `tmp/`: files being written, cleared at every open;
+//! - `objects/`: content-addressed immutable objects;
+//! - `pointers/`: node-owned mutable names for objects (`facts-head`);
+//! - `blocks/`: one execution manifest per produced block.
 
 use crate::{
     storage::{DiskStorage, Storage},
@@ -65,10 +74,22 @@ pub struct BlockManifest {
     pub identities: Vec<BoundIdentity>,
 }
 
-#[derive(Debug)]
+const LAYOUT: &[u8] = b"ops-node-policy-archive 2\n";
+
 pub struct ArtifactStore {
     root: PathBuf,
     storage: Arc<dyn Storage>,
+    /// The exclusive state-directory lock: one writer of `facts-head` and of
+    /// block evidence per directory.
+    _lock: Box<dyn std::any::Any + Send + Sync>,
+}
+
+impl fmt::Debug for ArtifactStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ArtifactStore")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ArtifactStore {
@@ -79,22 +100,61 @@ impl ArtifactStore {
     /// Open on an explicit storage implementation (tests count and fault-inject).
     pub fn open_with(root: impl AsRef<Path>, storage: Arc<dyn Storage>) -> Result<Self, String> {
         let root = root.as_ref().to_owned();
-        for directory in [
-            root.clone(),
-            root.join("objects"),
-            root.join("blocks"),
-            root.join("pointers"),
-        ] {
-            storage
-                .ensure_private_dir(&directory)
-                .map_err(|error| match error.kind() {
-                    io::ErrorKind::PermissionDenied => {
-                        "execution archive requires a private directory".to_owned()
-                    }
-                    _ => io_error(error),
-                })?;
+        storage
+            .ensure_private_dir(&root)
+            .map_err(private_directory_error)?;
+        // Decide on the layout before changing anything: a foreign or older
+        // directory is left exactly as it was.
+        let names = storage.list(&root).map_err(io_error)?;
+        if names.iter().any(|name| name == "LAYOUT") {
+            let marker = storage
+                .read(&root.join("LAYOUT"), 64)
+                .map_err(|_| "cannot read the policy state directory layout marker".to_owned())?
+                .unwrap_or_default();
+            if marker != LAYOUT {
+                return Err(format!(
+                    "policy state directory layout {:?} is not the {:?} this node uses",
+                    printable(&marker),
+                    printable(LAYOUT)
+                ));
+            }
+        } else if names.iter().all(|name| name.starts_with(".pending-")) {
+            // Empty, or an initialisation interrupted before its marker was
+            // durable: the marker is the first durable entry.
+            publish_immutable(storage.as_ref(), &root, &root, "LAYOUT", LAYOUT)?;
+        } else {
+            return Err(layout_error());
         }
-        Ok(Self { root, storage })
+        let lock = storage
+            .lock(&root.join("LOCK"))
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::WouldBlock => {
+                    "policy state directory is in use by another node process".to_owned()
+                }
+                _ => "cannot lock the policy state directory; it must be on a local \
+                      filesystem with advisory locks"
+                    .to_owned(),
+            })?;
+        // An initialisation interrupted before its marker leaves a temp name
+        // in the root; with the lock held nobody else is writing one.
+        for name in names.iter().filter(|name| name.starts_with(".pending-")) {
+            storage.remove(&root.join(name)).map_err(io_error)?;
+        }
+        for directory in ["tmp", "objects", "blocks", "pointers"] {
+            storage
+                .ensure_private_dir(&root.join(directory))
+                .map_err(private_directory_error)?;
+        }
+        // Leftovers of writes interrupted by a crash.
+        let temporary = root.join("tmp");
+        for name in storage.list(&temporary).map_err(io_error)? {
+            storage.remove(&temporary.join(name)).map_err(io_error)?;
+        }
+        Ok(Self {
+            root,
+            storage,
+            _lock: lock,
+        })
     }
 
     pub fn put(&self, bytes: &[u8]) -> Result<ArtifactId, String> {
@@ -212,35 +272,20 @@ impl ArtifactStore {
             .ok_or_else(|| "invalid execution archive file".to_owned())
     }
 
-    /// temp file → `sync_all` → hard link → unlink temp → directory `sync_all`:
-    /// 2 syncs. The temp name is gone before the directory sync, so a crash
-    /// afterwards leaves only the published name.
     fn publish_immutable(&self, directory: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
-        let destination = directory.join(name);
-        let temporary = directory.join(temporary_name());
-        // Only our own temp is ever removed: a failed create leaves nothing to clean.
-        self.storage
-            .write_synced(&temporary, bytes)
-            .map_err(io_error)?;
-        let linked = self
-            .storage
-            .link(&temporary, &destination)
-            .map_err(io_error);
-        let cleanup = self
-            .storage
-            .remove(&temporary)
-            .map(|_| ())
-            .map_err(io_error);
-        if !linked? && self.read_bounded(&destination, bytes.len())? != bytes {
-            return Err("conflicting immutable execution artifact".into());
-        }
-        cleanup?;
-        self.storage.sync_dir(directory).map_err(io_error)
+        publish_immutable(
+            self.storage.as_ref(),
+            &self.root.join("tmp"),
+            directory,
+            name,
+            bytes,
+        )
     }
 
-    /// temp file → `sync_all` → rename → directory `sync_all`: 2 syncs.
+    /// temp file (in `tmp/`) → `sync_all` → rename → directory `sync_all`:
+    /// 2 syncs.
     fn replace_atomic(&self, directory: &Path, key: &str, bytes: &[u8]) -> Result<(), String> {
-        let temporary = directory.join(temporary_name());
+        let temporary = self.root.join("tmp").join(temporary_name());
         self.storage
             .write_synced(&temporary, bytes)
             .map_err(io_error)?;
@@ -254,6 +299,58 @@ impl ArtifactStore {
         }
         result
     }
+}
+
+/// temp file → `sync_all` → hard link → unlink temp → directory `sync_all`:
+/// 2 syncs. The temp lives in `temporary` (cleared at open), so a crash at any
+/// point leaves at most a leftover there and never a partial published name.
+fn publish_immutable(
+    storage: &dyn Storage,
+    temporary: &Path,
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let destination = directory.join(name);
+    let temporary = temporary.join(temporary_name());
+    // Only our own temp is ever removed: a failed create leaves nothing to clean.
+    storage.write_synced(&temporary, bytes).map_err(io_error)?;
+    let linked = storage.link(&temporary, &destination).map_err(io_error);
+    let cleanup = storage.remove(&temporary).map(|_| ()).map_err(io_error);
+    if !linked?
+        && storage
+            .read(&destination, bytes.len())
+            .map_err(|_| "invalid execution archive file".to_owned())?
+            .as_deref()
+            != Some(bytes)
+    {
+        return Err("conflicting immutable execution artifact".into());
+    }
+    cleanup?;
+    storage.sync_dir(directory).map_err(io_error)
+}
+
+fn private_directory_error(error: io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::PermissionDenied => "execution archive requires a private directory".into(),
+        _ => io_error(error),
+    }
+}
+
+/// The marker for an error message: printable ASCII only, bounded.
+fn printable(marker: &[u8]) -> String {
+    marker
+        .iter()
+        .take(48)
+        .map(|byte| match byte {
+            b' '..=b'~' => *byte as char,
+            _ => '?',
+        })
+        .collect()
+}
+
+fn layout_error() -> String {
+    "unsupported policy state directory layout; start the node with an empty directory".into()
 }
 
 /// Unique across process restarts even when the pid repeats (pid 1 in a

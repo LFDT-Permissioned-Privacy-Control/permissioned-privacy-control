@@ -153,8 +153,13 @@ fn only_synced_objects_survive_a_crash() {
     let storage = MemoryStorage::new();
     let root = Path::new("/state");
     let store = ArtifactStore::open_with(root, storage.clone()).unwrap();
+    let before = storage.counts();
     let kept = store.put(b"durable evidence").unwrap();
-    assert_eq!(storage.counts().syncs, 2, "file sync + directory sync");
+    assert_eq!(
+        (storage.counts() - before).syncs,
+        2,
+        "file sync + directory sync"
+    );
     storage.set_hook(|op, _| match op {
         Op::SyncDir => Action::Fail,
         _ => Action::Proceed,
@@ -172,21 +177,6 @@ fn only_synced_objects_survive_a_crash() {
         reopened.get(lost).is_err(),
         "unsynced directory entry survived"
     );
-}
-
-#[test]
-fn publication_leaves_no_temp_name_after_a_crash() {
-    use common::MemoryStorage;
-    use std::path::Path;
-    let storage = MemoryStorage::new();
-    let root = Path::new("/state");
-    let store = ArtifactStore::open_with(root, storage.clone()).unwrap();
-    store.put(b"evidence").unwrap();
-    storage.crash();
-    storage.restart();
-    let names = storage.names(&root.join("objects"));
-    assert_eq!(names.len(), 1, "{names:?}");
-    assert!(!names[0].starts_with('.'), "{names:?}");
 }
 
 #[test]
@@ -212,4 +202,111 @@ fn retry_after_a_failed_directory_sync_makes_the_object_durable() {
             .unwrap(),
         b"evidence"
     );
+}
+
+#[test]
+fn old_archive_layout_is_refused_and_left_unchanged() {
+    use common::MemoryStorage;
+    use std::path::Path;
+    let storage = MemoryStorage::new();
+    let root = Path::new("/state");
+    // A layout-1 directory: objects, pointers and manifests, no marker.
+    storage.plant(&root.join("objects").join("ab".repeat(32)), b"object");
+    storage.plant(&root.join("pointers").join("tx-01"), b"pointer");
+    storage.plant(&root.join("blocks").join("cd".repeat(32)), b"manifest");
+    ops_reth_policy::storage::Storage::ensure_private_dir(storage.as_ref(), root).unwrap();
+    assert_eq!(storage.names(root), vec!["blocks", "objects", "pointers"]);
+    let (tree, counts) = (storage.tree(), storage.counts());
+    let error = ArtifactStore::open_with(root, storage.clone()).unwrap_err();
+    assert!(
+        error.contains("unsupported policy state directory layout"),
+        "{error}"
+    );
+    assert_eq!(storage.tree(), tree, "the refused directory was modified");
+    let used = storage.counts() - counts;
+    assert_eq!((used.writes, used.others), (0, 0), "{used:?}");
+}
+
+#[test]
+fn foreign_marker_is_refused() {
+    use common::MemoryStorage;
+    use std::path::Path;
+    let storage = MemoryStorage::new();
+    let root = Path::new("/state");
+    storage.plant(&root.join("LAYOUT"), b"ops-node-policy-archive 1\n");
+    let tree = storage.tree();
+    let error = ArtifactStore::open_with(root, storage.clone()).unwrap_err();
+    assert!(
+        error.contains("\"ops-node-policy-archive 1?\" is not the"),
+        "{error}"
+    );
+    assert_eq!(storage.tree(), tree, "the refused directory was modified");
+}
+
+#[test]
+fn crash_at_every_step_of_initialisation_recovers() {
+    use common::{Action, MemoryStorage};
+    use std::{
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+    for step in 0..32 {
+        let storage = MemoryStorage::new();
+        let root = Path::new("/state");
+        let count = Arc::new(AtomicUsize::new(0));
+        storage.set_hook({
+            let count = count.clone();
+            move |_, _| {
+                if count.fetch_add(1, Ordering::SeqCst) == step {
+                    Action::CrashAfter
+                } else {
+                    Action::Proceed
+                }
+            }
+        });
+        let first = ArtifactStore::open_with(root, storage.clone());
+        let operations = count.load(Ordering::SeqCst);
+        drop(first);
+        storage.restart();
+        let store = ArtifactStore::open_with(root, storage.clone())
+            .unwrap_or_else(|error| panic!("crash after step {step}: {error}"));
+        let id = store.put(b"evidence").unwrap();
+        assert_eq!(store.get(id).unwrap(), b"evidence");
+        if step >= operations {
+            break;
+        }
+    }
+}
+
+#[test]
+fn interrupted_initialisation_and_tmp_leftovers_recover() {
+    use common::MemoryStorage;
+    use std::path::Path;
+    let storage = MemoryStorage::new();
+    let root = Path::new("/state");
+    // A crash before the marker was durable leaves at most a temp name.
+    storage.plant(&root.join(".pending-1-2-3"), b"partial");
+    let store = ArtifactStore::open_with(root, storage.clone()).unwrap();
+    let id = store.put(b"evidence").unwrap();
+    drop(store);
+    storage.plant(&root.join("tmp").join(".pending-9-9-9"), b"leftover");
+    let store = ArtifactStore::open_with(root, storage.clone()).unwrap();
+    assert!(
+        storage.names(&root.join("tmp")).is_empty(),
+        "tmp/ cleared at open"
+    );
+    assert_eq!(store.get(id).unwrap(), b"evidence");
+}
+
+#[test]
+fn a_state_directory_has_one_node_process() {
+    let temp = Temp::new();
+    let first = ArtifactStore::open(&temp.0).unwrap();
+    let error = ArtifactStore::open(&temp.0).unwrap_err();
+    assert!(error.contains("in use"), "{error}");
+    drop(first);
+    ArtifactStore::open(&temp.0).unwrap();
 }

@@ -60,6 +60,24 @@ struct State {
 pub struct MemoryStorage {
     state: Mutex<State>,
     hook: Mutex<Option<Hook>>,
+    /// Held locks by path, with the epoch they were taken in: a crash or
+    /// restart ends the "process", so older locks no longer count.
+    locks: Arc<Mutex<HashMap<PathBuf, u64>>>,
+}
+
+struct LockGuard {
+    locks: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    path: PathBuf,
+    epoch: u64,
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let mut locks = self.locks.lock().unwrap();
+        if locks.get(&self.path) == Some(&self.epoch) {
+            locks.remove(&self.path);
+        }
+    }
 }
 
 impl fmt::Debug for MemoryStorage {
@@ -69,13 +87,15 @@ impl fmt::Debug for MemoryStorage {
 }
 
 /// A snapshot of the I/O counters. Every attempted operation counts, whether
-/// it succeeds or not; `syncs` counts file plus directory syncs.
+/// it succeeds or not; `syncs` counts file plus directory syncs; `others`
+/// counts links, renames, removals and locks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
     pub writes: u64,
     pub syncs: u64,
     pub reads: u64,
     pub lists: u64,
+    pub others: u64,
 }
 
 impl std::ops::Sub for Counts {
@@ -86,6 +106,7 @@ impl std::ops::Sub for Counts {
             syncs: self.syncs - other.syncs,
             reads: self.reads - other.reads,
             lists: self.lists - other.lists,
+            others: self.others - other.others,
         }
     }
 }
@@ -97,6 +118,29 @@ fn split(path: &Path) -> io::Result<(PathBuf, String)> {
         .and_then(|name| name.to_str())
         .ok_or(io::ErrorKind::InvalidInput)?;
     Ok((parent.to_owned(), name.to_owned()))
+}
+
+/// Files in `dir` plus its subdirectories, as `read_dir` would list them.
+fn listing(state: &State, dir: &Path) -> Option<Vec<String>> {
+    let children: Vec<String> = state
+        .directories
+        .keys()
+        .filter_map(|path| {
+            (path.parent() == Some(dir))
+                .then(|| path.file_name()?.to_str().map(str::to_owned))
+                .flatten()
+        })
+        .collect();
+    let files = state.directories.get(dir);
+    if files.is_none() && children.is_empty() {
+        return None;
+    }
+    let mut names: Vec<String> = files
+        .map(|d| d.live.keys().cloned().collect())
+        .unwrap_or_default();
+    names.extend(children);
+    names.sort();
+    Some(names)
 }
 
 fn crashed() -> io::Error {
@@ -143,14 +187,28 @@ impl MemoryStorage {
         self.clear_hook();
     }
 
-    /// Live file names in `dir` (test inspection, not counted).
+    /// Live names in `dir`, files and subdirectories (test inspection, not
+    /// counted).
     pub fn names(&self, dir: &Path) -> Vec<String> {
+        listing(&self.state.lock().unwrap(), dir).unwrap_or_default()
+    }
+
+    /// Every live directory with each entry's live content (test inspection,
+    /// not counted).
+    pub fn tree(&self) -> BTreeMap<PathBuf, BTreeMap<String, Vec<u8>>> {
         let state = self.state.lock().unwrap();
         state
             .directories
-            .get(dir)
-            .map(|d| d.live.keys().cloned().collect())
-            .unwrap_or_default()
+            .iter()
+            .map(|(path, directory)| {
+                let files = directory
+                    .live
+                    .iter()
+                    .map(|(name, inode)| (name.clone(), state.inodes[inode].data.clone()))
+                    .collect();
+                (path.clone(), files)
+            })
+            .collect()
     }
 
     /// Overwrite a file's live and durable content (test tampering, not counted).
@@ -232,13 +290,7 @@ impl Storage for MemoryStorage {
             Op::List,
             dir,
             |c| c.lists += 1,
-            |state| {
-                state
-                    .directories
-                    .get(dir)
-                    .map(|d| d.live.keys().cloned().collect())
-                    .ok_or_else(|| io::ErrorKind::NotFound.into())
-            },
+            |state| listing(state, dir).ok_or_else(|| io::ErrorKind::NotFound.into()),
         )
     }
 
@@ -304,7 +356,7 @@ impl Storage for MemoryStorage {
         self.run(
             Op::Link,
             to,
-            |_| {},
+            |c| c.others += 1,
             |state| {
                 let inode = *state
                     .directories
@@ -332,7 +384,7 @@ impl Storage for MemoryStorage {
         self.run(
             Op::Rename,
             to,
-            |_| {},
+            |c| c.others += 1,
             |state| {
                 if !state.directories.contains_key(&to_dir) {
                     return Err(io::ErrorKind::NotFound.into());
@@ -358,7 +410,7 @@ impl Storage for MemoryStorage {
         self.run(
             Op::Remove,
             path,
-            |_| {},
+            |c| c.others += 1,
             |state| {
                 Ok(state
                     .directories
@@ -366,6 +418,37 @@ impl Storage for MemoryStorage {
                     .is_some_and(|d| d.live.remove(&name).is_some()))
             },
         )
+    }
+
+    fn lock(&self, path: &Path) -> io::Result<Box<dyn std::any::Any + Send + Sync>> {
+        let epoch = {
+            let mut state = self.state.lock().unwrap();
+            if state.crashed {
+                return Err(crashed());
+            }
+            state.counts.others += 1;
+            // Like the real thing, locking creates the lock file (durably empty).
+            let (parent, name) = split(path)?;
+            state.next += 1;
+            let inode = state.next;
+            let directory = state.directories.entry(parent).or_default();
+            if !directory.live.contains_key(&name) {
+                directory.live.insert(name.clone(), inode);
+                directory.durable.insert(name, inode);
+                state.inodes.insert(inode, Inode::default());
+            }
+            state.epoch
+        };
+        let mut locks = self.locks.lock().unwrap();
+        if locks.get(path) == Some(&epoch) {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        locks.insert(path.to_owned(), epoch);
+        Ok(Box::new(LockGuard {
+            locks: self.locks.clone(),
+            path: path.to_owned(),
+            epoch,
+        }))
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {

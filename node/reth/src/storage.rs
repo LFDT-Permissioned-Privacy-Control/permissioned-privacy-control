@@ -26,6 +26,9 @@ pub trait Storage: Send + Sync + fmt::Debug {
     fn remove(&self, path: &Path) -> io::Result<bool>;
     /// `sync_all` on the directory, making its entries durable.
     fn sync_dir(&self, dir: &Path) -> io::Result<()>;
+    /// Take an exclusive advisory lock on `path` (created if missing) for the
+    /// life of the returned guard. `WouldBlock` when another holder has it.
+    fn lock(&self, path: &Path) -> io::Result<Box<dyn std::any::Any + Send + Sync>>;
 }
 
 /// The real filesystem. On macOS `sync_all` is `F_FULLFSYNC`.
@@ -117,5 +120,20 @@ impl Storage for DiskStorage {
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         File::open(dir)?.sync_all()
+    }
+
+    fn lock(&self, path: &Path) -> io::Result<Box<dyn std::any::Any + Send + Sync>> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Box::new(file)),
+            Err(fs::TryLockError::WouldBlock) => Err(io::ErrorKind::WouldBlock.into()),
+            Err(fs::TryLockError::Error(error)) => Err(error),
+        }
     }
 }

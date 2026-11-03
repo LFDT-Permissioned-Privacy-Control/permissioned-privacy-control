@@ -320,7 +320,8 @@ flowchart TB
 
 Every applied fact update is retained as a signed object, and `facts-head`
 points at the latest checkpoint, so a restarted node resumes the same fact
-chain. A pending transaction identity lives only in the node's memory, from
+chain. The state directory carries a layout marker and is locked by the one
+node process using it; a directory in an older layout is refused. A pending transaction identity lives only in the node's memory, from
 admission until OPS observes the transaction's finalized receipt or its lease
 expires and a later admission reclaims it; admission does no storage I/O. A
 restarted node holds no pending identities: a pooled transaction cannot execute
