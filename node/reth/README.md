@@ -186,6 +186,26 @@ transactions and delegated accounts, SELFDESTRUCT, custom creation schemes,
 custom precompile providers, and transaction-index traces currently fail explicitly. The local stack's supported
 normal workflows do not require those features. MCP tooling is separate.
 
+The crash check runs Reth with its persistence threshold set to 0 (not the
+default), so each new chain head is written at once, asynchronously; a SIGKILL
+can still lose the newest blocks. It stops the node around block production:
+with SIGKILL while a batch waits in the pool, after a block with the batch was
+built but before it became the chain head, and just after it became the head;
+and once with SIGTERM, after which Reth restores its pool without the node's
+identities. After each restart it checks that the node is ready with the facts it
+had, that every block Reth reported saved survived, that a transaction without a
+receipt has no status, that every transaction in a surviving block reports
+`included` from its block's evidence, that restored pooled transactions do not
+execute without an identity, that every resubmission is accepted and included,
+and that the chain keeps importing its own blocks. A last restart without new
+facts reads every inclusion from disk:
+
+```sh
+python3 node/reth/scripts/crash.py --binary node/reth/target/release/ops-reth
+```
+
+Its records and logs stay in `.tmp/ops-reth-crash-*`.
+
 Implementation evidence: [reth-runtime.md](../../docs/implementation/evidence/reth-runtime.md).
 
 ## Reproducible load acceptance

@@ -384,6 +384,32 @@ and between the head pointer and installation. Every block whose assembly
 returned replays after restart, and neither the live nor the restored facts go
 backwards (the lease may: heartbeats are not persisted, so a restarted node is
 fresh again at the publisher's next heartbeat).
+
+A live run (`node/reth/scripts/crash.py`, 2026-11-03, seed 1410, 36
+transactions, binary `60bc930ad306…`, report
+`.tmp/ops-reth-crash-ejo1gfqj/result.json`) stopped the node eight times, with Reth's
+persistence threshold set to 0 (not the default), so each new head is written at
+once, asynchronously. SIGKILL hit, twice each, a batch waiting in the pool, a
+built block with the batch before it became the chain head (lost: it never
+became the head), and the first 50 ms after it became the head (lost: not yet
+written). Kills lost up to the two newest committed blocks; every block Reth had
+reported saved survived. One SIGTERM stop restarted with the batch restored to
+the pool from Reth's backup: without identities it did not execute, and its
+resubmission was accepted. After every restart the node was ready with its
+facts, every status request for a transaction without a receipt (28) was
+refused, every transaction in a surviving block reported `included` from its manifest,
+every resubmission was accepted and included, and the chain kept importing its
+own blocks. A last SIGKILL and restart without new facts read all 36 inclusions
+from disk, with no replay or manifest errors.
+
+Open risk shown by this run: with `--dev.finality-depth 1` the forkchoice update
+that makes a block the head also finalizes it, so the node can report
+`finalized: true` for a block that a crash then loses (both kills just after a
+commit lost such a block). OPS treats a finalized outcome as permanent
+(registration and visibility). The node does not yet hold finality back until
+Reth has written the block; with Reth's default persistence threshold that
+window is several blocks.
+
 A guarded node imports blocks at or below its finalized head on its canonical
 chain without manifests: only those blocks' own transactions execute, with no
 policy (`finalized_ancestor_without_manifest_imports_with_pass_through_policy`);
