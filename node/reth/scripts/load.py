@@ -121,7 +121,7 @@ class Node:
                         '--engine.cross-block-cache-size', str(args.execution_cache_mib),
                         '--txpool.max-account-slots', str(args.transactions * args.rounds + 64),
                         '--datadir', str(work / 'data'), '--http', '--http.addr', '127.0.0.1', '--http.port', str(self.public),
-                        '--http.api', 'eth,net,web3', '--authrpc.port', str(auth), '--port', str(p2p), '--disable-discovery',
+                        '--http.api', 'eth,net,web3', '--authrpc.port', str(auth), '--addr', '127.0.0.1', '--port', str(p2p), '--disable-discovery',
                         '--log.file.directory', str(work / 'logs'), '--color', 'never']
         self.process = subprocess.Popen(self.command, cwd=ROOT, env=env, stdout=self.log, stderr=subprocess.STDOUT)
         self.stop = threading.Event()

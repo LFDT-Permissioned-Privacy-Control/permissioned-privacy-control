@@ -106,16 +106,40 @@ approved policy getters continue to operate normally.
 The private listener supports `ops_policyApply`, `ops_policyStatus`,
 `ops_submitTransaction`, `ops_simulate`, and `ops_transactionStatus`. Its exact
 wire protocol is in [execution-context.md](../../docs/architecture/execution-context.md).
-It is separate from public Reth JSON-RPC. IPC and public debug/trace modules are
-disabled. `eth_call`, `eth_estimateGas`, and `debug_traceCall` are available through
+It is separate from public Reth JSON-RPC. IPC is disabled, and the node refuses
+to start with a public RPC module that replays, traces, validates or builds
+blocks through the guarded executor (`debug`, `trace`, `ots`, `flashbots`, `mev`,
+`testing`, or `all`), with `--rpc.forwarder` (it would send guarded
+transactions to a node without policy and hide local pool rejections) or with
+`--debug.reorg-frequency`. Public `eth_simulateV1` builds no blocks (its block
+limit is forced to 0). `eth_call`, `eth_estimateGas`, and `debug_traceCall` are available through
 signed private simulations; public calls cannot inherit an OPS principal.
 Nonempty state/code/storage and block overrides are rejected for every simulation
 mode. An authenticated call never authorizes replacing customer bytecode with a
 program that reads otherwise inaccessible storage. Trace output options remain
 available.
 
+Every successful `ops_policyStatus`, `ops_policyApply`, `ops_submitTransaction`
+and `ops_transactionStatus` result carries the node's `boot_id`
+(capability `boot_id_v1`): 32 random hex characters, new at every process start
+and never stored, so OPS records each delivery against the boot that answered
+it.
+
 A pending transaction is bound to one principal and selected organization, even
-when several principals share its signer. New execution requires a valid ticket.
+when several principals share its signer. A newer identity for the same
+principal, organization, signer and transaction replaces the registered one; an
+older one whose fact floor and expiry the registered identity already covers
+(for example a client's request that arrives after OPS renewed it) is accepted
+as a duplicate under its own context without replacing it. Any other identity
+for the hash is refused while the registered one is live. A pool answer of
+"nonce too low" without the transaction's own receipt, or of an underpriced
+replacement, is a definitive answer for those bytes at the current head (not a
+final outcome): `ops_submitTransaction` returns error
+`-32013` with `data.reason` `nonce_used` or `replaced`, and the node undoes
+exactly that registration (restoring the identity it replaced, which a
+reorganization may still need), never a newer one. "Nonce too low" for a
+transaction whose own receipt exists, and "already known", are accepted. Any
+other pool failure keeps the registration and returns the generic error. New execution requires a valid ticket.
 The node keeps pending identities in memory only: admission does no storage
 I/O. While an identity's lease is valid, the node refuses another principal,
 organization or signer for its transaction hash; an expired lease is reclaimed by

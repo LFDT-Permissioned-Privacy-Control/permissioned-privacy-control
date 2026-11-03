@@ -42,7 +42,12 @@ impl ExecutionBackend for Backend {
         .map(str::to_string)
         .collect()
     }
-    async fn submit(&self, _identity: Identity, raw: Bytes) -> Result<PoolSubmission, String> {
+    async fn submit(
+        &self,
+        _identity: Identity,
+        raw: Bytes,
+        _signer: alloy_primitives::Address,
+    ) -> Result<PoolSubmission, String> {
         use alloy_eips::eip2718::Decodable2718;
         let transaction = alloy_consensus::TxEnvelope::decode_2718(&mut raw.as_ref())
             .map_err(|_| "invalid fixture")?;

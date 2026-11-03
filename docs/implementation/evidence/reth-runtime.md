@@ -420,5 +420,27 @@ and another network's block still need the manifest
 `another_networks_block_is_never_trusted`). This applies to history the node
 already holds; first-time imports have no known finality for their blocks.
 
+## Delivery contract on the node (2026-11-03)
+
+Tests in `node/reth/tests/delivery.rs` and the `identity` unit tests:
+
+| Behaviour | Test |
+|---|---|
+| Every private response names the process's boot; a restart changes it, and the same still-valid envelope is admitted again | `boot_id_changes_on_restart_and_resent_envelope_is_admitted` |
+| An expired envelope is refused | `expired_resend_is_rejected` |
+| An older identity the registered one dominates is an idempotent success under its own context; a higher floor with a lower expiry, another principal or organization is refused | `older_identity_for_same_principal_and_binding_is_idempotent_success` |
+| "Nonce too low" and an underpriced replacement return `-32013` with the reason and release the slot; "already known" is accepted; other pool failures keep the registration | `pool_rejection_releases_slot_and_reports_reason`, `already_known_pool_error_is_an_already_pooled_transaction` |
+| "Nonce too low" with the transaction's own receipt keeps the identity and is accepted | `resend_of_an_included_transaction_keeps_its_identity`, `nonce_too_low_with_own_receipt_is_an_inclusion`; live: `smoke.py` check `included-resend-accepted` |
+| A delayed failed send never removes a newer identity; a failed renewal restores the identity it replaced; a stale undo token removes nothing, and a replaced or restored lease's old expiry releases nothing | `failed_send_never_removes_newer_identity`, `failed_renewal_keeps_prior_identity_needed_for_reorg`, `expiry_removal_is_conditional_on_context` |
+| The pool receives the signer recovered at admission (no second recovery) | `pooled_form_keeps_the_recovered_signer_and_hash` |
+| Startup refuses replaying, simulating or block-building public modules, a forwarder and the debug reorg stream; public simulation builds no blocks | `unsafe_public_rpc_is_refused_at_startup`, `debug_reorg_stream_is_refused_at_startup`, `public_rpc_never_builds_candidate_blocks`; live: `smoke.py` check `public-simulate-builds-nothing` |
+
+The startup check for public debug/trace modules compared the selection's
+display text, `[eth, debug]`, with `debug`, so it never matched: a node started
+with `--http.api eth,debug` ran with the debug module. The check now uses the
+typed selection. Before the simulation block limit was forced to 0, an
+unauthenticated `eth_simulateV1` request 100 blocks ahead published 99 gap-filler
+manifests (`smoke.py`, run without the limit).
+
 Not yet covered here: throughput, which is measured end to end through OPS
 separately.

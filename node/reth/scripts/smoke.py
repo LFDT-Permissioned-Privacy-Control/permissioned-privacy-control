@@ -49,7 +49,7 @@ genesis = dict(config=config, nonce='0x0', timestamp='0x0', gasLimit='0x1c9c380'
 (work / 'genesis.json').write_text(json.dumps(genesis))
 env = dict(os.environ, OPS_NODE_POLICY_CHAIN_ID='31337', OPS_NODE_POLICY_DEPLOYMENT_ID=network['deployment_id'], OPS_NODE_POLICY_PUBLIC_KEYS=json.dumps({'ops': base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()}), OPS_NODE_POLICY_STATE_DIR=str(work / 'policy'), OPS_NODE_POLICY_LISTEN=f'127.0.0.1:{private}', OPS_NODE_POLICY_TOKEN='local-runtime-smoke-token')
 log = open(work / 'node.log', 'w')
-command = [str(pathlib.Path(args.binary).resolve()), 'node', '--chain', str(work / 'genesis.json'), '--dev', '--dev.finality-depth', '1', '--dev.block-time', '1s', '--datadir', str(work / 'data'), '--http', '--http.addr', '127.0.0.1', '--http.port', str(public), '--http.api', 'eth,net,web3', '--authrpc.port', str(auth), '--port', str(p2p), '--disable-discovery', '--log.file.directory', str(work / 'logs'), '--color', 'never']
+command = [str(pathlib.Path(args.binary).resolve()), 'node', '--chain', str(work / 'genesis.json'), '--dev', '--dev.finality-depth', '1', '--dev.block-time', '1s', '--datadir', str(work / 'data'), '--http', '--http.addr', '127.0.0.1', '--http.port', str(public), '--http.api', 'eth,net,web3', '--authrpc.port', str(auth), '--addr', '127.0.0.1', '--port', str(p2p), '--disable-discovery', '--log.file.directory', str(work / 'logs'), '--color', 'never']
 process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
 try:
     for _ in range(100):
@@ -81,6 +81,16 @@ try:
     assert simulation(candidate=candidate, dry_run=True)['result']['policy']['would_allow'] is True
     assert 'error' in rpc('eth_call', [{'from': signed['sender'], 'to': signed['target'], 'data': signed['data']}, 'latest']), 'public call inherited identity'
     assert 'error' in rpc('ops_policyStatus', []), 'private API leaked onto public listener'
+    # Public eth_simulateV1 never builds candidate blocks, so it publishes no
+    # manifests. A request 100 blocks ahead would build 99 empty gap fillers
+    # (Reth's default cap is 256); real production cannot reach those heights
+    # during the check. (Discarded real payload rebuilds also publish
+    # noncanonical manifests, so canonicity alone would not tell.)
+    head = int(result('eth_blockNumber', []), 16)
+    for blocks in [[{'calls': []}], [{'blockOverrides': {'number': hex(head + 100)}, 'calls': []}]]:
+        assert 'error' in rpc('eth_simulateV1', [{'blockStateCalls': blocks}, 'latest']), 'public eth_simulateV1 built blocks'
+    ahead = [p.name for p in (work / 'policy' / 'blocks').rglob('*') if p.is_file() and int(p.name.split('-')[0], 16) > head + 20]
+    assert not ahead, f'public eth_simulateV1 published manifests: {ahead[:3]}'
     receipts = {}
     for name in ['call', 'create']:
         tx = signed[name]
@@ -93,6 +103,10 @@ try:
         else: raise RuntimeError(f'{name} receipt timeout')
         assert receipt['status'] == '0x1', receipt
         receipts[name] = receipt
+        # A resend of the included transaction under a new identity: the pool
+        # says "nonce too low", its own receipt exists, so it is accepted.
+        resent = result('ops_submitTransaction', [identity('transaction', tx['hash'], name + '-resent'), tx['raw']], True)
+        assert resent['status'] == 'accepted' and resent['transaction_hash'] == tx['hash'], resent
         for _ in range(100):
             status = result('ops_transactionStatus', [tx['hash']], True)
             if status['execution'].get('finalized'): break
@@ -132,7 +146,7 @@ try:
     assert status['ready'] and status['version'] == snapshot['version'], status
     status = result('ops_transactionStatus', [signed['create']['hash']], True)
     assert status['execution']['status'] == 'included' and status['execution']['created'][0]['address'] == receipts['create']['contractAddress'], status
-    summary = {'ok': True, 'workdir': str(work), 'created': receipts['create']['contractAddress'], 'blocks': {name: receipt['blockNumber'] for name, receipt in receipts.items()}, 'checks': ['signed-facts', 'scoped-call-estimate-trace', 'public-isolation', 'state-and-block-override-rejection', 'signed-pool-submission', 'real-block-self-import', 'create', 'canonical-creation-status', 'chain-finality-evidence', 'candidate-preview-active-gate', 'candidate-live-read-isolation', 'current-revocation', 'scoped-admin-diagnostics', 'restart-recovery']}
+    summary = {'ok': True, 'workdir': str(work), 'created': receipts['create']['contractAddress'], 'blocks': {name: receipt['blockNumber'] for name, receipt in receipts.items()}, 'checks': ['signed-facts', 'scoped-call-estimate-trace', 'public-isolation', 'state-and-block-override-rejection', 'signed-pool-submission', 'real-block-self-import', 'create', 'canonical-creation-status', 'chain-finality-evidence', 'candidate-preview-active-gate', 'candidate-live-read-isolation', 'current-revocation', 'scoped-admin-diagnostics', 'restart-recovery', 'public-simulate-builds-nothing', 'included-resend-accepted']}
     (work / 'result.json').write_text(json.dumps(summary, indent=2)); print(json.dumps(summary))
 except Exception:
     log.flush(); print((work / 'node.log').read_text()[-16000:]); raise

@@ -8,7 +8,7 @@ use crate::{
         PinnedPolicySnapshot,
     },
     facts::FactsPolicy,
-    identity::{CandidateNote, CapturedIdentity, IdentityRegistry},
+    identity::{Admission, CandidateNote, CapturedIdentity, IdentityRegistry},
     manifest::{BlockManifest, ManifestEntry},
     policy::{DiagnosticReport, PolicyFactory},
     stream::{AppliedFacts, FactStream, Prepared},
@@ -103,6 +103,36 @@ pub struct PolicyRuntime {
     /// Serialises fact ingestion. Identity admission never takes it.
     facts: Mutex<()>,
     status: Mutex<StatusCache>,
+    /// Random per process start: every private response names it, so OPS
+    /// knows which boot an acknowledgement belongs to.
+    boot_id: String,
+}
+
+/// 128 random bits as hex. `/dev/urandom` mixed with the clock and process
+/// id, so a missing device still yields an id that differs across restarts.
+fn new_boot_id() -> String {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    static STARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut random = [0u8; 16];
+    let _ =
+        std::fs::File::open("/dev/urandom").and_then(|mut device| device.read_exact(&mut random));
+    let mut hash = Sha256::new();
+    hash.update(random);
+    hash.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+            .to_be_bytes(),
+    );
+    hash.update(std::process::id().to_be_bytes());
+    hash.update(
+        STARTS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_be_bytes(),
+    );
+    alloy_primitives::hex::encode(&hash.finalize()[..16])
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -220,10 +250,16 @@ impl PolicyRuntime {
             verifier,
             facts: Mutex::new(()),
             status: Mutex::new(StatusCache::default()),
+            boot_id: new_boot_id(),
         }
     }
     pub fn verifier(&self) -> &Verifier {
         &self.verifier
+    }
+
+    /// This process start's id (32 hex characters).
+    pub fn boot_id(&self) -> &str {
+        &self.boot_id
     }
 
     /// Restore retained facts. Expired facts are retained for stream
@@ -435,8 +471,20 @@ impl PolicyRuntime {
     }
 
     /// Admit an identity verified once by the caller. Memory only: no storage
-    /// I/O and no lock shared with fact ingestion or block persistence.
+    /// I/O and no lock shared with fact ingestion or block persistence. A
+    /// transaction identity the registered one dominates is an idempotent
+    /// success (nothing installed).
     pub fn admit_identity(&self, verified: VerifiedIdentity, now: i64) -> Result<Identity, String> {
+        Ok(self.admit_transaction(verified, now)?.identity().clone())
+    }
+
+    /// `admit_identity`, returning whether the attempt was installed and the
+    /// registration that undoes exactly this installation.
+    pub fn admit_transaction(
+        &self,
+        verified: VerifiedIdentity,
+        now: i64,
+    ) -> Result<Admission, String> {
         self.identities.admit_reclaiming(verified, now)
     }
 

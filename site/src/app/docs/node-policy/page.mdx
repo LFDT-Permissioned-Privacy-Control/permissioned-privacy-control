@@ -217,6 +217,12 @@ rejects status requests for the transaction, and OPS keeps it pending and keeps
 polling. An unclean stop can also lose the newest blocks the node had not yet
 written; their transactions are then not included and need the same resend.
 
+The guarded node refuses to start with a public RPC module that replays,
+traces, validates or builds blocks (`debug`, `trace`, `ots`, `flashbots`, `mev`,
+`testing`, or `all`), with `--rpc.forwarder`, or with
+`--debug.reorg-frequency`; public `eth_simulateV1` returns an error. Use OPS's
+signed simulations for calls, estimates and traces.
+
 On the guarded Reth node, public `pending` block queries return no block, and
 finalized history the node already holds re-executes without its policy
 evidence; blocks it imports for the first time need the producer's execution

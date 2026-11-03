@@ -24,7 +24,12 @@ impl ExecutionBackend for Pool {
     fn capabilities(&self) -> Vec<String> {
         golden::Backend.capabilities()
     }
-    async fn submit(&self, _identity: Identity, _raw: Bytes) -> Result<PoolSubmission, String> {
+    async fn submit(
+        &self,
+        _identity: Identity,
+        _raw: Bytes,
+        _signer: alloy_primitives::Address,
+    ) -> Result<PoolSubmission, String> {
         Ok(self.0)
     }
     async fn simulate(

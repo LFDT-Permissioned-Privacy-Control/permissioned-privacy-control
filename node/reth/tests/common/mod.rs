@@ -700,7 +700,12 @@ pub mod golden {
             .map(str::to_string)
             .collect()
         }
-        async fn submit(&self, _identity: Identity, raw: Bytes) -> Result<PoolSubmission, String> {
+        async fn submit(
+            &self,
+            _identity: Identity,
+            raw: Bytes,
+            _signer: alloy_primitives::Address,
+        ) -> Result<PoolSubmission, String> {
             use alloy_eips::eip2718::Decodable2718;
             let transaction = alloy_consensus::TxEnvelope::decode_2718(&mut raw.as_ref())
                 .map_err(|_| "invalid fixture")?;
@@ -770,5 +775,109 @@ pub mod golden {
         let response = api.process("Bearer private-test-token", &body).await;
         assert_eq!(response.status, 200);
         serde_json::from_slice(&response.body).unwrap()
+    }
+}
+
+/// The golden transaction and its facts, re-signed with a local test key
+/// (`[11; 32]`, key id `local`), so a test can vary an identity's times,
+/// fact floor, principal and context for the same raw transaction.
+pub mod local {
+    use super::golden;
+    use alloy_primitives::B256;
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use ed25519_dalek::{Signer, SigningKey};
+    use ops_reth_policy::wire::{Network, Verifier};
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+
+    /// The golden clock.
+    pub const NOW: i64 = 1020;
+
+    fn key() -> SigningKey {
+        SigningKey::from_bytes(&[11; 32])
+    }
+
+    pub fn network() -> Network {
+        Network {
+            chain_id: 31337,
+            deployment_id: "ops-test".into(),
+        }
+    }
+
+    pub fn verifier() -> Verifier {
+        Verifier::new(
+            network(),
+            BTreeMap::from([("local".into(), key().verifying_key())]),
+        )
+    }
+
+    /// A signed envelope (as a JSON value) of `payload`.
+    pub fn seal(kind: &str, payload: &Value) -> Value {
+        let payload = serde_json::to_vec(payload).unwrap();
+        let mut bytes = b"OPS_NODE_POLICY_V1\0".to_vec();
+        for part in [kind.as_bytes(), b"local", payload.as_slice()] {
+            bytes.extend_from_slice(&(part.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(part);
+        }
+        json!({"version":1,"kind":kind,"key_id":"local","payload":STANDARD.encode(payload),
+            "signature":STANDARD.encode(key().sign(&bytes).to_bytes())})
+    }
+
+    /// The decoded payload of a golden envelope.
+    pub fn payload(name: &str) -> Value {
+        let envelope = &golden::envelopes()[name];
+        serde_json::from_slice(
+            &STANDARD
+                .decode(envelope["payload"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// The golden transaction snapshot (version 7), valid 1000..1100.
+    pub fn snapshot() -> Value {
+        seal("snapshot", &payload("transaction_snapshot"))
+    }
+
+    /// The golden snapshot at `version`, issued at `issued_at`.
+    pub fn snapshot_at(version: u64, issued_at: i64) -> Value {
+        let mut snapshot = payload("transaction_snapshot");
+        snapshot["version"] = json!(version);
+        snapshot["issued_at"] = json!(issued_at);
+        snapshot["expires_at"] = json!(issued_at + 100);
+        seal("snapshot", &snapshot)
+    }
+
+    /// The golden transaction identity with these fields replaced.
+    pub fn identity(context: &str, issued_at: i64, expires_at: i64, min_version: u64) -> Value {
+        identity_with(context, issued_at, expires_at, min_version, |_| {})
+    }
+
+    pub fn identity_with(
+        context: &str,
+        issued_at: i64,
+        expires_at: i64,
+        min_version: u64,
+        edit: impl FnOnce(&mut Value),
+    ) -> Value {
+        let mut identity = payload("transaction_identity");
+        identity["context_id"] = json!(context);
+        identity["issued_at"] = json!(issued_at);
+        identity["expires_at"] = json!(expires_at);
+        identity["min_snapshot_version"] = json!(min_version);
+        edit(&mut identity);
+        seal("identity", &identity)
+    }
+
+    pub fn raw() -> Value {
+        golden::envelopes()["raw_transaction"].clone()
+    }
+
+    pub fn tx_hash() -> B256 {
+        payload("transaction_identity")["binding_hash"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
     }
 }

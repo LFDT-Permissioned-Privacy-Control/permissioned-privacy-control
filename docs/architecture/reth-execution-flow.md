@@ -334,7 +334,11 @@ expires and a later admission reclaims it; admission does no storage I/O. A
 restarted node holds no pending identities: a transaction not yet included
 cannot execute until the principal that submitted it sends it again through OPS
 (OPS does not resubmit it), and OPS's submission row keeps the principal binding
-meanwhile. The transaction pool itself is Reth's in-memory pool. Reth saves
+meanwhile. Each process start has a new random `boot_id`, kept in memory only;
+every successful status, fact-apply and submission result names it. A
+definitive pool rejection of the transaction's bytes (its nonce is used without
+its own receipt, or a replacement is underpriced) undoes exactly that
+registration. The transaction pool itself is Reth's in-memory pool. Reth saves
 local pool transactions only on graceful shutdown and restores them at start, so
 a crash loses pooled transactions while OPS keeps their submission rows. The
 node accepts a resend even when the transaction is still pooled. A block's

@@ -3,13 +3,13 @@
 
 use crate::{
     context::ExecutionBinding,
-    identity::IdentityRegistry,
+    identity::{Admission, IdentityRegistry},
     runtime::PolicyRuntime,
     wire::{Identity, MAX_ENVELOPE_BYTES, SimulationRequest, decode_strict, parse_simulation},
 };
 use alloy_consensus::{Transaction, TxEnvelope, transaction::SignerRecoverable};
 use alloy_eips::eip2718::Decodable2718;
-use alloy_primitives::{B256, Bytes, hex};
+use alloy_primitives::{Address, B256, Bytes, hex};
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use http_body_util::{BodyExt, Full, Limited};
@@ -42,6 +42,10 @@ const REQUIRED_CAPABILITIES: [&str; 8] = [
     "finalized_status_v1",
 ];
 
+/// Capabilities the private API itself implements, advertised with the
+/// backend's.
+const API_CAPABILITIES: [&str; 1] = ["boot_id_v1"];
+
 /// What the transaction pool did with a submitted transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolSubmission {
@@ -50,13 +54,49 @@ pub enum PoolSubmission {
     /// The pool already holds a transaction with the submitted hash, for
     /// example one restored from the pool's backup after a restart.
     AlreadyKnown,
+    /// The pool refused it because its nonce is used, and the chain holds this
+    /// transaction's own canonical receipt: it is already included. Like
+    /// "already known", a success; the identity is kept, because a reorg
+    /// before finality can return the transaction to the pool.
+    Included,
+    /// A definitive answer for these bytes now (not final for OPS: a used
+    /// nonce is final only once finalized, a competing transaction can leave
+    /// the pool). Any other pool failure is an `Err` (transient or ambiguous).
+    Rejected(PoolRejection),
+}
+
+/// Why the pool definitively rejected a transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolRejection {
+    /// Its nonce is already used by another transaction of the signer, at the
+    /// node's current head (not necessarily final): no own receipt exists.
+    NonceUsed,
+    /// Another pooled transaction holds its nonce and the fee bump is too low.
+    Replaced,
+}
+
+impl PoolRejection {
+    /// The reason in the error response.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NonceUsed => "nonce_used",
+            Self::Replaced => "replaced",
+        }
+    }
 }
 
 #[async_trait]
 pub trait ExecutionBackend: Send + Sync {
     /// Advertise a capability only after its production path is wired.
     fn capabilities(&self) -> Vec<String>;
-    async fn submit(&self, identity: Identity, raw: Bytes) -> Result<PoolSubmission, String>;
+    /// Insert `raw`, whose signer the caller already recovered and checked
+    /// against the identity (`signer`), into the pool.
+    async fn submit(
+        &self,
+        identity: Identity,
+        raw: Bytes,
+        signer: Address,
+    ) -> Result<PoolSubmission, String>;
     async fn transaction_status(&self, _hash: B256) -> Result<Value, String> {
         Err("transaction status is unavailable".into())
     }
@@ -143,6 +183,27 @@ pub struct ApiResponse {
     pub body: Vec<u8>,
 }
 
+/// Why a private request failed. Plain messages stay in the node's own
+/// errors; a response carries only the code and, for a pool rejection, the
+/// reason.
+#[derive(Debug)]
+enum Failure {
+    Message(String),
+    PoolRejected(PoolRejection),
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_owned())
+    }
+}
+
 /// Simulations have no pending-pool lifecycle. Release their capacity even if
 /// the backend errors or the HTTP task is cancelled while awaiting execution.
 struct SimulationRegistration {
@@ -225,19 +286,27 @@ impl PrivateApi {
                 body: serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"result":result}))
                     .expect("serializable RPC result"),
             },
-            Err(error) if error.starts_with("resynchronisation required") => {
+            Err(Failure::PoolRejected(rejection)) => rpc_error_data(
+                id,
+                -32013,
+                "transaction pool rejected",
+                json!({"reason":rejection.reason()}),
+            ),
+            Err(Failure::Message(error)) if error.starts_with("resynchronisation required") => {
                 rpc_error(id, -32011, "policy resynchronisation required")
             }
-            Err(_) => rpc_error(id, -32000, "private execution request rejected"),
+            Err(Failure::Message(_)) => rpc_error(id, -32000, "private execution request rejected"),
         }
     }
 
-    async fn dispatch(&self, mut request: RpcRequest, now: i64) -> Result<Value, String> {
+    async fn dispatch(&self, mut request: RpcRequest, now: i64) -> Result<Value, Failure> {
+        let boot_id = self.runtime.boot_id();
         match request.method.as_str() {
             "ops_policyStatus" => {
                 require_count(&request.params, 0)?;
                 let latest = self.runtime.feed.latest()?;
                 let mut capabilities = self.backend.capabilities();
+                capabilities.extend(API_CAPABILITIES.map(str::to_owned));
                 capabilities.sort();
                 capabilities.dedup();
                 let complete = REQUIRED_CAPABILITIES
@@ -255,7 +324,7 @@ impl PrivateApi {
                     })
                     .unwrap_or((0, String::new(), 0));
                 Ok(
-                    json!({"protocol_version":1,"network":self.runtime.network(),"capabilities":capabilities,"version":version,"digest":digest,"expires_at":expires,"ready":fresh&&complete,"reason":if !complete{"runtime_incomplete"}else if !fresh{"facts_unavailable"}else{""}}),
+                    json!({"protocol_version":1,"network":self.runtime.network(),"capabilities":capabilities,"version":version,"digest":digest,"expires_at":expires,"ready":fresh&&complete,"reason":if !complete{"runtime_incomplete"}else if !fresh{"facts_unavailable"}else{""},"boot_id":boot_id}),
                 )
             }
             "ops_policyApply" => {
@@ -280,7 +349,7 @@ impl PrivateApi {
                 .await
                 .map_err(|_| "policy ingestion unavailable")??;
                 Ok(
-                    json!({"version":facts.version(),"digest":hex::encode(facts.digest()),"expires_at":facts.expires_at()}),
+                    json!({"version":facts.version(),"digest":hex::encode(facts.digest()),"expires_at":facts.expires_at(),"boot_id":boot_id}),
                 )
             }
             "ops_transactionStatus" => {
@@ -318,7 +387,7 @@ impl PrivateApi {
                         .map_err(|_| "status lookup failed")??;
                 Ok(
                     json!({"transaction_hash":format!("{hash:#x}"),"principal_id":identity.principal_id,
-                    "org_id":identity.org_id,"context_id":identity.context_id,"execution":execution}),
+                    "org_id":identity.org_id,"context_id":identity.context_id,"execution":execution,"boot_id":boot_id}),
                 )
             }
             "ops_submitTransaction" => {
@@ -333,11 +402,22 @@ impl PrivateApi {
                 let (runtime, clock) = (self.runtime.clone(), self.clock.clone());
                 // Verification, decoding, signer recovery and admission are CPU
                 // work: one pool job, with the clock read when it runs.
-                let (identity, raw, hash, context_id) = self
+                let (admission, raw, hash, signer) = self
                     .cpu
                     .run(move || admit_transaction(&runtime, &identity, &raw, clock()))
                     .await??;
-                match self.backend.submit(identity, raw.into()).await? {
+                let (identity, registration) = match admission {
+                    Admission::Installed {
+                        identity,
+                        registration,
+                    } => (identity, Some(registration)),
+                    // A newer identity for this binding is installed (a
+                    // renewal won the race): this attempt is a duplicate. The
+                    // transaction is still offered to the pool.
+                    Admission::Dominated(identity) => (identity, None),
+                };
+                let context_id = identity.context_id.clone();
+                match self.backend.submit(identity, raw.into(), signer).await? {
                     PoolSubmission::Inserted(inserted) if inserted != hash => {
                         return Err("transaction pool returned a different hash".into());
                     }
@@ -348,9 +428,24 @@ impl PrivateApi {
                     // admitted above lets it execute, so the resend is
                     // accepted and retries are idempotent.
                     PoolSubmission::AlreadyKnown => {}
+                    // Already included (own canonical receipt): the identity
+                    // stays for a reorg before finality.
+                    PoolSubmission::Included => {}
+                    // The pool refused these bytes definitively for now: undo
+                    // exactly this installation (never a newer one), so the
+                    // slot is released or the identity it replaced, which a
+                    // reorg may still need, is restored. Ambiguous or transient
+                    // failures (an `Err` above) keep the registration: an
+                    // identity without a pooled transaction executes nothing.
+                    PoolSubmission::Rejected(rejection) => {
+                        if let Some(registration) = registration {
+                            self.runtime.identities.revert(registration)?;
+                        }
+                        return Err(Failure::PoolRejected(rejection));
+                    }
                 }
                 Ok(
-                    json!({"transaction_hash":format!("{hash:#x}"),"context_id":context_id,"status":"accepted"}),
+                    json!({"transaction_hash":format!("{hash:#x}"),"context_id":context_id,"status":"accepted","boot_id":boot_id}),
                 )
             }
             "ops_simulate" => {
@@ -367,14 +462,17 @@ impl PrivateApi {
                     .cpu
                     .run(move || admit_simulation(&runtime, &identity, &encoded, clock()))
                     .await??;
-                self.backend.simulate(identity, request, exact.into()).await
+                Ok(self
+                    .backend
+                    .simulate(identity, request, exact.into())
+                    .await?)
             }
             _ => Err("unknown private method".into()),
         }
     }
 }
 
-type AdmittedTransaction = (Identity, Vec<u8>, B256, String);
+type AdmittedTransaction = (Admission, Vec<u8>, B256, Address);
 
 /// Pool job: verify the identity once, decode the raw transaction, recover its
 /// signer, check the binding and facts, then register the identity.
@@ -414,14 +512,13 @@ fn admit_transaction(
         return Err("transaction identity mismatch".into());
     }
     runtime.feed.pin(now, identity.min_snapshot_version)?;
-    let context_id = identity.context_id.clone();
     // The identity is registered before pool insertion, so a pooled
     // transaction never runs without it. An ambiguous pool result keeps the
     // registration; rebinding is refused by OPS's durable submission row, saved
     // before transport. A request cancelled after this point
     // leaves an identity without a pooled transaction: harmless, it expires.
-    let identity = runtime.admit_identity(verified, now)?;
-    Ok((identity, raw, hash, context_id))
+    let admission = runtime.admit_transaction(verified, now)?;
+    Ok((admission, raw, hash, recovered))
 }
 
 type AdmittedSimulation = (Identity, SimulationRequest, Vec<u8>, SimulationRegistration);
@@ -470,6 +567,15 @@ fn require_count(params: &[Value], count: usize) -> Result<(), String> {
         return Err("invalid private parameters".into());
     }
     Ok(())
+}
+fn rpc_error_data(id: Value, code: i32, message: &str, data: Value) -> ApiResponse {
+    ApiResponse {
+        status: 200,
+        body: serde_json::to_vec(
+            &json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message,"data":data}}),
+        )
+        .expect("serializable RPC error"),
+    }
 }
 fn rpc_error(id: Value, code: i32, message: &str) -> ApiResponse {
     ApiResponse {
