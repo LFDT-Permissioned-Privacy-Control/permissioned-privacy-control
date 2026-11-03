@@ -61,7 +61,7 @@ Transaction bindings are indexed by signed transaction hash. Simulation bindings
 
 Ingestion is acknowledged and retried idempotently. OPS forwards a transaction only after its context is accepted, or records an explicit pending-context state. Reth resolves current memberships, links and bans from the immutable snapshot selected for that execution. A signed identity cannot freeze old permissions. Binding conflicts are errors, never last-writer-wins.
 
-Snapshot version assignment is serialised in Postgres commit order. The fact mutation and outbox row are atomic. The node applies whole batches, pins immutable state per candidate block, and checkpoints acknowledged state. Lag beyond the hard validity bound prevents execution. Historical produced-block manifests retain the exact snapshot, policy revisions and principal contexts needed for self-import/replay; ordinary user queries still use current access rights.
+Snapshot version assignment is serialised in Postgres commit order. The fact mutation, its version and its changed keys are atomic. The node applies whole batches, pins immutable state per candidate block, and checkpoints acknowledged state. Lag beyond the hard validity bound prevents execution. Historical produced-block manifests retain the exact snapshot, policy revisions and principal contexts needed for self-import/replay; ordinary user queries still use current access rights.
 
 ## Implementation and evidence index
 

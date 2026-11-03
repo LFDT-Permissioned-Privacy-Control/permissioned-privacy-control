@@ -110,13 +110,38 @@ same registered ABI or configuration workflow.
 
 ## How changing facts reach Reth
 
-PostgreSQL remains authoritative. Relevant row changes update a commit-ordered
-version and outbox in the same database transaction. The publisher exports one
-consistent database generation, including active policy artifacts. It sends a
-full snapshot to bootstrap or resynchronize, otherwise a delta containing
-upserts and explicit deletions. Each envelope is signed with the OPS Ed25519
-key and bound to the chain and deployment. Reth verifies it using configured
-public keys over a separate authenticated private endpoint.
+PostgreSQL remains authoritative. A change to a column the fact export reads
+(the dependency set in `node_policy_export.go`) advances one commit-ordered
+version, once per database transaction, and records the changed keys
+(principal, DID, group, contract, organisation policy, sanction) in a change
+log, in that same transaction. Changes to anything else (names, notes,
+metadata, login timestamps) do not move the version.
+
+Publication is event driven. The transaction that advances the version sends
+`node_policy_changed` at commit; the elected publisher listens on its own
+database session and publishes at once. Notifications that arrive while it is
+publishing collapse into one more publication. The one-second publication
+interval remains as the heartbeat and the fallback when the subscription is
+lost; a resubscription publishes at once, because changes may have been
+missed meanwhile. The publisher exports only the keys changed since the
+generation the node acknowledged, in one consistent database snapshot,
+including active policy artifacts. It reads every fact again when the change
+log cannot describe the gap (it was pruned past that generation, a fact table
+was truncated, or the change is large), when the incremental read fails, at
+every checkpoint, after a publisher restart or failover (it cannot know how
+the node's facts were built), and at least every five minutes, when it also
+compares the incrementally published facts with a full export and republishes
+in full on any difference. The change log is written only through
+security-definer functions, so the runtime role can add keys or prune through
+an acknowledged version but cannot remove a change unseen; without a
+publisher it keeps the last 8,192 versions. It sends a full snapshot
+to bootstrap or resynchronize, otherwise a delta containing upserts and
+explicit deletions. Each envelope is signed with the OPS Ed25519 key and bound
+to the chain and deployment. Reth verifies it using configured public keys over
+a separate authenticated private endpoint. Recording the node's acknowledgement
+prunes the change log through that version and sends `node_policy_applied`,
+which makes every OPS instance re-read the node's status at once instead of at
+its next one-second check.
 
 ```mermaid
 sequenceDiagram
@@ -126,20 +151,22 @@ sequenceDiagram
     participant Node as Reth fact receiver
     participant Exec as Reth execution
     Admin->>DB: Remove membership or activate rules
-    DB->>DB: Commit rows and ordered change version together
-    Pub->>DB: Read consistent committed generation
+    DB->>DB: Commit rows, ordered change version and changed keys together
+    DB-->>Pub: node_policy_changed (at commit)
+    Pub->>DB: Read the changed keys in one consistent generation
     Pub->>Node: Signed snapshot or delta via ops_policyApply
     Node->>Node: Verify signature, network, version and complete graph
     Node->>Node: Apply and checkpoint complete update
     Node-->>Pub: Acknowledge applied version and digest
-    Pub->>DB: Record acknowledgement
+    Pub->>DB: Record acknowledgement, prune the change log
+    DB-->>Pub: node_policy_applied (every OPS instance refreshes node status)
     Exec->>Node: Pin fresh immutable snapshot for next candidate
     loop No new changes
         Pub->>Node: Signed heartbeat for installed version and digest
     end
 ```
 
-Defaults are a **one-second publication interval**, **30-second fact freshness
+Defaults are a **one-second heartbeat interval**, **30-second fact freshness
 lease** and **one-minute identity lifetime**. A heartbeat renews freshness; it
 does not change facts. Missing versions require resynchronization. Invalid,
 missing or expired facts prevent new execution.
@@ -282,12 +309,12 @@ flowchart TB
     subgraph OPSProc["OPS process"]
         SignKey["Ed25519 signing private key file"]
         NodeToken["Bearer token for the private node API"]
-        LastSnap["Elected publisher: last published snapshot,<br/>in memory, for building deltas"]
+        LastSnap["Elected publisher: last published snapshot,<br/>in memory, patched with changed keys into deltas"]
     end
     subgraph PG["OPS PostgreSQL, authoritative"]
         Directory["Directory facts: users, memberships, linked addresses,<br/>groups and access, contracts and grants,<br/>shared infrastructure, preregistered addresses, sanctions"]
         Config["Configuration revisions and active execution<br/>policy revisions with compiled per-group artifacts"]
-        Feed["node_policy_clock, node_policy_outbox,<br/>node_policy_cursors (acknowledged version)"]
+        Feed["node_policy_clock, node_policy_changes (changed keys,<br/>pruned at acknowledgement), node_policy_cursors (acknowledged version)"]
         Subs["node_submissions: raw transaction, identity envelope,<br/>principal, organization, signer, visibility, state"]
         Visibility["pending_tx_visibility, tx_visible_to"]
         Audit["rbac_audit_log, hash-chained"]

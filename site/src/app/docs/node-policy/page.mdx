@@ -161,7 +161,13 @@ seed or private key. Configure the corresponding public key and matching network
 identity in the Reth launcher. Keep its private endpoint off user-facing networks.
 
 The default fact lifetime is 30 seconds, publication interval one second and
-identity lifetime one minute.
+identity lifetime one minute. OPS publishes a fact change as soon as it
+commits; the publication interval is the heartbeat that renews the facts'
+lifetime and the fallback while change notifications are interrupted. Only
+changes to what the node enforces start a publication: memberships and their
+expiry, linked addresses, bans and KYC, groups and their claims, contract
+ownership and grants, shared infrastructure, preregistered addresses, sanctions
+and active execution policies. Edits to names, notes or metadata do not.
 
 OPS keeps its connections to the private endpoint open and splits them into
 three bounded pools, so a burst of transactions never delays fact
@@ -197,7 +203,9 @@ than running stale; a lifetime under about fifteen seconds leaves no room for
 that takeover.
 The lease needs a direct database connection or a session-pooling proxy;
 transaction pooling (PgBouncer in transaction mode) breaks session-level
-advisory locks and would leave the lease orphaned. With a pooler on another
+advisory locks and would leave the lease orphaned. Change notifications
+(PostgreSQL `LISTEN`/`NOTIFY`) need the same; without them OPS still publishes,
+but only at the publication interval. With a pooler on another
 host the database's keepalives only reach the pooler, so give the pooler client
 keepalives of a similar bound, or a vanished OPS host holds the lease until the
 pooler notices on its own. Keep

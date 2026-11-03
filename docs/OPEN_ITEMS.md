@@ -420,6 +420,14 @@ representative contracts on the intended hardware and block configuration.
 The reciprocal of an in-process policy-check time excludes this work and cannot
 be quoted as achieved node TPS.
 
+**Resolved on the OPS side (fact-change refusals):** the fact version now
+advances only when a column the fact export reads changes, once per database
+transaction. The publisher is woken by `LISTEN`/`NOTIFY` at commit instead of
+its one-second timer (in tests a fact change reached the node in a few
+milliseconds), and it exports only the keys changed since the generation the
+node acknowledged, with a full export at checkpoints, at least every five
+minutes, and whenever the change log cannot describe the gap.
+
 Evidence: [load results and durability analysis](implementation/evidence/reth-runtime.md#where-the-stacks-throughput-actually-goes-2026-09-17),
 [current policy cost and theoretical ceiling](implementation/evidence/per-group-live-2026-09-25.md#theoretical-throughput-from-policy-cost).
 

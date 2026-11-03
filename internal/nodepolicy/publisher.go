@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"log/slog"
+	"reflect"
 	"slices"
 	"sync"
 	"time"
@@ -18,6 +20,13 @@ type FactNode interface {
 	PolicyStatus(context.Context) (NodeStatus, error)
 	ApplyPolicy(context.Context, []byte) (AppliedState, error)
 }
+
+// FactRepublisher can force the next publication to be a full export, by
+// recording a change the incremental export cannot describe.
+type FactRepublisher interface {
+	RequestFullNodePolicyExport(context.Context) error
+}
+
 type PublisherConfig struct {
 	Network    Network
 	ConsumerID string
@@ -26,6 +35,10 @@ type PublisherConfig struct {
 	Node       FactNode
 	Lifetime   time.Duration
 	Now        func() time.Time
+	// Wake, when set, makes Run publish at once instead of at the next
+	// heartbeat. Senders fill it without blocking (capacity 1), so any number
+	// of signals during a publication cause at most one more (RD-1411 §5.2).
+	Wake <-chan struct{}
 }
 type Publisher struct {
 	mu         sync.Mutex
@@ -34,7 +47,21 @@ type Publisher struct {
 	lastDigest string
 	deltaCount int
 	deltaBytes int
+	// lastFull is when facts were last read in full from the source.
+	lastFull time.Time
+	// anchorRequested: this publisher found the node holding facts it did not
+	// publish itself (a restart or failover) and asked for a full export.
+	anchorRequested bool
 }
+
+// ErrFactDivergence means the facts published incrementally differ from a
+// full export of the same generation. The publisher requests a full
+// republication, which corrects the node.
+var ErrFactDivergence = errors.New("incrementally published facts differ from the full export")
+
+// fullExportEvery bounds how long incrementally published facts go without
+// being compared with, or replaced by, a full export (RD-1411 §5.6).
+const fullExportEvery = 5 * time.Minute
 
 // Keep replay checkpoints comfortably below the node's signed-history bounds.
 const maxCheckpointDeltas = 128
@@ -80,42 +107,80 @@ func (p *Publisher) Tick(ctx context.Context) error {
 	var payload any
 	var snapshot *Snapshot
 	var expected AppliedState
+	fromFull := false // the published facts were read in full in this tick
+	matchesNode := p.last != nil && p.last.Version == status.Version && p.lastDigest == status.Digest
 	if status.Version == version {
 		if !hexDigest(status.Digest) {
 			return ErrNodeResponse
+		}
+		if matchesNode && at.Sub(p.lastFull) >= fullExportEvery {
+			if err := p.verify(ctx, at); err != nil {
+				return err
+			}
+		}
+		if p.last == nil && !p.anchorRequested {
+			// The node holds facts another publisher (or this process before
+			// a restart) may have built incrementally; nothing here can
+			// compare them, so the next publication reads every fact.
+			if r, ok := c.Source.(FactRepublisher); ok {
+				if _, incremental := c.Source.(IncrementalFactSource); incremental {
+					if err := r.RequestFullNodePolicyExport(ctx); err != nil {
+						return err
+					}
+				}
+			}
+			p.anchorRequested = true
 		}
 		kind = "heartbeat"
 		payload = Heartbeat{Header: header, Version: version, Digest: status.Digest}
 		expected = AppliedState{Version: version, Digest: status.Digest, ExpiresAt: header.ExpiresAt}
 	} else {
-		exported, err := c.Source.ExportNodePolicySnapshot(ctx, c.Network, at, c.Lifetime)
-		if err != nil {
-			return err
+		canDelta := matchesNode && p.deltaCount < maxCheckpointDeltas && p.deltaBytes < maxCheckpointDeltaBytes
+		var next *Snapshot
+		var delta *Delta
+		if incremental, ok := c.Source.(IncrementalFactSource); ok && canDelta && at.Sub(p.lastFull) < fullExportEvery {
+			patched, d, err := p.exportIncremental(ctx, incremental, header, version)
+			if err != nil {
+				// Never worse than the full export: read everything instead.
+				slog.Warn("incremental fact export failed; exporting every fact", "error", err)
+			} else if patched != nil {
+				next, delta = patched, d
+			}
 		}
-		if exported.Version < version || exported.Version <= status.Version || exported.Header != header {
-			return ErrSnapshot
-		}
-		if _, err := Pin(exported); err != nil {
-			return err
-		}
-		snapshot = &exported
-		kind, payload = "snapshot", exported
-		if p.last != nil && p.last.Version == status.Version && p.lastDigest == status.Digest && p.deltaCount < maxCheckpointDeltas && p.deltaBytes < maxCheckpointDeltaBytes {
-			delta, err := BuildDelta(*p.last, p.lastDigest, exported)
+		if next == nil {
+			exported, err := p.exportFull(ctx, at, header, version, status.Version)
 			if err != nil {
 				return err
 			}
-			kind, payload = "delta", delta
+			next, fromFull = &exported, true
+			if canDelta {
+				d, err := BuildDelta(*p.last, p.lastDigest, exported)
+				if err != nil {
+					return err
+				}
+				delta = &d
+			}
 		}
-		expected = AppliedState{Version: exported.Version, ExpiresAt: header.ExpiresAt}
+		snapshot = next
+		kind, payload = "snapshot", *next
+		if delta != nil {
+			kind, payload = "delta", *delta
+		}
+		expected = AppliedState{Version: next.Version, ExpiresAt: header.ExpiresAt}
 	}
 	wire, err := c.Signer.Seal(kind, payload)
 	if err != nil {
 		return err
 	}
 	if kind == "delta" && p.deltaBytes+len(wire) > maxCheckpointDeltaBytes {
-		kind = "snapshot"
-		wire, err = c.Signer.Seal(kind, *snapshot)
+		// The checkpoint re-anchors on a fresh full export.
+		exported, err := p.exportFull(ctx, at, header, version, status.Version)
+		if err != nil {
+			return err
+		}
+		snapshot, kind, fromFull = &exported, "snapshot", true
+		expected.Version = exported.Version
+		wire, err = c.Signer.Seal(kind, exported)
 		if err != nil {
 			return err
 		}
@@ -129,10 +194,14 @@ func (p *Publisher) Tick(ctx context.Context) error {
 	}
 	ack, err := c.Node.ApplyPolicy(ctx, wire)
 	if errors.Is(err, ErrNodeResync) && kind == "delta" {
-		// The rejected delta never advanced the node. Replace it with this
-		// same coherent, strictly newer database generation.
-		kind = "snapshot"
-		wire, err = c.Signer.Seal(kind, *snapshot)
+		// The rejected delta never advanced the node. Replace it with a fresh
+		// full export: a strictly newer, coherent database generation.
+		exported, exportErr := p.exportFull(ctx, at, header, version, status.Version)
+		if exportErr != nil {
+			return exportErr
+		}
+		snapshot, kind, fromFull = &exported, "snapshot", true
+		wire, err = c.Signer.Seal(kind, exported)
 		if err != nil {
 			return err
 		}
@@ -140,7 +209,7 @@ func (p *Publisher) Tick(ctx context.Context) error {
 		if err := decodeStrict(wire, &envelope); err != nil {
 			return err
 		}
-		expected.Digest = PayloadDigest(envelope.Payload)
+		expected = AppliedState{Version: exported.Version, Digest: PayloadDigest(envelope.Payload), ExpiresAt: header.ExpiresAt}
 		ack, err = c.Node.ApplyPolicy(ctx, wire)
 	}
 	if err != nil {
@@ -157,7 +226,11 @@ func (p *Publisher) Tick(ctx context.Context) error {
 		p.lastDigest = ack.Digest
 		if kind == "snapshot" {
 			p.deltaCount, p.deltaBytes = 0, 0
-		} else {
+		}
+		if fromFull {
+			p.lastFull = at
+		}
+		if kind == "delta" {
 			p.deltaCount++
 			p.deltaBytes += len(wire)
 		}
@@ -165,8 +238,100 @@ func (p *Publisher) Tick(ctx context.Context) error {
 	return nil
 }
 
+// exportIncremental reads the changes since p.last and patches them in. A nil
+// snapshot without an error means the change log cannot describe the gap.
+func (p *Publisher) exportIncremental(ctx context.Context, source IncrementalFactSource, header Header, version uint64) (*Snapshot, *Delta, error) {
+	changes, err := source.ExportNodePolicyChanges(ctx, *p.last)
+	if err != nil || changes.Full {
+		return nil, nil, err
+	}
+	patched, d, err := ApplyChanges(*p.last, p.lastDigest, header, changes)
+	if err != nil {
+		return nil, nil, err
+	}
+	if patched.Version < version {
+		return nil, nil, ErrSnapshot
+	}
+	if _, err := Pin(patched); err != nil {
+		return nil, nil, err
+	}
+	return &patched, &d, nil
+}
+
+// exportFull reads every fact and checks the export is a coherent generation
+// newer than the node's.
+func (p *Publisher) exportFull(ctx context.Context, at time.Time, header Header, version, nodeVersion uint64) (Snapshot, error) {
+	c := p.config
+	exported, err := c.Source.ExportNodePolicySnapshot(ctx, c.Network, at, c.Lifetime)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if exported.Version < version || exported.Version <= nodeVersion || exported.Header != header {
+		return Snapshot{}, ErrSnapshot
+	}
+	if _, err := Pin(exported); err != nil {
+		return Snapshot{}, err
+	}
+	return exported, nil
+}
+
+// verify compares the facts the node holds (published incrementally) with a
+// full export of the same generation. A difference is reported and a full
+// republication requested, so a divergence lasts at most fullExportEvery
+// plus one publication.
+func (p *Publisher) verify(ctx context.Context, at time.Time) error {
+	c := p.config
+	if _, ok := c.Source.(IncrementalFactSource); !ok {
+		p.lastFull = at
+		return nil
+	}
+	full, err := c.Source.ExportNodePolicySnapshot(ctx, c.Network, at, c.Lifetime)
+	if err != nil {
+		return err
+	}
+	if full.Version != p.last.Version {
+		return nil // a change landed meanwhile; its publication reads in full
+	}
+	if sameFacts(*p.last, full) {
+		p.lastFull = at
+		return nil
+	}
+	if r, ok := c.Source.(FactRepublisher); ok {
+		if err := r.RequestFullNodePolicyExport(ctx); err != nil {
+			return err
+		}
+	}
+	p.lastFull = time.Time{}
+	return ErrFactDivergence
+}
+
+// sameFacts reports whether two snapshots hold the same facts, whatever their
+// order.
+func sameFacts(a, b Snapshot) bool {
+	a, b = cloneSnapshot(a), cloneSnapshot(b)
+	empty := func(upserts any, deletes []string) bool {
+		return reflect.ValueOf(upserts).Len() == 0 && len(deletes) == 0
+	}
+	if u, d := diffFacts(a.Principals, b.Principals, principalKey); !empty(u, d) {
+		return false
+	}
+	if u, d := diffFacts(a.Groups, b.Groups, groupKey); !empty(u, d) {
+		return false
+	}
+	if u, d := diffFacts(a.Contracts, b.Contracts, contractKey); !empty(u, d) {
+		return false
+	}
+	if u, d := diffFacts(a.Policies, b.Policies, policyKey); !empty(u, d) {
+		return false
+	}
+	u, d := diffFacts(a.Sanctions, b.Sanctions, sanctionKey)
+	return empty(u, d)
+}
+
 // Run keeps retrying through transient outages. The node's lease enforces the
 // staleness bound while unavailable; errors are reported without hiding them.
+// It publishes on every Wake signal and, as heartbeat and fallback when
+// notifications are lost, every interval.
 func (p *Publisher) Run(ctx context.Context, interval time.Duration, report func(error)) error {
 	if interval <= 0 || interval > p.config.Lifetime/3 {
 		return errors.New("fact publish interval exceeds freshness budget")
@@ -182,6 +347,7 @@ func (p *Publisher) Run(ctx context.Context, interval time.Duration, report func
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timer.C:
+		case <-p.config.Wake:
 		}
 	}
 }

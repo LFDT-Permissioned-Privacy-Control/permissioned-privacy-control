@@ -439,6 +439,35 @@ func nodeErrorClass(err error) string {
 	}
 }
 
+// runNodePolicyNotifications connects the database's fact-stream
+// notifications to this instance (RD-1411 §5.2, §5.4) until ctx ends: a fact
+// change wakes the publisher (only the elected term reads wake), an
+// acknowledgement refreshes the node status cache through kick, and a
+// resubscription does both, since notifications may have been missed. Losing
+// the subscription is logged at most once per failureLogEvery.
+func runNodePolicyNotifications(ctx context.Context, listen func(context.Context, db.NodePolicyListener) error, wake chan<- struct{}, kick func()) {
+	signal := func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	var lost loggate.Gate
+	_ = listen(ctx, db.NodePolicyListener{
+		Changed: func(uint64) { signal() },
+		Applied: func(uint64) { kick() },
+		Connected: func() {
+			signal()
+			kick()
+		},
+		Lost: func(err error) {
+			if suppressed, ok := lost.Allow("listen", time.Now(), failureLogEvery); ok {
+				slog.Warn("node policy notifications interrupted; publishing on the timer until resubscribed", "error", err, "suppressed", suppressed)
+			}
+		},
+	})
+}
+
 func (s *Server) initNodePolicy() error {
 	c := s.config.NodePolicy
 	if err := c.Validate(); err != nil {
@@ -460,7 +489,14 @@ func (s *Server) initNodePolicy() error {
 	if err != nil {
 		return err
 	}
-	publisher, err := nodepolicy.NewPublisher(nodepolicy.PublisherConfig{Network: network, ConsumerID: c.ConsumerID, Signer: signer, Source: s.db, Node: observingFactNode{node: client, bridge: bridge}, Lifetime: c.FactTTL})
+	schemaCtx, cancelSchema := context.WithTimeout(context.Background(), 10*time.Second)
+	err = s.db.CheckNodePolicySchema(schemaCtx)
+	cancelSchema()
+	if err != nil {
+		return fmt.Errorf("node policy: %w", err)
+	}
+	wake := make(chan struct{}, 1)
+	publisher, err := nodepolicy.NewPublisher(nodepolicy.PublisherConfig{Network: network, ConsumerID: c.ConsumerID, Signer: signer, Source: s.db, Node: observingFactNode{node: client, bridge: bridge}, Lifetime: c.FactTTL, Wake: wake})
 	if err != nil {
 		return err
 	}
@@ -471,6 +507,13 @@ func (s *Server) initNodePolicy() error {
 	// Every instance probes the node's status (it serves requests whether or
 	// not it publishes); the probe stops with the node-policy context.
 	waitProbe := bridge.startStatusProbe(ctx, time.Second)
+	// Fact changes wake the publisher and acknowledgements refresh every
+	// instance's node status at once; both timers stay as fallback.
+	notifyDone := make(chan struct{})
+	go func() {
+		defer close(notifyDone)
+		runNodePolicyNotifications(ctx, s.db.ListenNodePolicy, wake, bridge.kickProbe)
+	}()
 	report := func(err error) {
 		if ctx.Err() == nil {
 			slog.Warn("node policy publication pending", "error", err)
@@ -485,6 +528,7 @@ func (s *Server) initNodePolicy() error {
 	go func() {
 		defer close(s.nodePolicyDone)
 		defer waitProbe()
+		defer func() { <-notifyDone }()
 		_ = nodepolicy.RunElected(ctx, s.db.NodePolicyLease(), c.PublishInterval, func(term context.Context) {
 			slog.Info("node policy publisher elected", "consumer_id", c.ConsumerID)
 			defer slog.Info("node policy publisher term ended", "consumer_id", c.ConsumerID)
