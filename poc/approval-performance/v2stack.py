@@ -6,11 +6,13 @@ Engine API block driver as the V1 stack. Only the node (ops-reth, policy
 enforced in the node, no preflight) and OPS's execution mode differ.
 """
 import base64
+import contextlib
 import json
 import os
 from pathlib import Path
 import secrets
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -63,24 +65,49 @@ class V2Node(h.Node):
         env = dict(os.environ, RUST_LOG="info", OPS_POLICY_DECISION_LOG="1" if self.decision_log else "0", OPS_NODE_POLICY_CHAIN_ID="31337", OPS_NODE_POLICY_DEPLOYMENT_ID=deployment,
                    OPS_NODE_POLICY_PUBLIC_KEYS=json.dumps({"perf": public_key}), OPS_NODE_POLICY_LISTEN=self.private_url.removeprefix("http://"),
                    OPS_NODE_POLICY_TOKEN=token, OPS_NODE_POLICY_STATE_DIR=str(self.state_dir))
-        self.process = subprocess.Popen(args, cwd=h.ROOT, env=env, stdout=self.stdout, stderr=self.log,
-                                        start_new_session=os.environ.get("OPS_POC_DETACH_CHILDREN") == "1")
+        self.args, self.env = args, env
+        self.spawn()
         try:
-            for _ in range(600):
-                if self.process.poll() is not None:
-                    raise RuntimeError((self.stdout_path.read_text() + self.log_path.read_text())[-8000:])
-                try:
-                    self.rpc("web3_clientVersion")
-                    break
-                except (OSError, urllib.error.URLError):
-                    time.sleep(0.1)
-            else:
-                raise RuntimeError("ops-reth startup timed out")
+            self.wait_rpc()
             self.head = self.rpc("eth_getBlockByNumber", "latest", False)
             assert int(self.head["number"], 16) == 0
         except BaseException:
             self.close()
             raise
+
+    def spawn(self):
+        self.process = subprocess.Popen(self.args, cwd=h.ROOT, env=self.env, stdout=self.stdout, stderr=self.log,
+                                        start_new_session=os.environ.get("OPS_POC_DETACH_CHILDREN") == "1")
+
+    def wait_rpc(self):
+        for _ in range(600):
+            if self.process.poll() is not None:
+                raise RuntimeError((self.stdout_path.read_text() + self.log_path.read_text())[-8000:])
+            try:
+                self.rpc("web3_clientVersion")
+                return
+            except (OSError, urllib.error.URLError, RuntimeError):
+                time.sleep(0.1)
+        raise RuntimeError("ops-reth startup timed out")
+
+    def stop(self, sig=signal.SIGKILL, timeout=60):
+        """Stop the node process: SIGKILL is a crash, SIGTERM a clean stop."""
+        if self.process.poll() is None:
+            self.process.send_signal(sig)
+            self.process.wait(timeout=timeout)
+        # Keep-alive connections to the stopped process are dead.
+        with self.rpc_connections_lock:
+            for connection in self.rpc_connections:
+                connection.close()
+            self.rpc_connections.clear()
+        self.rpc_local = threading.local()
+
+    def start(self):
+        """Start again on the same data and policy state directories and ports
+        (live acceptance: restarts and outages)."""
+        self.spawn()
+        self.wait_rpc()
+        self.head = self.rpc("eth_getBlockByNumber", "latest", False)
 
     def archive_bytes(self):
         # The running node writes and prunes meanwhile: skip what vanished.
@@ -132,6 +159,7 @@ class V2Stack(g.GasstormStack):
             seed_file.chmod(0o600)
             deployment, token = "perf-" + secrets.token_hex(4), secrets.token_hex(24)
             self.node = V2Node(name, deployment, base64.b64encode(public).decode(), token)
+            self.node_token, self.extra_ops = token, {}
             self.url = "http://127.0.0.1:" + str(h.unused_port())
             env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "TMPDIR", "LANG")}
             env.update(ENVIRONMENT="development", GIN_MODE="release", PORT=self.url.rsplit(":", 1)[1], BASE_URL=self.url,
@@ -148,19 +176,9 @@ class V2Stack(g.GasstormStack):
                        OPS_NODE_POLICY_CHAIN_ID="31337", OPS_NODE_POLICY_DEPLOYMENT_ID=deployment,
                        PLATFORM_ADMIN_SUBJECTS=",".join(REVIEWERS))
             env.update({k: v for k, v in (ops_env or {}).items() if not k.startswith("OPS_APPROVAL_")})
+            self.ops_environment = env
             self.opslog = (self.directory / "ops.log").open("w")
-            self.ops = subprocess.Popen([str(self.ops_binary)], cwd=self.directory, env=env, stdout=self.opslog, stderr=subprocess.STDOUT,
-                                        start_new_session=os.environ.get("OPS_POC_DETACH_CHILDREN") == "1")
-            for _ in range(300):
-                if self.ops.poll() is not None:
-                    raise RuntimeError((self.directory / "ops.log").read_text()[-7000:])
-                try:
-                    request(self.url + "/health")
-                    break
-                except (OSError, RuntimeError):
-                    time.sleep(.1)
-            else:
-                raise RuntimeError("OPS startup timed out")
+            self.ops = self.spawn_ops(env, self.opslog, self.url, self.directory / "ops.log")
             self.seed()
             self.activate_execution_policy()
             # Blocks may only be built once the node holds fresh facts for the
@@ -178,6 +196,53 @@ class V2Stack(g.GasstormStack):
         except BaseException:
             self.close()
             raise
+
+    def spawn_ops(self, env, log, url, log_path):
+        process = subprocess.Popen([str(self.ops_binary)], cwd=self.directory, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=os.environ.get("OPS_POC_DETACH_CHILDREN") == "1")
+        for _ in range(300):
+            if process.poll() is not None:
+                raise RuntimeError(log_path.read_text()[-7000:])
+            try:
+                request(url + "/health")
+                return process
+            except (OSError, RuntimeError):
+                time.sleep(.1)
+        process.kill()
+        process.wait(timeout=5)
+        raise RuntimeError("OPS startup timed out")
+
+    def stop_ops(self, sig=signal.SIGKILL):
+        """Stop the first OPS instance (SIGKILL: crash)."""
+        if self.ops.poll() is None:
+            self.ops.send_signal(sig)
+            self.ops.wait(timeout=30)
+
+    def start_ops(self):
+        """Start the first OPS instance again with the same settings, port and audit buffer."""
+        self.ops = self.spawn_ops(self.ops_environment, self.opslog, self.url, self.directory / "ops.log")
+
+    def start_extra_ops(self, name):
+        """A further OPS instance on the same databases and node (its own port
+        and audit buffer); restarting the same name reuses both. Returns its URL."""
+        if name in self.extra_ops:
+            url, env, log, _ = self.extra_ops[name]
+        else:
+            url = "http://127.0.0.1:" + str(h.unused_port())
+            env = dict(self.ops_environment, PORT=url.rsplit(":", 1)[1], BASE_URL=url,
+                       AUDIT_BUFFER_DIR=str(self.directory / ("audit-buffer-" + name)))
+            log = (self.directory / f"ops-{name}.log").open("w")
+            # Registered before the start, so close() also closes a failed one's log.
+            self.extra_ops[name] = (url, env, log, None)
+        process = self.spawn_ops(env, log, url, self.directory / f"ops-{name}.log")
+        self.extra_ops[name] = (url, env, log, process)
+        return url
+
+    def stop_extra_ops(self, name, sig=signal.SIGKILL):
+        url, env, log, process = self.extra_ops[name]
+        if process is not None and process.poll() is None:
+            process.send_signal(sig)
+            process.wait(timeout=30)
 
     def activate_execution_policy(self):
         """V2 executes only under an active, reviewed execution policy. Import
@@ -210,6 +275,27 @@ class V2Stack(g.GasstormStack):
     def close(self):
         # Every step runs even if an earlier one fails: containers must never outlive a run.
         try:
+            for name, (_, _, log, process) in getattr(self, "extra_ops", {}).items():
+                # One instance failing to stop never skips the others or the first.
+                try:
+                    if process is not None and process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=15)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                except Exception:
+                    pass
+                finally:
+                    log.close()
+                    with contextlib.suppress(OSError):
+                        shutil.copy2(self.directory / f"ops-{name}.log", h.EVIDENCE / (f"{self.name}-ops-{name}.log"))
+            if self.ops is None and getattr(self, "opslog", None) is not None:
+                # OPS never came up: keep its log as evidence, as before.
+                self.opslog.close()
+                with contextlib.suppress(OSError):
+                    shutil.copy2(self.directory / "ops.log", h.EVIDENCE / (self.name + "-ops.log"))
             if self.ops is not None:
                 try:
                     self.ops.terminate()
