@@ -171,7 +171,7 @@ sequenceDiagram
     OPS->>OPS: Sign identity bound to exact transaction hash
     OPS->>DB: Persist submission and visibility intent
     OPS->>Node: ops_submitTransaction(identity, raw transaction)
-    Node->>Node: Verify and retain identity and admit to pool
+    Node->>Node: Verify identity once, register it in memory, admit to pool
     Node-->>OPS: Accepted transaction hash
     OPS-->>User: Transaction hash (execution is still pending)
     Node->>EVM: Build candidate with pinned facts and identity
@@ -188,8 +188,10 @@ sequenceDiagram
 The signed identity names the **OPS principal**, organization, Ethereum signer,
 scope, request hash, context ID, network, expiry and minimum fact version.
 Several OPS principals can share one Ethereum signer and still have different
-permissions. Reth does not guess the principal from the address. The durable
-transaction binding cannot be replaced with another principal's identity.
+permissions. Reth does not guess the principal from the address. OPS's durable
+submission record binds the transaction hash to one principal before anything
+reaches the node, and the node refuses another principal while the identity's
+lease is valid.
 
 At each CALL, STATICCALL, DELEGATECALL, CALLCODE, CREATE or CREATE2 boundary,
 the guard observes the real frame. Code and storage addresses are separate,
@@ -301,7 +303,7 @@ flowchart TB
         end
         subgraph StateDir["Policy state directory"]
             Objects["objects: signed fact envelopes, checkpoints,<br/>identity envelopes, status records"]
-            Pointers["pointers: facts-head, tx-, status-, included-, terminal-"]
+            Pointers["pointers: facts-head, status-, included-"]
             Blocks["blocks: one execution manifest per produced block"]
         end
     end
@@ -318,11 +320,15 @@ flowchart TB
 
 Every applied fact update is retained as a signed object, and `facts-head`
 points at the latest checkpoint, so a restarted node resumes the same fact
-chain. A transaction identity is stored as an object with a `tx-` pointer when
-the node accepts it. At startup the node reloads identities that are unexpired
-and not yet terminal. The transaction pool itself is Reth's in-memory pool. Reth
-saves local pool transactions only on graceful shutdown, so a crash loses
-pooled transactions while OPS keeps their submission rows. A block manifest names the facts checkpoint
+chain. A pending transaction identity lives only in the node's memory, from
+admission until OPS observes the transaction's canonical receipt or its lease
+expires and a later admission reclaims it; admission does no storage I/O. A
+restarted node holds no pending identities: a pooled transaction cannot execute
+until it is submitted again through OPS, and OPS's submission row keeps the
+principal binding meanwhile. The transaction pool itself
+is Reth's in-memory pool. Reth saves local pool transactions only on graceful
+shutdown, so a crash loses pooled transactions while OPS keeps their submission
+rows. A block manifest names the facts checkpoint
 and the identity envelope behind every transaction in the block; self-import
 and forensic replay read it, ordinary queries do not.
 
@@ -339,8 +345,7 @@ sequenceDiagram
     OPS->>OPS: Sign identity bound to the transaction hash
     OPS->>DB: Insert node_submissions row, state queued
     OPS->>RT: ops_submitTransaction(identity, raw transaction)
-    RT->>Dir: Identity envelope object and tx- pointer
-    RT->>RT: Register pending identity
+    RT->>RT: Register pending identity, memory only
     RT->>Reth: Insert raw transaction into pool
     OPS->>DB: Mark row accepted
     Reth->>RT: Build candidate block with pinned facts
@@ -351,7 +356,6 @@ sequenceDiagram
     loop Reconciler until a final outcome
         OPS->>RT: ops_transactionStatus(hash)
         RT->>Reth: Canonical receipt and finalized head
-        RT->>Dir: terminal- pointer once a receipt is canonical
         RT->>RT: Release pending identity slot
         RT-->>OPS: included or reverted, finality, created contracts
         OPS->>DB: Update row state and outcome

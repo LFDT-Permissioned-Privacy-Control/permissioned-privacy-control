@@ -26,7 +26,8 @@ pub struct PolicyRuntime {
     pub identities: Arc<IdentityRegistry>,
     pub archive: Arc<ArtifactStore>,
     verifier: Verifier,
-    ingestion: Mutex<()>,
+    /// Serialises fact ingestion. Identity admission never takes it.
+    facts: Mutex<()>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -64,15 +65,17 @@ impl PolicyRuntime {
             identities: Arc::new(IdentityRegistry::new(verifier.clone(), capacity)),
             archive,
             verifier,
-            ingestion: Mutex::new(()),
+            facts: Mutex::new(()),
         }
     }
     pub fn verifier(&self) -> &Verifier {
         &self.verifier
     }
 
-    /// Restore retained facts and pending transaction bindings. Expired facts are
-    /// retained for stream continuity/status but `pin_candidate` still rejects.
+    /// Restore retained facts. Expired facts are retained for stream
+    /// continuity/status but `pin_candidate` still rejects. Pending identities
+    /// live in memory only and are not restored: a pooled transaction cannot
+    /// execute until it is submitted again through OPS.
     pub fn open(
         verifier: Verifier,
         archive: Arc<ArtifactStore>,
@@ -88,48 +91,41 @@ impl PolicyRuntime {
                 now,
             )?);
         }
-        for id in runtime.archive.pointers("tx-")? {
-            let envelope = runtime.archive.get(id)?;
-            let payload = verifier.open("identity", &envelope)?;
-            let value: serde_json::Value = crate::wire::decode_strict(&payload)?;
-            let issued = value
-                .get("issued_at")
-                .and_then(|v| v.as_i64())
-                .ok_or("invalid retained execution identity")?;
-            let identity = verifier.open_identity(&envelope, issued)?;
-            if identity.scope != "transaction" {
-                return Err("invalid retained execution identity scope".into());
-            }
-            if identity.header.expires_at > now
-                && runtime
-                    .archive
-                    .pointer(&format!("terminal-{}", &identity.binding_hash[2..]))?
-                    .is_none()
-            {
-                runtime.identities.accept(&envelope, issued)?;
-            }
-        }
         Ok(runtime)
     }
     pub fn network(&self) -> &Network {
         self.verifier.network()
     }
 
-    /// Status lookup authenticates retained identity evidence, but deliberately
-    /// does not renew its execution lease or confer historical execution rights.
-    pub fn retained_identity(&self, hash: B256) -> Result<Identity, String> {
-        let id = self
-            .archive
-            .pointer(&format!("tx-{}", alloy_primitives::hex::encode(hash)))?
+    /// The registered identity for `hash`, whether or not its lease is valid.
+    pub fn live_identity(&self, hash: B256) -> Option<Identity> {
+        self.identities.live(&ExecutionBinding::Transaction(hash))
+    }
+
+    /// The identity a status answer describes. `Some(block)`: the identity that
+    /// executed `hash` in that block, from its manifest, signature re-verified at
+    /// its issue time (status never renews a lease or grants execution).
+    /// `None`: the live registry entry. Unknown is an error, so status is never
+    /// disclosed for a hash OPS did not submit.
+    pub fn status_identity(&self, hash: B256, block: Option<B256>) -> Result<Identity, String> {
+        let Some(block) = block else {
+            return self
+                .live_identity(hash)
+                .ok_or_else(|| "unknown execution identity".into());
+        };
+        let manifest = self.archive.manifest_by_hash(block)?;
+        if &manifest.block.network != self.network() {
+            return Err("execution manifest network mismatch".into());
+        }
+        let entry = manifest
+            .identities
+            .iter()
+            .find(|entry| entry.transaction_hash == hash)
             .ok_or("unknown execution identity")?;
-        let envelope = self.archive.get(id)?;
-        let payload = self.verifier.open("identity", &envelope)?;
-        let value: serde_json::Value = crate::wire::decode_strict(&payload)?;
-        let issued = value
-            .get("issued_at")
-            .and_then(|v| v.as_i64())
-            .ok_or("invalid retained identity")?;
-        let identity = self.verifier.open_identity(&envelope, issued)?;
+        let envelope = self
+            .verifier
+            .decode_envelope("identity", &self.archive.get(entry.envelope)?)?;
+        let identity = self.verifier.verify_archived_identity(envelope)?;
         if identity.scope != "transaction" || identity.binding_hash != format!("{hash:#x}") {
             return Err("retained identity mismatch".into());
         }
@@ -162,7 +158,7 @@ impl PolicyRuntime {
         now: i64,
     ) -> Result<Arc<AppliedFacts>, String> {
         let _guard = self
-            .ingestion
+            .facts
             .lock()
             .map_err(|_| "policy ingestion unavailable")?;
         let facts = self.feed.accept(kind, wire, now)?;
@@ -175,66 +171,17 @@ impl PolicyRuntime {
         self.admit_identity(self.verifier.verify_identity(wire, now)?, now)
     }
 
-    /// Admit an identity verified once by the caller.
+    /// Admit an identity verified once by the caller. Memory only: no storage
+    /// I/O and no lock shared with fact ingestion or block persistence.
     pub fn admit_identity(&self, verified: VerifiedIdentity, now: i64) -> Result<Identity, String> {
-        let _guard = self
-            .ingestion
-            .lock()
-            .map_err(|_| "policy ingestion unavailable")?;
-        let proposed = verified.identity().clone();
-        let wire = verified.envelope().to_wire();
-        if proposed.scope == "transaction"
-            && self
-                .archive
-                .pointer(&format!("tx-{}", &proposed.binding_hash[2..]))?
-                .is_some()
-        {
-            let old = self.retained_identity(
-                proposed
-                    .binding_hash
-                    .parse()
-                    .map_err(|_| "invalid transaction binding")?,
-            )?;
-            if old.principal_id != proposed.principal_id
-                || old.org_id != proposed.org_id
-                || old.signer != proposed.signer
-                || old.header.issued_at > proposed.header.issued_at
-                || old.header.expires_at > proposed.header.expires_at
-                || old.min_snapshot_version > proposed.min_snapshot_version
-            {
-                return Err("durable execution binding conflict".into());
-            }
-        }
-        let identity = self.identities.admit_reclaiming(verified, now)?;
-        if identity.scope == "transaction" {
-            let evidence = self.archive.put(&wire)?;
-            self.archive
-                .set_pointer(&format!("tx-{}", &identity.binding_hash[2..]), evidence)?;
-            // Explicit renewed admission can follow a reorg. A prior canonical
-            // reconciliation must not suppress this new pending lease on restart.
-            self.archive
-                .remove_pointer(&format!("terminal-{}", &identity.binding_hash[2..]))?;
-        }
-        Ok(identity)
+        self.identities.admit_reclaiming(verified, now)
     }
 
-    /// Called only after the backend observes a canonical receipt. The signed
-    /// binding remains durable after the bounded pending slot is released.
+    /// Called after the backend observes a canonical receipt. Releases the
+    /// bounded pending slot once the block's evidence holds the transaction.
     pub fn reconcile_included(&self, hash: B256, block: B256) -> Result<(), String> {
-        let _guard = self
-            .ingestion
-            .lock()
-            .map_err(|_| "policy ingestion unavailable")?;
-        self.retained_identity(hash)?;
         self.transaction_status(hash, Some(block))?
             .ok_or("canonical execution evidence unavailable")?;
-        let marker = self
-            .archive
-            .put(&serde_json::to_vec(&block).map_err(|_| "invalid inclusion marker")?)?;
-        let key = format!("terminal-{}", alloy_primitives::hex::encode(hash));
-        if self.archive.pointer(&key)? != Some(marker) {
-            self.archive.set_pointer(&key, marker)?;
-        }
         self.identities.finish(&ExecutionBinding::Transaction(hash))
     }
 

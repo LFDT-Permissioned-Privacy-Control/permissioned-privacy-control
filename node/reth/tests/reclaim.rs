@@ -87,19 +87,3 @@ fn expired_key_beyond_the_first_batch_can_be_renewed() {
         "renewed"
     );
 }
-
-#[test]
-fn reclaiming_an_expired_lease_keeps_the_durable_binding() {
-    // While the node keeps durable `tx-` bindings, reclaiming the lease of a
-    // pending hash does not let another principal bind it.
-    let runtime = full();
-    let mut other = identity(hash(5), "other");
-    other["principal_id"] = json!("another_principal");
-    other["issued_at"] = json!(LATER - 5);
-    other["expires_at"] = json!(LATER + 55);
-    assert!(
-        runtime
-            .accept_identity(&seal("identity", &other), LATER)
-            .is_err()
-    );
-}

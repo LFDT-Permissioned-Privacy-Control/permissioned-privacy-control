@@ -184,11 +184,13 @@ fn produced_block_replays_original_facts_after_revocation_and_restart() {
         "denied"
     );
     drop(runtime);
-    let restarted = PolicyRuntime::new(
-        verifier,
+    let restarted = PolicyRuntime::open(
+        verifier.clone(),
         Arc::new(ArtifactStore::open(&directory).unwrap()),
         16,
-    );
+        1800000020,
+    )
+    .unwrap();
     assert!(
         restarted.pin_candidate(1800000020).is_err(),
         "replay facts must not become current user permissions"
@@ -196,20 +198,52 @@ fn produced_block_replays_original_facts_after_revocation_and_restart() {
     assert!(execute(&restarted.replay(&descriptor()).unwrap()));
     assert_eq!(
         restarted
-            .retained_identity(B256::repeat_byte(1))
+            .status_identity(B256::repeat_byte(1), Some(descriptor().hash))
             .unwrap()
             .context_id,
-        "renewed-context"
+        "ctx-a",
+        "status reports the identity that executed in the block"
     );
-    assert!(restarted.retained_identity(B256::repeat_byte(2)).is_err());
+    assert!(
+        restarted
+            .status_identity(B256::repeat_byte(1), None)
+            .is_err(),
+        "pending identities are not restored"
+    );
+    assert!(
+        restarted
+            .status_identity(B256::repeat_byte(2), Some(descriptor().hash))
+            .is_err()
+    );
     let mut wrong = descriptor();
     wrong.hash = B256::repeat_byte(99);
     assert!(restarted.replay(&wrong).is_err());
+    drop(restarted);
+    // The same archive opened for another network discloses nothing.
+    let foreign = PolicyRuntime::new(
+        Verifier::new(
+            Network {
+                chain_id: 31337,
+                deployment_id: "another-deployment".into(),
+            },
+            BTreeMap::from([(
+                "ops".into(),
+                SigningKey::from_bytes(&[7; 32]).verifying_key(),
+            )]),
+        ),
+        Arc::new(ArtifactStore::open(&directory).unwrap()),
+        16,
+    );
+    assert!(
+        foreign
+            .status_identity(B256::repeat_byte(1), Some(descriptor().hash))
+            .is_err()
+    );
     std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
-fn canonical_status_releases_capacity_without_releasing_durable_identity_binding() {
+fn finalized_release_frees_the_slot_and_the_manifest_keeps_the_executed_binding() {
     let directory =
         std::env::temp_dir().join(format!("ops-runtime-terminal-{}", std::process::id()));
     let verifier = Verifier::new(
@@ -235,7 +269,8 @@ fn canonical_status_releases_capacity_without_releasing_durable_identity_binding
     assert!(
         runtime
             .reconcile_included(B256::repeat_byte(1), B256::repeat_byte(99))
-            .is_err()
+            .is_err(),
+        "release requires the including block's evidence"
     );
     runtime
         .reconcile_included(B256::repeat_byte(1), descriptor().hash)
@@ -249,17 +284,10 @@ fn canonical_status_releases_capacity_without_releasing_durable_identity_binding
             )
             .is_err()
     );
-    identity["principal_id"] = json!("another-principal");
-    assert!(
-        runtime
-            .accept_identity(&seal("identity", &identity), 1800000010)
-            .is_err()
-    );
-    identity["principal_id"] = json!("fixture_principal");
     identity["binding_hash"] = json!(format!("{:#x}", B256::repeat_byte(2)));
     runtime
         .accept_identity(&seal("identity", &identity), 1800000010)
-        .unwrap();
+        .expect("the released slot is free for another transaction");
     drop(runtime);
     let restarted = PolicyRuntime::open(verifier, archive, 1, 1800000100).unwrap();
     assert!(
@@ -268,7 +296,7 @@ fn canonical_status_releases_capacity_without_releasing_durable_identity_binding
     );
     assert_eq!(
         restarted
-            .retained_identity(B256::repeat_byte(1))
+            .status_identity(B256::repeat_byte(1), Some(descriptor().hash))
             .unwrap()
             .principal_id,
         "fixture_principal"
@@ -278,57 +306,6 @@ fn canonical_status_releases_capacity_without_releasing_durable_identity_binding
             .transaction_status(B256::repeat_byte(1), Some(descriptor().hash))
             .unwrap()
             .is_some()
-    );
-    std::fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn renewed_admission_after_canonical_reconciliation_is_restored_on_restart() {
-    let directory =
-        std::env::temp_dir().join(format!("ops-runtime-renewal-{}", std::process::id()));
-    let verifier = Verifier::new(
-        network(),
-        BTreeMap::from([(
-            "ops".into(),
-            SigningKey::from_bytes(&[7; 32]).verifying_key(),
-        )]),
-    );
-    let archive = Arc::new(ArtifactStore::open(&directory).unwrap());
-    let runtime = PolicyRuntime::new(verifier.clone(), archive.clone(), 1);
-    let snapshot = fixture()["snapshot"].clone();
-    runtime
-        .accept_facts("snapshot", &seal("snapshot", &snapshot), 1800000010)
-        .unwrap();
-    let mut identity = json!({"network":network(),"issued_at":1800000000,"expires_at":1800000060,"scope":"transaction","context_id":"original","principal_id":"fixture_principal","org_id":"org_acme","signer":snapshot["principals"][0]["linked_addresses"][0],"binding_hash":format!("{:#x}",B256::repeat_byte(1)),"min_snapshot_version":1});
-    runtime
-        .accept_identity(&seal("identity", &identity), 1800000010)
-        .unwrap();
-    let handle = runtime.pin_candidate(1800000010).unwrap();
-    assert!(execute(&handle));
-    handle.persist(&archive, &descriptor()).unwrap();
-    runtime
-        .reconcile_included(B256::repeat_byte(1), descriptor().hash)
-        .unwrap();
-    // The receipt disappears in a reorg; OPS explicitly admits the same signed
-    // transaction again with a fresh context after checking current permissions.
-    identity["context_id"] = json!("post-reorg");
-    identity["issued_at"] = json!(1800000010);
-    identity["expires_at"] = json!(1800000070);
-    runtime
-        .accept_identity(&seal("identity", &identity), 1800000010)
-        .unwrap();
-    drop(runtime);
-    let restarted = PolicyRuntime::open(verifier, archive, 1, 1800000010).unwrap();
-    assert_eq!(
-        restarted
-            .identities
-            .lookup(
-                &ExecutionBinding::Transaction(B256::repeat_byte(1)),
-                1800000010
-            )
-            .unwrap()
-            .context_id,
-        "post-reorg"
     );
     std::fs::remove_dir_all(directory).unwrap();
 }

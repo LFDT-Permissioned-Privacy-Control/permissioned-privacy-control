@@ -512,6 +512,11 @@ pub mod fixture {
     }
     /// Execute the fixture's allowed call bound to `hash` in this handle.
     pub fn execute(handle: &ExecutionHandle, hash: B256) -> bool {
+        execute_result(handle, hash).is_ok()
+    }
+
+    /// As `execute`, with the denial reason.
+    pub fn execute_result(handle: &ExecutionHandle, hash: B256) -> Result<(), String> {
         let case = &lifecycle()["cases"][0];
         let signer = case["facts"]["signer"]
             .as_str()
@@ -560,7 +565,8 @@ pub mod fixture {
             .build()
             .unwrap();
         evm.transact_raw(PolicyTx::bound(tx, ExecutionBinding::Transaction(hash)))
-            .is_ok()
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
     }
 }
 

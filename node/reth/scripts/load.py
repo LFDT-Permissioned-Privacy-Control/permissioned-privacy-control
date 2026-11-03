@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Bounded real-node load acceptance. Uses public deterministic development keys.
 
-This measures private HTTP admission through canonical mining, with durable facts,
-identity journals and block manifests enabled. It is not an isolated EVM benchmark.
+This measures private HTTP admission through canonical mining, with durable facts
+and block manifests enabled (pending identities are memory-only). It is not an
+isolated EVM benchmark.
 Run beside other workloads only when their contention is recorded in the report.
 """
 import argparse

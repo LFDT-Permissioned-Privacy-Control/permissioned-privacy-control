@@ -102,14 +102,24 @@ program that reads otherwise inaccessible storage. Trace output options remain
 available.
 
 A pending transaction is bound to one principal and selected organization, even
-when several principals share its signer. New execution requires a valid ticket; renewal must preserve that durable
-binding. An `expired` status describes the current lease and is not final: a
-previously pinned candidate can still settle, so OPS continues receipt polling. Rule denials describe the current
+when several principals share its signer. New execution requires a valid ticket.
+The node keeps pending identities in memory only: admission does no storage
+I/O. While an identity's lease is valid, the node refuses another principal,
+organization or signer for its transaction hash; an expired lease is reclaimed by
+a later admission. OPS's durable submission record refuses rebinding before
+anything reaches the node, including after the node has released or lost the
+identity. After a node restart the node holds no pending identities, so a pooled
+transaction cannot execute until it is submitted again through OPS. An `expired` status describes the current lease and is not final: a
+previously pinned candidate can still settle, so OPS continues receipt polling.
+Once the expired lease has been reclaimed, a status request for the not-included
+transaction returns an error. Rule denials describe the current
 candidate and are not final pool eviction: Reth can retry an already admitted
 transaction when later facts change. Included creation metadata is returned only
 when a canonical receipt matches the exact archived block, and includes nested
 successful CREATE/CREATE2 results. Reverted creations never become registration
-evidence. Canonical reconciliation releases the bounded pending identity slot.
+evidence. The status of an included transaction reports the identity that executed
+it, from the block's manifest. Canonical reconciliation releases the bounded pending
+identity slot.
 Permanent OPS registration and visibility projection wait for `finalized:true`,
 backed by the node's finalized forkchoice header and canonical block checks.
 Wait for that reconciliation before calling a newly deployed contract across
@@ -158,7 +168,8 @@ Implementation evidence: [reth-runtime.md](../../docs/implementation/evidence/re
 ## Reproducible load acceptance
 
 The load harness measures signed private HTTP admission through canonical mining
-with durable facts, identities, and block manifests enabled:
+with durable facts and block manifests enabled (pending identities are
+memory-only):
 
 ```sh
 python3 node/reth/scripts/load.py --binary node/reth/target/release/ops-reth \
@@ -182,8 +193,8 @@ using the pinned Solidity compiler. This measures the complete node path, not
 isolated policy-interpreter cost or full OPS/explorer throughput. It does not
 establish the roadmap's 5,000 TPS target.
 
-Transaction identities currently require serialized synchronous archive writes.
-That admission bottleneck remains open; see
+Transaction admission no longer writes to disk. Block assembly still writes
+per-transaction evidence objects; see
 [sustained throughput work](../../docs/OPEN_ITEMS.md#13-reth-sustained-transaction-throughput).
 The current group's in-process timings imply only a
 [policy-only theoretical ceiling](../../docs/implementation/evidence/per-group-live-2026-09-25.md#theoretical-throughput-from-policy-cost),

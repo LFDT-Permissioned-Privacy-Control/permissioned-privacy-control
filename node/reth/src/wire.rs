@@ -251,6 +251,17 @@ impl Verifier {
 
     /// Decode and verify a JSON envelope, keeping its decoded parts.
     pub fn open_envelope(&self, kind: &str, wire: &[u8]) -> Result<SignedEnvelope, String> {
+        let decoded = self.decode_envelope(kind, wire)?;
+        self.verify(&decoded)?;
+        Ok(decoded)
+    }
+
+    /// Decode a JSON envelope without verifying it. Callers must `verify`.
+    pub(crate) fn decode_envelope(
+        &self,
+        kind: &str,
+        wire: &[u8],
+    ) -> Result<SignedEnvelope, String> {
         if wire.is_empty()
             || wire.len() > MAX_ENVELOPE_BYTES
             || !matches!(kind, "identity" | "snapshot" | "delta" | "heartbeat")
@@ -269,7 +280,6 @@ impl Verifier {
                 .try_into()
                 .map_err(|_| "untrusted node policy signature".to_owned())?,
         };
-        self.verify(&decoded)?;
         Ok(decoded)
     }
 
@@ -311,6 +321,20 @@ impl Verifier {
             identity,
             envelope: Arc::new(envelope),
         })
+    }
+
+    /// Verify archived identity evidence at its own issue time: a status lookup
+    /// authenticates the evidence without treating an expired lease as current.
+    /// Returns the fields only, never an admissible `VerifiedIdentity`.
+    pub fn verify_archived_identity(&self, envelope: SignedEnvelope) -> Result<Identity, String> {
+        if envelope.kind != "identity" || envelope.payload.len() > MAX_IDENTITY_BYTES {
+            return Err("invalid node policy envelope".into());
+        }
+        self.verify(&envelope)?;
+        let issued = decode_strict::<Identity>(&envelope.payload)?
+            .header
+            .issued_at;
+        self.identity_fields(&envelope.payload, issued)
     }
 
     fn identity_fields(&self, payload: &[u8], now: i64) -> Result<Identity, String> {

@@ -405,9 +405,9 @@ Evidence and theoretical policy-only throughput:
 
 **Status:** Open capacity work; no production TPS claim is established.
 
-As checked on 2026-09-25, `Runtime::accept_identity` still holds one ingestion
-mutex while persisting each transaction's signed identity and archive pointer.
-Those writes synchronously flush files and directories. The earlier 2026-09-17
+Identity admission no longer writes to disk or takes the fact-ingestion lock;
+pending identities are held in memory. Block assembly still writes
+per-transaction evidence objects with synchronous flushes. The earlier 2026-09-17
 private-node load run measured **9.6–11.1 mined transactions/s** on a shared
 Apple M2 Max development setup. That historical result is not a fresh throughput
 measurement of the per-group build. The latest run verified live correctness

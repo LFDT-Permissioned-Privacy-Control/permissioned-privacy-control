@@ -1,5 +1,9 @@
-//! Bounded authenticated identity ingestion. Transaction bindings survive ticket
-//! expiry until trusted terminal reconciliation; expiry never permits rebinding.
+//! Bounded authenticated identity ingestion, in memory only. While an entry is
+//! live it refuses any other principal, organization or signer for its binding.
+//! A standalone registry keeps an entry until `finish`; the node runtime also
+//! reclaims expired leases on admission. Rebinding protection after release or a
+//! restart is OPS's durable submission row, saved before transport, not this
+//! registry.
 
 use crate::{
     context::{ExecutionBinding, ExecutionIdentity, IdentityResolver},
@@ -175,6 +179,11 @@ impl IdentityRegistry {
         Ok(identity)
     }
 
+    /// The registered identity for `binding`, whether or not its lease is valid.
+    pub fn live(&self, binding: &ExecutionBinding) -> Option<Identity> {
+        self.get(binding).ok().map(|stored| stored.identity)
+    }
+
     pub fn lookup(&self, binding: &ExecutionBinding, at: i64) -> Result<Identity, String> {
         Ok(self.capture(binding, at)?.identity)
     }
@@ -207,7 +216,8 @@ impl IdentityRegistry {
         Ok(stored.clone())
     }
 
-    /// Only trusted terminal-status reconciliation may release pending bindings.
+    /// Release a binding: finalized-inclusion reconciliation, or the end of a
+    /// simulation.
     pub fn finish(&self, binding: &ExecutionBinding) -> Result<(), String> {
         self.identities
             .lock()

@@ -133,37 +133,6 @@ impl ArtifactStore {
             .transpose()
     }
 
-    pub fn remove_pointer(&self, key: &str) -> Result<(), String> {
-        pointer_key(key)?;
-        let directory = self.root.join("pointers");
-        if self
-            .storage
-            .remove(&directory.join(key))
-            .map_err(io_error)?
-        {
-            self.storage.sync_dir(&directory).map_err(io_error)?;
-        }
-        Ok(())
-    }
-
-    pub fn pointers(&self, prefix: &str) -> Result<Vec<ArtifactId>, String> {
-        pointer_key(prefix)?;
-        let mut result = Vec::new();
-        for name in self
-            .storage
-            .list(&self.root.join("pointers"))
-            .map_err(io_error)?
-        {
-            if name.starts_with(prefix) {
-                result.push(
-                    self.pointer(&name)?
-                        .ok_or("missing execution archive pointer")?,
-                );
-            }
-        }
-        Ok(result)
-    }
-
     /// Call before publishing the assembled block. ACK requires durable artifacts
     /// and manifest. A retry is idempotent; an existing hash cannot be overwritten.
     pub fn publish(&self, manifest: &BlockManifest) -> Result<(), String> {
@@ -191,6 +160,21 @@ impl ArtifactStore {
             return Err("execution manifest block mismatch".into());
         }
         self.validate(&manifest)?;
+        Ok(manifest)
+    }
+
+    /// A manifest by block hash alone, for status lookups: decoded and checked
+    /// for format and block hash only (the network and the one needed entry
+    /// are the caller's to check). Replay uses `load_for_block`.
+    pub fn manifest_by_hash(&self, block: B256) -> Result<BlockManifest, String> {
+        let bytes = self.read_bounded(
+            &self.root.join("blocks").join(hex::encode(block)),
+            MAX_MANIFEST,
+        )?;
+        let manifest: BlockManifest = decode_strict(&bytes)?;
+        if manifest.format_version != 1 || manifest.block.hash != block {
+            return Err("execution manifest block mismatch".into());
+        }
         Ok(manifest)
     }
 

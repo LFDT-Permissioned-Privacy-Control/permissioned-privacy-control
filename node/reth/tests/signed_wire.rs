@@ -212,7 +212,7 @@ fn verifies_go_signed_identity_snapshot_and_simulation_golden_vectors() {
 }
 
 #[test]
-fn pending_transaction_cannot_be_rebound_even_after_ticket_expiry() {
+fn standalone_registry_keeps_a_binding_after_ticket_expiry() {
     use ops_reth_policy::{context::ExecutionBinding, identity::IdentityRegistry};
     let registry = IdentityRegistry::new(verifier(), 10);
     registry.accept(&seal(&payload()), 1000).unwrap();

@@ -195,9 +195,25 @@ impl PrivateApi {
                     .parse::<B256>()
                     .map_err(|_| "invalid transaction hash")?;
                 // Expiry limits execution authority, not later status access on
-                // this authenticated service listener. No unknown hash lookup.
-                let identity = self.runtime.retained_identity(hash)?;
+                // this authenticated service listener. The identity comes from
+                // the including block's manifest, or else the live registry; an
+                // unknown hash is an error and discloses nothing.
                 let execution = self.backend.transaction_status(hash).await?;
+                let block = match execution.get("status").and_then(Value::as_str) {
+                    Some("included" | "reverted") => Some(
+                        execution
+                            .get("block_hash")
+                            .and_then(Value::as_str)
+                            .and_then(|block| block.parse::<B256>().ok())
+                            .ok_or("invalid execution status")?,
+                    ),
+                    _ => None,
+                };
+                let runtime = self.runtime.clone();
+                let identity =
+                    tokio::task::spawn_blocking(move || runtime.status_identity(hash, block))
+                        .await
+                        .map_err(|_| "status lookup failed")??;
                 Ok(
                     json!({"transaction_hash":format!("{hash:#x}"),"principal_id":identity.principal_id,
                     "org_id":identity.org_id,"context_id":identity.context_id,"execution":execution}),
@@ -242,8 +258,10 @@ impl PrivateApi {
                 }
                 self.runtime.feed.pin(now, identity.min_snapshot_version)?;
                 let context_id = identity.context_id.clone();
-                // Durable identity precedes pool insertion. An ambiguous pool
-                // result must never free this hash for another principal.
+                // The identity is registered before pool insertion, so a pooled
+                // transaction never runs without it. An ambiguous pool result
+                // keeps the registration; rebinding is refused by OPS's durable
+                // submission row, saved before transport.
                 let identity = self.runtime.admit_identity(verified, now)?;
                 let accepted = self.backend.submit(identity, raw.into()).await?;
                 if accepted != hash {

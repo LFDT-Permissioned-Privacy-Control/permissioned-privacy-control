@@ -119,12 +119,13 @@ fn main() -> eyre::Result<()> {
         let status:StatusFn=Arc::new(move |hash| {
             let eth=eth_status.clone(); let runtime=status_runtime.clone();
             Box::pin(async move {
-                let identity=runtime.retained_identity(hash)?;
                 let status=if let Some(receipt)=eth.transaction_receipt(hash).await.map_err(|_|"receipt lookup failed")? {
                     let receipt=serde_json::to_value(receipt).map_err(|_|"invalid canonical receipt")?;
                     let block:B256=receipt.get("blockHash").and_then(Value::as_str).ok_or("receipt block unavailable")?.parse().map_err(|_|"invalid receipt block")?;
-                    let mut status=runtime.transaction_status(hash,Some(block))?.ok_or("canonical execution evidence unavailable")?;
-                    runtime.reconcile_included(hash,block)?;
+                    let lookup=runtime.clone();
+                    let mut status=tokio::task::spawn_blocking(move||lookup.transaction_status(hash,Some(block))).await.map_err(|_|"status lookup failed")??.ok_or("canonical execution evidence unavailable")?;
+                    let release=runtime.clone();
+                    tokio::task::spawn_blocking(move||release.reconcile_included(hash,block)).await.map_err(|_|"status lookup failed")??;
                     status.status=if receipt.get("status").and_then(Value::as_str)==Some("0x1") {"included"} else {"reverted"}.into();
                     if let Some(finalized)=eth.rpc_block_header(BlockId::finalized()).await.map_err(|_|"finalized head lookup failed")? {
                         let finalized=serde_json::to_value(finalized).map_err(|_|"invalid finalized head")?;
@@ -141,12 +142,17 @@ fn main() -> eyre::Result<()> {
                         }
                     }
                     status
-                } else if identity.header.expires_at <= now() {
-                    // This describes the current ticket only. An already pinned
-                    // candidate can still settle; OPS continues receipt polling.
-                    ops_reth_policy::runtime::TransactionStatus {status:"expired".into(),facts_version:identity.min_snapshot_version,block_hash:None,block_number:None,reason_code:"IDENTITY_EXPIRED".into(),created:Vec::new(),finalized:false,finalized_block_hash:None,finalized_block_number:None}
                 } else {
-                    runtime.transaction_status(hash,None)?.unwrap_or(ops_reth_policy::runtime::TransactionStatus {status:"pending".into(),facts_version:identity.min_snapshot_version,block_hash:None,block_number:None,reason_code:String::new(),created:Vec::new(),finalized:false,finalized_block_hash:None,finalized_block_number:None})
+                    // Not included: only a live (registered) identity has a status.
+                    let identity=runtime.live_identity(hash).ok_or("unknown execution identity")?;
+                    if identity.header.expires_at <= now() {
+                        // This describes the current ticket only. An already pinned
+                        // candidate can still settle; OPS continues receipt polling.
+                        ops_reth_policy::runtime::TransactionStatus {status:"expired".into(),facts_version:identity.min_snapshot_version,block_hash:None,block_number:None,reason_code:"IDENTITY_EXPIRED".into(),created:Vec::new(),finalized:false,finalized_block_hash:None,finalized_block_number:None}
+                    } else {
+                        let lookup=runtime.clone();
+                        tokio::task::spawn_blocking(move||lookup.transaction_status(hash,None)).await.map_err(|_|"status lookup failed")??.unwrap_or(ops_reth_policy::runtime::TransactionStatus {status:"pending".into(),facts_version:identity.min_snapshot_version,block_hash:None,block_number:None,reason_code:String::new(),created:Vec::new(),finalized:false,finalized_block_hash:None,finalized_block_number:None})
+                    }
                 };
                 serde_json::to_value(status).map_err(|_|"invalid execution status".into())
             })
