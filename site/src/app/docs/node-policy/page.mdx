@@ -186,6 +186,37 @@ acknowledgement cursor, not the instance — or leave it at its default. Configu
 `POLICY_SOLC` or the executable search path. `GET /ready` returns 503 until the
 node has fresh matching facts and required capabilities.
 
+The guarded Reth node reads its own settings in the Reth launcher; they share
+the `OPS_NODE_POLICY_` prefix with OPS but are not OPS settings. Set
+`OPS_NODE_POLICY_STATE_DIR` to a dedicated subdirectory on a local filesystem,
+not a volume's root or a symlink: owned by the node's user with mode 0700 and
+empty when first used (the node creates it if its parent exists). One node
+process locks it. A directory written by an older layout is refused; there is
+no importer, so point the node at a new empty directory.
+
+Size the node for the expected load:
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `OPS_NODE_POLICY_CAPACITY` | Submissions and simulations the node tracks at once; more are refused | 262144 (about 370 MB when full) |
+| `OPS_NODE_POLICY_EXPECTED_TPS` | Sustained transactions per second, at least 1 | 2000 |
+| `OPS_NODE_POLICY_FINALITY_BOUND` | Seconds from inclusion to finality of the deployed consensus (finality depth × block time), at least 1 | 64 |
+| `OPS_NODE_POLICY_PENDING_LIMIT` | Allowance for submissions still waiting for inclusion | 37500 |
+| `OPS_NODE_POLICY_VERIFY_WORKERS` | Submissions and simulations admitted in parallel, 1–64 | 4 |
+
+A submission holds its slot until OPS observes its finalized receipt, or until
+its lease expires. The node refuses to start when the capacity is below 1.25 ×
+(transactions per second × (2 s + finality bound) + pending allowance).
+
+Submissions the node tracks are not kept across a node restart. A transaction
+not yet included then does not execute until the principal that submitted it
+sends the same signed transaction, with the same `visibleTo`, again through OPS;
+OPS does not resubmit it. The node accepts that resend even when its transaction
+pool still holds the transaction, as after a clean shutdown. Until then the node
+rejects status requests for the transaction, and OPS keeps it pending and keeps
+polling. An unclean stop can also lose the newest blocks the node had not yet
+written; their transactions are then not included and need the same resend.
+
 On the guarded Reth node, public `pending` block queries return no block, and
 finalized history the node already holds re-executes without its policy
 evidence; blocks it imports for the first time need the producer's execution
