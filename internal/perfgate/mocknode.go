@@ -1269,6 +1269,24 @@ func (m *MockNode) Stalled() (senders, txs int) {
 	return senders, txs
 }
 
+// Lapsed returns the pooled guarded transactions whose identity has expired
+// (a lease gap: the node would not include them, and they hold back their
+// sender's later nonces).
+func (m *MockNode) Lapsed() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.cfg.Clock().Unix()
+	var out []string
+	for _, account := range m.accounts {
+		for _, tx := range account.pooled {
+			if tx.guarded && tx.identity && tx.idExpires != 0 && tx.idExpires <= now {
+				out = append(out, tx.hash)
+			}
+		}
+	}
+	return out
+}
+
 // Stamp is one transaction's mock-side timeline (unix ns; 0 = never).
 type Stamp struct {
 	Arrived, Replied, Finalized int64
