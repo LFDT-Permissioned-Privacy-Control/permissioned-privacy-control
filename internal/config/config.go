@@ -232,6 +232,9 @@ type Config struct {
 	DBMaxOpenConns    int
 	DBMaxIdleConns    int
 	DBConnMaxLifetime time.Duration
+	// dbPoolErr is an invalid DB_MAX_OPEN_CONNS / DB_MAX_IDLE_CONNS value,
+	// reported by Validate.
+	dbPoolErr error
 	// Upstream node HTTP transport pool (RD-1112). proxy + tracer talk to one
 	// node host at high concurrency; Go's default caps idle keep-alive at 2
 	// per host, churning TCP connections. These tune the pool.
@@ -754,6 +757,7 @@ func Load() *Config {
 
 	dbMaxOpen := getEnvInt("DB_MAX_OPEN_CONNS", 50)
 	dbMaxIdle := getEnvInt("DB_MAX_IDLE_CONNS", dbMaxOpen) // default = MaxOpen to avoid connection churn
+	dbPoolErr := poolEnvError()
 	dbConnMaxLifetime := parseDurationEnv("DB_CONN_MAX_LIFETIME", 5*time.Minute)
 	nodeMaxIdleConns := getEnvInt("NODE_HTTP_MAX_IDLE_CONNS", 512)
 	nodeMaxIdleConnsPerHost := getEnvInt("NODE_HTTP_MAX_IDLE_CONNS_PER_HOST", 256)
@@ -780,6 +784,7 @@ func Load() *Config {
 		DatabaseURL:                         databaseURL,
 		DBMaxOpenConns:                      dbMaxOpen,
 		DBMaxIdleConns:                      dbMaxIdle,
+		dbPoolErr:                           dbPoolErr,
 		DBConnMaxLifetime:                   dbConnMaxLifetime,
 		NodeMaxIdleConns:                    nodeMaxIdleConns,
 		NodeMaxIdleConnsPerHost:             nodeMaxIdleConnsPerHost,
@@ -968,6 +973,9 @@ func (c *Config) AzureADEnabled() bool {
 // regardless of environment — misconfiguring Path B breaks login for everyone.
 func (c *Config) Validate() error {
 	if err := c.NodePolicy.Validate(); err != nil {
+		return err
+	}
+	if err := c.validatePool(); err != nil {
 		return err
 	}
 	// A configured-but-unreadable CONFIG_FILE is a fatal misconfiguration: the
@@ -1170,6 +1178,43 @@ func getEnv(key, defaultValue string) string {
 		}
 	}
 	return defaultValue
+}
+
+// maxDBPoolConns bounds DB_MAX_OPEN_CONNS; beyond it a pooler is the answer.
+const maxDBPoolConns = 10_000
+
+// poolEnvError refuses pool sizes that would otherwise silently fall back to
+// the default (an unparseable or non-positive DB_MAX_OPEN_CONNS) or that
+// cannot take effect (a non-positive DB_MAX_IDLE_CONNS).
+func poolEnvError() error {
+	if v := os.Getenv("DB_MAX_OPEN_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil || n < 1 || n > maxDBPoolConns {
+			return fmt.Errorf("DB_MAX_OPEN_CONNS must be an integer in 1..%d", maxDBPoolConns)
+		}
+	}
+	if v := os.Getenv("DB_MAX_IDLE_CONNS"); v != "" {
+		// 0 would keep no idle connection (one connect per query), and the
+		// pool option treats it as "use the default" anyway: refuse it.
+		if n, err := strconv.Atoi(v); err != nil || n < 1 {
+			return fmt.Errorf("DB_MAX_IDLE_CONNS must be a positive integer")
+		}
+	}
+	return nil
+}
+
+// validatePool checks the database pool sizes (RD-1410). Zero sizes in a
+// literal configuration take the defaults.
+func (c *Config) validatePool() error {
+	if c.dbPoolErr != nil {
+		return c.dbPoolErr
+	}
+	if c.DBMaxOpenConns < 0 || c.DBMaxOpenConns > maxDBPoolConns || c.DBMaxIdleConns < 0 {
+		return fmt.Errorf("DB_MAX_OPEN_CONNS must be 1..%d and DB_MAX_IDLE_CONNS positive", maxDBPoolConns)
+	}
+	if c.DBMaxOpenConns > 0 && c.DBMaxIdleConns > c.DBMaxOpenConns {
+		return fmt.Errorf("DB_MAX_IDLE_CONNS (%d) must not exceed DB_MAX_OPEN_CONNS (%d)", c.DBMaxIdleConns, c.DBMaxOpenConns)
+	}
+	return nil
 }
 
 // getEnvInt reads an environment variable as an int, returning defaultValue if

@@ -172,7 +172,10 @@ func StartStack(ctx context.Context, o StackOptions) (*Stack, error) {
 		"JWT_SECRET":             "perfgate-access-secret-" + randomHex(16), "JWT_REFRESH_SECRET": "perfgate-refresh-secret-" + randomHex(16),
 		"ADMIN_API_TOKEN": s.AdminToken, "ALLOW_MOCK_LOGIN": "true", "MOCK_SIGNATURES": "false", "ENABLE_TRAVEL_RULE": "true",
 		"VERIFIER_ID": "did:privado:verifier:dev-0000000000000000", "DISABLE_COINGECKO": "true",
-		"MAX_CONCURRENT_REQUESTS": "5000", "EXPLORER_DATABASE_URL": "", "DB_MAX_OPEN_CONNS": "30",
+		// The database pool is the product default (DB_MAX_OPEN_CONNS unset) on
+		// both trees; P0 ran gate 2 with the gate-1 harness's 30. Override it
+		// with OPS_GATE2_EXTRA_ENV for a labelled sensitivity run.
+		"MAX_CONCURRENT_REQUESTS": "5000", "EXPLORER_DATABASE_URL": "",
 		"AUDIT_BUFFER_DIR": filepath.Join(o.Dir, "audit-buffer"),
 	}
 	if o.Mode == "reth" {

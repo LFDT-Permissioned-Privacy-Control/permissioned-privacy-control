@@ -55,3 +55,36 @@ func TestLoadPoolAndTransportEnvOverrides(t *testing.T) {
 		t.Errorf("NodeMaxConnsPerHost = 200, got %d", cfg.NodeMaxConnsPerHost)
 	}
 }
+
+// R12.2 (RD-1410): pool sizes are validated. A zero or negative pool, an idle
+// pool larger than the open pool, or an unparseable value is refused at
+// startup instead of silently becoming the default.
+func TestPoolSizesAreValidated(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"DB_MAX_OPEN_CONNS": "0"},
+		{"DB_MAX_OPEN_CONNS": "-5"},
+		{"DB_MAX_OPEN_CONNS": "fifty"},
+		{"DB_MAX_OPEN_CONNS": "20", "DB_MAX_IDLE_CONNS": "40"},
+		{"DB_MAX_IDLE_CONNS": "-1"},
+		{"DB_MAX_IDLE_CONNS": "0"},
+	} {
+		for k, v := range env {
+			t.Setenv(k, v)
+		}
+		cfg := Load()
+		if err := cfg.validatePool(); err == nil {
+			t.Errorf("%v accepted", env)
+		}
+		for k := range env {
+			t.Setenv(k, "")
+		}
+	}
+	t.Setenv("DB_MAX_OPEN_CONNS", "120")
+	t.Setenv("DB_MAX_IDLE_CONNS", "")
+	if err := Load().validatePool(); err != nil {
+		t.Fatalf("valid pool refused: %v", err)
+	}
+	if err := (&Config{}).validatePool(); err != nil {
+		t.Fatalf("a literal configuration without pool sizes takes the defaults: %v", err)
+	}
+}

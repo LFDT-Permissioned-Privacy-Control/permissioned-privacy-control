@@ -362,6 +362,24 @@ func buildExplorerBackend(sqlStore *explorer.Store, indexerURL string) (explorer
 	return b, nil
 }
 
+// warnIfPoolExceedsServer warns at startup when one instance's pool alone can
+// open more connections than the database server accepts (RD-1410). Several
+// instances, the audit pools on the same server and other clients all count
+// against the same limit; see the DB_MAX_OPEN_CONNS sizing guidance.
+func warnIfPoolExceedsServer(database *db.DB, setting string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	available, err := database.AvailableConnections(ctx)
+	if err != nil {
+		slog.Debug("database connection limit not read; pool size not checked", "database", setting, "error", err)
+		return
+	}
+	if pool := database.Conn().Stats().MaxOpenConnections; pool > available {
+		slog.Warn("database pool exceeds the server's connection limit; requests will fail with too many connections under load",
+			"database", setting, "pool", pool, "server_available", available)
+	}
+}
+
 // PrivadoVerifier interface for Privado ID operations
 type PrivadoVerifier interface {
 	CreateAuthorizationRequest(verifierID, callbackURL, reason string) (*protocol.AuthorizationRequestMessage, error)
@@ -389,6 +407,7 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database: %w", err)
 	}
+	warnIfPoolExceedsServer(database, "DATABASE_URL")
 
 	// RD-1147: access_logs ALWAYS lives in a SEPARATE, always-on append-only
 	// audit database — the main DB no longer has an access_logs table at all

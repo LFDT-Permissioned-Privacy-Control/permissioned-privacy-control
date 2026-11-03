@@ -93,8 +93,8 @@ The proxy operates in **UTC**. The backend container image sets `TZ=UTC`, and th
 These tune connection reuse. Defaults suit a single high-throughput node; size them to your node and to Postgres `max_connections` when running multiple instances.
 
 <EnvTable vars={[
-  { name: "DB_MAX_OPEN_CONNS", default: "50", description: "Max open Postgres connections per instance. With N instances, keep N × this under the database's max_connections — use a pooler (e.g. PgBouncer) if you exceed it." },
-  { name: "DB_MAX_IDLE_CONNS", default: "(= DB_MAX_OPEN_CONNS)", description: "Idle connections retained in the pool. Defaults to DB_MAX_OPEN_CONNS so connections are reused, not churned, under bursty load." },
+  { name: "DB_MAX_OPEN_CONNS", default: "50", description: "Max open Postgres connections per instance, 1 to 10000. With N instances, keep N × this (plus the audit database pools when they share the server) under the database's max_connections — use a pooler (e.g. PgBouncer) if you exceed it. A larger pool raises throughput under heavy concurrent load when the database has the connections. The proxy refuses to start on an invalid value and logs a warning at startup when one instance's pool alone exceeds what the database server accepts." },
+  { name: "DB_MAX_IDLE_CONNS", default: "(= DB_MAX_OPEN_CONNS)", description: "Idle connections retained in the pool, at least 1 and not above DB_MAX_OPEN_CONNS. Defaults to DB_MAX_OPEN_CONNS so connections are reused, not churned, under bursty load." },
   { name: "DB_CONN_MAX_LIFETIME", default: "5m", description: "Max lifetime of a pooled Postgres connection before it is recycled." },
   { name: "NODE_HTTP_MAX_IDLE_CONNS_PER_HOST", default: "256", description: "Idle keep-alive connections kept to the upstream node host. Go's default of 2 causes connection churn at high request rates; raise to match expected concurrency." },
   { name: "NODE_HTTP_MAX_IDLE_CONNS", default: "512", description: "Total idle keep-alive connections across hosts for the upstream node client." },

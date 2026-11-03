@@ -133,10 +133,17 @@ func parseConfigUTC(databaseURL string) (*pgx.ConnConfig, error) {
 
 // openPostgres opens a pgx-backed *sql.DB with the session timezone pinned to
 // UTC (see parseConfigUTC).
-func openPostgres(databaseURL string) (*sql.DB, error) {
+func openPostgres(databaseURL string, opts ...Option) (*sql.DB, error) {
 	cfg, err := parseConfigUTC(databaseURL)
 	if err != nil {
 		return nil, err
+	}
+	p := defaultPoolConfig()
+	for _, o := range opts {
+		o(&p)
+	}
+	if p.tracer != nil {
+		cfg.Tracer = p.tracer
 	}
 	return stdlib.OpenDB(*cfg), nil
 }
@@ -156,6 +163,7 @@ type poolConfig struct {
 	maxOpenConns    int
 	maxIdleConns    int
 	connMaxLifetime time.Duration
+	tracer          pgx.QueryTracer
 }
 
 // defaultPoolConfig returns the default pool sizing. MaxIdle equals MaxOpen so
@@ -184,6 +192,21 @@ func WithPool(maxOpen, maxIdle int, connMaxLifetime time.Duration) Option {
 	}
 }
 
+// AvailableConnections is how many connections the server accepts for
+// ordinary roles (max_connections less the superuser reserve), the ceiling
+// for the sum of every pool that connects to it (RD-1410).
+func (d *DB) AvailableConnections(ctx context.Context) (int, error) {
+	var n int
+	err := d.conn.QueryRowContext(ctx, `SELECT current_setting('max_connections')::int - current_setting('superuser_reserved_connections')::int`).Scan(&n)
+	return n, err
+}
+
+// WithQueryTracer installs a pgx query tracer on every connection of the
+// handle; tests use it to count database round trips.
+func WithQueryTracer(tracer pgx.QueryTracer) Option {
+	return func(p *poolConfig) { p.tracer = tracer }
+}
+
 func applyPool(conn *sql.DB, opts ...Option) {
 	p := defaultPoolConfig()
 	for _, o := range opts {
@@ -195,7 +218,7 @@ func applyPool(conn *sql.DB, opts ...Option) {
 }
 
 func New(databaseURL string, opts ...Option) (*DB, error) {
-	conn, err := openPostgres(databaseURL)
+	conn, err := openPostgres(databaseURL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -248,7 +271,7 @@ func New(databaseURL string, opts ...Option) (*DB, error) {
 // already proven Postgres is up (server audit pools) or are interactive tools
 // where waiting 30s on a bad DSN is worse than an immediate error.
 func NewWithoutMigrate(databaseURL string, opts ...Option) (*DB, error) {
-	conn, err := openPostgres(databaseURL)
+	conn, err := openPostgres(databaseURL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

@@ -42,7 +42,8 @@ type AuditBuffer interface {
 // and reusable.
 type JSONRPCProcessor struct {
 	nodeExecution     NodeExecutionService
-	nodeFailureLog    loggate.Gate // rate-limits node-path failure lines (G15)
+	nodeFailureLog    loggate.Gate // rate-limits node-path failure lines
+	systemLinks       *systemLinkCache
 	nodeApprovals     *nodeapproval.Service
 	rbacAccessCtrl    *rbac.AccessController
 	rateLimiter       RateLimiterInterface
@@ -302,6 +303,7 @@ type JSONRPCProcessorConfig struct {
 func NewJSONRPCProcessor(cfg JSONRPCProcessorConfig) *JSONRPCProcessor {
 	p := &JSONRPCProcessor{
 		nodeExecution:          cfg.NodeExecution,
+		systemLinks:            newSystemLinkCache(),
 		rbacAccessCtrl:         cfg.RBACAccessCtrl,
 		rateLimiter:            cfg.RateLimiter,
 		proxy:                  cfg.Proxy,
@@ -1963,10 +1965,13 @@ func (p *JSONRPCProcessor) processRawTransaction(ctx context.Context, req *Proce
 		}
 	}
 
-	// System-link the sender's ETH address to their DID.
-	if statusCode == http.StatusOK && from != "" && req.UserID != "" {
+	// System-link the sender's ETH address to their DID, once per cache
+	// lifetime per (DID, sender) rather than on every transaction.
+	if statusCode == http.StatusOK && from != "" && req.UserID != "" && !p.systemLinks.known(req.UserID, from) {
 		if err := p.rbacAccessCtrl.Store().SystemLinkEthAddress(ctx, req.UserID, from); err != nil {
 			slog.Warn("failed to system-link eth address", "user", req.UserID, "address", from, "error", err)
+		} else {
+			p.systemLinks.remember(req.UserID, from)
 		}
 	}
 
