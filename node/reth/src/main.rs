@@ -167,11 +167,16 @@ fn main() -> eyre::Result<()> {
             let eth=eth_simulate.clone();
             let org=identity.org_id.clone();
             let binding=ExecutionBinding::Simulation {digest:identity.binding_hash.parse().unwrap_or_default(),context_id:identity.context_id.clone()};
-            let pinned=simulation_runtime.pin_simulation(identity,now());
+            let runtime=simulation_runtime.clone();
             Box::pin(async move {
-                let pinned=pinned?;
-                let (factory,candidate_report)=if let Some(candidates)=&request.candidate_policies {let (factory,report)=pinned.candidate_set_factory(candidates,&org)?;(factory,Some(report))} else if let Some(candidate)=&request.candidate_policy {let (factory,report)=pinned.candidate_factory(candidate,&org)?;(factory,Some(report))} else {(pinned.factory(),None)};
-                let transaction:TransactionRequest=serde_json::from_value(request.params[0].clone()).map_err(|_|"invalid simulation transaction")?;
+                // Pinning facts and building policy adapters scale with the
+                // fact snapshot: prepared on a blocking thread, not an async worker.
+                let (factory,candidate_report,transaction,request)=tokio::task::spawn_blocking(move||->Result<_,String> {
+                    let pinned=runtime.pin_simulation(identity,now())?;
+                    let (factory,candidate_report)=if let Some(candidates)=&request.candidate_policies {let (factory,report)=pinned.candidate_set_factory(candidates,&org)?;(factory,Some(report))} else if let Some(candidate)=&request.candidate_policy {let (factory,report)=pinned.candidate_factory(candidate,&org)?;(factory,Some(report))} else {(pinned.factory(),None)};
+                    let transaction:TransactionRequest=serde_json::from_value(request.params[0].clone()).map_err(|_|"invalid simulation transaction")?;
+                    Ok((factory,candidate_report,transaction,request))
+                }).await.map_err(|_|"simulation preparation failed")??;
                 let block:BlockId=request.params.get(1).filter(|v|!v.is_null()).map(|v|serde_json::from_value(v.clone())).transpose().map_err(|_|"invalid simulation block")?.unwrap_or_default();
                 // A signed principal authorizes execution of existing code,
                 // never replacement code/storage supplied by an RPC caller.
@@ -193,7 +198,9 @@ fn main() -> eyre::Result<()> {
                 }).await.map_err(|_|"simulation denied or failed".into())
             })
         });
-        let api=Arc::new(PrivateApi::new(runtime,Arc::new(Backend {submit,simulate,status}),token,Arc::new(now)).map_err(eyre::Report::msg)?);
+        let workers=usize::try_from(setting("OPS_NODE_POLICY_VERIFY_WORKERS",&ops_reth_policy::api::DEFAULT_CPU_WORKERS.to_string())?)?;
+        if !(1..=64).contains(&workers) {eyre::bail!("OPS_NODE_POLICY_VERIFY_WORKERS must be between 1 and 64");}
+        let api=Arc::new(PrivateApi::new(runtime,Arc::new(Backend {submit,simulate,status}),token,Arc::new(now)).map_err(eyre::Report::msg)?.with_cpu_pool(ops_reth_policy::api::CpuPool::new(workers)));
         let (stop,stopped)=tokio::sync::oneshot::channel::<()>();
         let mut private=tokio::spawn(serve(listener,api,async move {let _=stopped.await;}));
         tokio::select! {

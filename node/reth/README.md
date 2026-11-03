@@ -54,6 +54,7 @@ belongs to OPS; the node only receives trusted public keys.
 | `OPS_NODE_POLICY_PUBLIC_KEYS` | JSON object mapping key ID to base64 Ed25519 public key |
 | `OPS_NODE_POLICY_LISTEN` | Private listener, for example `127.0.0.1:8555` |
 | `OPS_NODE_POLICY_TOKEN` | Bearer token shared with OPS |
+| `OPS_NODE_POLICY_VERIFY_WORKERS` | Optional concurrent identity-admission jobs (signature verification, transaction decoding, signer recovery), 1–64; default `4` |
 | `OPS_NODE_POLICY_STATE_DIR` | Dedicated durable policy/archive directory |
 | `OPS_NODE_POLICY_CAPACITY` | Optional pending identity limit; default `262144` (estimated at about 370 MB when full). A slot is held until OPS observes the transaction's finalized receipt, or until its lease expires. Startup refuses a value below ⌈1.25 × (expected tx/s × (2 s + finality bound) + pending limit)⌉ |
 | `OPS_NODE_POLICY_EXPECTED_TPS` | Optional sustained transactions per second the capacity must cover; default `2000` |

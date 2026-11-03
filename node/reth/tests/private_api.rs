@@ -200,12 +200,28 @@ async fn simulation_context_capacity_is_released_on_success_error_and_cancellati
             "ops_simulate",
             json!([gold["simulation_identity"], gold["simulation"]]),
         );
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            api.process("Bearer private-test-token", &request),
-        )
-        .await;
-        assert_eq!(result.is_err(), mode == 2);
+        // Mode 2 never answers: the request is dropped once the backend has
+        // been reached, i.e. after admission. Other modes must answer.
+        let before = backend.simulations.load(Ordering::SeqCst);
+        let answered = {
+            let call = api.process("Bearer private-test-token", &request);
+            tokio::pin!(call);
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    tokio::select! {
+                        _ = &mut call => return true,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+                            if mode == 2 && backend.simulations.load(Ordering::SeqCst) > before {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("simulation neither answered nor reached the backend")
+        };
+        assert_eq!(answered, mode != 2);
         assert!(
             backend
                 .identities

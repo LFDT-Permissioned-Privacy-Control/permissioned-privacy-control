@@ -646,17 +646,25 @@ pub mod golden {
     /// A private API over `storage`, at the golden clock (1020), and a clone of
     /// its verifier.
     pub fn api(storage: &Arc<MemoryStorage>) -> (PrivateApi, Verifier) {
+        let (api, verifier, _) = api_with_runtime(storage);
+        (api, verifier)
+    }
+
+    /// As `api`, also returning the runtime for registry inspection.
+    pub fn api_with_runtime(
+        storage: &Arc<MemoryStorage>,
+    ) -> (PrivateApi, Verifier, Arc<PolicyRuntime>) {
         let verifier = verifier();
         let archive = ArtifactStore::open_with(Path::new("/state"), storage.clone()).unwrap();
         let runtime = Arc::new(PolicyRuntime::new(verifier.clone(), Arc::new(archive), 16));
         let api = PrivateApi::new(
-            runtime,
+            runtime.clone(),
             Arc::new(Backend),
             "private-test-token".into(),
             Arc::new(|| 1020),
         )
         .unwrap();
-        (api, verifier)
+        (api, verifier, runtime)
     }
 
     pub async fn call(api: &PrivateApi, method: &str, params: Value) -> Value {
