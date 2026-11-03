@@ -444,6 +444,21 @@ payload and another network's block still need the manifest
 `another_networks_block_is_never_trusted`). This applies to history the node
 already holds; first-time imports have no known finality for their blocks.
 
+## Private listeners (2026-11-03)
+
+Tests in `node/reth/tests/lanes.rs`, over real loopback connections:
+
+| Behaviour | Test |
+|---|---|
+| Above its cap a listener answers a submission `503` with `Retry-After: 1` and closes the connection, but still serves status; requests within the cap complete | `listener_over_capacity_returns_503` |
+| A connection is recycled with `Connection: close` on the first response after its lifetime; a submission in flight at that moment completes | `connections_are_recycled_after_a_complete_response` |
+| While every execution connection waits for a fact version, the control listener applies it at once and the waiters are admitted; with one listener, publication over the cap applies too; the control listener refuses execution methods before any work | `control_lane_applies_facts_while_execution_lane_is_saturated` |
+
+The previous listener dropped connections above 128 without an answer and cut
+every connection after 60 s, including a request in flight. With overflow
+serving and recycling disabled, all three tests fail. `smoke.py` publishes facts
+through `OPS_NODE_POLICY_CONTROL_LISTEN` and checks that it refuses a submission.
+
 ## Bounded fact wait and self-import (2026-11-03)
 
 | Behaviour | Test |

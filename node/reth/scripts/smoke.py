@@ -25,14 +25,14 @@ def identity(scope, binding, context):
     return seal('identity', dict(header(), scope=scope, context_id=context, principal_id='fixture_principal', org_id='org_acme', signer=signed['sender'].lower(), binding_hash=binding, min_snapshot_version=1))
 def port():
     with socket.socket() as sock: sock.bind(('127.0.0.1', 0)); return sock.getsockname()[1]
-public, private, auth, p2p = [port() for _ in range(4)]
-def rpc(method, params, internal=False):
+public, private, auth, p2p, control = [port() for _ in range(5)]
+def rpc(method, params, internal=False, listener=None):
     headers = {'Content-Type': 'application/json'}
     if internal: headers['Authorization'] = 'Bearer local-runtime-smoke-token'
-    request = urllib.request.Request(f'http://127.0.0.1:{private if internal else public}', json.dumps({'jsonrpc': '2.0', 'id': 'smoke', 'method': method, 'params': params}).encode(), headers)
+    request = urllib.request.Request(f'http://127.0.0.1:{listener or (private if internal else public)}', json.dumps({'jsonrpc': '2.0', 'id': 'smoke', 'method': method, 'params': params}).encode(), headers)
     return json.load(urllib.request.urlopen(request, timeout=10))
-def result(method, params, internal=False):
-    response = rpc(method, params, internal)
+def result(method, params, internal=False, listener=None):
+    response = rpc(method, params, internal, listener)
     assert 'error' not in response, (method, response)
     return response['result']
 def simulation(method='eth_call', target=None, data=None, dry_run=False, candidate=None, options=None):
@@ -47,7 +47,7 @@ snapshot['contracts'].append({'address': foreign, 'org_id': 'org_foreign', 'shar
 config = dict(chainId=31337, homesteadBlock=0, eip150Block=0, eip155Block=0, eip158Block=0, byzantiumBlock=0, constantinopleBlock=0, petersburgBlock=0, istanbulBlock=0, berlinBlock=0, londonBlock=0, terminalTotalDifficulty=0, terminalTotalDifficultyPassed=True, shanghaiTime=0)
 genesis = dict(config=config, nonce='0x0', timestamp='0x0', gasLimit='0x1c9c380', difficulty='0x0', baseFeePerGas='0x3b9aca00', alloc={signed['sender']: {'balance': '0x3635c9adc5dea00000'}, signed['target']: {'balance': '0x0', 'code': '0x00', 'storage': {'0x' + '00' * 32: '0x' + '00' * 30 + 'face'}}})
 (work / 'genesis.json').write_text(json.dumps(genesis))
-env = dict(os.environ, OPS_NODE_POLICY_CHAIN_ID='31337', OPS_NODE_POLICY_DEPLOYMENT_ID=network['deployment_id'], OPS_NODE_POLICY_PUBLIC_KEYS=json.dumps({'ops': base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()}), OPS_NODE_POLICY_STATE_DIR=str(work / 'policy'), OPS_NODE_POLICY_LISTEN=f'127.0.0.1:{private}', OPS_NODE_POLICY_TOKEN='local-runtime-smoke-token')
+env = dict(os.environ, OPS_NODE_POLICY_CHAIN_ID='31337', OPS_NODE_POLICY_DEPLOYMENT_ID=network['deployment_id'], OPS_NODE_POLICY_PUBLIC_KEYS=json.dumps({'ops': base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()}), OPS_NODE_POLICY_STATE_DIR=str(work / 'policy'), OPS_NODE_POLICY_LISTEN=f'127.0.0.1:{private}', OPS_NODE_POLICY_CONTROL_LISTEN=f'127.0.0.1:{control}', OPS_NODE_POLICY_TOKEN='local-runtime-smoke-token')
 log = open(work / 'node.log', 'w')
 command = [str(pathlib.Path(args.binary).resolve()), 'node', '--chain', str(work / 'genesis.json'), '--dev', '--dev.finality-depth', '1', '--dev.block-time', '1s', '--engine.persistence-threshold', '0', '--datadir', str(work / 'data'), '--http', '--http.addr', '127.0.0.1', '--http.port', str(public), '--http.api', 'eth,net,web3', '--authrpc.port', str(auth), '--addr', '127.0.0.1', '--port', str(p2p), '--disable-discovery', '--log.file.directory', str(work / 'logs'), '--color', 'never']
 process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -58,8 +58,13 @@ try:
         except OSError: time.sleep(.1)
     else: raise RuntimeError('private API startup timeout')
     assert not status['ready']
-    ack = result('ops_policyApply', [seal('snapshot', snapshot)], True)
+    # Facts are published through the control listener, which serves only
+    # publication and status.
+    ack = result('ops_policyApply', [seal('snapshot', snapshot)], True, control)
     assert ack['version'] == snapshot['version'] and result('ops_policyStatus', [], True)['ready']
+    assert result('ops_policyStatus', [], True, control)['boot_id'] == ack['boot_id']
+    refused = rpc('ops_submitTransaction', [identity('transaction', signed['call']['hash'], 'control'), signed['call']['raw']], True, control)
+    assert refused.get('error', {}).get('code') == -32000, f'the control listener served an execution method: {refused}'
     assert 'result' in simulation(), 'signed current simulation failed'
     assert 'result' in simulation('eth_estimateGas'), 'scoped estimate failed'
     assert 'result' in simulation('debug_traceCall'), 'scoped trace failed'
@@ -147,7 +152,7 @@ try:
     assert status['ready'] and status['version'] == snapshot['version'], status
     status = result('ops_transactionStatus', [signed['create']['hash']], True)
     assert status['execution']['status'] == 'included' and status['execution']['created'][0]['address'] == receipts['create']['contractAddress'], status
-    summary = {'ok': True, 'workdir': str(work), 'created': receipts['create']['contractAddress'], 'blocks': {name: receipt['blockNumber'] for name, receipt in receipts.items()}, 'checks': ['signed-facts', 'scoped-call-estimate-trace', 'public-isolation', 'state-and-block-override-rejection', 'signed-pool-submission', 'real-block-self-import', 'create', 'canonical-creation-status', 'chain-finality-evidence', 'candidate-preview-active-gate', 'candidate-live-read-isolation', 'current-revocation', 'scoped-admin-diagnostics', 'restart-recovery', 'public-simulate-builds-nothing', 'included-resend-accepted']}
+    summary = {'ok': True, 'workdir': str(work), 'created': receipts['create']['contractAddress'], 'blocks': {name: receipt['blockNumber'] for name, receipt in receipts.items()}, 'checks': ['signed-facts', 'scoped-call-estimate-trace', 'public-isolation', 'state-and-block-override-rejection', 'signed-pool-submission', 'real-block-self-import', 'create', 'canonical-creation-status', 'chain-finality-evidence', 'candidate-preview-active-gate', 'candidate-live-read-isolation', 'current-revocation', 'scoped-admin-diagnostics', 'restart-recovery', 'public-simulate-builds-nothing', 'included-resend-accepted', 'control-listener']}
     (work / 'result.json').write_text(json.dumps(summary, indent=2)); print(json.dumps(summary))
 except Exception:
     log.flush(); print((work / 'node.log').read_text()[-16000:]); raise

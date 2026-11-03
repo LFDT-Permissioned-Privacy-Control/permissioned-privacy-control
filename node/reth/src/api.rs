@@ -19,7 +19,13 @@ use hyper::{
 use hyper_util::rt::{TokioIo, TokioTimer};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{convert::Infallible, future::Future, io, sync::Arc, time::Duration};
+use std::{
+    convert::Infallible,
+    future::Future,
+    io,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use subtle::ConstantTimeEq;
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet};
 
@@ -304,6 +310,21 @@ impl PrivateApi {
     }
 
     pub async fn process(&self, authorization: &str, body: &[u8]) -> ApiResponse {
+        self.process_on(Lane::Execution, authorization, body).await
+    }
+
+    /// `process` for a listener serving `lane`.
+    pub async fn process_on(&self, lane: Lane, authorization: &str, body: &[u8]) -> ApiResponse {
+        self.process_serving(Serving::Lane(lane), authorization, body)
+            .await
+    }
+
+    async fn process_serving(
+        &self,
+        serving: Serving,
+        authorization: &str,
+        body: &[u8],
+    ) -> ApiResponse {
         if !self.authenticated(authorization) {
             return ApiResponse {
                 status: 401,
@@ -331,6 +352,19 @@ impl PrivateApi {
         };
         if request.jsonrpc != "2.0" || request.id.is_empty() || request.id.len() > 128 {
             return rpc_error(Value::Null, -32600, "invalid private request");
+        }
+        if !serving.serves(&request.method) {
+            if serving == Serving::Overflow {
+                return ApiResponse {
+                    status: 503,
+                    body: br#"{"error":"private listener at capacity"}"#.to_vec(),
+                };
+            }
+            return rpc_error(
+                json!(request.id),
+                -32000,
+                "private execution request rejected",
+            );
         }
         let id = json!(request.id);
         match self.dispatch(request, (self.clock)()).await {
@@ -771,35 +805,157 @@ fn rpc_error(id: Value, code: i32, message: &str) -> ApiResponse {
     }
 }
 
-/// Dedicated private HTTP listener with bounded bodies, connections and time.
-/// Shutdown stops acceptance and drains existing requests for at most 10 sec.
+/// Which private methods a listener serves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane {
+    /// Every private method (the main listener).
+    Execution,
+    /// Only fact publication and node status, so fact changes apply while
+    /// the execution listener is saturated.
+    Control,
+}
+
+/// How a connection is served: within the listener's cap, or above it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Serving {
+    Lane(Lane),
+    /// Above the cap: fact publication and status are still served, so a
+    /// full listener never blocks the facts its waiting requests need;
+    /// anything else is answered 503 with `Retry-After: 1`.
+    Overflow,
+}
+
+impl Serving {
+    fn serves(self, method: &str) -> bool {
+        match self {
+            Self::Lane(Lane::Execution) => true,
+            Self::Lane(Lane::Control) | Self::Overflow => {
+                matches!(method, "ops_policyApply" | "ops_policyStatus")
+            }
+        }
+    }
+}
+
+/// A private listener's bounds.
+#[derive(Clone, Copy, Debug)]
+pub struct ListenerConfig {
+    pub lane: Lane,
+    /// Connections served at once. Above it a connection is still served for
+    /// fact publication and status, and answered 503 with `Retry-After: 1`
+    /// otherwise, then closed.
+    pub max_connections: usize,
+    /// After this long a connection is closed at its next response boundary
+    /// (`Connection: close`): an in-flight request always completes. One
+    /// that is still open a minute later (a peer that stopped reading) is
+    /// closed.
+    pub connection_lifetime: Duration,
+}
+
+impl Default for ListenerConfig {
+    fn default() -> Self {
+        Self {
+            lane: Lane::Execution,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            connection_lifetime: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Default connections per private listener.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 128;
+/// Connections served above the cap at once; more are closed unanswered.
+const OVERFLOW: usize = 64;
+/// How long an over-capacity connection may take for its one exchange: the
+/// header (10 s), body (15 s) and processing (30 s) bounds, with margin.
+const OVERFLOW_TIME: Duration = Duration::from_secs(60);
+
+/// The main private listener with default bounds.
 pub async fn serve(
     listener: TcpListener,
     api: Arc<PrivateApi>,
     shutdown: impl Future<Output = ()> + Send,
 ) -> io::Result<()> {
-    let limit = Arc::new(Semaphore::new(128));
+    serve_with(listener, api, ListenerConfig::default(), shutdown).await
+}
+
+/// Dedicated private HTTP listener with bounded bodies, connections and time.
+/// Shutdown stops acceptance, lets in-flight requests finish (connections
+/// close at their response boundary) for at most 10 s, then aborts.
+pub async fn serve_with(
+    listener: TcpListener,
+    api: Arc<PrivateApi>,
+    config: ListenerConfig,
+    shutdown: impl Future<Output = ()> + Send,
+) -> io::Result<()> {
+    let limit = Arc::new(Semaphore::new(config.max_connections.max(1)));
+    let overflow = Arc::new(Semaphore::new(OVERFLOW));
+    let (stopping, stop) = tokio::sync::watch::channel(false);
     let mut requests = JoinSet::new();
+    let mut last_accept_error: Option<Instant> = None;
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             _=&mut shutdown=>break,
             Some(_)=requests.join_next(),if !requests.is_empty()=>{},
             incoming=listener.accept()=>{
-                let (stream,_)=incoming?;
-                let Ok(permit)=limit.clone().try_acquire_owned() else {drop(stream);continue;};
+                // A failed accept (descriptor limits, an aborted handshake)
+                // never stops the listener.
+                let stream=match incoming {
+                    Ok((stream,_))=>stream,
+                    Err(error)=>{
+                        // Rate-limited: a persistent error (descriptor
+                        // exhaustion) clears when descriptors free up.
+                        if last_accept_error.is_none_or(|at:Instant|at.elapsed()>=Duration::from_secs(10)) {
+                            eprintln!("ops policy private listener: accept failed: {error}");
+                            last_accept_error=Some(Instant::now());
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                let (serving,permit)=match limit.clone().try_acquire_owned() {
+                    Ok(permit)=>(Serving::Lane(config.lane),permit),
+                    Err(_)=>match overflow.clone().try_acquire_owned() {
+                        Ok(permit)=>(Serving::Overflow,permit),
+                        Err(_)=>{drop(stream);continue;}
+                    },
+                };
                 let api=api.clone();
+                let mut stop=stop.clone();
+                let lifetime=config.connection_lifetime;
                 requests.spawn(async move {
                     let _permit=permit;
-                    let service=service_fn(move |req|handle_http(api.clone(),req));
+                    let opened=Instant::now();
+                    let service=service_fn(move |req|{
+                        let api=api.clone();
+                        async move {
+                            let mut response=handle_http(api,serving,req).await?;
+                            // Recycle at a response boundary, never mid-request.
+                            if serving==Serving::Overflow || opened.elapsed()>=lifetime {
+                                response.headers_mut().insert(hyper::header::CONNECTION,hyper::header::HeaderValue::from_static("close"));
+                            }
+                            Ok::<_,Infallible>(response)
+                        }
+                    });
                     let mut builder=http1::Builder::new();
                     builder.timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(10));
+                    let backstop=if serving==Serving::Overflow {OVERFLOW_TIME} else {lifetime+Duration::from_secs(60)};
                     let connection=builder.serve_connection(TokioIo::new(stream),service);
-                    let _=tokio::time::timeout(Duration::from_secs(60),connection).await;
+                    tokio::pin!(connection);
+                    let _=tokio::time::timeout(backstop,async {
+                        tokio::select! {
+                            _=connection.as_mut()=>{},
+                            _ = async { let _ = stop.wait_for(|stopping| *stopping).await; } =>{
+                                connection.as_mut().graceful_shutdown();
+                                let _=connection.await;
+                            }
+                        }
+                    }).await;
                 });
             }
         }
     }
+    let _ = stopping.send(true);
     let drained = async { while requests.join_next().await.is_some() {} };
     if tokio::time::timeout(Duration::from_secs(10), drained)
         .await
@@ -811,6 +967,7 @@ pub async fn serve(
 }
 async fn handle_http(
     api: Arc<PrivateApi>,
+    serving: Serving,
     request: Request<Incoming>,
 ) -> Result<Response<Full<bytes::Bytes>>, Infallible> {
     let authorization = request
@@ -841,7 +998,7 @@ async fn handle_http(
         {
             Ok(Ok(body)) => match tokio::time::timeout(
                 Duration::from_secs(30),
-                api.process(&authorization, &body.to_bytes()),
+                api.process_serving(serving, &authorization, &body.to_bytes()),
             )
             .await
             {
@@ -868,5 +1025,13 @@ async fn handle_http(
         "cache-control",
         hyper::header::HeaderValue::from_static("no-store"),
     );
+    // Only the over-capacity answer means "nothing ran, retry": a timed-out
+    // request may have run.
+    if serving == Serving::Overflow && result.status() == StatusCode::SERVICE_UNAVAILABLE {
+        result.headers_mut().insert(
+            hyper::header::RETRY_AFTER,
+            hyper::header::HeaderValue::from_static("1"),
+        );
+    }
     Ok(result)
 }

@@ -4,7 +4,10 @@ use alloy_rpc_types_trace::geth::GethDebugTracingCallOptions;
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ops_reth_policy::{
-    api::{ExecutionBackend, MAX_FACT_WAIT, PoolRejection, PoolSubmission, PrivateApi, serve},
+    api::{
+        ExecutionBackend, Lane, ListenerConfig, MAX_FACT_WAIT, PoolRejection, PoolSubmission,
+        PrivateApi, serve_with,
+    },
     archive::{ArtifactStore, Retention},
     context::ExecutionBinding,
     runtime::PolicyRuntime,
@@ -310,6 +313,23 @@ fn main() -> eyre::Result<()> {
         force_rpc_settings(&mut builder.config_mut().rpc)?;
         let listener = tokio::net::TcpListener::bind(required("OPS_NODE_POLICY_LISTEN")?).await?;
         let fact_wait = parse_fact_wait(&optional("OPS_NODE_POLICY_FACT_WAIT", "1s")?)?;
+        let control_listener = match std::env::var("OPS_NODE_POLICY_CONTROL_LISTEN") {
+            Ok(address) if address.is_empty() => None,
+            Ok(address) => Some(tokio::net::TcpListener::bind(address).await?),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                eyre::bail!("OPS_NODE_POLICY_CONTROL_LISTEN is not valid text")
+            }
+        };
+        let max_connections = usize::try_from(setting("OPS_NODE_POLICY_MAX_CONNECTIONS", "128")?)?;
+        if !(1..=65_536).contains(&max_connections) {
+            eyre::bail!("OPS_NODE_POLICY_MAX_CONNECTIONS must be between 1 and 65536");
+        }
+        let control_connections =
+            usize::try_from(setting("OPS_NODE_POLICY_CONTROL_MAX_CONNECTIONS", "16")?)?;
+        if !(1..=1024).contains(&control_connections) {
+            eyre::bail!("OPS_NODE_POLICY_CONTROL_MAX_CONNECTIONS must be between 1 and 1024");
+        }
         let token = required("OPS_NODE_POLICY_TOKEN")?;
         let eth_builder: EthereumEthApiBuilder = Default::default();
         let engine_builder: BasicEngineApiBuilder<EthereumEngineValidatorBuilder> =
@@ -581,13 +601,45 @@ fn main() -> eyre::Result<()> {
             .with_cpu_pool(ops_reth_policy::api::CpuPool::new(workers))
             .with_fact_wait(fact_wait),
         );
-        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let mut private = tokio::spawn(serve(listener, api, async move {
-            let _ = stopped.await;
-        }));
+        // The main listener serves every private method; the optional
+        // control listener only fact publication and status, with its own
+        // connection cap, so fact changes apply while the main one is full.
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let stopping = |mut stopped: tokio::sync::watch::Receiver<bool>| async move {
+            let _ = stopped.wait_for(|stop| *stop).await;
+        };
+        let mut private = tokio::spawn(serve_with(
+            listener,
+            api.clone(),
+            ListenerConfig {
+                lane: Lane::Execution,
+                max_connections,
+                ..ListenerConfig::default()
+            },
+            stopping(stopped.clone()),
+        ));
+        let mut control = match control_listener {
+            Some(listener) => tokio::spawn(serve_with(
+                listener,
+                api,
+                ListenerConfig {
+                    lane: Lane::Control,
+                    max_connections: control_connections,
+                    ..ListenerConfig::default()
+                },
+                stopping(stopped),
+            )),
+            None => tokio::spawn(std::future::pending::<std::io::Result<()>>()),
+        };
         tokio::select! {
-            exit=handle.wait_for_node_exit()=> {let _=stop.send(());private.await??;exit},
+            exit=handle.wait_for_node_exit()=> {
+                let _=stop.send(true);
+                private.await??;
+                control.abort();
+                exit
+            },
             result=&mut private=> {result??;eyre::bail!("private OPS policy listener stopped")},
+            result=&mut control=> {result??;eyre::bail!("private OPS control listener stopped")},
         }
     })
 }
