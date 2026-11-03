@@ -531,5 +531,39 @@ typed selection. Before the simulation block limit was forced to 0, an
 unauthenticated `eth_simulateV1` request 100 blocks ahead published 99 gap-filler
 manifests (`smoke.py`, run without the limit).
 
+## Batched transaction status (2026-11-03)
+
+Tests in `node/reth/tests/transaction_statuses.rs`, against a canonical chain
+model, and the `main.rs` unit tests:
+
+| Behaviour | Test |
+|---|---|
+| Entries in request order (a repeated hash answered at each position), an unknown hash `null`, the node's boot id, each entry equal to the single call's result plus `pooled` | `batched_status_answers_in_request_order_with_unknown_as_null` |
+| 1 to 256 lowercase hashes and senders; more, none, uppercase, unprefixed, short or non-string values and other parameter shapes fail the call | `batched_status_takes_one_to_256_lowercase_hashes` |
+| The finalized head is capped at the height Reth has written, every entry's finality is decided against it, and a finalized answer releases the slot | `finalized_head_is_capped_at_the_written_height` |
+| No finality evidence (and no nonce read) while finality is unknown, only genesis is final, or the finalized header cannot be read | `finality_evidence_is_withheld_when_unknown_genesis_or_unreadable` |
+| With senders: each hash's receipt presence (unknown for a failed lookup, whose entry is then `null`, never the registry's "pending") and the senders' nonces, read once per call at exactly the finalized hash; without senders, neither field and no state read | `dropped_evidence_reads_receipts_and_nonces_at_the_finalized_hash` |
+| A pending transaction no longer pooled is reported so (eviction); an included one never is; a pooled transaction without an identity has no status | `pooled_tells_a_pending_transaction_from_an_evicted_one` |
+| The canonical epoch stays on appends and on replaced blocks no answer named, and changes when a block named by a batched or a single status answer leaves the chain; the answer that sees a loss, also one during it, reports it and anchors its own blocks | `canonical_epoch_changes_when_a_reported_block_leaves_the_chain`, `a_change_during_an_answer_is_reported_by_that_answer`, `the_answer_that_reports_a_change_anchors_its_own_blocks`, `a_block_named_below_the_highest_is_still_watched_after_a_change` |
+| Named blocks at or below the finalized block are no longer watched | `named_blocks_at_or_below_finality_are_no_longer_watched` |
+| A block that left the chain while an answer was prepared is never named in it, also as a receipt of a hash without an entry | `a_block_gone_by_the_end_of_an_answer_is_never_named` |
+| The finalized block is fixed before any transaction is looked up: a block finalized meanwhile decides nothing and the nonces are read at the earlier one | `the_finalized_block_is_fixed_before_any_transaction_is_looked_up` |
+| A canonical block without local evidence gives `null` | `included_without_local_evidence_is_null` |
+| After a restart one call loads at most 16 uncached blocks; the next answers the rest | `a_call_loads_a_bounded_number_of_uncached_blocks` |
+| Without a chain or a pool view the call fails | `batched_status_fails_closed_without_chain_or_pool_view` |
+| Not served on the control listener; answers while every admission worker is held | `batched_status_is_served_only_on_the_execution_listener_off_the_admission_pool` |
+| Startup refuses pruning of the transaction index, receipts or bodies | `pruning_of_transaction_data_is_refused_at_startup` |
+
+With the genesis rule, the cold-block budget, keeping named blocks after a
+change, pruning them at finality, dropping blocks gone during an answer, or
+reading the finalized block first disabled, the corresponding tests fail. `smoke.py` check `batched-status`
+compares a live answer with Reth's public view: the finalized head's number
+and timestamp with its header, the sender's nonce with
+`eth_getTransactionCount` at that block hash, the receipts with the
+transactions' inclusion, each entry with the single call, `pooled` with
+`eth_getTransactionByHash` for a pending transaction, and, after a restart, a
+new boot id and `null` for a transaction restored to the pool without an
+identity.
+
 Not yet covered here: throughput, which is measured end to end through OPS
 separately.

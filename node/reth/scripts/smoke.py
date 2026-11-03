@@ -126,6 +126,28 @@ try:
         if name == 'create':
             assert status['execution']['created'] == [{'address': receipt['contractAddress'], 'org_id': 'org_acme', 'principal_id': 'fixture_principal'}], status
     assert receipts['create']['contractAddress']
+    # Batched status: request order, an unknown hash as null, the finalized
+    # head (final and written) with its header's timestamp; with senders, each
+    # hash's receipt presence and the sender's nonce at exactly that block.
+    assert 'transaction_statuses_v1' in result('ops_policyStatus', [], True)['capabilities']
+    unknown = '0x' + 'cd' * 32
+    hashes = [signed['call']['hash'], unknown, signed['create']['hash']]
+    plain = result('ops_transactionStatuses', [hashes], True)
+    assert set(plain) == {'boot_id', 'finalized', 'canonical_epoch', 'statuses'} and plain['boot_id'] == ack['boot_id'], plain
+    batch = result('ops_transactionStatuses', [hashes, [signed['sender'].lower()]], True)
+    assert batch['statuses'][1] is None and batch['canonical_epoch'] == 0 and batch['receipts'] == [True, False, True], batch
+    final = batch['finalized']
+    final_header = result('eth_getBlockByHash', [final['hash'], False])
+    assert int(final_header['number'], 16) == final['number'] and int(final_header['timestamp'], 16) == final['timestamp'], (batch, final_header)
+    final_nonce = int(result('eth_getTransactionCount', [signed['sender'], {'blockHash': final['hash']}]), 16)
+    assert final_nonce >= 2 and batch['sender_nonces'] == [final_nonce], (batch, final_nonce)
+    for index, name in [(0, 'call'), (2, 'create')]:
+        entry = batch['statuses'][index]
+        assert entry['transaction_hash'] == signed[name]['hash'] and entry['pooled'] is False, entry
+        assert entry['execution']['finalized'] and entry['execution']['finalized_block_hash'] == final['hash'], entry
+        single = result('ops_transactionStatus', [signed[name]['hash']], True)
+        assert {k: v for k, v in single.items() if k != 'boot_id' and k != 'execution'} == {k: v for k, v in entry.items() if k in single and k != 'execution'}, (entry, single)
+        assert all(entry['execution'][k] == single['execution'][k] for k in ['status', 'facts_version', 'block_hash', 'block_number', 'reason_code', 'created', 'finalized']), (entry, single)
     snapshot.update(header()); snapshot['version'] += 1; snapshot['principals'][0]['banned'] = True
     result('ops_policyApply', [seal('snapshot', snapshot)], True)
     assert 'error' in simulation(), 'revoked principal still simulated'
@@ -142,6 +164,9 @@ try:
         assert result('eth_getTransactionReceipt', [tx['hash']]) is None, 'revoked principal executed'
         status = result('ops_transactionStatus', [tx['hash']], True)
         assert status['execution']['status'] == 'denied' and not status['execution']['created'], status
+        # Pool presence matches Reth's own view of the pending transaction.
+        entry = result('ops_transactionStatuses', [[tx['hash']]], True)['statuses'][0]
+        assert entry['execution']['status'] == 'denied' and entry['pooled'] == (result('eth_getTransactionByHash', [tx['hash']]) is not None), entry
     process.terminate(); process.wait(timeout=10)
     process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
     for _ in range(100):
@@ -152,7 +177,12 @@ try:
     assert status['ready'] and status['version'] == snapshot['version'], status
     status = result('ops_transactionStatus', [signed['create']['hash']], True)
     assert status['execution']['status'] == 'included' and status['execution']['created'][0]['address'] == receipts['create']['contractAddress'], status
-    summary = {'ok': True, 'workdir': str(work), 'created': receipts['create']['contractAddress'], 'blocks': {name: receipt['blockNumber'] for name, receipt in receipts.items()}, 'checks': ['signed-facts', 'scoped-call-estimate-trace', 'public-isolation', 'state-and-block-override-rejection', 'signed-pool-submission', 'real-block-self-import', 'create', 'canonical-creation-status', 'chain-finality-evidence', 'candidate-preview-active-gate', 'candidate-live-read-isolation', 'current-revocation', 'scoped-admin-diagnostics', 'restart-recovery', 'public-simulate-builds-nothing', 'included-resend-accepted', 'control-listener']}
+    # After the restart: a new boot, and a transaction the node holds no
+    # identity for (the denied one, restored to the pool) has no status.
+    batch = result('ops_transactionStatuses', [[signed['create']['hash'], signed['denied']['hash']]], True)
+    assert batch['boot_id'] == status['boot_id'] != ack['boot_id'], batch
+    assert batch['statuses'][0]['execution']['status'] == 'included' and batch['statuses'][1] is None, batch
+    summary = {'ok': True, 'workdir': str(work), 'created': receipts['create']['contractAddress'], 'blocks': {name: receipt['blockNumber'] for name, receipt in receipts.items()}, 'checks': ['signed-facts', 'scoped-call-estimate-trace', 'public-isolation', 'state-and-block-override-rejection', 'signed-pool-submission', 'real-block-self-import', 'create', 'canonical-creation-status', 'chain-finality-evidence', 'candidate-preview-active-gate', 'candidate-live-read-isolation', 'current-revocation', 'scoped-admin-diagnostics', 'restart-recovery', 'public-simulate-builds-nothing', 'included-resend-accepted', 'control-listener', 'batched-status']}
     (work / 'result.json').write_text(json.dumps(summary, indent=2)); print(json.dumps(summary))
 except Exception:
     log.flush(); print((work / 'node.log').read_text()[-16000:]); raise

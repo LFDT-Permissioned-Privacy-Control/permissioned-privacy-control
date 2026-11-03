@@ -23,9 +23,10 @@ from the backup, while the node holds no identities. After every restart:
 - every transaction the node reported `finalized: true` before the stop kept
   its block: the node reports finality only for blocks Reth has written;
 - a restored pooled transaction does not execute without an identity;
-- transactions without a receipt are submitted again, as their sender would
-  (OPS does not resubmit them); every submission is accepted, also when the
-  pool still holds the transaction, and all are included;
+- transactions without a receipt are submitted again, as OPS does once it sees
+  the new boot id (it renews and redelivers every pending transaction with no
+  client action); every submission is accepted, also when the pool still holds
+  the transaction, and all are included;
 - the chain keeps growing, so produced blocks keep self-importing (every
   produced block is replayed from its manifest through newPayload).
 A last SIGKILL and restart without new facts reads every inclusion from disk.

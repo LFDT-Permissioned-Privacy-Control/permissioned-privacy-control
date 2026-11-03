@@ -25,7 +25,7 @@ use reth_ethereum::{
         builder::rpc::{BasicEngineApiBuilder, BasicEngineValidatorBuilder, RpcAddOns},
         node::{EthereumEngineValidatorBuilder, EthereumEthApiBuilder},
     },
-    pool::TransactionOrigin,
+    pool::{TransactionOrigin, TransactionPool},
     primitives::{Recovered, WithEncoded},
     provider::db::mdbx::SyncMode,
     rpc::{
@@ -51,6 +51,7 @@ type BackendFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send>>;
 type SubmitFn =
     Arc<dyn Fn(Identity, Bytes, Address) -> BackendFuture<PoolSubmission> + Send + Sync>;
 type StatusFn = Arc<dyn Fn(B256) -> BackendFuture<Value> + Send + Sync>;
+type PooledFn = Arc<dyn Fn(&[B256]) -> Vec<bool> + Send + Sync>;
 type SimulateFn =
     Arc<dyn Fn(Identity, SimulationRequest, Bytes) -> BackendFuture<Value> + Send + Sync>;
 
@@ -58,6 +59,7 @@ struct Backend {
     submit: SubmitFn,
     simulate: SimulateFn,
     status: StatusFn,
+    pooled: PooledFn,
 }
 #[async_trait]
 impl ExecutionBackend for Backend {
@@ -71,10 +73,14 @@ impl ExecutionBackend for Backend {
             "candidate_simulation_v1",
             "scoped_diagnostics_v1",
             "finalized_status_v1",
+            "transaction_statuses_v1",
         ]
         .into_iter()
         .map(str::to_owned)
         .collect()
+    }
+    fn pooled(&self, hashes: &[B256]) -> Result<Vec<bool>, String> {
+        Ok((self.pooled)(hashes))
     }
     async fn submit(
         &self,
@@ -380,82 +386,16 @@ fn main() -> eyre::Result<()> {
         });
         let eth_submit = handle.node.rpc_registry.eth_api().clone();
         let eth_simulate = eth_submit.clone();
-        let eth_status = eth_submit.clone();
         let status_runtime = runtime.clone();
         let status: StatusFn = Arc::new(move |hash| {
-            let eth = eth_status.clone();
             let runtime = status_runtime.clone();
             Box::pin(async move {
-                let status = if let Some(receipt) = eth
-                    .transaction_receipt(hash)
+                // From the node's canonical chain (index lookups, never the
+                // block's other receipts) and the block's evidence; finality
+                // never above what Reth has written.
+                let status = tokio::task::spawn_blocking(move || runtime.status(hash, now()))
                     .await
-                    .map_err(|_| "receipt lookup failed")?
-                {
-                    let receipt =
-                        serde_json::to_value(receipt).map_err(|_| "invalid canonical receipt")?;
-                    let block: B256 = receipt
-                        .get("blockHash")
-                        .and_then(Value::as_str)
-                        .ok_or("receipt block unavailable")?
-                        .parse()
-                        .map_err(|_| "invalid receipt block")?;
-                    let included = u64::from_str_radix(
-                        receipt
-                            .get("blockNumber")
-                            .and_then(Value::as_str)
-                            .ok_or("receipt block unavailable")?
-                            .trim_start_matches("0x"),
-                        16,
-                    )
-                    .map_err(|_| "invalid receipt block")?;
-                    let success = receipt.get("status").and_then(Value::as_str) == Some("0x1");
-                    // Finality from the node's canonical chain, never above
-                    // what Reth has written (a crash cannot lose a block
-                    // reported final); deciding from it is the runtime's.
-                    let lookup = runtime.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let finality = lookup.finality_evidence(included);
-                        lookup.canonical_status(hash, (included, block), success, finality)
-                    })
-                    .await
-                    .map_err(|_| "status lookup failed")??
-                } else {
-                    // Not included: only a live (registered) identity has a status.
-                    let identity = runtime
-                        .live_identity(hash)
-                        .ok_or("unknown execution identity")?;
-                    if identity.header.expires_at <= now() {
-                        // This describes the current ticket only. An already pinned
-                        // candidate can still settle; OPS continues receipt polling.
-                        ops_reth_policy::runtime::TransactionStatus {
-                            status: "expired".into(),
-                            facts_version: identity.min_snapshot_version,
-                            block_hash: None,
-                            block_number: None,
-                            reason_code: "IDENTITY_EXPIRED".into(),
-                            created: Vec::new(),
-                            finalized: false,
-                            finalized_block_hash: None,
-                            finalized_block_number: None,
-                        }
-                    } else {
-                        let lookup = runtime.clone();
-                        tokio::task::spawn_blocking(move || lookup.transaction_status(hash, None))
-                            .await
-                            .map_err(|_| "status lookup failed")??
-                            .unwrap_or(ops_reth_policy::runtime::TransactionStatus {
-                                status: "pending".into(),
-                                facts_version: identity.min_snapshot_version,
-                                block_hash: None,
-                                block_number: None,
-                                reason_code: String::new(),
-                                created: Vec::new(),
-                                finalized: false,
-                                finalized_block_hash: None,
-                                finalized_block_number: None,
-                            })
-                    }
-                };
+                    .map_err(|_| "status lookup failed")??;
                 serde_json::to_value(status).map_err(|_| "invalid execution status".into())
             })
         });
@@ -579,6 +519,11 @@ fn main() -> eyre::Result<()> {
                 .map_err(|_| "simulation denied or failed".into())
             })
         });
+        // The pool's view for batched status: an in-memory lookup per hash.
+        let pool = handle.node.pool.clone();
+        let pooled: PooledFn = Arc::new(move |hashes: &[B256]| {
+            hashes.iter().map(|hash| pool.contains(hash)).collect()
+        });
         let workers = usize::try_from(setting(
             "OPS_NODE_POLICY_VERIFY_WORKERS",
             &ops_reth_policy::api::DEFAULT_CPU_WORKERS.to_string(),
@@ -593,6 +538,7 @@ fn main() -> eyre::Result<()> {
                     submit,
                     simulate,
                     status,
+                    pooled,
                 }),
                 token,
                 Arc::new(now),
@@ -798,6 +744,45 @@ mod tests {
         assert!(refuse_unsafe_database(&database(&[])).is_ok());
         assert!(refuse_unsafe_database(&database(&["--db.sync-mode", "durable"])).is_ok());
         assert!(refuse_unsafe_database(&database(&["--db.sync-mode", "safe-no-sync"])).is_err());
+    }
+
+    #[test]
+    fn pruning_of_transaction_data_is_refused_at_startup() {
+        use reth_ethereum::chainspec::DEV;
+        let pruned = |arguments: &[&str]| {
+            let mut command = vec!["ops-reth", "node"];
+            command.extend_from_slice(arguments);
+            let cli = Cli::<EthereumChainSpecParser>::try_parse_args_from(command).unwrap();
+            let reth_ethereum::cli::interface::Commands::Node(node) = cli.command else {
+                panic!("not the node command");
+            };
+            node.pruning
+                .prune_config(&*DEV)
+                .map(|config| ops_reth_policy::pruned_data!(config.segments))
+        };
+        // No pruning, and pruning that keeps every transaction's data.
+        for arguments in [
+            &[][..],
+            &["--prune.sender-recovery.full"],
+            &["--prune.account-history.distance", "100000"],
+        ] {
+            assert!(
+                pruned(arguments).unwrap_or_default().refuse().is_ok(),
+                "{arguments:?} was refused"
+            );
+        }
+        for arguments in [
+            &["--full"][..],
+            &["--minimal"],
+            &["--prune.transaction-lookup.full"],
+            &["--prune.receipts.distance", "100000"],
+            &["--prune.bodies.distance", "100000"],
+        ] {
+            assert!(
+                pruned(arguments).unwrap_or_default().refuse().is_err(),
+                "{arguments:?} was accepted"
+            );
+        }
     }
 
     #[test]

@@ -116,7 +116,8 @@ over-capacity connection after a minute, and every connection 10 s into a
 shutdown are dropped.
 
 The private listener supports `ops_policyApply`, `ops_policyStatus`,
-`ops_submitTransaction`, `ops_simulate`, and `ops_transactionStatus`. Its exact
+`ops_submitTransaction`, `ops_simulate`, `ops_transactionStatus` and
+`ops_transactionStatuses`. Its exact
 wire protocol is in [execution-context.md](../../docs/architecture/execution-context.md).
 It is separate from public Reth JSON-RPC. IPC is disabled, and the node refuses
 to start with a public RPC module that replays, traces, validates or builds
@@ -160,10 +161,12 @@ organization or signer for its transaction hash; an expired lease is reclaimed b
 a later admission. OPS's durable submission record refuses rebinding before
 anything reaches the node, including after the node has released or lost the
 identity. After a node restart the node holds no pending identities, so a
-transaction not yet included cannot execute until the principal that submitted it
-sends the same signed transaction again through OPS; OPS does not resubmit it.
-The node accepts that resend even when its pool still holds the transaction:
-after a clean shutdown Reth restores the pool from its backup. An `expired`
+transaction not yet included cannot execute until OPS delivers it again. OPS
+sees the new `boot_id` and renews and redelivers every pending transaction (a
+fresh identity and the same signed bytes), with no client action. Renewal
+follows a full OPS re-check, so a revoked principal's transactions are not
+renewed. The node accepts that delivery even when its pool still holds the
+transaction: after a clean shutdown Reth restores the pool from its backup. An `expired`
 status describes the current lease and is not final: a
 previously pinned candidate can still settle, so OPS continues receipt polling.
 Once the expired lease has been reclaimed, a status request for the not-included
@@ -178,7 +181,7 @@ identity slot once the transaction's canonical block is final and written (OPS's
 status poll of a finalized receipt releases it too): before finality a
 reorganization can return the transaction to the pool, where its registered
 identity lets it execute again, without OPS, while its lease is valid; after
-expiry the principal that submitted it must send it again through OPS.
+expiry OPS renews it once its status is pending again.
 Permanent OPS registration and visibility projection wait for `finalized:true`.
 The node reports finality only up to the lower of Reth's forkchoice-finalized
 height and the height Reth has written to disk (a crash can lose newer blocks),
@@ -187,6 +190,54 @@ finalized history uses consensus finality alone.
 Wait for that reconciliation before calling a newly deployed contract across
 blocks. Inclusion alone remains provisional and can return to pending after a
 reorganization.
+
+`ops_transactionStatuses` (capability `transaction_statuses_v1`) answers up to
+256 transactions in one call, for OPS's reconciliation and recovery. Its first
+parameter is an array of hashes, each `0x` and 64 lowercase hex characters. The
+result names `boot_id` once, `finalized` (the effective finalized block above,
+as `number`, `hash` and header `timestamp`; `null` while finality is unknown,
+only genesis is final, or that block's header cannot be read),
+`canonical_epoch`, and `statuses`, one entry per requested hash in request
+order. An entry is the `ops_transactionStatus` result without `boot_id`, plus
+`pooled`: the node's pool holds the transaction, never `true` once it is
+included, so a pending transaction that is not pooled was evicted. The
+finalized block is read before any transaction is looked up, and every entry's
+finality is decided against it. An entry is `null` when the node has no answer
+for the hash in this call: no canonical block and no registered identity, a
+canonical block without local evidence, a failed lookup, or a block beyond the
+call's budget of 16 blocks whose evidence is not cached yet (loading one
+verifies every identity in it; the next call finds more cached). A `null` is
+never evidence that the transaction is gone. `canonical_epoch` starts at 0 at
+every process start and changes whenever a block that a status answer of the
+same process named as a transaction's inclusion block has left the canonical
+chain before becoming final; the first answer that sees the loss reports it
+(it can also change without such a loss), and a new `boot_id` counts as a
+change. An answer never
+names a block that left the chain while it was being prepared: those
+transactions get `null` (and a `null` receipt) in that answer.
+
+An optional second parameter, an array of up to 256 sender addresses (`0x` and
+40 lowercase hex characters), asks for dropped-transaction evidence: the result
+then also has `receipts`, one per requested hash (`true`: a canonical block
+holds it; `false`: none does; `null`: unknown), and `sender_nonces`, one per
+requested sender, its account nonce in the state after `finalized.hash` (the
+whole field is `null` when `finalized` is, or that state cannot be read). Both
+are read from the node's own chain after the finalized block was fixed, so a
+`false` receipt with a sender nonce past the transaction's means another
+transaction consumed that nonce in a final block. The node therefore refuses to
+start with pruning that removes transaction data (`--full`, `--minimal`,
+`--prune.transaction-lookup.*`, `--prune.receipts.*`, a receipt log filter,
+`--prune.bodies.*`, or the same in the config file): an included transaction
+would read as not included. The check reads the settings, not the data
+directory, so use a data directory that was never pruned. Blocks above the
+canonical head that Reth still keeps on disk after a reorganization are never
+treated as canonical.
+
+Malformed parameters (more than 256 hashes or senders, none, or not lowercase
+`0x` hex of the right length), or a node without a chain or pool view yet,
+fail the whole call with the generic error. The call is served only on the
+main listener and runs on its own bounded lane (four calls at once), never on
+the admission workers.
 
 The local example uses `--dev.finality-depth 1`; Reth's default is 64. These are
 the dev miner's forkchoice decisions, not an external consensus guarantee. The

@@ -4,7 +4,7 @@
 use crate::{
     context::ExecutionBinding,
     identity::{Admission, IdentityRegistry},
-    runtime::PolicyRuntime,
+    runtime::{MAX_STATUS_BATCH, PolicyRuntime, StatusBatch},
     wire::{Identity, MAX_ENVELOPE_BYTES, SimulationRequest, decode_strict, parse_simulation},
 };
 use alloy_consensus::{Transaction, TxEnvelope, transaction::SignerRecoverable};
@@ -59,6 +59,9 @@ pub const MAX_FACT_WAIT: Duration = Duration::from_secs(5);
 /// so waiters alone can never fill the listener and block the publication
 /// they wait for.
 pub const DEFAULT_FACT_WAITERS: usize = 32;
+/// Batched status calls worked on at once; more wait (holding only their
+/// connection).
+const STATUS_JOBS: usize = 4;
 
 /// What the transaction pool did with a submitted transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +117,12 @@ pub trait ExecutionBackend: Send + Sync {
     async fn transaction_status(&self, _hash: B256) -> Result<Value, String> {
         Err("transaction status is unavailable".into())
     }
+    /// Whether the transaction pool holds each hash, in order (cheap, in
+    /// memory). A backend without a pool view cannot answer
+    /// `ops_transactionStatuses`.
+    fn pooled(&self, _hashes: &[B256]) -> Result<Vec<bool>, String> {
+        Err("transaction pool view is unavailable".into())
+    }
     async fn simulate(
         &self,
         identity: Identity,
@@ -134,6 +143,9 @@ pub struct PrivateApi {
     /// Bounds concurrent waiters; beyond it a lagging request gets `-32012`
     /// at once.
     waiters: Arc<Semaphore>,
+    /// Bounds concurrent batched status jobs (recovery and reconciliation
+    /// traffic), apart from the admission pool.
+    status_jobs: Arc<Semaphore>,
 }
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -261,6 +273,7 @@ impl PrivateApi {
             cpu: CpuPool::new(DEFAULT_CPU_WORKERS),
             fact_wait: DEFAULT_FACT_WAIT,
             waiters: Arc::new(Semaphore::new(DEFAULT_FACT_WAITERS)),
+            status_jobs: Arc::new(Semaphore::new(STATUS_JOBS)),
         })
     }
 
@@ -471,15 +484,56 @@ impl PrivateApi {
                 };
                 let runtime = self.runtime.clone();
                 // Status has its own blocking lane: archive reads never hold
-                // the admission pool's permits.
-                let identity =
-                    tokio::task::spawn_blocking(move || runtime.status_identity(hash, block))
-                        .await
-                        .map_err(|_| "status lookup failed")??;
+                // the admission pool's permits. A block named as the
+                // inclusion block counts for the canonical epoch.
+                let identity = tokio::task::spawn_blocking(move || {
+                    let identity = runtime.status_identity(hash, block)?;
+                    // A block that left the chain meanwhile is never named.
+                    if !runtime.note_reported(block.as_slice())?.1.is_empty() {
+                        return Err("canonical chain changed during the lookup".to_owned());
+                    }
+                    Ok(identity)
+                })
+                .await
+                .map_err(|_| "status lookup failed")??;
                 Ok(
                     json!({"transaction_hash":format!("{hash:#x}"),"principal_id":identity.principal_id,
                     "org_id":identity.org_id,"context_id":identity.context_id,"execution":execution,"boot_id":boot_id}),
                 )
+            }
+            "ops_transactionStatuses" => {
+                if !matches!(request.params.len(), 1 | 2) {
+                    return Err("invalid private parameters".into());
+                }
+                let hashes = status_hashes(&request.params[0])?;
+                // Optional: senders whose nonce after the finalized block is
+                // wanted, with each hash's receipt presence (dropped evidence).
+                let senders = request.params.get(1).map(status_senders).transpose()?;
+                // A bounded lane of its own: never the admission pool's
+                // permits. The permit travels with the job, so a cancelled
+                // request cannot let more jobs run than the bound.
+                let permit = self
+                    .status_jobs
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| "status lookup unavailable")?;
+                let (runtime, backend) = (self.runtime.clone(), self.backend.clone());
+                let batch = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    // The pool is read before any inclusion: a transaction
+                    // leaves the pool only after its block is canonical.
+                    let pooled = backend.pooled(&hashes)?;
+                    if pooled.len() != hashes.len() {
+                        return Err("transaction pool view unavailable".to_owned());
+                    }
+                    runtime
+                        .transaction_statuses(&hashes, &pooled, senders.as_deref(), now)
+                        .map(|batch| (batch, senders.is_some()))
+                })
+                .await
+                .map_err(|_| "status lookup failed")??;
+                Ok(status_batch_json(&batch.0, batch.1, boot_id))
             }
             "ops_submitTransaction" => {
                 require_count(&request.params, 2)?;
@@ -778,6 +832,84 @@ fn admit_simulation(
         },
         now,
     )
+}
+
+/// `[hash, …]`: 1 to `MAX_STATUS_BATCH` transaction hashes, each `0x` and 64
+/// lowercase hex characters, exactly as OPS stores them.
+fn status_hashes(param: &Value) -> Result<Vec<B256>, String> {
+    lowercase_hex_list(param, 32)?
+        .iter()
+        .map(|hash| hash.parse().map_err(|_| "invalid transaction hash".into()))
+        .collect()
+}
+
+/// `[address, …]`: 1 to `MAX_STATUS_BATCH` sender addresses, each `0x` and 40
+/// lowercase hex characters.
+fn status_senders(param: &Value) -> Result<Vec<Address>, String> {
+    lowercase_hex_list(param, 20)?
+        .iter()
+        .map(|sender| sender.parse().map_err(|_| "invalid sender".into()))
+        .collect()
+}
+
+/// A JSON array of 1 to `MAX_STATUS_BATCH` strings, each `0x` and exactly
+/// `bytes` bytes as lowercase hex.
+fn lowercase_hex_list(param: &Value, bytes: usize) -> Result<Vec<&str>, String> {
+    let values = param.as_array().ok_or("invalid status parameters")?;
+    if values.is_empty() || values.len() > MAX_STATUS_BATCH {
+        return Err("invalid status parameters".into());
+    }
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| {
+                    value.len() == 2 + 2 * bytes
+                        && value.starts_with("0x")
+                        && value[2..]
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+                .ok_or_else(|| "invalid status parameters".to_owned())
+        })
+        .collect()
+}
+
+/// The wire form of a batched status answer. Each entry is the single
+/// status call's result without `boot_id` (named once for the batch), with
+/// the pool's view. With requested senders, also each hash's receipt
+/// presence and the senders' nonces after the finalized block.
+fn status_batch_json(batch: &StatusBatch, evidence: bool, boot_id: &str) -> Value {
+    let statuses: Vec<Value> = batch
+        .statuses
+        .iter()
+        .map(|entry| match entry {
+            None => Value::Null,
+            Some(entry) => json!({
+                "transaction_hash": format!("{:#x}", entry.hash),
+                "principal_id": entry.identity.principal_id,
+                "org_id": entry.identity.org_id,
+                "context_id": entry.identity.context_id,
+                "execution": entry.execution,
+                "pooled": entry.pooled,
+            }),
+        })
+        .collect();
+    let finalized = batch.finalized.map(|head| {
+        json!({"number": head.number, "hash": format!("{:#x}", head.hash), "timestamp": head.timestamp})
+    });
+    let mut answer = json!({
+        "boot_id": boot_id,
+        "finalized": finalized,
+        "canonical_epoch": batch.canonical_epoch,
+        "statuses": statuses,
+    });
+    if evidence {
+        answer["receipts"] = json!(batch.receipts);
+        answer["sender_nonces"] = json!(batch.sender_nonces);
+    }
+    answer
 }
 
 fn require_count(params: &[Value], count: usize) -> Result<(), String> {

@@ -20,7 +20,7 @@ use crate::{
 use alloy_evm::revm::context::TxEnv;
 use alloy_primitives::{Address, B256};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::{Arc, Condvar, Mutex, OnceLock, Weak},
     time::Duration,
 };
@@ -65,6 +65,98 @@ impl From<&Identity> for StatusIdentity {
             org_id: identity.org_id.clone(),
             context_id: identity.context_id.clone(),
         }
+    }
+}
+
+/// The effective finalized block a batched status answer is consistent with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FinalizedHead {
+    pub number: u64,
+    pub hash: B256,
+    pub timestamp: u64,
+}
+
+/// One hash's answer in a batched status call.
+#[derive(Clone, Debug)]
+pub struct BatchedStatus {
+    pub hash: B256,
+    pub identity: StatusIdentity,
+    pub execution: TransactionStatus,
+    /// The pool holds it (only ever true for a transaction not included).
+    pub pooled: bool,
+}
+
+/// A batched status answer, in request order.
+#[derive(Clone, Debug)]
+pub struct StatusBatch {
+    pub finalized: Option<FinalizedHead>,
+    pub canonical_epoch: u64,
+    /// `None` where the node has no answer for a hash.
+    pub statuses: Vec<Option<BatchedStatus>>,
+    /// Per hash: a canonical block holds it (its own receipt exists), none
+    /// does, or `None` when that could not be read. Looked up after the
+    /// finalized block was fixed.
+    pub receipts: Vec<Option<bool>>,
+    /// Per requested sender: its account nonce after the finalized block;
+    /// `None` without senders, a finalized block, or readable state there.
+    pub sender_nonces: Option<Vec<u64>>,
+}
+
+/// Hashes (and senders) one batched status call answers at most.
+pub const MAX_STATUS_BATCH: usize = 256;
+
+/// Blocks whose evidence one batched call may load from the archive (each
+/// load verifies every identity in the block): entries in further uncached
+/// blocks get no answer in that call, and the next call finds more cached.
+const COLD_BLOCKS_PER_STATUS_CALL: usize = 16;
+
+/// Named blocks above finality kept for the canonical epoch; beyond this the
+/// lowest are dropped (only a node whose finality is unknown for that long
+/// gets there, and finality re-polls still cover them).
+const NAMED_BLOCKS: usize = 16_384;
+
+/// The canonical epoch: a counter that changes whenever a block this process
+/// named in a status answer as a transaction's inclusion block has left the
+/// canonical chain. Named blocks above the finalized height are kept (a final
+/// block cannot leave); checking the highest suffices while it is canonical,
+/// because canonical blocks are hash-linked, so any change below it changes
+/// the canonical hash at its height (or removes the height). After a change
+/// the ones still canonical stay, so none is forgotten.
+#[derive(Debug, Default)]
+struct CanonicalEpoch {
+    epoch: u64,
+    named: BTreeMap<u64, B256>,
+}
+
+impl CanonicalEpoch {
+    /// At the end of an answer that would name `blocks` (possibly none, no
+    /// duplicates): bump if an earlier named block left the chain (keeping
+    /// the named blocks still canonical), then add these blocks still
+    /// canonical. Returns the epoch this answer reports and the blocks that
+    /// left the chain during it: the answer must not name them.
+    fn note(
+        &mut self,
+        chain: &dyn ChainState,
+        blocks: &[(u64, B256)],
+        finalized: Option<u64>,
+    ) -> (u64, Vec<(u64, B256)>) {
+        let canonical = |&(number, hash): &(u64, B256)| chain.canonical_hash(number) == Some(hash);
+        if let Some(finalized) = finalized {
+            self.named = self.named.split_off(&finalized.saturating_add(1));
+        }
+        if let Some((&number, &hash)) = self.named.last_key_value()
+            && !canonical(&(number, hash))
+        {
+            self.epoch += 1;
+            self.named
+                .retain(|&number, &mut hash| canonical(&(number, hash)));
+        }
+        let (live, gone): (Vec<_>, Vec<_>) = blocks.iter().partition(|block| canonical(block));
+        self.named.extend(live);
+        while self.named.len() > NAMED_BLOCKS {
+            self.named.pop_first();
+        }
+        (self.epoch, gone)
     }
 }
 
@@ -138,6 +230,8 @@ pub struct PolicyRuntime {
     finality: Finality,
     /// The highest final height whose identities were released.
     released_through: Mutex<Option<u64>>,
+    /// Changes when a block named in a status answer leaves the chain.
+    reported: Mutex<CanonicalEpoch>,
     /// The highest block Reth had written when the node started (its
     /// persisted-block notification starts empty).
     persisted_at_start: OnceLock<(u64, B256)>,
@@ -319,6 +413,7 @@ impl PolicyRuntime {
             chain: OnceLock::new(),
             finality: Finality::default(),
             released_through: Mutex::new(None),
+            reported: Mutex::new(CanonicalEpoch::default()),
             persisted_at_start: OnceLock::new(),
             wake: Arc::new(Wake::default()),
             retention: Retention::default(),
@@ -769,6 +864,235 @@ impl PolicyRuntime {
                 .finish(&ExecutionBinding::Transaction(hash))?;
         }
         Ok(status)
+    }
+
+    /// Record that a status answer is about to name these inclusion blocks.
+    /// Returns the canonical epoch it reports and the blocks that are no
+    /// longer canonical, which it must not name. Without an attached chain
+    /// nothing is tracked.
+    pub fn note_reported(&self, blocks: &[(u64, B256)]) -> Result<(u64, Vec<(u64, B256)>), String> {
+        let Some(chain) = self.chain.get() else {
+            return Ok((0, Vec::new()));
+        };
+        let mut blocks = blocks.to_vec();
+        blocks.sort_unstable();
+        blocks.dedup();
+        let finalized = self.finality.current().map(|(number, _)| number);
+        Ok(self
+            .reported
+            .lock()
+            .map_err(|_| "execution status unavailable")?
+            .note(chain.as_ref(), &blocks, finalized))
+    }
+
+    /// The single status call's answer for `hash`: from its canonical block's
+    /// evidence (`included`/`reverted`, final once the effective finalized
+    /// block proves it), else from its registered identity. Unknown is an
+    /// error, so nothing is disclosed for a hash OPS did not submit.
+    pub fn status(&self, hash: B256, now: i64) -> Result<TransactionStatus, String> {
+        let chain = self.chain.get().ok_or("node chain unavailable")?;
+        match chain.inclusion(hash)? {
+            Some(inclusion) => self.canonical_status(
+                hash,
+                (inclusion.number, inclusion.hash),
+                inclusion.success,
+                self.finality_evidence(inclusion.number),
+            ),
+            None => Ok(self
+                .pending_status(hash, now)?
+                .ok_or("unknown execution identity")?
+                .1),
+        }
+    }
+
+    /// Batched status of `hashes` (at most `MAX_STATUS_BATCH`), with the
+    /// pool's view of each (`pooled`, read before this call), and the nonces
+    /// of `senders` (at most `MAX_STATUS_BATCH`) after the finalized block.
+    ///
+    /// The effective finalized block F is fixed before any inclusion is looked
+    /// up, so "no canonical block holds H" together with a nonce at F past
+    /// H's can never describe an H that was itself finalized meanwhile.
+    /// Every entry's finality is decided against that one F. A hash without a
+    /// canonical block or live identity, without readable evidence for its
+    /// block, or past this call's budget of uncached blocks, has no entry.
+    /// The canonical epoch is read last, after this answer's blocks are noted.
+    pub fn transaction_statuses(
+        &self,
+        hashes: &[B256],
+        pooled: &[bool],
+        senders: Option<&[Address]>,
+        now: i64,
+    ) -> Result<StatusBatch, String> {
+        if hashes.is_empty()
+            || hashes.len() > MAX_STATUS_BATCH
+            || pooled.len() != hashes.len()
+            || senders.is_some_and(|senders| senders.is_empty() || senders.len() > MAX_STATUS_BATCH)
+        {
+            return Err("invalid status batch".into());
+        }
+        let chain = self.chain.get().ok_or("node chain unavailable")?.clone();
+        // Only a block above genesis, still canonical, with a readable header
+        // is finality evidence; otherwise the answer has none.
+        let finalized = self.effective_finality().and_then(|(number, hash)| {
+            (number > 0 && chain.canonical_hash(number) == Some(hash)).then_some(())?;
+            Some(FinalizedHead {
+                number,
+                hash,
+                timestamp: chain.block_timestamp(hash)?,
+            })
+        });
+        let mut cold_blocks = COLD_BLOCKS_PER_STATUS_CALL;
+        let mut statuses = Vec::with_capacity(hashes.len());
+        let mut receipts = Vec::with_capacity(hashes.len());
+        let mut blocks = Vec::with_capacity(hashes.len());
+        for (&hash, &in_pool) in hashes.iter().zip(pooled) {
+            let (entry, receipt, block) = match chain.inclusion(hash) {
+                Ok(Some(inclusion)) => (
+                    self.batched_included(
+                        chain.as_ref(),
+                        hash,
+                        inclusion,
+                        finalized,
+                        &mut cold_blocks,
+                    ),
+                    Some(true),
+                    Some((inclusion.number, inclusion.hash)),
+                ),
+                Ok(None) => (self.batched_pending(hash, in_pool, now), Some(false), None),
+                // No evidence either way: never the registry's answer.
+                Err(_) => (None, None, None),
+            };
+            statuses.push(entry);
+            receipts.push(receipt);
+            blocks.push(block);
+        }
+        let sender_nonces = match (senders, finalized) {
+            (Some(senders), Some(head)) => chain
+                .nonces_at(head.hash, senders)
+                .ok()
+                .filter(|nonces| nonces.len() == senders.len()),
+            _ => None,
+        };
+        // Every inclusion block read, also of hashes without an entry: their
+        // receipt names it too.
+        let reported: Vec<(u64, B256)> = blocks.iter().flatten().copied().collect();
+        let (canonical_epoch, gone) = self.note_reported(&reported)?;
+        // A block that left the chain during this answer is never named: its
+        // transactions get no answer (and no receipt evidence) this time.
+        for ((entry, receipt), block) in statuses.iter_mut().zip(&mut receipts).zip(&blocks) {
+            if block.is_some_and(|block| gone.contains(&block)) {
+                *entry = None;
+                *receipt = None;
+            }
+        }
+        Ok(StatusBatch {
+            finalized,
+            canonical_epoch,
+            statuses,
+            receipts,
+            sender_nonces,
+        })
+    }
+
+    /// A canonically included transaction's batched entry, from its block's
+    /// evidence (loading at most `cold_blocks` more blocks from the
+    /// archive), final when `finalized` proves it; then its slot is released,
+    /// as by the single status call.
+    fn batched_included(
+        &self,
+        chain: &dyn ChainState,
+        hash: B256,
+        inclusion: crate::chain::Inclusion,
+        finalized: Option<FinalizedHead>,
+        cold_blocks: &mut usize,
+    ) -> Option<BatchedStatus> {
+        let key = (inclusion.number, inclusion.hash);
+        let cached = self.status.lock().ok()?.blocks.get(&key).cloned();
+        let block = match cached {
+            Some(block) => block,
+            None if *cold_blocks == 0 => return None,
+            None => {
+                *cold_blocks -= 1;
+                self.block_status(key.0, key.1).ok().flatten()?
+            }
+        };
+        let transaction = block.transactions.get(&hash)?;
+        let mut execution = TransactionStatus {
+            status: if inclusion.success {
+                "included"
+            } else {
+                "reverted"
+            }
+            .into(),
+            facts_version: block.facts_version,
+            block_hash: Some(inclusion.hash),
+            block_number: Some(inclusion.number),
+            reason_code: transaction.reason_code.clone(),
+            created: transaction.created.clone(),
+            finalized: false,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        };
+        if let Some(head) = finalized
+            && let Some(canonical) = chain.canonical_hash(inclusion.number)
+        {
+            execution.observe_finality(canonical, head.number, head.hash);
+        }
+        if execution.finalized {
+            self.identities
+                .finish(&ExecutionBinding::Transaction(hash))
+                .ok()?;
+        }
+        Some(BatchedStatus {
+            hash,
+            identity: transaction.identity.clone(),
+            execution,
+            pooled: false,
+        })
+    }
+
+    /// A transaction not included: only a live identity has a status, as in
+    /// the single status call.
+    fn batched_pending(&self, hash: B256, pooled: bool, now: i64) -> Option<BatchedStatus> {
+        let (identity, execution) = self.pending_status(hash, now).ok()??;
+        Some(BatchedStatus {
+            hash,
+            identity: (&identity).into(),
+            execution,
+            pooled,
+        })
+    }
+
+    /// The status of a transaction no canonical block holds: `None` without
+    /// a registered identity; else `expired` once its lease has passed (this
+    /// describes the current ticket only: a pinned candidate can still settle
+    /// it), or the latest candidate note, or `pending`.
+    pub fn pending_status(
+        &self,
+        hash: B256,
+        now: i64,
+    ) -> Result<Option<(Identity, TransactionStatus)>, String> {
+        let Some(identity) = self.live_identity(hash) else {
+            return Ok(None);
+        };
+        let quiet = |status: &str, reason_code: &str| TransactionStatus {
+            status: status.into(),
+            facts_version: identity.min_snapshot_version,
+            block_hash: None,
+            block_number: None,
+            reason_code: reason_code.into(),
+            created: Vec::new(),
+            finalized: false,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        };
+        let status = if identity.header.expires_at <= now {
+            quiet("expired", "IDENTITY_EXPIRED")
+        } else {
+            self.transaction_status(hash, None)?
+                .unwrap_or_else(|| quiet("pending", ""))
+        };
+        Ok(Some((identity, status)))
     }
 
     pub fn pin_candidate(&self, at: i64) -> Result<Arc<ExecutionHandle>, String> {

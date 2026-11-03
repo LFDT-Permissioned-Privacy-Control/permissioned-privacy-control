@@ -3,13 +3,13 @@
 
 use crate::{
     archive::BlockDescriptor,
-    chain::ChainState,
+    chain::{ChainState, Inclusion},
     policy::{PolicyEvm, PolicyFactory},
     runtime::{
         ChainView, ExecutionHandle, FinalityView, ImportExecution, ImportOrigin, PolicyRuntime,
     },
 };
-use alloy_consensus::Header;
+use alloy_consensus::{BlockHeader, Header, TxReceipt};
 use alloy_eips::BlockNumHash;
 use alloy_evm::{
     EvmEnv,
@@ -17,7 +17,7 @@ use alloy_evm::{
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext},
     revm::inspector::Inspector,
 };
-use alloy_primitives::{B256, keccak256};
+use alloy_primitives::{Address, B256, keccak256};
 use reth_ethereum::{
     Block, EthPrimitives,
     chainspec::ChainSpec,
@@ -34,8 +34,8 @@ use reth_ethereum::{
     },
     primitives::{SealedBlock, SealedHeader},
     provider::{
-        BlockHashReader, BlockIdReader, BlockNumReader, DatabaseProviderFactory,
-        TransactionsProvider,
+        BlockHashReader, BlockIdReader, BlockNumReader, DatabaseProviderFactory, HeaderProvider,
+        ReceiptProvider, StateProviderFactory, TransactionsProvider,
     },
     rpc::types::engine::ExecutionData,
 };
@@ -114,6 +114,9 @@ where
     P: BlockIdReader
         + BlockHashReader
         + TransactionsProvider<Transaction = reth_ethereum::TransactionSigned>
+        + ReceiptProvider<Receipt: TxReceipt>
+        + HeaderProvider<Header: BlockHeader>
+        + StateProviderFactory
         + Send
         + Sync,
 {
@@ -130,7 +133,13 @@ where
         (self.canonical_hash(number) == Some(hash)).then_some(number)
     }
     fn canonical_hash(&self, number: u64) -> Option<B256> {
-        self.provider.block_hash(number).ok().flatten()
+        let hash = self.provider.block_hash(number).ok().flatten()?;
+        // Above the canonical head the provider falls back to the database,
+        // which keeps blocks of an abandoned branch until Reth removes them
+        // (after a forkchoice to an ancestor): those are not canonical. The
+        // head is read after the hash, so a head that moves back meanwhile
+        // refuses the hash.
+        (number <= self.provider.best_block_number().ok()?).then_some(hash)
     }
     fn transactions(&self, number: u64) -> Option<Vec<B256>> {
         Some(
@@ -142,6 +151,51 @@ where
                 .map(|transaction| *transaction.tx_hash())
                 .collect(),
         )
+    }
+    fn inclusion(&self, hash: B256) -> Result<Option<Inclusion>, String> {
+        // Index lookups only: the transaction's block and its own receipt,
+        // never the block's other receipts.
+        let Some((_, meta)) = self
+            .provider
+            .transaction_by_hash_with_meta(hash)
+            .map_err(|_| "transaction lookup failed")?
+        else {
+            return Ok(None);
+        };
+        let receipt = self
+            .provider
+            .receipt_by_hash(hash)
+            .map_err(|_| "receipt lookup failed")?
+            .ok_or("receipt unavailable")?;
+        // Two lookups: only an inclusion still canonical after both is
+        // evidence (a reorganization in between could pair them wrongly).
+        if self.canonical_hash(meta.block_number) != Some(meta.block_hash) {
+            return Err("canonical chain changed during the lookup".into());
+        }
+        Ok(Some(Inclusion {
+            number: meta.block_number,
+            hash: meta.block_hash,
+            success: receipt.status(),
+        }))
+    }
+    fn block_timestamp(&self, hash: B256) -> Option<u64> {
+        Some(self.provider.header(hash).ok().flatten()?.timestamp())
+    }
+    fn nonces_at(&self, block: B256, accounts: &[Address]) -> Result<Vec<u64>, String> {
+        // One state view at exactly this block, by hash.
+        let state = self
+            .provider
+            .state_by_block_hash(block)
+            .map_err(|_| "account state unavailable")?;
+        accounts
+            .iter()
+            .map(|account| {
+                state
+                    .account_nonce(account)
+                    .map(Option::unwrap_or_default)
+                    .map_err(|_| "account state unavailable".to_owned())
+            })
+            .collect()
     }
 }
 
@@ -379,6 +433,40 @@ impl ConfigureEngineEvm<ExecutionData> for OpsEvmConfig {
     }
 }
 
+/// The `PrunedData` of Reth's prune modes (`PruneConfig::segments`, from the
+/// command line or the config file), without naming Reth's prune types.
+#[macro_export]
+macro_rules! pruned_data {
+    ($segments:expr) => {{
+        let segments = &$segments;
+        $crate::sdk::PrunedData {
+            transaction_lookup: segments.transaction_lookup.is_some(),
+            receipts: segments.receipts.is_some() || !segments.receipts_log_filter.is_empty(),
+            bodies: segments.bodies_history.is_some(),
+        }
+    }};
+}
+
+/// Which transaction data a node's pruning settings remove.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PrunedData {
+    pub transaction_lookup: bool,
+    pub receipts: bool,
+    pub bodies: bool,
+}
+
+impl PrunedData {
+    /// The guarded node needs every canonical transaction's hash index, body
+    /// and receipt: without them an included transaction would read as not
+    /// included, and OPS could record it dropped.
+    pub fn refuse(self) -> Result<(), String> {
+        if self.transaction_lookup || self.receipts || self.bodies {
+            return Err("pruning transaction lookup, receipts or bodies is not supported by the guarded node: its status answers need every canonical transaction".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct OpsExecutorBuilder(pub Arc<PolicyRuntime>);
 impl<Node> ExecutorBuilder<Node> for OpsExecutorBuilder
@@ -389,6 +477,15 @@ where
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         if ctx.chain_spec().chain.id() != self.0.network().chain_id {
             eyre::bail!("OPS policy network does not match node chain");
+        }
+        // Status, release and OPS's `dropped` decision rely on the node's
+        // transaction index, bodies and receipts: refuse pruning that removes
+        // them (`--full`, `--minimal`, `--prune.*`, or the config file).
+        let toml = ctx.reth_config().prune.clone();
+        for config in ctx.config().prune_config().into_iter().chain([toml]) {
+            crate::pruned_data!(config.segments)
+                .refuse()
+                .map_err(eyre::Report::msg)?;
         }
         // Before launch nothing is being written: the database's finished
         // block is what Reth has written.
