@@ -479,26 +479,44 @@ impl ArtifactStore {
     /// 4096 blocks). The record list it references must already be durable.
     /// Idempotent per block: an existing manifest whose transactions carry the
     /// same principals, organizations, signers and outcomes stays (another
-    /// build may differ only in lease, facts or identity lease times).
+    /// build may differ only in lease, facts or identity lease times), also
+    /// when two builds of the block publish at the same time.
     pub fn publish_manifest(&self, manifest: &BlockManifest) -> Result<Published, String> {
         self.get_list(manifest.facts_version, manifest.records)?;
         let directory = self.directory(&self.block_directory(manifest.number))?;
         let name = manifest_name(manifest.number, manifest.hash);
-        if let Some(existing) = self
+        let existing = match self
             .storage
             .read(&directory.join(&name), MAX_SEGMENT)
             .map_err(|_| "invalid execution archive file".to_owned())?
         {
-            let existing = read_entry(&existing, manifest.number, manifest.hash)?
-                .ok_or("invalid execution manifest")?;
-            if evidence(&existing)? != evidence(manifest)? {
-                return Err("conflicting execution manifest".into());
+            Some(existing) => {
+                self.storage.sync_dir(&directory).map_err(io_error)?;
+                existing
             }
-            self.storage.sync_dir(&directory).map_err(io_error)?;
-            return Ok(Published::Existing);
+            // Another build of this block may link its manifest between this
+            // check and this link (concurrent payload builds): its evidence
+            // decides, exactly as if it had been there first.
+            None => match link_immutable(
+                self.storage.as_ref(),
+                &self.root.join("tmp"),
+                &directory,
+                &name,
+                &write_segment(&[manifest])?,
+                MAX_SEGMENT,
+            )? {
+                Linked::Published => return Ok(Published::New),
+                // The other build published exactly this manifest.
+                Linked::Same => return Ok(Published::Existing),
+                Linked::Other(existing) => existing,
+            },
+        };
+        let existing = read_entry(&existing, manifest.number, manifest.hash)?
+            .ok_or("invalid execution manifest")?;
+        if evidence(&existing)? != evidence(manifest)? {
+            return Err("conflicting execution manifest".into());
         }
-        self.publish_immutable(&directory, &name, &write_segment(&[manifest])?)?;
-        Ok(Published::New)
+        Ok(Published::Existing)
     }
 
     /// The manifest of block (number, hash), if this node published it: its
@@ -1060,9 +1078,54 @@ impl ArtifactStore {
     }
 }
 
+/// What `link_immutable` found under the name.
+enum Linked {
+    /// These bytes, linked here, now durable.
+    Published,
+    /// These same bytes, linked first by another writer, now durable.
+    Same,
+    /// Other bytes another writer linked first, now durable.
+    Other(Vec<u8>),
+}
+
 /// temp file → `sync_all` → hard link → unlink temp → directory `sync_all`:
 /// 2 syncs. The temp lives in `temporary` (cleared at open), so a crash at any
 /// point leaves at most a leftover there and never a partial published name.
+/// When another writer linked the name first, its directory entry is made
+/// durable all the same and its bytes are compared (a file longer than
+/// `limit` is an error, never truncated).
+fn link_immutable(
+    storage: &dyn Storage,
+    temporary: &Path,
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+    limit: usize,
+) -> Result<Linked, String> {
+    let destination = directory.join(name);
+    let temporary = temporary.join(temporary_name());
+    // Only our own temp is ever removed: a failed create leaves nothing to clean.
+    storage.write_synced(&temporary, bytes).map_err(io_error)?;
+    let linked = storage.link(&temporary, &destination).map_err(io_error);
+    let cleanup = storage.remove(&temporary).map(|_| ()).map_err(io_error);
+    let found = if linked? {
+        Linked::Published
+    } else {
+        match storage
+            .read(&destination, limit)
+            .map_err(|_| "invalid execution archive file".to_owned())?
+        {
+            Some(existing) if existing == bytes => Linked::Same,
+            Some(existing) => Linked::Other(existing),
+            None => return Err("invalid execution archive file".into()),
+        }
+    };
+    cleanup?;
+    storage.sync_dir(directory).map_err(io_error)?;
+    Ok(found)
+}
+
+/// `link_immutable` for content that must be exactly these bytes.
 fn publish_immutable(
     storage: &dyn Storage,
     temporary: &Path,
@@ -1070,23 +1133,10 @@ fn publish_immutable(
     name: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let destination = directory.join(name);
-    let temporary = temporary.join(temporary_name());
-    // Only our own temp is ever removed: a failed create leaves nothing to clean.
-    storage.write_synced(&temporary, bytes).map_err(io_error)?;
-    let linked = storage.link(&temporary, &destination).map_err(io_error);
-    let cleanup = storage.remove(&temporary).map(|_| ()).map_err(io_error);
-    if !linked?
-        && storage
-            .read(&destination, bytes.len())
-            .map_err(|_| "invalid execution archive file".to_owned())?
-            .as_deref()
-            != Some(bytes)
-    {
-        return Err("conflicting immutable execution artifact".into());
+    match link_immutable(storage, temporary, directory, name, bytes, bytes.len())? {
+        Linked::Published | Linked::Same => Ok(()),
+        Linked::Other(_) => Err("conflicting immutable execution artifact".into()),
     }
-    cleanup?;
-    storage.sync_dir(directory).map_err(io_error)
 }
 
 fn bucket_name(number: u64) -> String {

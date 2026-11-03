@@ -385,6 +385,19 @@ returned replays after restart, and neither the live nor the restored facts go
 backwards (the lease may: heartbeats are not persisted, so a restarted node is
 fresh again at the publisher's next heartbeat).
 
+Two builds of one block can publish at the same time (Reth builds an empty
+payload beside the one in flight when it has no best payload yet). The build
+that loses the link compares the evidence of the manifest that won, as a later
+republish does, and is accepted when the transactions, principals,
+organizations, signers and outcomes agree, once the winner's directory entry
+is durable (`concurrent_publication_of_equivalent_evidence_is_idempotent`,
+which crashes right after and finds the winner's manifest); a byte-identical
+winner counts as existing too (`concurrent_publication_of_the_same_manifest_is_existing`),
+and other evidence is still refused
+(`concurrent_publication_of_other_evidence_still_conflicts`).
+Before, the losing build compared raw bytes, which include the lease and the
+record list, so its block assembly failed (independent review, finding 5).
+
 A live run (`node/reth/scripts/crash.py`, 2026-11-03, seed 1410, 36
 transactions, binary `60bc930ad306…`, report
 `.tmp/ops-reth-crash-ejo1gfqj/result.json`) stopped the node eight times, with Reth's
