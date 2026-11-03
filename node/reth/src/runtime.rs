@@ -11,7 +11,7 @@ use crate::{
     identity::{CapturedIdentity, IdentityRegistry},
     policy::{DiagnosticReport, PolicyFactory},
     stream::{AppliedFacts, FactStream},
-    wire::{Identity, Network, PolicyArtifact, Verifier},
+    wire::{Identity, Network, PolicyArtifact, VerifiedIdentity, Verifier},
 };
 use alloy_evm::revm::context::TxEnv;
 use alloy_primitives::{Address, B256};
@@ -172,11 +172,17 @@ impl PolicyRuntime {
     }
 
     pub fn accept_identity(&self, wire: &[u8], now: i64) -> Result<Identity, String> {
+        self.admit_identity(self.verifier.verify_identity(wire, now)?, now)
+    }
+
+    /// Admit an identity verified once by the caller.
+    pub fn admit_identity(&self, verified: VerifiedIdentity, now: i64) -> Result<Identity, String> {
         let _guard = self
             .ingestion
             .lock()
             .map_err(|_| "policy ingestion unavailable")?;
-        let proposed = self.verifier.open_identity(wire, now)?;
+        let proposed = verified.identity().clone();
+        let wire = verified.envelope().to_wire();
         if proposed.scope == "transaction"
             && self
                 .archive
@@ -200,9 +206,9 @@ impl PolicyRuntime {
             }
         }
         self.identities.release_expired(now)?;
-        let identity = self.identities.accept(wire, now)?;
+        let identity = self.identities.admit(verified, now)?;
         if identity.scope == "transaction" {
-            let evidence = self.archive.put(wire)?;
+            let evidence = self.archive.put(&wire)?;
             self.archive
                 .set_pointer(&format!("tx-{}", &identity.binding_hash[2..]), evidence)?;
             // Explicit renewed admission can follow a reorg. A prior canonical
@@ -282,7 +288,7 @@ impl PolicyRuntime {
                     binding,
                     CapturedIdentity {
                         identity,
-                        envelope: Vec::new(),
+                        envelope: None,
                     },
                 )])),
                 outcomes: Mutex::new(HashMap::new()),
@@ -311,8 +317,10 @@ impl PolicyRuntime {
         }
         let mut captured = HashMap::new();
         for entry in &manifest.identities {
-            let envelope = self.archive.get(entry.envelope)?;
-            let identity = self.verifier.open_identity(&envelope, at)?;
+            let (identity, envelope) = self
+                .verifier
+                .verify_identity(&self.archive.get(entry.envelope)?, at)?
+                .into_parts();
             if identity.scope != "transaction"
                 || identity.binding_hash != format!("{:#x}", entry.transaction_hash)
             {
@@ -320,7 +328,10 @@ impl PolicyRuntime {
             }
             captured.insert(
                 ExecutionBinding::Transaction(entry.transaction_hash),
-                CapturedIdentity { identity, envelope },
+                CapturedIdentity {
+                    identity,
+                    envelope: Some(envelope),
+                },
             );
         }
         ExecutionHandle::new(
@@ -436,9 +447,13 @@ impl ExecutionHandle {
                 let identity = captured
                     .get(&ExecutionBinding::Transaction(*hash))
                     .ok_or("missing executed transaction identity")?;
+                let envelope = identity
+                    .envelope
+                    .as_ref()
+                    .ok_or("missing executed transaction evidence")?;
                 Ok(BoundIdentity {
                     transaction_hash: *hash,
-                    envelope: archive.put(&identity.envelope)?,
+                    envelope: archive.put(&envelope.to_wire())?,
                     outcome: outcomes
                         .get(&ExecutionBinding::Transaction(*hash))
                         .cloned()

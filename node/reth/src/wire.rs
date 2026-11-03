@@ -11,6 +11,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashSet},
     fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 pub const MAX_ENVELOPE_BYTES: usize = 64 << 20;
@@ -169,21 +173,84 @@ struct Envelope {
     signature: String,
 }
 
+/// A signed envelope in decoded form: the exact signed payload bytes, the key
+/// and the signature. Lossless: the signature still verifies over the same bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedEnvelope {
+    pub kind: String,
+    pub key_id: String,
+    pub payload: Vec<u8>,
+    pub signature: [u8; 64],
+}
+
+impl SignedEnvelope {
+    /// The JSON wire form. Field order may differ from the sender's encoding;
+    /// the signed payload bytes and signature are identical.
+    pub fn to_wire(&self) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "kind": self.kind,
+            "key_id": self.key_id,
+            "payload": STANDARD.encode(&self.payload),
+            "signature": STANDARD.encode(self.signature),
+        }))
+        .expect("serializable envelope")
+    }
+}
+
+/// An identity whose signature has been verified exactly once. Only the
+/// `Verifier` constructs it, so holders never verify again. It is not tied to
+/// a particular verifier: the node has one trust root, cloned into every
+/// component, and admission rechecks the network and validity window.
+#[derive(Clone, Debug)]
+pub struct VerifiedIdentity {
+    identity: Identity,
+    envelope: Arc<SignedEnvelope>,
+}
+
+impl VerifiedIdentity {
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+    pub fn envelope(&self) -> &Arc<SignedEnvelope> {
+        &self.envelope
+    }
+    pub fn into_parts(self) -> (Identity, Arc<SignedEnvelope>) {
+        (self.identity, self.envelope)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Verifier {
     network: Network,
     keys: BTreeMap<String, VerifyingKey>,
+    /// Shared by clones, so one count covers every component using this trust root.
+    verifications: Arc<AtomicU64>,
 }
 
 impl Verifier {
     pub fn new(network: Network, keys: BTreeMap<String, VerifyingKey>) -> Self {
-        Self { network, keys }
+        Self {
+            network,
+            keys,
+            verifications: Arc::new(AtomicU64::new(0)),
+        }
     }
     pub fn network(&self) -> &Network {
         &self.network
     }
 
+    /// Ed25519 signature checks performed so far by this verifier and its clones.
+    pub fn signature_verifications(&self) -> u64 {
+        self.verifications.load(Ordering::Relaxed)
+    }
+
     pub fn open(&self, kind: &str, wire: &[u8]) -> Result<Vec<u8>, String> {
+        Ok(self.open_envelope(kind, wire)?.payload)
+    }
+
+    /// Decode and verify a JSON envelope, keeping its decoded parts.
+    pub fn open_envelope(&self, kind: &str, wire: &[u8]) -> Result<SignedEnvelope, String> {
         if wire.is_empty()
             || wire.len() > MAX_ENVELOPE_BYTES
             || !matches!(kind, "identity" | "snapshot" | "delta" | "heartbeat")
@@ -194,23 +261,60 @@ impl Verifier {
         if envelope.version != 1 || envelope.kind != kind || !identifier(&envelope.key_id) {
             return Err("invalid node policy envelope".into());
         }
-        let payload = decode_base64(&envelope.payload)?;
-        let signature = Signature::from_slice(&decode_base64(&envelope.signature)?)
-            .map_err(|_| "untrusted node policy signature".to_owned())?;
+        let decoded = SignedEnvelope {
+            kind: envelope.kind,
+            key_id: envelope.key_id,
+            payload: decode_base64(&envelope.payload)?,
+            signature: decode_base64(&envelope.signature)?
+                .try_into()
+                .map_err(|_| "untrusted node policy signature".to_owned())?,
+        };
+        self.verify(&decoded)?;
+        Ok(decoded)
+    }
+
+    /// Verify an envelope in decoded form: its kind, key and signature over the
+    /// exact payload bytes.
+    pub fn verify(&self, envelope: &SignedEnvelope) -> Result<(), String> {
+        if !matches!(
+            envelope.kind.as_str(),
+            "identity" | "snapshot" | "delta" | "heartbeat"
+        ) || !identifier(&envelope.key_id)
+            || envelope.payload.is_empty()
+        {
+            return Err("invalid node policy envelope".into());
+        }
         let key = self
             .keys
             .get(&envelope.key_id)
             .ok_or_else(|| "untrusted node policy signature".to_owned())?;
-        key.verify_strict(&signing_bytes(kind, &envelope.key_id, &payload), &signature)
-            .map_err(|_| "untrusted node policy signature".to_owned())?;
-        Ok(payload)
+        self.verifications.fetch_add(1, Ordering::Relaxed);
+        key.verify_strict(
+            &signing_bytes(&envelope.kind, &envelope.key_id, &envelope.payload),
+            &Signature::from_bytes(&envelope.signature),
+        )
+        .map_err(|_| "untrusted node policy signature".to_owned())
     }
 
     pub fn open_identity(&self, wire: &[u8], now: i64) -> Result<Identity, String> {
+        Ok(self.verify_identity(wire, now)?.identity)
+    }
+
+    /// The one signature check for an identity received on the wire.
+    pub fn verify_identity(&self, wire: &[u8], now: i64) -> Result<VerifiedIdentity, String> {
         if wire.len() > MAX_IDENTITY_BYTES {
             return Err("invalid node policy envelope".into());
         }
-        let identity: Identity = decode_strict(&self.open("identity", wire)?)?;
+        let envelope = self.open_envelope("identity", wire)?;
+        let identity = self.identity_fields(&envelope.payload, now)?;
+        Ok(VerifiedIdentity {
+            identity,
+            envelope: Arc::new(envelope),
+        })
+    }
+
+    fn identity_fields(&self, payload: &[u8], now: i64) -> Result<Identity, String> {
+        let identity: Identity = decode_strict(payload)?;
         self.validate_header(&identity.header, now)?;
         if !matches!(identity.scope.as_str(), "transaction" | "simulation")
             || !identifier(&identity.context_id)

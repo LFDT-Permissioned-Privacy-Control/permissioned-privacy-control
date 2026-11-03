@@ -3,7 +3,7 @@
 
 use crate::{
     context::{ExecutionBinding, ExecutionIdentity, IdentityResolver},
-    wire::{Identity, Verifier},
+    wire::{Identity, SignedEnvelope, VerifiedIdentity, Verifier},
 };
 use alloy_evm::revm::context::TxEnv;
 use alloy_primitives::{Address, B256};
@@ -21,15 +21,17 @@ enum Key {
 #[derive(Clone, Debug)]
 struct StoredIdentity {
     identity: Identity,
-    envelope: Vec<u8>,
+    envelope: Arc<SignedEnvelope>,
 }
 
 /// One atomic registry read. Record this envelope when this identity is used, so
 /// a concurrent ticket renewal cannot substitute different replay evidence.
+/// `None` only for a simulation pinned outside the registry; simulations never
+/// become block evidence.
 #[derive(Clone, Debug)]
 pub struct CapturedIdentity {
     pub identity: Identity,
-    pub envelope: Vec<u8>,
+    pub envelope: Option<Arc<SignedEnvelope>>,
 }
 
 #[derive(Debug)]
@@ -48,9 +50,17 @@ impl IdentityRegistry {
         }
     }
 
-    /// A successful result is the acknowledgement that the context is installed.
+    /// Verify and install. A successful result is the acknowledgement that the
+    /// context is installed.
     pub fn accept(&self, envelope: &[u8], now: i64) -> Result<Identity, String> {
-        let identity = self.verifier.open_identity(envelope, now)?;
+        self.admit(self.verifier.verify_identity(envelope, now)?, now)
+    }
+
+    /// Install an identity whose signature was already verified once; only its
+    /// validity window is rechecked at `now`.
+    pub fn admit(&self, verified: VerifiedIdentity, now: i64) -> Result<Identity, String> {
+        let (identity, envelope) = verified.into_parts();
+        self.verifier.validate_header(&identity.header, now)?;
         let key = key_for_identity(&identity)?;
         let mut store = self
             .identities
@@ -76,7 +86,7 @@ impl IdentityRegistry {
             key,
             StoredIdentity {
                 identity: identity.clone(),
-                envelope: envelope.to_vec(),
+                envelope,
             },
         );
         Ok(identity)
@@ -91,7 +101,7 @@ impl IdentityRegistry {
         self.verifier.validate_header(&stored.identity.header, at)?;
         Ok(CapturedIdentity {
             identity: stored.identity,
-            envelope: stored.envelope,
+            envelope: Some(stored.envelope),
         })
     }
 

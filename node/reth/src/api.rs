@@ -207,7 +207,8 @@ impl PrivateApi {
                 require_count(&request.params, 2)?;
                 let wire = serde_json::to_vec(&request.params[0])
                     .map_err(|_| "invalid identity envelope")?;
-                let identity = self.runtime.verifier().open_identity(&wire, now)?;
+                let verified = self.runtime.verifier().verify_identity(&wire, now)?;
+                let identity = verified.identity();
                 if identity.scope != "transaction" {
                     return Err("invalid identity scope".into());
                 }
@@ -243,7 +244,7 @@ impl PrivateApi {
                 let context_id = identity.context_id.clone();
                 // Durable identity precedes pool insertion. An ambiguous pool
                 // result must never free this hash for another principal.
-                let identity = self.runtime.accept_identity(&wire, now)?;
+                let identity = self.runtime.admit_identity(verified, now)?;
                 let accepted = self.backend.submit(identity, raw.into()).await?;
                 if accepted != hash {
                     return Err("transaction pool returned a different hash".into());
@@ -256,7 +257,8 @@ impl PrivateApi {
                 require_count(&request.params, 2)?;
                 let wire = serde_json::to_vec(&request.params[0])
                     .map_err(|_| "invalid identity envelope")?;
-                let identity = self.runtime.verifier().open_identity(&wire, now)?;
+                let verified = self.runtime.verifier().verify_identity(&wire, now)?;
+                let identity = verified.identity();
                 if identity.scope != "simulation" {
                     return Err("invalid identity scope".into());
                 }
@@ -280,7 +282,7 @@ impl PrivateApi {
                     return Err("simulation signer mismatch".into());
                 }
                 self.runtime.feed.pin(now, identity.min_snapshot_version)?;
-                let identity = self.runtime.accept_identity(&wire, now)?;
+                let identity = self.runtime.admit_identity(verified, now)?;
                 let _registration = SimulationRegistration {
                     identities: self.runtime.identities.clone(),
                     binding: ExecutionBinding::Simulation {

@@ -45,11 +45,16 @@ fn captured_identity_retains_exact_evidence_across_renewal() {
     newer["expires_at"] = json!(1120);
     newer["min_snapshot_version"] = json!(2);
     registry.accept(&seal(&newer), 1020).unwrap();
-    assert_eq!(captured.envelope, first);
+    let evidence = captured.envelope.as_ref().unwrap();
+    assert_eq!(
+        **evidence,
+        verifier().open_envelope("identity", &first).unwrap(),
+        "captured evidence must be the exact first signed payload"
+    );
     assert_eq!(captured.identity.min_snapshot_version, 1);
     assert_eq!(
         verifier()
-            .open_identity(&captured.envelope, 1020)
+            .open_identity(&evidence.to_wire(), 1020)
             .unwrap()
             .min_snapshot_version,
         1
