@@ -185,3 +185,23 @@ fn node_refuses_rebinding_only_while_the_identity_is_live() {
         "another_principal"
     );
 }
+#[test]
+fn candidate_execution_writes_nothing_to_disk() {
+    let storage = MemoryStorage::new();
+    let runtime = runtime(&storage, 16);
+    let tx = hash(3);
+    runtime
+        .accept_identity(&seal("identity", &identity(tx, "ctx-a")), AT)
+        .unwrap();
+    let before = storage.counts();
+    // A storage operation would fail and deny the build's execution.
+    storage.set_hook(|_, _| common::Action::Fail);
+    for _ in 0..3 {
+        assert!(execute(&runtime.pin_candidate(AT).unwrap(), tx));
+    }
+    storage.clear_hook();
+    let used = storage.counts() - before;
+    assert_eq!(used, Default::default(), "{used:?}");
+    let status = runtime.transaction_status(tx, None).unwrap().unwrap();
+    assert_eq!(status.status, "pending", "candidate outcome kept in memory");
+}

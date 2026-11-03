@@ -26,6 +26,17 @@ enum Key {
 struct StoredIdentity {
     identity: Identity,
     envelope: Arc<SignedEnvelope>,
+    candidate: Option<CandidateNote>,
+}
+
+/// The latest candidate-build outcome of a pending transaction, in memory
+/// only. Lost on restart, where a denied transaction reads as unknown; a
+/// denial is never final anyway.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CandidateNote {
+    pub denied: bool,
+    pub reason_code: String,
+    pub facts_version: u64,
 }
 
 /// One atomic registry read. Record this envelope when this identity is used, so
@@ -169,14 +180,42 @@ impl IdentityRegistry {
         } else if store.identities.len() >= self.capacity {
             return Err("execution identity capacity reached".into());
         }
+        // A renewal keeps the latest candidate outcome until the next build.
+        let candidate = store
+            .identities
+            .get(&key)
+            .and_then(|old| old.candidate.clone());
         store.insert(
             key,
             StoredIdentity {
                 identity: identity.clone(),
                 envelope,
+                candidate,
             },
         );
         Ok(identity)
+    }
+
+    /// Best effort: note a candidate outcome on the live entry for `hash` (the
+    /// current one, even if renewed during the build). A missing entry
+    /// (released meanwhile) is a no-op, so a note can never deny an executable
+    /// transaction or change an identity, its expiry or capacity.
+    pub(crate) fn note_outcome(&self, hash: B256, note: CandidateNote) {
+        if let Ok(mut store) = self.identities.lock()
+            && let Some(stored) = store.identities.get_mut(&Key::Transaction(hash))
+        {
+            stored.candidate = Some(note);
+        }
+    }
+
+    pub(crate) fn candidate_note(&self, hash: B256) -> Option<CandidateNote> {
+        self.identities
+            .lock()
+            .ok()?
+            .identities
+            .get(&Key::Transaction(hash))?
+            .candidate
+            .clone()
     }
 
     /// The registered identity for `binding`, whether or not its lease is valid.
@@ -322,6 +361,7 @@ mod tests {
                 payload: vec![1],
                 signature: [0; 64],
             }),
+            candidate: None,
         }
     }
 

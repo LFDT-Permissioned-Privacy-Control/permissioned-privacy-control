@@ -405,8 +405,9 @@ Evidence and theoretical policy-only throughput:
 
 **Status:** Open capacity work; no production TPS claim is established.
 
-Identity admission no longer writes to disk or takes the fact-ingestion lock;
-pending identities are held in memory. Block assembly still writes
+Identity admission and candidate execution no longer write to disk, and
+admission no longer takes the fact-ingestion lock; pending identities and their
+latest candidate outcome are held in memory. Block assembly still writes
 per-transaction evidence objects with synchronous flushes. The earlier 2026-09-17
 private-node load run measured **9.6–11.1 mined transactions/s** on a shared
 Apple M2 Max development setup. That historical result is not a fresh throughput

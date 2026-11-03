@@ -193,8 +193,8 @@ using the pinned Solidity compiler. This measures the complete node path, not
 isolated policy-interpreter cost or full OPS/explorer throughput. It does not
 establish the roadmap's 5,000 TPS target.
 
-Transaction admission no longer writes to disk. Block assembly still writes
-per-transaction evidence objects; see
+Transaction admission and candidate execution no longer write to disk. Block
+assembly still writes per-transaction evidence objects; see
 [sustained throughput work](../../docs/OPEN_ITEMS.md#13-reth-sustained-transaction-throughput).
 The current group's in-process timings imply only a
 [policy-only theoretical ceiling](../../docs/implementation/evidence/per-group-live-2026-09-25.md#theoretical-throughput-from-policy-cost),

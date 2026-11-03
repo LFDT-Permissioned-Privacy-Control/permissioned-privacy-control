@@ -298,12 +298,12 @@ flowchart TB
     subgraph Runtime["Guarded Reth policy runtime"]
         subgraph Memory["Memory"]
             Facts["Installed fact snapshot with policy bytecode"]
-            Pending["Pending transaction identities, bounded"]
+            Pending["Pending transaction identities, bounded,<br/>with their latest candidate outcome"]
             Trust["Trusted OPS public keys and bearer token, from configuration"]
         end
         subgraph StateDir["Policy state directory"]
             Objects["objects: signed fact envelopes, checkpoints,<br/>identity envelopes, status records"]
-            Pointers["pointers: facts-head, status-, included-"]
+            Pointers["pointers: facts-head, included-"]
             Blocks["blocks: one execution manifest per produced block"]
         end
     end
@@ -349,7 +349,7 @@ sequenceDiagram
     RT->>Reth: Insert raw transaction into pool
     OPS->>DB: Mark row accepted
     Reth->>RT: Build candidate block with pinned facts
-    RT->>Dir: status- record (pending or denied)
+    RT->>RT: Candidate outcome (pending or denied), memory only
     RT->>Dir: Block manifest, fact checkpoint, included- record
     Note over RT,Dir: The manifest is durable before the block is returned
     Reth->>Reth: Persist block in chain database

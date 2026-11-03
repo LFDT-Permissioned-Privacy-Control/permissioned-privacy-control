@@ -8,7 +8,7 @@ use crate::{
         PinnedPolicySnapshot,
     },
     facts::FactsPolicy,
-    identity::{CapturedIdentity, IdentityRegistry},
+    identity::{CandidateNote, CapturedIdentity, IdentityRegistry},
     policy::{DiagnosticReport, PolicyFactory},
     stream::{AppliedFacts, FactStream},
     wire::{Identity, Network, PolicyArtifact, VerifiedIdentity, Verifier},
@@ -132,19 +132,34 @@ impl PolicyRuntime {
         Ok(identity)
     }
 
+    /// `Some(block)`: the included status from that block's evidence. `None`:
+    /// the latest candidate outcome noted in memory for a pending transaction.
     pub fn transaction_status(
         &self,
         hash: B256,
         canonical_block: Option<B256>,
     ) -> Result<Option<TransactionStatus>, String> {
-        let key = match canonical_block {
-            Some(block) => format!(
-                "included-{}-{}",
-                alloy_primitives::hex::encode(hash),
-                alloy_primitives::hex::encode(block)
-            ),
-            None => format!("status-{}", alloy_primitives::hex::encode(hash)),
+        let Some(block) = canonical_block else {
+            return Ok(self
+                .identities
+                .candidate_note(hash)
+                .map(|note| TransactionStatus {
+                    status: if note.denied { "denied" } else { "pending" }.into(),
+                    facts_version: note.facts_version,
+                    block_hash: None,
+                    block_number: None,
+                    reason_code: note.reason_code,
+                    created: Vec::new(),
+                    finalized: false,
+                    finalized_block_hash: None,
+                    finalized_block_number: None,
+                }));
         };
+        let key = format!(
+            "included-{}-{}",
+            alloy_primitives::hex::encode(hash),
+            alloy_primitives::hex::encode(block)
+        );
         self.archive
             .pointer(&key)?
             .map(|id| crate::wire::decode_strict(&self.archive.get(id)?))
@@ -198,7 +213,6 @@ impl PolicyRuntime {
                 captured: Mutex::new(HashMap::new()),
                 outcomes: Mutex::new(HashMap::new()),
                 expected: None,
-                archive: Some(self.archive.clone()),
                 facts_version,
             },
         )
@@ -239,7 +253,6 @@ impl PolicyRuntime {
                 )])),
                 outcomes: Mutex::new(HashMap::new()),
                 expected: None,
-                archive: None,
                 facts_version: 0,
             },
         )
@@ -301,7 +314,6 @@ impl PolicyRuntime {
                         })
                         .collect(),
                 ),
-                archive: None,
                 facts_version: manifest.facts_version,
             },
         )
@@ -446,12 +458,14 @@ impl ExecutionHandle {
 
 #[derive(Debug)]
 struct RecordingResolver {
+    /// The live registry, for candidate builds only: identities are captured
+    /// from it and outcomes noted on it. Replay and simulation have none, so
+    /// they never touch live state.
     source: Option<Arc<IdentityRegistry>>,
     at: i64,
     captured: Mutex<HashMap<ExecutionBinding, CapturedIdentity>>,
     outcomes: Mutex<HashMap<ExecutionBinding, ExecutionOutcome>>,
     expected: Option<HashMap<ExecutionBinding, ExecutionOutcome>>,
-    archive: Option<Arc<ArtifactStore>>,
     facts_version: u64,
 }
 impl IdentityResolver for RecordingResolver {
@@ -461,26 +475,17 @@ impl IdentityResolver for RecordingResolver {
         {
             return Err("replayed execution outcome differs from archive".into());
         }
-        if let (Some(archive), ExecutionBinding::Transaction(hash)) = (&self.archive, binding) {
-            {
-                let status = TransactionStatus {
-                    status: if outcome.denied { "denied" } else { "pending" }.into(),
-                    facts_version: self.facts_version,
-                    block_hash: None,
-                    block_number: None,
+        // Candidate builds note the outcome on the live registry entry: memory
+        // only, best effort, so a build never waits on disk.
+        if let (Some(registry), ExecutionBinding::Transaction(hash)) = (&self.source, binding) {
+            registry.note_outcome(
+                *hash,
+                CandidateNote {
+                    denied: outcome.denied,
                     reason_code: outcome.reason_code.clone(),
-                    created: Vec::new(),
-                    finalized: false,
-                    finalized_block_hash: None,
-                    finalized_block_number: None,
-                };
-                let id = archive
-                    .put(&serde_json::to_vec(&status).map_err(|_| "invalid execution status")?)?;
-                archive.set_pointer(
-                    &format!("status-{}", alloy_primitives::hex::encode(hash)),
-                    id,
-                )?;
-            }
+                    facts_version: self.facts_version,
+                },
+            );
         }
         self.outcomes
             .lock()

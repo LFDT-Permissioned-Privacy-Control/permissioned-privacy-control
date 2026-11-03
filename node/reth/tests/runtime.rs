@@ -175,6 +175,36 @@ fn produced_block_replays_original_facts_after_revocation_and_restart() {
         .accept("snapshot", &seal("snapshot", &snapshot), 1800000020)
         .unwrap();
     assert!(!execute(&runtime.pin_candidate(1800000020).unwrap()));
+    let denied = runtime
+        .transaction_status(B256::repeat_byte(1), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            denied.status.as_str(),
+            denied.reason_code.as_str(),
+            denied.facts_version
+        ),
+        ("denied", "POLICY_DENIED", 2)
+    );
+    // Replaying the produced block executes the archived identity: it must not
+    // overwrite the live candidate outcome.
+    assert!(execute(&runtime.replay(&descriptor()).unwrap()));
+    assert_eq!(
+        runtime
+            .transaction_status(B256::repeat_byte(1), None)
+            .unwrap()
+            .unwrap()
+            .status,
+        "denied"
+    );
+    // A renewal keeps the outcome until the next build.
+    let mut later = renewed.clone();
+    later["issued_at"] = json!(1800000020);
+    later["expires_at"] = json!(1800000080);
+    runtime
+        .accept_identity(&seal("identity", &later), 1800000020)
+        .unwrap();
     assert_eq!(
         runtime
             .transaction_status(B256::repeat_byte(1), None)
