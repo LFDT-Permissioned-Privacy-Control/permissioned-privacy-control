@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { OpsClient, OpsError, RpcError } from '../dist/index.js';
+import { OpsClient, OpsError, RpcError, FINAL_STATUSES, isFinal, describeStatus } from '../dist/index.js';
 
 const response = (body, status = 200) => new Response(JSON.stringify(body), {status, headers:{'content-type':'application/json'}});
 const session = {accessToken:'named-access', refreshToken:'named-refresh'};
@@ -82,6 +82,30 @@ test('RPC detects protocol errors and status awaits actual finalized reconciliat
   const status=await client.waitForFinality('0xhash',{pollIntervalMs:1,timeoutMs:1000});
   assert.equal(status.reconciled,true);
   assert.equal(calls.length,3);
+});
+
+test('waitForFinality ends only on included, reverted or dropped; renewal_stopped is reported, not terminal',async()=>{
+  const sequence=[
+    {status:'pending',reconciled:false},
+    {status:'renewal_stopped',reconciled:false,reconciliation_note:'max_age'},
+    {status:'provisional',reconciled:false,execution:{status:'included',finalized:false}},
+    {status:'renewal_stopped',reconciled:false,reconciliation_note:'nonce_conflict'},
+    {status:'dropped',reconciled:true,reconciliation_note:'nonce_consumed'},
+  ];
+  const {client,calls}=fixture((call,n)=>response(sequence[Math.min(n,sequence.length)-1]));
+  const seen=[];
+  const status=await client.waitForFinality('0xhash',{pollIntervalMs:1,timeoutMs:1000,onStatus:s=>seen.push(s.status)});
+  assert.equal(status.status,'dropped');
+  assert.equal(calls.length,5);
+  assert.deepEqual(seen,['pending','renewal_stopped','provisional','renewal_stopped','dropped']);
+  assert.deepEqual([...FINAL_STATUSES],['included','reverted','dropped']);
+  assert.equal(isFinal({status:'renewal_stopped',reconciled:false}),false);
+  assert.equal(isFinal({status:'included',reconciled:true,execution:{status:'included',finalized:true}}),true);
+  assert.equal(isFinal({status:'included',reconciled:false,execution:{status:'included',finalized:true}}),false,'bookkeeping not committed yet');
+  assert.equal(isFinal({status:'dropped',reconciled:true}),true);
+  assert.equal(isFinal({status:'dropped',reconciled:false}),false);
+  assert.match(describeStatus({status:'renewal_stopped',reconciliation_note:'max_age'}),/will not be renewed; may still settle \(max_age\)/);
+  assert.match(describeStatus({status:'dropped'}),/can never execute/);
 });
 
 test('generated routes encode path parameters and reject credential-bearing base URLs',async()=>{
