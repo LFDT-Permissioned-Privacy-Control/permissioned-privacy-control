@@ -298,12 +298,22 @@ fn finalized_release_frees_the_slot_and_the_manifest_keeps_the_executed_binding(
     handle.persist(&archive, &descriptor()).unwrap();
     assert!(
         runtime
-            .reconcile_included(B256::repeat_byte(1), B256::repeat_byte(99))
+            .canonical_status(
+                B256::repeat_byte(1),
+                B256::repeat_byte(99),
+                true,
+                final_evidence()
+            )
             .is_err(),
         "release requires the including block's evidence"
     );
     runtime
-        .reconcile_included(B256::repeat_byte(1), descriptor().hash)
+        .canonical_status(
+            B256::repeat_byte(1),
+            descriptor().hash,
+            true,
+            final_evidence(),
+        )
         .unwrap();
     assert!(
         runtime
@@ -337,5 +347,114 @@ fn finalized_release_frees_the_slot_and_the_manifest_keeps_the_executed_binding(
             .unwrap()
             .is_some()
     );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// The descriptor block (1, 0x0a…) canonical and finalized by block 2.
+fn final_evidence() -> Option<ops_reth_policy::runtime::FinalityEvidence> {
+    Some(ops_reth_policy::runtime::FinalityEvidence {
+        canonical_at_inclusion: descriptor().hash,
+        finalized_number: 2,
+        finalized_hash: B256::repeat_byte(20),
+    })
+}
+
+/// A runtime with the fixture identity for 0x01… executed in the descriptor
+/// block and its manifest published.
+fn included(name: &str) -> (PolicyRuntime, std::path::PathBuf) {
+    let directory = std::env::temp_dir().join(format!("ops-runtime-{name}-{}", std::process::id()));
+    let verifier = Verifier::new(
+        network(),
+        BTreeMap::from([(
+            "ops".into(),
+            SigningKey::from_bytes(&[7; 32]).verifying_key(),
+        )]),
+    );
+    let archive = Arc::new(ArtifactStore::open(&directory).unwrap());
+    let runtime = PolicyRuntime::new(verifier, archive.clone(), 4);
+    let snapshot = fixture()["snapshot"].clone();
+    runtime
+        .accept_facts("snapshot", &seal("snapshot", &snapshot), 1800000010)
+        .unwrap();
+    let identity = json!({"network":network(),"issued_at":1800000000,"expires_at":1800000060,"scope":"transaction","context_id":"ctx-a","principal_id":"fixture_principal","org_id":"org_acme","signer":snapshot["principals"][0]["linked_addresses"][0],"binding_hash":format!("{:#x}",B256::repeat_byte(1)),"min_snapshot_version":1});
+    runtime
+        .accept_identity(&seal("identity", &identity), 1800000010)
+        .unwrap();
+    let candidate = runtime.pin_candidate(1800000010).unwrap();
+    assert!(execute(&candidate));
+    candidate.persist(&archive, &descriptor()).unwrap();
+    (runtime, directory)
+}
+
+fn live(runtime: &PolicyRuntime) -> bool {
+    runtime
+        .identities
+        .lookup(
+            &ExecutionBinding::Transaction(B256::repeat_byte(1)),
+            1800000010,
+        )
+        .is_ok()
+}
+
+#[test]
+fn identity_released_at_finality_not_inclusion() {
+    let (runtime, directory) = included("finality");
+    let tx = B256::repeat_byte(1);
+    let block = descriptor().hash;
+    let provisional = runtime.canonical_status(tx, block, true, None).unwrap();
+    assert_eq!(
+        (provisional.status.as_str(), provisional.finalized),
+        ("included", false)
+    );
+    assert!(live(&runtime), "released at inclusion, before finality");
+    let rival = Some(ops_reth_policy::runtime::FinalityEvidence {
+        canonical_at_inclusion: B256::repeat_byte(77),
+        ..final_evidence().unwrap()
+    });
+    assert!(
+        !runtime
+            .canonical_status(tx, block, true, rival)
+            .unwrap()
+            .finalized
+    );
+    assert!(
+        live(&runtime),
+        "released although another block is canonical at the height"
+    );
+    let early = Some(ops_reth_policy::runtime::FinalityEvidence {
+        finalized_number: 0,
+        ..final_evidence().unwrap()
+    });
+    assert!(
+        !runtime
+            .canonical_status(tx, block, true, early)
+            .unwrap()
+            .finalized
+    );
+    assert!(live(&runtime), "released below the finalized height");
+    let reverted = runtime
+        .canonical_status(tx, block, false, final_evidence())
+        .unwrap();
+    assert_eq!(
+        (reverted.status.as_str(), reverted.finalized),
+        ("reverted", true)
+    );
+    assert!(!live(&runtime), "a finalized outcome must release the slot");
+    assert!(
+        !execute(&runtime.pin_candidate(1800000010).unwrap()),
+        "executed without an identity after release"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn reorg_before_finality_reexecutes_without_ops() {
+    let (runtime, directory) = included("reorg");
+    runtime
+        .canonical_status(B256::repeat_byte(1), descriptor().hash, true, None)
+        .unwrap();
+    // A reorg drops the block and the transaction returns to the pool: a new
+    // candidate executes it again with the still-live identity, no OPS call.
+    assert!(execute(&runtime.pin_candidate(1800000010).unwrap()));
     std::fs::remove_dir_all(directory).unwrap();
 }

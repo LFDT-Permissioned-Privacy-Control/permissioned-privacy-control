@@ -44,6 +44,16 @@ pub struct TransactionStatus {
     pub finalized_block_number: Option<u64>,
 }
 
+/// Finality evidence from the node's canonical chain for one included
+/// transaction: the canonical hash at its height and the finalized block,
+/// itself canonical at its height.
+#[derive(Clone, Copy, Debug)]
+pub struct FinalityEvidence {
+    pub canonical_at_inclusion: B256,
+    pub finalized_number: u64,
+    pub finalized_hash: B256,
+}
+
 impl TransactionStatus {
     /// Evidence comes from the node's canonical forkchoice provider, never a
     /// receipt or a locally counted number of confirmations alone.
@@ -192,12 +202,34 @@ impl PolicyRuntime {
         self.identities.admit_reclaiming(verified, now)
     }
 
-    /// Called after the backend observes a canonical receipt. Releases the
-    /// bounded pending slot once the block's evidence holds the transaction.
-    pub fn reconcile_included(&self, hash: B256, block: B256) -> Result<(), String> {
-        self.transaction_status(hash, Some(block))?
+    /// The status of `hash`, canonically included in `block`, from the block's
+    /// manifest: `included` or `reverted`, and finalized when `finality` proves
+    /// it. The bounded pending slot is released only then: before finality a
+    /// reorg can return the transaction to the pool, where its identity lets it
+    /// execute again while its lease is valid.
+    pub fn canonical_status(
+        &self,
+        hash: B256,
+        block: B256,
+        success: bool,
+        finality: Option<FinalityEvidence>,
+    ) -> Result<TransactionStatus, String> {
+        let mut status = self
+            .transaction_status(hash, Some(block))?
             .ok_or("canonical execution evidence unavailable")?;
-        self.identities.finish(&ExecutionBinding::Transaction(hash))
+        status.status = if success { "included" } else { "reverted" }.into();
+        if let Some(evidence) = finality {
+            status.observe_finality(
+                evidence.canonical_at_inclusion,
+                evidence.finalized_number,
+                evidence.finalized_hash,
+            );
+        }
+        if status.finalized {
+            self.identities
+                .finish(&ExecutionBinding::Transaction(hash))?;
+        }
+        Ok(status)
     }
 
     pub fn pin_candidate(&self, at: i64) -> Result<Arc<ExecutionHandle>, String> {

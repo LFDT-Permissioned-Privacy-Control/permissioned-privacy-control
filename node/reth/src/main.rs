@@ -99,7 +99,10 @@ fn main() -> eyre::Result<()> {
             keys.insert(id,ed25519_dalek::VerifyingKey::from_bytes(&bytes)?);
         }
         let archive=Arc::new(ArtifactStore::open(required("OPS_NODE_POLICY_STATE_DIR")?).map_err(eyre::Report::msg)?);
-        let capacity=std::env::var("OPS_NODE_POLICY_CAPACITY").unwrap_or_else(|_|"100000".into()).parse()?;
+        let setting=|name:&str,default:&str|->eyre::Result<u64> {std::env::var(name).unwrap_or_else(|_|default.into()).parse::<u64>().map_err(|error|eyre::eyre!("{name}: {error}"))};
+        let capacity=usize::try_from(setting("OPS_NODE_POLICY_CAPACITY","262144")?)?;
+        // Slots are held until OPS observes finality: size them for the expected load.
+        ops_reth_policy::identity::validate_capacity(capacity,setting("OPS_NODE_POLICY_EXPECTED_TPS","2000")?,setting("OPS_NODE_POLICY_FINALITY_BOUND","64")?,setting("OPS_NODE_POLICY_PENDING_LIMIT","37500")?).map_err(eyre::Report::msg)?;
         let runtime=Arc::new(PolicyRuntime::open(Verifier::new(network,keys),archive,capacity,now()).map_err(eyre::Report::msg)?);
         for selection in [&builder.config().rpc.http_api,&builder.config().rpc.ws_api].into_iter().flatten() {
             if selection.to_string().split(',').any(|s|matches!(s,"all"|"debug"|"trace")) {eyre::bail!("historical debug/trace RPC is reserved for authenticated forensic replay; use ops_simulate for calls");}
@@ -122,26 +125,27 @@ fn main() -> eyre::Result<()> {
                 let status=if let Some(receipt)=eth.transaction_receipt(hash).await.map_err(|_|"receipt lookup failed")? {
                     let receipt=serde_json::to_value(receipt).map_err(|_|"invalid canonical receipt")?;
                     let block:B256=receipt.get("blockHash").and_then(Value::as_str).ok_or("receipt block unavailable")?.parse().map_err(|_|"invalid receipt block")?;
-                    let lookup=runtime.clone();
-                    let mut status=tokio::task::spawn_blocking(move||lookup.transaction_status(hash,Some(block))).await.map_err(|_|"status lookup failed")??.ok_or("canonical execution evidence unavailable")?;
-                    let release=runtime.clone();
-                    tokio::task::spawn_blocking(move||release.reconcile_included(hash,block)).await.map_err(|_|"status lookup failed")??;
-                    status.status=if receipt.get("status").and_then(Value::as_str)==Some("0x1") {"included"} else {"reverted"}.into();
+                    let included=u64::from_str_radix(receipt.get("blockNumber").and_then(Value::as_str).ok_or("receipt block unavailable")?.trim_start_matches("0x"),16).map_err(|_|"invalid receipt block")?;
+                    let success=receipt.get("status").and_then(Value::as_str)==Some("0x1");
+                    // Finality evidence from the node's canonical chain: the finalized
+                    // head, canonical at its own height, and the canonical hash at the
+                    // included height. Deciding from it is the runtime's.
+                    let mut finality=None;
                     if let Some(finalized)=eth.rpc_block_header(BlockId::finalized()).await.map_err(|_|"finalized head lookup failed")? {
                         let finalized=serde_json::to_value(finalized).map_err(|_|"invalid finalized head")?;
                         let final_hash:B256=finalized["hash"].as_str().ok_or("finalized hash unavailable")?.parse().map_err(|_|"invalid finalized hash")?;
                         let final_number=u64::from_str_radix(finalized["number"].as_str().ok_or("finalized number unavailable")?.trim_start_matches("0x"),16).map_err(|_|"invalid finalized number")?;
-                        let included=status.block_number.ok_or("included block number unavailable")?;
                         if let Some(canonical)=eth.rpc_block_header(BlockId::number(included)).await.map_err(|_|"canonical block lookup failed")? {
                             let canonical=serde_json::to_value(canonical).map_err(|_|"invalid canonical header")?;
                             let canonical_hash:B256=canonical["hash"].as_str().ok_or("canonical hash unavailable")?.parse().map_err(|_|"invalid canonical hash")?;
                             if let Some(final_canonical)=eth.rpc_block_header(BlockId::number(final_number)).await.map_err(|_|"canonical finalized lookup failed")? {
                                 let final_canonical=serde_json::to_value(final_canonical).map_err(|_|"invalid canonical finalized header")?;
-                                if final_canonical["hash"].as_str()==Some(&format!("{final_hash:#x}")) {status.observe_finality(canonical_hash,final_number,final_hash);}
+                                if final_canonical["hash"].as_str()==Some(&format!("{final_hash:#x}")) {finality=Some(ops_reth_policy::runtime::FinalityEvidence{canonical_at_inclusion:canonical_hash,finalized_number:final_number,finalized_hash:final_hash});}
                             }
                         }
                     }
-                    status
+                    let lookup=runtime.clone();
+                    tokio::task::spawn_blocking(move||lookup.canonical_status(hash,block,success,finality)).await.map_err(|_|"status lookup failed")??
                 } else {
                     // Not included: only a live (registered) identity has a status.
                     let identity=runtime.live_identity(hash).ok_or("unknown execution identity")?;

@@ -321,7 +321,7 @@ flowchart TB
 Every applied fact update is retained as a signed object, and `facts-head`
 points at the latest checkpoint, so a restarted node resumes the same fact
 chain. A pending transaction identity lives only in the node's memory, from
-admission until OPS observes the transaction's canonical receipt or its lease
+admission until OPS observes the transaction's finalized receipt or its lease
 expires and a later admission reclaims it; admission does no storage I/O. A
 restarted node holds no pending identities: a pooled transaction cannot execute
 until it is submitted again through OPS, and OPS's submission row keeps the
@@ -356,7 +356,7 @@ sequenceDiagram
     loop Reconciler until a final outcome
         OPS->>RT: ops_transactionStatus(hash)
         RT->>Reth: Canonical receipt and finalized head
-        RT->>RT: Release pending identity slot
+        RT->>RT: Release pending identity slot once finalized
         RT-->>OPS: included or reverted, finality, created contracts
         OPS->>DB: Update row state and outcome
     end

@@ -49,6 +49,51 @@ pub struct CapturedIdentity {
     pub envelope: Option<Arc<SignedEnvelope>>,
 }
 
+/// Seconds a transaction may wait between admission and inclusion, in the
+/// capacity bound below.
+pub const INCLUSION_BOUND_SECS: u64 = 2;
+
+/// Identities the registry must hold: every transaction from admission until
+/// its slot is released when OPS observes finality, plus an allowance for
+/// admitted submissions awaiting inclusion, with 25 % headroom: ⌈1.25 × (tps × (inclusion bound + finality bound) + pending limit)⌉.
+/// `None` on overflow.
+pub fn required_capacity(
+    expected_tps: u64,
+    finality_bound_secs: u64,
+    pending_limit: u64,
+) -> Option<u64> {
+    let window = INCLUSION_BOUND_SECS.checked_add(finality_bound_secs)?;
+    let load = expected_tps
+        .checked_mul(window)?
+        .checked_add(pending_limit)?;
+    Some(load.checked_mul(5)?.div_ceil(4))
+}
+
+/// Startup check: refuse a capacity too small for the configured load.
+pub fn validate_capacity(
+    capacity: usize,
+    expected_tps: u64,
+    finality_bound_secs: u64,
+    pending_limit: u64,
+) -> Result<(), String> {
+    if expected_tps == 0 || finality_bound_secs == 0 {
+        return Err(
+            "OPS_NODE_POLICY_EXPECTED_TPS and OPS_NODE_POLICY_FINALITY_BOUND must be at least 1"
+                .into(),
+        );
+    }
+    let required = required_capacity(expected_tps, finality_bound_secs, pending_limit)
+        .ok_or("identity capacity bound overflows")?;
+    if (capacity as u64) < required {
+        return Err(format!(
+            "OPS_NODE_POLICY_CAPACITY {capacity} is below the {required} identities needed for \
+             OPS_NODE_POLICY_EXPECTED_TPS {expected_tps}, OPS_NODE_POLICY_FINALITY_BOUND \
+             {finality_bound_secs} s and OPS_NODE_POLICY_PENDING_LIMIT {pending_limit}"
+        ));
+    }
+    Ok(())
+}
+
 /// Expired leases released per admission, so one admission after an idle TTL
 /// never pops a whole cohort while block building waits on the same lock. A
 /// full registry always has room after a batch if any lease has expired: the
@@ -263,6 +308,16 @@ impl IdentityRegistry {
             .map_err(|_| "identity registry unavailable".to_owned())?
             .remove(&key_for_binding(binding));
         Ok(())
+    }
+
+    /// Registered identities, including expired leases not yet reclaimed.
+    pub fn occupancy(&self) -> Result<usize, String> {
+        Ok(self
+            .identities
+            .lock()
+            .map_err(|_| "identity registry unavailable")?
+            .identities
+            .len())
     }
 
     pub fn for_execution(self: &Arc<Self>, at: i64) -> Arc<RegistryView> {

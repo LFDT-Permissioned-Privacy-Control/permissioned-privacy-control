@@ -55,7 +55,10 @@ belongs to OPS; the node only receives trusted public keys.
 | `OPS_NODE_POLICY_LISTEN` | Private listener, for example `127.0.0.1:8555` |
 | `OPS_NODE_POLICY_TOKEN` | Bearer token shared with OPS |
 | `OPS_NODE_POLICY_STATE_DIR` | Dedicated durable policy/archive directory |
-| `OPS_NODE_POLICY_CAPACITY` | Optional pending identity limit; default `100000` |
+| `OPS_NODE_POLICY_CAPACITY` | Optional pending identity limit; default `262144` (estimated at about 370 MB when full). A slot is held until OPS observes the transaction's finalized receipt, or until its lease expires. Startup refuses a value below ⌈1.25 × (expected tx/s × (2 s + finality bound) + pending limit)⌉ |
+| `OPS_NODE_POLICY_EXPECTED_TPS` | Optional sustained transactions per second the capacity must cover; default `2000` |
+| `OPS_NODE_POLICY_FINALITY_BOUND` | Optional seconds from inclusion to finality (finality depth × block time), at least `1`; default `64`. Set it from the deployed consensus, which has no universal fixed depth |
+| `OPS_NODE_POLICY_PENDING_LIMIT` | Optional allowance for admitted submissions still awaiting inclusion, which capacity must also cover; default `37500` |
 | `OPS_POLICY_DECISION_LOG` | Set to `1` to print one `OPS_POLICY_DECISION {…}` JSON line per checked transaction on stderr (development diagnostic; off by default — it costs a synchronous write per transaction and records principal/selector pairs in the node log) |
 
 ```sh
@@ -118,8 +121,10 @@ transaction when later facts change. Included creation metadata is returned only
 when a canonical receipt matches the exact archived block, and includes nested
 successful CREATE/CREATE2 results. Reverted creations never become registration
 evidence. The status of an included transaction reports the identity that executed
-it, from the block's manifest. Canonical reconciliation releases the bounded pending
-identity slot.
+it, from the block's manifest. The bounded pending identity slot is released when
+OPS observes the finalized receipt: before finality a reorganization can return the
+transaction to the pool, where its registered identity lets it execute again while
+its lease is valid; after expiry it must be submitted again through OPS.
 Permanent OPS registration and visibility projection wait for `finalized:true`,
 backed by the node's finalized forkchoice header and canonical block checks.
 Wait for that reconciliation before calling a newly deployed contract across
