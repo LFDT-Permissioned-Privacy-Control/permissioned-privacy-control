@@ -54,8 +54,8 @@ belongs to OPS; the node only receives trusted public keys.
 | `OPS_NODE_POLICY_PUBLIC_KEYS` | JSON object mapping key ID to base64 Ed25519 public key |
 | `OPS_NODE_POLICY_LISTEN` | Private listener, for example `127.0.0.1:8555` |
 | `OPS_NODE_POLICY_TOKEN` | Bearer token shared with OPS |
-| `OPS_NODE_POLICY_MAX_CONNECTIONS` | Optional connections the private listener serves at once, 1–65536; default `128`. Above it, up to 64 more connections are still served for fact publication and status and answered `503` with `Retry-After: 1` otherwise; beyond those a connection is closed. With several OPS instances, cover the sum of their connections |
-| `OPS_NODE_POLICY_CONTROL_LISTEN` | Optional second private listener, for example `127.0.0.1:8556`, serving only fact publication and status (`ops_policyApply`, `ops_policyStatus`; other methods get the generic error), with the same token, so fact changes apply while the main listener is full |
+| `OPS_NODE_POLICY_MAX_CONNECTIONS` | Optional authenticated connections the private listener serves at once, 1–65536; default `128`. Above it, up to 64 more authenticated connections are still served for fact publication and status and answered `503` with `Retry-After: 1` otherwise; beyond those an authenticated connection is answered the same `503` and closed. A connection counts only from its first authenticated request. With several OPS instances, cover the sum of their connections |
+| `OPS_NODE_POLICY_CONTROL_LISTEN` | Optional, recommended in production: a second private listener, for example `127.0.0.1:8556`, serving only fact publication and status (`ops_policyApply`, `ops_policyStatus`; other methods get the generic error), with the same token, so fact changes apply while the main listener is full. Bind it to an interface only OPS can reach (firewalled, not the main listener's), so no other peer can load it |
 | `OPS_NODE_POLICY_CONTROL_MAX_CONNECTIONS` | Optional connections the control listener serves at once, 1–1024; default `16` (plus the same 64 over-capacity connections) |
 | `OPS_NODE_POLICY_FACT_WAIT` | Optional bounded wait of a submission or simulation whose fact floor is above the installed, fresh facts: `0s`–`5s`, as a whole number of `ms` or `s`; default `1s`. Then error `-32012` (capability `fact_wait_v1`, advertised unless `0s`). At most 32 requests wait at once; more, and stale or missing facts, are answered at once |
 | `OPS_NODE_POLICY_VERIFY_WORKERS` | Optional concurrent identity-admission jobs (signature verification, transaction decoding, signer recovery), 1–64; default `4` |
@@ -114,6 +114,14 @@ flight completes. An idle connection is closed after 10 s; a connection still
 open a minute after its lifetime (a peer that stopped reading), an
 over-capacity connection after a minute, and every connection 10 s into a
 shutdown are dropped.
+A connection takes a place in the listener's limit only at its first
+authenticated request. Before that it must send a complete request head with
+the right token within 10 s, and at most the limit plus 64 such connections
+wait at once (a new one closes the oldest waiting connection of the peer
+address with the most waiting), so peers without the token cannot hold the
+places OPS needs. A request without the right token is answered `401` and its
+connection is closed; so are `404` and `413` answers. A `503` after the 30 s
+processing bound carries no `Retry-After`: that request may have run.
 
 The private listener supports `ops_policyApply`, `ops_policyStatus`,
 `ops_submitTransaction`, `ops_simulate`, `ops_transactionStatus` and

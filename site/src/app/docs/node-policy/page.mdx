@@ -311,8 +311,8 @@ Size the node for the expected load:
 | `OPS_NODE_POLICY_FINALITY_BOUND` | Seconds from inclusion until a block is final and written by the node: the larger of the deployed consensus's finality (finality depth × block time) and the node's write lag, at least 1 | 64 |
 | `OPS_NODE_POLICY_PENDING_LIMIT` | Allowance for submissions still waiting for inclusion | 37500 |
 | `OPS_NODE_POLICY_VERIFY_WORKERS` | Submissions and simulations admitted in parallel, 1–64 | 4 |
-| `OPS_NODE_POLICY_MAX_CONNECTIONS` | Connections the private listener serves at once; above it fact publication and status are still served and other requests get 503 with `Retry-After: 1` | 128 |
-| `OPS_NODE_POLICY_CONTROL_LISTEN` | Optional second private listener that serves only fact publication and status | unset |
+| `OPS_NODE_POLICY_MAX_CONNECTIONS` | Authenticated connections the private listener serves at once; above it fact publication and status are still served and other requests get 503 with `Retry-After: 1` | 128 |
+| `OPS_NODE_POLICY_CONTROL_LISTEN` | Optional second private listener that serves only fact publication and status; recommended in production, on an interface only OPS can reach | unset |
 | `OPS_NODE_POLICY_CONTROL_MAX_CONNECTIONS` | Connections the control listener serves at once | 16 |
 | `OPS_NODE_POLICY_FACT_WAIT` | How long the node holds a request that needs newer facts than it has before it answers that facts are pending; `0s`–`5s` | 1s |
 | `OPS_NODE_POLICY_MANIFEST_RETENTION` | How long the node keeps each finalized block's execution evidence after the block, `forever` (archive nodes) or a whole number of `s`, `m`, `h` or `d`, at least one hour | 7d |
@@ -320,7 +320,11 @@ Size the node for the expected load:
 Size `OPS_NODE_POLICY_MAX_CONNECTIONS` for every OPS instance that uses the
 node: at least the sum of their connections to it. Private connections are
 recycled after about a minute after a complete response; a request in flight
-completes.
+completes. A connection counts against the limit only once it has sent a
+request with the node's token: a connection that sends no such request within
+10 s, or a request with a wrong token, is closed. Run the control listener on a
+separate interface that only OPS can reach (for example a firewalled private
+network), so fact publication never shares a listener with other peers.
 
 The retention of block execution evidence is a record-retention control: set it
 from your documented retention policy. Evidence of blocks that are not yet

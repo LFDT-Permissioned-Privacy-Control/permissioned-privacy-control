@@ -459,6 +459,26 @@ every connection after 60 s, including a request in flight. With overflow
 serving and recycling disabled, all three tests fail. `smoke.py` publishes facts
 through `OPS_NODE_POLICY_CONTROL_LISTEN` and checks that it refuses a submission.
 
+Unauthenticated peers (independent review, finding 2), and the timeout answer
+(finding 3):
+
+| Behaviour | Test |
+|---|---|
+| A request with a wrong token is answered `401` with `Connection: close`, and the connection closes | `unauthorized_request_closes_the_connection` |
+| A connection that starts no request is closed at the first-request deadline; an authenticated one stays open past it | `silent_connection_is_closed_at_the_first_request_deadline` |
+| 82 silent connections (more than the cap of 2 plus the 64 overflow places) and 8 failed authentications take no place: two submissions are still served within the cap, a third gets the over-capacity `503` with `Retry-After: 1`, status is served | `unauthenticated_connections_never_take_the_cap` |
+| With the cap and the 64 overflow places held by authenticated connections, a further one is answered `503` with `Retry-After: 1` and closed (it was closed unanswered before) | `authenticated_connection_beyond_the_overflow_is_answered_503` |
+| Fact publication on an overflow connection held past the processing bound is answered `503` without `Retry-After` (it may have run) | `timed_out_answer_on_an_overflow_connection_has_no_retry_after` |
+| A `401`, and the `503` beyond the overflow, are sent only after the request body was read, so a client writing its body in parts never hits a reset | `refusals_before_admission_read_the_body_first` |
+| 76 silent connections beside an idle admitted connection and a submission in flight: the oldest waiting connection is closed, the submission completes `accepted`, the idle connection still answers | `evicting_unauthenticated_connections_never_cuts_an_admitted_one` |
+
+The first five failed against the previous listener: a 401 kept the connection
+open, a silent connection stayed until the 10 s header timeout, silent
+connections took every place at accept (the submissions saw a closed
+connection), and the timeout answer carried `Retry-After: 1`. The body test
+failed against the first version of this change, which answered before the
+body arrived.
+
 ## Bounded fact wait and self-import (2026-11-03)
 
 | Behaviour | Test |
