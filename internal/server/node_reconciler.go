@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"privacy-proxy/internal/db"
+	"privacy-proxy/internal/loggate"
 	"privacy-proxy/internal/nodepolicy"
 )
 
@@ -73,9 +74,18 @@ func reconcileNodeSubmissionBatch(ctx context.Context, store nodeOutcomeStore, n
 func runNodeReconciler(ctx context.Context, store nodeOutcomeStore, node nodeOutcomeClient, network nodepolicy.Network) {
 	timer := time.NewTicker(time.Second)
 	defer timer.Stop()
+	var gate loggate.Gate
 	for {
 		if err := reconcileNodeSubmissionBatch(ctx, store, node, network); err != nil && ctx.Err() == nil {
-			slog.Warn("node transaction reconciliation pending", "error", err)
+			// One bounded line per interval: the count and the first error, not
+			// every row's error joined into one line.
+			failures := []error{err}
+			if joined, ok := err.(interface{ Unwrap() []error }); ok && len(joined.Unwrap()) > 0 {
+				failures = joined.Unwrap()
+			}
+			if suppressed, ok := gate.Allow("reconcile:"+nodeErrorClass(failures[0]), time.Now(), failureLogEvery); ok {
+				slog.Warn("node transaction reconciliation pending", "failed_rows", len(failures), "first_error", failures[0], "suppressed", suppressed)
+			}
 		}
 		select {
 		case <-ctx.Done():

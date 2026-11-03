@@ -21,6 +21,7 @@ import (
 	"privacy-proxy/internal/audit"
 	"privacy-proxy/internal/compliance"
 	"privacy-proxy/internal/db"
+	"privacy-proxy/internal/loggate"
 	"privacy-proxy/internal/metrics"
 	"privacy-proxy/internal/nodeapproval"
 	"privacy-proxy/internal/proxy"
@@ -41,6 +42,7 @@ type AuditBuffer interface {
 // and reusable.
 type JSONRPCProcessor struct {
 	nodeExecution     NodeExecutionService
+	nodeFailureLog    loggate.Gate // rate-limits node-path failure lines (G15)
 	nodeApprovals     *nodeapproval.Service
 	rbacAccessCtrl    *rbac.AccessController
 	rateLimiter       RateLimiterInterface

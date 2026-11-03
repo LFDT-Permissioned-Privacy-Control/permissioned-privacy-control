@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"privacy-proxy/internal/nodehttp"
 	"slices"
 	"strconv"
 	"strings"
@@ -66,28 +67,107 @@ func (s NodeStatus) RequireReady(at time.Time, version uint64) error {
 
 // Client talks exclusively to the configured private listener. It never follows
 // redirects, so a misrouted response cannot forward the service credential.
+//
+// Calls travel on three lanes, each its own bounded keep-alive pool
+// (RD-1410): control (fact publication and node status), transaction
+// (submissions and simulations) and recovery (outcome status). A lane at its
+// cap makes further callers wait for one of its connections instead of
+// opening and discarding new ones, and a full transaction lane never delays
+// fact publication.
 type Client struct {
-	endpoint string
-	token    string
-	network  Network
-	http     *http.Client
-	sequence atomic.Uint64
+	endpoint                       string
+	token                          string
+	network                        Network
+	control, transaction, recovery *http.Client
+	sequence                       atomic.Uint64
 }
 
-func NewClient(endpoint, token string, network Network, client *http.Client) (*Client, error) {
-	u, err := url.Parse(endpoint)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Fragment != "" || u.RawQuery != "" || strings.TrimSpace(token) == "" || strings.ContainsAny(token, "\r\n") || network.ChainID == 0 || !identifier(network.DeploymentID) {
-		return nil, ErrEnvelope
-	}
-	copyClient := http.Client{Timeout: 15 * time.Second}
-	if client != nil {
-		copyClient = *client
-		if copyClient.Timeout <= 0 {
-			copyClient.Timeout = 15 * time.Second
+// Lanes sizes the client's connection pools to the private node. With several
+// OPS instances the node's connection limit must cover the sum over all of
+// them.
+type Lanes struct {
+	Control, Transaction, Recovery int
+}
+
+// MaxLaneConnections bounds each lane.
+const MaxLaneConnections = 1024
+
+// DefaultLanes keeps one instance's total (84) inside a node limit of 128.
+func DefaultLanes() Lanes { return Lanes{Control: 4, Transaction: 64, Recovery: 16} }
+
+func (l Lanes) Validate() error {
+	for _, n := range []int{l.Control, l.Transaction, l.Recovery} {
+		if n < 1 || n > MaxLaneConnections {
+			return fmt.Errorf("node policy connection lanes must each be 1..%d", MaxLaneConnections)
 		}
 	}
-	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{endpoint: endpoint, token: token, network: network, http: &copyClient}, nil
+	return nil
+}
+
+// laneIdleTimeout drops an idle connection well before the node or any
+// middlebox would, so a pooled connection is rarely stale when reused.
+const laneIdleTimeout = 5 * time.Second
+
+func laneClient(size int) *http.Client {
+	transport := nodehttp.NewTransport(nodehttp.TransportConfig{MaxIdleConns: size, MaxIdleConnsPerHost: size, MaxConnsPerHost: size, IdleConnTimeout: laneIdleTimeout})
+	// The private endpoint carries the service bearer token and signed
+	// identities: never route it through an environment-configured proxy.
+	transport.Proxy = nil
+	// One request per connection keeps the per-lane connection cap exact.
+	transport.ForceAttemptHTTP2 = false
+	return &http.Client{Timeout: 15 * time.Second, Transport: transport}
+}
+
+func validEndpoint(endpoint, token string, network Network) bool {
+	u, err := url.Parse(endpoint)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" && u.User == nil && u.Fragment == "" && u.RawQuery == "" && strings.TrimSpace(token) != "" && !strings.ContainsAny(token, "\r\n") && network.ChainID != 0 && identifier(network.DeploymentID)
+}
+
+func noRedirects(c *http.Client) *http.Client {
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return c
+}
+
+// NewPooledClient is the production client: one bounded keep-alive pool per
+// lane.
+func NewPooledClient(endpoint, token string, network Network, lanes Lanes) (*Client, error) {
+	if !validEndpoint(endpoint, token, network) || lanes.Validate() != nil {
+		return nil, ErrEnvelope
+	}
+	return &Client{endpoint: endpoint, token: token, network: network, control: noRedirects(laneClient(lanes.Control)), transaction: noRedirects(laneClient(lanes.Transaction)), recovery: noRedirects(laneClient(lanes.Recovery))}, nil
+}
+
+// NewClient builds the pooled client with DefaultLanes when client is nil.
+// A non-nil client (tests) carries every lane.
+func NewClient(endpoint, token string, network Network, client *http.Client) (*Client, error) {
+	if client == nil {
+		return NewPooledClient(endpoint, token, network, DefaultLanes())
+	}
+	if !validEndpoint(endpoint, token, network) {
+		return nil, ErrEnvelope
+	}
+	copyClient := *client
+	if copyClient.Timeout <= 0 {
+		copyClient.Timeout = 15 * time.Second
+	}
+	shared := noRedirects(&copyClient)
+	return &Client{endpoint: endpoint, token: token, network: network, control: shared, transaction: shared, recovery: shared}, nil
+}
+
+// lane picks the connection pool for method. Read-only status calls are also
+// marked idempotent, so the transport may retry one that failed on a reused
+// connection the node had already closed.
+func (c *Client) lane(method string) (*http.Client, bool) {
+	switch method {
+	case "ops_policyStatus":
+		return c.control, true
+	case "ops_policyApply":
+		return c.control, false
+	case "ops_transactionStatus", "ops_transactionStatuses":
+		return c.recovery, true
+	default: // ops_submitTransaction, ops_simulate
+		return c.transaction, false
+	}
 }
 
 func (c *Client) PolicyStatus(ctx context.Context) (NodeStatus, error) {
@@ -204,12 +284,18 @@ func (c *Client) call(ctx context.Context, method string, params []any) (json.Ra
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := c.http.Do(req)
+	client, idempotent := c.lane(method)
+	if idempotent {
+		req.Header.Set("Idempotency-Key", id)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, ErrNodeUnavailable
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		// Drain a little so the connection can return to the pool.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return nil, ErrNodeUnavailable
 	}
 	response, err := io.ReadAll(io.LimitReader(resp.Body, MaxNodeResponseBytes+1))

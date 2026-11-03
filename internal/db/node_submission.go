@@ -127,13 +127,26 @@ func (d *DB) RecordNodeOutcome(ctx context.Context, network nodepolicy.Network, 
 	if err != nil {
 		return err
 	}
+	// Only an outcome that registers created contracts writes configuration
+	// state, so only it takes the organisation's configuration scope (before
+	// the resource and intent locks, matching configuration writers). Every
+	// other outcome needs only the organisation to exist and not be deleted
+	// meanwhile: FOR KEY SHARE, which conflicts with deletion but with neither
+	// the scope nor the request path (RD-1410).
+	registers := status.Execution.Status == "included" && status.Execution.Finalized && len(status.Execution.Created) > 0
 	return withRetry(ctx, func() error {
 		return d.WithTx(ctx, func(tx *Tx) error {
-			// Scope lock precedes resource/intent locks, matching configuration writers.
 			note := ""
-			if err := tx.AuthorizeDeploymentRegistration(ctx, status.OrgID); err != nil {
-				if !errors.Is(err, sql.ErrNoRows) {
-					return err
+			var orgErr error
+			if registers {
+				orgErr = tx.AuthorizeDeploymentRegistration(ctx, status.OrgID)
+			} else {
+				var id string
+				orgErr = tx.tx.QueryRowContext(ctx, `SELECT id FROM organizations WHERE id=$1 FOR KEY SHARE`, status.OrgID).Scan(&id)
+			}
+			if orgErr != nil {
+				if !errors.Is(orgErr, sql.ErrNoRows) {
+					return orgErr
 				}
 				note = "organization_deleted"
 			}

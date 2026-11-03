@@ -20,8 +20,21 @@ type NodePolicyConfig struct {
 	FactTTL         time.Duration
 	PublishInterval time.Duration
 	IdentityTTL     time.Duration
-	parseError      error
+	// Connection lanes to the private node (RD-1410): bounded
+	// keep-alive pools for fact publication/status, transactions and outcome
+	// status. The node's connection limit must cover the sum over instances.
+	ControlConns, TransactionConns, RecoveryConns int
+	parseError                                    error
 }
+
+// Private-node connection lane bounds and defaults; they mirror
+// nodepolicy.MaxLaneConnections and nodepolicy.DefaultLanes.
+const (
+	maxNodePolicyLaneConns            = 1024
+	defaultNodePolicyControlConns     = 4
+	defaultNodePolicyTransactionConns = 64
+	defaultNodePolicyRecoveryConns    = 16
+)
 
 func (c NodePolicyConfig) Enabled() bool { return c.Mode == "reth" }
 func loadNodePolicy(get func(string) string) NodePolicyConfig {
@@ -39,6 +52,18 @@ func loadNodePolicy(get func(string) string) NodePolicyConfig {
 	c.ChainID, err = strconv.ParseUint(value("OPS_NODE_POLICY_CHAIN_ID", "0"), 10, 64)
 	if err != nil {
 		c.parseError = fmt.Errorf("OPS_NODE_POLICY_CHAIN_ID must be an unsigned integer")
+	}
+	for _, lane := range []struct {
+		key      string
+		fallback int
+		dst      *int
+	}{
+		{"OPS_NODE_POLICY_CONTROL_CONNS", defaultNodePolicyControlConns, &c.ControlConns}, {"OPS_NODE_POLICY_TRANSACTION_CONNS", defaultNodePolicyTransactionConns, &c.TransactionConns}, {"OPS_NODE_POLICY_RECOVERY_CONNS", defaultNodePolicyRecoveryConns, &c.RecoveryConns},
+	} {
+		*lane.dst, err = strconv.Atoi(value(lane.key, strconv.Itoa(lane.fallback)))
+		if err != nil || *lane.dst < 1 || *lane.dst > maxNodePolicyLaneConns {
+			c.parseError = fmt.Errorf("%s must be an integer in 1..%d", lane.key, maxNodePolicyLaneConns)
+		}
 	}
 	for _, duration := range []struct {
 		key, fallback string
@@ -73,11 +98,29 @@ func (c NodePolicyConfig) Validate() error {
 	if c.PrivateKeyFile == "" || !nodePolicyIdentifier(c.KeyID) || c.ChainID == 0 || !nodePolicyIdentifier(c.DeploymentID) || !nodePolicyIdentifier(c.ConsumerID) {
 		return fmt.Errorf("Reth policy mode requires a signing key file, key ID, chain ID, deployment ID and consumer ID")
 	}
+	for _, n := range []int{c.ControlConns, c.TransactionConns, c.RecoveryConns} {
+		if n < 0 || n > maxNodePolicyLaneConns { // 0: the default
+			return fmt.Errorf("OPS_NODE_POLICY_CONTROL_CONNS, OPS_NODE_POLICY_TRANSACTION_CONNS and OPS_NODE_POLICY_RECOVERY_CONNS must each be 1..%d", maxNodePolicyLaneConns)
+		}
+	}
 	if c.FactTTL < time.Second || c.FactTTL > 10*time.Minute || c.IdentityTTL < time.Second || c.IdentityTTL > 10*time.Minute || c.PublishInterval <= 0 || c.PublishInterval > c.FactTTL/3 {
 		return fmt.Errorf("node policy lifetimes must be 1s..10m and publish interval at most one third of fact lifetime")
 	}
 	return nil
 }
+
+// LaneSizes returns the control, transaction and recovery lane sizes; a zero
+// field (a literal configuration without them) takes its default.
+func (c NodePolicyConfig) LaneSizes() (control, transaction, recovery int) {
+	pick := func(n, fallback int) int {
+		if n == 0 {
+			return fallback
+		}
+		return n
+	}
+	return pick(c.ControlConns, defaultNodePolicyControlConns), pick(c.TransactionConns, defaultNodePolicyTransactionConns), pick(c.RecoveryConns, defaultNodePolicyRecoveryConns)
+}
+
 func nodePolicyIdentifier(value string) bool {
 	if len(value) == 0 || len(value) > 128 {
 		return false

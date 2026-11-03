@@ -111,7 +111,9 @@ func (p *JSONRPCProcessor) processNodeExecution(ctx context.Context, req *Proces
 	} // Existing raw-tx method equivalence.
 	admission, err := p.rbacAccessCtrl.CheckExecutionAdmission(ctx, &rbac.AccessCheckRequest{UserExternalID: req.UserID, OrgID: req.OrgID, Method: allowlistMethod, AccessMethod: method, Params: params, TargetAddress: to, BypassCache: req.BypassPermsCache})
 	if err != nil || admission == nil {
-		slog.Warn("node execution admission unavailable", "method", req.Method, "error", err)
+		if suppressed, ok := p.nodeFailureLog.Allow("admission:"+nodeErrorClass(err), time.Now(), failureLogEvery); ok {
+			slog.Warn("node execution admission unavailable", "method", req.Method, "error", err, "suppressed", suppressed)
+		}
 		return p.nodeExecutionError(ctx, req, http.StatusNotFound, "method not found", ReasonMethodNotAllowed)
 	}
 	req.resolvedOrgID = admission.OrgID
@@ -270,8 +272,13 @@ func nodeCallTraceParams(params []any) []any {
 	return []any{params[0], block, map[string]any{"tracer": "callTracer"}}
 }
 
+// nodeExecutionFailure answers a node-path failure. The warning is
+// rate-limited per error class: a failing node costs one line per
+// interval, while every request is still answered and audited.
 func (p *JSONRPCProcessor) nodeExecutionFailure(ctx context.Context, req *ProcessRequest, err error) *ProcessResult {
-	slog.Warn("private node execution failed", "method", req.Method, "error", err)
+	if suppressed, ok := p.nodeFailureLog.Allow("failure:"+nodeErrorClass(err), time.Now(), failureLogEvery); ok {
+		slog.Warn("private node execution failed", "method", req.Method, "error", err, "suppressed", suppressed)
+	}
 	if errors.Is(err, nodepolicy.ErrNodeRejected) {
 		return p.nodeExecutionError(ctx, req, http.StatusForbidden, "request rejected by execution node", ReasonNodeRejected)
 	}

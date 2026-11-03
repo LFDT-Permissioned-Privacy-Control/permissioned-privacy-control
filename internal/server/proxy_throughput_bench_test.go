@@ -56,7 +56,14 @@ func proxyBenchDSN(b *testing.B) string {
 // mockNode is an instant-response Ethereum node stub: it executes no EVM, so
 // the benchmark measures only the proxy.
 func mockNode(tb testing.TB) *httptest.Server {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(mockNodeHandler())
+	tb.Cleanup(srv.Close)
+	return srv
+}
+
+// mockNodeHandler is mockNode's handler, for harnesses that count connections.
+func mockNodeHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Method string `json:"method"`
 			ID     any    `json:"id"`
@@ -79,9 +86,7 @@ func mockNode(tb testing.TB) *httptest.Server {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
-	}))
-	tb.Cleanup(srv.Close)
-	return srv
+	})
 }
 
 // seedPermittedUser inserts an org + group + group_access (allowing

@@ -163,6 +163,27 @@ identity in the Reth launcher. Keep its private endpoint off user-facing network
 The default fact lifetime is 30 seconds, publication interval one second and
 identity lifetime one minute.
 
+OPS keeps its connections to the private endpoint open and splits them into
+three bounded pools, so a burst of transactions never delays fact
+publication:
+
+| Variable | Default | Carries |
+| --- | --- | --- |
+| `OPS_NODE_POLICY_CONTROL_CONNS` | 4 | fact publication and node status |
+| `OPS_NODE_POLICY_TRANSACTION_CONNS` | 64 | transaction submission and simulation |
+| `OPS_NODE_POLICY_RECOVERY_CONNS` | 16 | transaction outcome checks |
+
+Each accepts 1 to 1024. Requests beyond a pool's size wait for one of its
+connections. The guarded Reth node's private listener accepts at most 128
+connections; keep the sum of all three pools across every OPS instance within
+it (84 per instance at the defaults).
+
+OPS checks the node's readiness in the background every second (and, on the
+instance publishing facts, right after each publication), not once per
+request. A request is refused with 503 while the node has not yet applied the
+current facts, when the node does not answer a readiness check, or when OPS
+has had no successful readiness answer for five seconds.
+
 When several OPS instances share one database, exactly one of them publishes
 facts and reconciles submissions at a time. Each instance campaigns for a
 database lease (a session-level advisory lock); the others stand by and take
