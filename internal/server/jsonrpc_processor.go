@@ -227,6 +227,9 @@ type ProcessError struct {
 	// an out-of-scope frame, its owner, for audit records only.
 	TraceDeniedTarget string
 	TraceDeniedOrgID  string
+	// RetryAfter, when positive, is sent as the Retry-After header (seconds):
+	// the request may succeed unchanged after that long.
+	RetryAfter int
 }
 
 func (e *ProcessError) Error() string {

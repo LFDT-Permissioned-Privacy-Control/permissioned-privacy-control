@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
@@ -35,6 +36,10 @@ type MockNodeConfig struct {
 	// MaxBlockTxs caps transactions per block (0 = unlimited).
 	MaxBlockTxs int
 	Clock       func() time.Time
+	// FactWait is how long a submission whose identity requires newer facts
+	// than installed waits for them before -32012, like the node's
+	// OPS_NODE_POLICY_FACT_WAIT (default 1 s).
+	FactWait time.Duration
 }
 
 // MockNode answers the public JSON-RPC methods the legacy path forwards and the
@@ -45,6 +50,9 @@ type MockNodeConfig struct {
 // verified: the mock stands in for node behaviour, not node security.
 type MockNode struct {
 	cfg MockNodeConfig
+
+	// factsVersion mirrors facts.version for fact waiters, without m.mu.
+	factsVersion atomic.Uint64
 
 	mu       sync.Mutex
 	txs      map[string]*mockTx
@@ -146,6 +154,9 @@ func NewMockNode(cfg MockNodeConfig) *MockNode {
 	}
 	if cfg.BlockTime <= 0 {
 		cfg.BlockTime = time.Second
+	}
+	if cfg.FactWait <= 0 {
+		cfg.FactWait = time.Second
 	}
 	genesis := &MockBlock{Number: 0, Hash: blockHash(0, ""), Time: cfg.Clock()}
 	return &MockNode{cfg: cfg, txs: map[string]*mockTx{}, accounts: map[string]*mockAccount{}, dirty: map[string]struct{}{}, blocks: []*MockBlock{genesis}, index: map[string]indexedTx{}, methods: map[string]*methodStat{}, unknown: map[string]int{}, replies: map[string]int64{}}
@@ -519,11 +530,12 @@ type identity struct {
 		ChainID      uint64 `json:"chain_id"`
 		DeploymentID string `json:"deployment_id"`
 	} `json:"network"`
-	Scope       string `json:"scope"`
-	ContextID   string `json:"context_id"`
-	PrincipalID string `json:"principal_id"`
-	OrgID       string `json:"org_id"`
-	BindingHash string `json:"binding_hash"`
+	Scope              string `json:"scope"`
+	ContextID          string `json:"context_id"`
+	PrincipalID        string `json:"principal_id"`
+	OrgID              string `json:"org_id"`
+	BindingHash        string `json:"binding_hash"`
+	MinSnapshotVersion uint64 `json:"min_snapshot_version"`
 }
 
 type envelope struct {
@@ -681,9 +693,10 @@ func (m *MockNode) privateMethods() map[string]handlerFunc {
 	}
 }
 
-// Capabilities mirrors nodepolicy.RequiredCapabilities at 22a0adbb. The
-// compatibility test in internal/nodepolicy fails if they drift.
-var Capabilities = []string{"per_frame_a5", "signed_identity_v1", "fact_stream_v1", "simulation_v1", "archive_v1", "candidate_simulation_v1", "scoped_diagnostics_v1", "finalized_status_v1"}
+// Capabilities mirrors nodepolicy.RequiredCapabilities plus the optional
+// fact_wait_v1 (RD-1411). The compatibility test in internal/nodepolicy
+// fails if they drift.
+var Capabilities = []string{"per_frame_a5", "signed_identity_v1", "fact_stream_v1", "simulation_v1", "archive_v1", "candidate_simulation_v1", "scoped_diagnostics_v1", "finalized_status_v1", "fact_wait_v1"}
 
 type network struct {
 	ChainID      uint64 `json:"chain_id"`
@@ -761,12 +774,31 @@ func (m *MockNode) policyApply(params []json.RawMessage, _ *callInfo) (any, *rpc
 		}
 		digest := sha256.Sum256(e.Payload)
 		m.facts = mockFacts{version: payload.Version, digest: hex.EncodeToString(digest[:]), expiresAt: payload.ExpiresAt}
+		m.factsVersion.Store(payload.Version)
 	}
 	return struct {
 		Version   uint64 `json:"version"`
 		Digest    string `json:"digest"`
 		ExpiresAt int64  `json:"expires_at"`
 	}{m.facts.version, m.facts.digest, m.facts.expiresAt}, nil
+}
+
+// waitForFacts waits up to FactWait for the installed facts to reach version,
+// then answers -32012, as the node does (T14). Before any facts were
+// published the mock does not enforce versions (its own unit tests submit
+// without a publisher; the real node refuses).
+func (m *MockNode) waitForFacts(version uint64) *rpcError {
+	deadline := time.Now().Add(m.cfg.FactWait)
+	for {
+		installed := m.factsVersion.Load()
+		if installed == 0 || installed >= version {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return &rpcError{Code: -32012, Message: "policy facts pending"}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 func (m *MockNode) submitTransaction(params []json.RawMessage, call *callInfo) (any, *rpcError) {
@@ -783,6 +815,9 @@ func (m *MockNode) submitTransaction(params []json.RawMessage, call *callInfo) (
 	}
 	raw, rpcErr := stringParam(params, 1)
 	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	if rpcErr := m.waitForFacts(id.MinSnapshotVersion); rpcErr != nil {
 		return nil, rpcErr
 	}
 	hash, rpcErr := m.pool(raw, &id, call.arrived)

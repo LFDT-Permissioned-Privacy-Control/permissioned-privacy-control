@@ -184,11 +184,21 @@ connections. The guarded Reth node's private listener accepts at most 128
 connections; keep the sum of all three pools across every OPS instance within
 it (84 per instance at the defaults).
 
-OPS checks the node's readiness in the background every second (and, on the
-instance publishing facts, right after each publication), not once per
-request. A request is refused with 503 while the node has not yet applied the
-current facts, when the node does not answer a readiness check, or when OPS
-has had no successful readiness answer for five seconds.
+OPS checks the node's readiness in the background every second and, on every
+instance, right after each publication, not once per request. Every request
+requires the facts current in the database when it arrived, so a revocation
+committed before a request always applies to it. When the node has not
+applied those facts yet, a node that supports it waits for them (up to its
+fact wait, one second by default) and only then refuses; OPS passes such
+requests on for up to one second after it first sees the node behind, at most
+16 at a time per instance (each waiting request holds a transaction
+connection), and refuses the rest itself. A request refused because publication is
+pending is answered with 503, `Retry-After: 1` and, for callers with verbose
+errors, the reason `publication_pending`: retry it unchanged. A request is
+also refused with 503 when the node does not answer a readiness check, when its
+facts have expired, or when OPS has had no successful readiness answer for five
+seconds. `GET /ready` follows the same rule, so a short publication does not
+take every instance out of a load balancer at once.
 
 When several OPS instances share one database, exactly one of them publishes
 facts and reconciles submissions at a time. Each instance campaigns for a

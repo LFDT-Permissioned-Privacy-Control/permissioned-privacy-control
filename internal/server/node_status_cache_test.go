@@ -83,8 +83,9 @@ func TestPrepareIdentityMakesNoNodeCall(t *testing.T) {
 		t.Fatalf("100 identities made %d node status calls, want 0", extra)
 	}
 
-	// A revocation raises the database version; the node has not applied it.
-	// Requests refuse with ErrSnapshotLag; each refusal rests on a status read
+	// A revocation raises the database version; the node (without the
+	// fact_wait_v1 wait) has not applied it. Requests refuse with
+	// ErrFactsPending (503, Retry-After); each refusal rests on a status read
 	// that started after its own version read, and those reads are shared and
 	// spaced, never one per request in a burst.
 	versions.v.Store(8)
@@ -95,8 +96,8 @@ func TestPrepareIdentityMakesNoNodeCall(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := bridge.PrepareIdentity(ctx, request); !errors.Is(err, nodepolicy.ErrSnapshotLag) {
-				t.Errorf("lagging node: %v, want ErrSnapshotLag", err)
+			if _, err := bridge.PrepareIdentity(ctx, request); !errors.Is(err, nodepolicy.ErrFactsPending) {
+				t.Errorf("lagging node: %v, want ErrFactsPending", err)
 			}
 		}()
 	}

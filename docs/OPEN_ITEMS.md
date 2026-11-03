@@ -426,7 +426,11 @@ transaction. The publisher is woken by `LISTEN`/`NOTIFY` at commit instead of
 its one-second timer (in tests a fact change reached the node in a few
 milliseconds), and it exports only the keys changed since the generation the
 node acknowledged, with a full export at checkpoints, at least every five
-minutes, and whenever the change log cannot describe the gap.
+minutes, and whenever the change log cannot describe the gap. A request that
+needs facts the node has not applied yet is handed to the node's bounded wait
+(capability `fact_wait_v1`) and, if they do not arrive, answered with 503 and
+`Retry-After: 1` (reason `publication_pending`) instead of an immediate
+refusal; a node without that capability is refused the same way at once.
 
 Evidence: [load results and durability analysis](implementation/evidence/reth-runtime.md#where-the-stacks-throughput-actually-goes-2026-09-17),
 [current policy cost and theoretical ceiling](implementation/evidence/per-group-live-2026-09-25.md#theoretical-throughput-from-policy-cost).

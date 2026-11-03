@@ -279,6 +279,13 @@ func (p *JSONRPCProcessor) nodeExecutionFailure(ctx context.Context, req *Proces
 	if suppressed, ok := p.nodeFailureLog.Allow("failure:"+nodeErrorClass(err), time.Now(), failureLogEvery); ok {
 		slog.Warn("private node execution failed", "method", req.Method, "error", err, "suppressed", suppressed)
 	}
+	if errors.Is(err, nodepolicy.ErrFactsPending) {
+		// The node has not applied the facts this request needs yet (its
+		// bounded wait expired): retryable, not a policy decision.
+		result := p.nodeExecutionError(ctx, req, http.StatusServiceUnavailable, "execution facts are being published; retry shortly", ReasonPublicationPending)
+		result.Error.RetryAfter = 1
+		return result
+	}
 	if errors.Is(err, nodepolicy.ErrNodeRejected) {
 		return p.nodeExecutionError(ctx, req, http.StatusForbidden, "request rejected by execution node", ReasonNodeRejected)
 	}

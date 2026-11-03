@@ -70,6 +70,10 @@ const (
 	// imply that the authenticated caller lacks a method permission.
 	ReasonNodeRejected         = "node_rejected"
 	ReasonExecutionUnavailable = "execution_unavailable"
+	// ReasonPublicationPending: the execution node has not yet applied the
+	// policy facts the request needs (503 with Retry-After). It describes the
+	// deployment's publication, not any tenant's state.
+	ReasonPublicationPending = "publication_pending"
 	// ReasonInternalError: an internal failure (500) — generic by construction.
 	ReasonInternalError = "internal_error"
 
@@ -114,7 +118,8 @@ func wireReason(code string) string {
 		ReasonConcurrencyLimited,
 		ReasonUpstreamError,
 		ReasonNodeRejected,
-		ReasonExecutionUnavailable:
+		ReasonExecutionUnavailable,
+		ReasonPublicationPending:
 		return code
 	default:
 		return ReasonWireGenericDenied

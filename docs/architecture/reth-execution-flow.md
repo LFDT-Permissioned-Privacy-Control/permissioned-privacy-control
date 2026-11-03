@@ -171,10 +171,18 @@ lease** and **one-minute identity lifetime**. A heartbeat renews freshness; it
 does not change facts. Missing versions require resynchronization. Invalid,
 missing or expired facts prevent new execution.
 
-Before minting a request identity, OPS checks that the node has acknowledged
-the current database version and is ready. That version becomes the identity's
-minimum required snapshot version. A configuration being active in PostgreSQL
-and applied on Reth are separate states, exposed by publication/readiness status.
+Before minting a request identity, OPS reads the current database version; it
+becomes the identity's minimum required snapshot version, so a revocation
+committed before the request always binds it. Readiness comes from a cached
+node status (refreshed every second and on every acknowledgement), not a node
+call per request. If the node is ready but has not applied that version yet,
+OPS hands the request on when the node advertises `fact_wait_v1`: the node
+waits a bounded time (default one second) for the version and then answers
+-32012, which OPS returns as 503 with `Retry-After: 1` and reason
+`publication_pending`. OPS refuses the same way itself once it has seen the
+node behind for longer than that wait, or at once for a node without the
+capability. A configuration being active in PostgreSQL and applied on Reth are
+separate states, exposed by publication/readiness status.
 
 A candidate block pins one coherent snapshot; it never adopts half a policy
 set or changes memberships halfway through execution. A revocation affects

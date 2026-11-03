@@ -304,6 +304,15 @@ func TestRevocationCommittedBeforeRequestRaisesMinVersion(t *testing.T) {
 	if revoked <= before {
 		t.Fatal("revocation did not advance the fact clock")
 	}
+	// A node that waits for facts (fact_wait_v1) gets the request before it
+	// applied the revocation: the identity still requires the revoked
+	// version, so the node cannot execute it on the older facts.
+	node.mu.Lock()
+	node.caps = append(node.caps, nodepolicy.CapabilityFactWait)
+	node.mu.Unlock()
+	if got := minVersion(); got != revoked {
+		t.Fatalf("request before the node applied the revocation carries min version %d, want %d", got, revoked)
+	}
 	// The node has applied the revocation by the time the request runs.
 	if err := publisher.Tick(ctx); err != nil {
 		t.Fatal(err)

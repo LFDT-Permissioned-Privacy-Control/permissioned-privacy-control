@@ -20,8 +20,15 @@ import (
 // The gate-2 mock node must be accepted by the real strict client, publisher
 // and outcome validator, or gate-2 numbers would measure a broken protocol.
 func TestPerfgateMockSpeaksTheStrictNodeProtocol(t *testing.T) {
-	if !slices.Equal(perfgate.Capabilities, RequiredCapabilities()) {
-		t.Fatalf("mock capabilities %v drifted from %v", perfgate.Capabilities, RequiredCapabilities())
+	for _, c := range RequiredCapabilities() {
+		if !slices.Contains(perfgate.Capabilities, c) {
+			t.Fatalf("mock capabilities %v lack required %s", perfgate.Capabilities, c)
+		}
+	}
+	for _, c := range perfgate.Capabilities {
+		if !slices.Contains(RequiredCapabilities(), c) && !slices.Contains(OptionalCapabilities(), c) {
+			t.Fatalf("mock advertises %s, which OPS does not know", c)
+		}
 	}
 	network := Network{ChainID: 31337, DeploymentID: "perfgate-compat"}
 	clock := time.Now

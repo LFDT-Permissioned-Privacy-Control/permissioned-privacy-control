@@ -54,7 +54,39 @@ type nodeExecutionBridge struct {
 	lastRefresh atomic.Int64  // unix nanos (wall clock) when the last one started
 	kick        chan struct{} // asks the probe for an immediate read
 	log         loggate.Gate
+
+	// behind is the current lag episode (RD-1411 §5.3): since when this
+	// instance has seen the node below target, the database version it was
+	// first seen behind. A new episode starts only once the node reached that
+	// target.
+	behindMu sync.Mutex
+	behind   struct {
+		target uint64
+		since  time.Time
+	}
+	// factWaiters bounds the requests handed to the node's fact wait at once;
+	// waiting holds a transaction-lane connection, so the rest are refused at
+	// once. waiting maps an identity's context to when it took a slot.
+	factWaiters chan struct{}
+	waitingMu   sync.Mutex
+	waiting     map[string]time.Time
 }
+
+// maxFactWaiters bounds requests waiting on the node for facts at once, a
+// quarter of the default transaction lane (64), so waiting never starves the
+// lane.
+const maxFactWaiters = 16
+
+// factWaiterLease releases a slot whose request never reached the node (for
+// example a simulation refused by its audit write).
+const factWaiterLease = 20 * time.Second
+
+// nodeFactWaitBudget is how long after first seeing the node behind the
+// database OPS still hands requests to a node that waits for facts itself
+// (fact_wait_v1): the node's default OPS_NODE_POLICY_FACT_WAIT. Past it the
+// node's wait would expire too, so OPS refuses at once, before any side
+// effect, instead of holding a transaction connection per request.
+const nodeFactWaitBudget = time.Second
 
 // nodeStatusMaxAge bounds how old the last node status read may be before
 // identities are refused; the background probe reads it every second.
@@ -220,7 +252,73 @@ func (b *nodeExecutionBridge) check(o *nodeStatusObservation, version uint64) er
 	if status.Version > version {
 		return nodepolicy.ErrFeedConflict
 	}
+	if status.Version < version && status.Ready && status.ExpiresAt > b.now().Unix() {
+		// Ready on older facts: publication is pending. Every other rule
+		// still applies at the node's own version.
+		if err := status.RequireReady(b.now(), status.Version); err != nil {
+			return err
+		}
+		if status.WaitsForFacts() && b.lagIsYoung(status.Version, version) {
+			// The identity requires the database version; the node waits for
+			// it (bounded) and refuses with -32012 if it does not arrive.
+			return errFactWait
+		}
+		return nodepolicy.ErrFactsPending
+	}
 	return status.RequireReady(b.now(), version)
+}
+
+// errFactWait: the node is behind but waits for the facts itself; the request
+// may go to it if a waiter slot is free (readiness turns it into nil).
+var errFactWait = errors.New("node waits for the request's facts")
+
+// lagIsYoung tracks the lag episode and reports whether it began less than
+// nodeFactWaitBudget ago. An episode ends once the node reaches the version
+// it was first seen behind, so a node still catching up does not get a new
+// window per step, and a node restarted below it gets none.
+func (b *nodeExecutionBridge) lagIsYoung(nodeVersion, version uint64) bool {
+	now := b.now()
+	b.behindMu.Lock()
+	defer b.behindMu.Unlock()
+	if b.behind.since.IsZero() || nodeVersion >= b.behind.target {
+		b.behind.target, b.behind.since = version, now
+	}
+	return now.Sub(b.behind.since) < nodeFactWaitBudget
+}
+
+// acquireFactWait takes a waiter slot for an identity sent to the node's fact
+// wait; false when every slot is taken.
+func (b *nodeExecutionBridge) acquireFactWait(contextID string) bool {
+	b.waitingMu.Lock()
+	defer b.waitingMu.Unlock()
+	if b.factWaiters == nil {
+		b.factWaiters = make(chan struct{}, maxFactWaiters)
+		b.waiting = map[string]time.Time{}
+	}
+	now := time.Now()
+	for id, at := range b.waiting {
+		if now.Sub(at) > factWaiterLease {
+			delete(b.waiting, id)
+			<-b.factWaiters
+		}
+	}
+	select {
+	case b.factWaiters <- struct{}{}:
+		b.waiting[contextID] = now
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseFactWait frees the slot of an identity once its node call returned.
+func (b *nodeExecutionBridge) releaseFactWait(contextID string) {
+	b.waitingMu.Lock()
+	defer b.waitingMu.Unlock()
+	if _, ok := b.waiting[contextID]; ok {
+		delete(b.waiting, contextID)
+		<-b.factWaiters
+	}
 }
 
 // observingFactNode is the node as the publisher sees it: its status reads
@@ -249,18 +347,24 @@ func (o observingFactNode) ApplyPolicy(ctx context.Context, wire []byte) (nodepo
 	return applied, err
 }
 
-func (b *nodeExecutionBridge) readiness(ctx context.Context) (uint64, error) {
-	version, err := b.source.NodePolicyVersion(ctx)
+// readiness returns the database fact version the request requires. waits
+// reports that the node is behind and will wait for that version itself.
+func (b *nodeExecutionBridge) readiness(ctx context.Context) (version uint64, waits bool, err error) {
+	version, err = b.source.NodePolicyVersion(ctx)
 	if err != nil {
-		return 0, nodepolicy.ErrNodeUnavailable
+		return 0, false, nodepolicy.ErrNodeUnavailable
 	}
 	// Taken after the version read: a status read with a higher sequence
 	// started after the database answered.
 	mark := b.cache.seq.Load()
-	if err := b.check(b.cache.load(), version); err == nil {
-		return version, nil
+	err = b.check(b.cache.load(), version)
+	if err != nil && !errors.Is(err, errFactWait) {
+		err = b.check(b.refreshAfter(ctx, mark), version)
 	}
-	return version, b.check(b.refreshAfter(ctx, mark), version)
+	if errors.Is(err, errFactWait) {
+		return version, true, nil
+	}
+	return version, false, err
 }
 
 // executionStatus is the readiness report (/ready and /status): a live node
@@ -280,7 +384,10 @@ func (b *nodeExecutionBridge) executionStatus(ctx context.Context) (uint64, node
 	if o.err != nil {
 		return version, nodepolicy.NodeStatus{}, o.err
 	}
-	return version, o.status, b.check(o, version)
+	if err := b.check(o, version); err != nil && !errors.Is(err, errFactWait) {
+		return version, o.status, err
+	}
+	return version, o.status, nil
 }
 
 // handleReady reports whether execution can use current authoritative facts.
@@ -319,7 +426,7 @@ func (s *Server) executionStatus(ctx context.Context) apimodels.ExecutionStatus 
 		result.Ready = true
 		result.Reason = ""
 	} else if desired > 0 && node.Version < desired {
-		result.Reason = "publication_pending"
+		result.Reason = ReasonPublicationPending
 	} else if node.Version > desired && desired > 0 {
 		result.Reason = "version_conflict"
 	} else if node.ExpiresAt > 0 && node.ExpiresAt <= s.nodeExecution.now().Unix() {
@@ -328,25 +435,32 @@ func (s *Server) executionStatus(ctx context.Context) apimodels.ExecutionStatus 
 	return result
 }
 func (b *nodeExecutionBridge) PrepareIdentity(ctx context.Context, request NodeExecutionIdentityRequest) ([]byte, error) {
-	version, err := b.readiness(ctx)
+	version, waits, err := b.readiness(ctx)
 	if err != nil {
 		return nil, err
 	}
 	at := b.now()
-	identity := nodepolicy.Identity{Header: nodepolicy.Header{Network: b.network, IssuedAt: at.Unix(), ExpiresAt: at.Add(b.lifetime).Unix()}, Scope: request.Scope, ContextID: uuid.NewString(), PrincipalID: request.PrincipalID, OrgID: request.OrgID, Signer: request.Signer, BindingHash: request.BindingHash, MinSnapshotVersion: version}
+	contextID := uuid.NewString()
+	if waits && !b.acquireFactWait(contextID) {
+		return nil, nodepolicy.ErrFactsPending
+	}
+	identity := nodepolicy.Identity{Header: nodepolicy.Header{Network: b.network, IssuedAt: at.Unix(), ExpiresAt: at.Add(b.lifetime).Unix()}, Scope: request.Scope, ContextID: contextID, PrincipalID: request.PrincipalID, OrgID: request.OrgID, Signer: request.Signer, BindingHash: request.BindingHash, MinSnapshotVersion: version}
 	wire, err := b.signer.Seal("identity", identity)
 	if err != nil {
+		b.releaseFactWait(contextID)
 		return nil, err
 	}
 	// Validate internal caller input with the shared strict wire contract before
 	// emitting an envelope. This does not make a permission decision.
 	verifier := nodepolicy.Verifier{Network: b.network, Keys: map[string]ed25519.PublicKey{b.signer.KeyID: b.signer.PrivateKey.Public().(ed25519.PublicKey)}, Now: b.now}
 	if _, err := verifier.OpenIdentity(wire); err != nil {
+		b.releaseFactWait(contextID)
 		return nil, err
 	}
 	return wire, nil
 }
 func (b *nodeExecutionBridge) SubmitTransaction(ctx context.Context, identity []byte, raw string, metadata NodeSubmissionMetadata) (nodepolicy.Submission, error) {
+	defer b.releaseFactWait(identityContextID(identity))
 	store, ok := b.source.(nodeSubmissionStore)
 	if !ok {
 		return nodepolicy.Submission{}, nodepolicy.ErrNodeUnavailable
@@ -374,7 +488,21 @@ func (b *nodeExecutionBridge) SubmitTransaction(ctx context.Context, identity []
 	return submitted, nil
 }
 func (b *nodeExecutionBridge) Simulate(ctx context.Context, identity, request []byte) (json.RawMessage, error) {
+	defer b.releaseFactWait(identityContextID(identity))
 	return b.node.Simulate(ctx, identity, request)
+}
+
+// identityContextID reads the context id of an identity envelope this
+// instance signed ("" if it cannot); it only keys the fact-wait slot.
+func identityContextID(wire []byte) string {
+	var envelope nodepolicy.Envelope
+	var i struct {
+		ContextID string `json:"context_id"`
+	}
+	if json.Unmarshal(wire, &envelope) != nil || json.Unmarshal(envelope.Payload, &i) != nil {
+		return ""
+	}
+	return i.ContextID
 }
 
 func loadNodePolicySigner(c config.NodePolicyConfig) (nodepolicy.Signer, error) {
@@ -426,6 +554,8 @@ func nodeErrorClass(err error) string {
 		return "resync"
 	case errors.Is(err, nodepolicy.ErrSnapshotLag):
 		return "snapshot_lag"
+	case errors.Is(err, nodepolicy.ErrFactsPending):
+		return "facts_pending"
 	case errors.Is(err, nodepolicy.ErrFeedConflict):
 		return "feed_conflict"
 	case errors.Is(err, nodepolicy.ErrIdentity):

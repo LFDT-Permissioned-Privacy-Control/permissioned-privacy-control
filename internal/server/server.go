@@ -1447,6 +1447,8 @@ const MaxRequestBodySize = 1 << 20 // 1MB
 // @Failure      429 {object} apimodels.APIError "concurrency limit, signed-approval simulation budget, or upstream rate limit"
 // @Failure      500 {object} apimodels.APIError "trace-validation or compliance-check error"
 // @Failure      502 {object} apimodels.APIError "failed to forward to the upstream node"
+// @Failure      503 {object} apimodels.APIError "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs (retry after Retry-After seconds)"
+// @Header       503 {integer} Retry-After "seconds before the same request may succeed (set when publication of policy facts is pending)"
 // @Security     BearerAuth
 // @Router       /rpc [post]
 // @Router       /rpc/{org_id} [post]
@@ -1550,12 +1552,20 @@ func (s *Server) handleJSONRPC(c *gin.Context) {
 				respBody["reason"] = wireReason(procReq.denialReason)
 			}
 		}
+		writeProcessErrorHeaders(c, result.Error)
 		c.JSON(result.Error.StatusCode, respBody)
 		return
 	}
 
 	// Return response from node
 	c.Data(result.StatusCode, "application/json", result.ResponseBody)
+}
+
+// writeProcessErrorHeaders sets the headers a processing error carries.
+func writeProcessErrorHeaders(c *gin.Context, e *ProcessError) {
+	if e != nil && e.RetryAfter > 0 {
+		c.Header("Retry-After", strconv.Itoa(e.RetryAfter))
+	}
 }
 
 // getLogs returns a filtered, paginated page of RBAC access-log rows.

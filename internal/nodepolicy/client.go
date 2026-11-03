@@ -27,7 +27,22 @@ var (
 	ErrNodeResponse    = errors.New("invalid private execution node response")
 	ErrNodeRejected    = errors.New("private execution node rejected request")
 	ErrNodeResync      = errors.New("private execution node requires a full fact snapshot")
+	// ErrFactsPending: the node has not applied the facts the request needs
+	// (its bounded wait for them expired, or OPS saw it behind). Retryable.
+	ErrFactsPending = errors.New("private execution node is waiting for newer policy facts")
 )
+
+// CapabilityFactWait is advertised by a node that, instead of refusing at
+// once, waits a bounded time for an identity's minimum fact version and then
+// answers -32012 (RD-1411 §5.3). Optional: OPS refuses lag itself without it.
+const CapabilityFactWait = "fact_wait_v1"
+
+// OptionalCapabilities are capabilities OPS uses when a node offers them.
+func OptionalCapabilities() []string { return []string{CapabilityFactWait} }
+
+// WaitsForFacts reports whether the node waits for a request's minimum fact
+// version instead of refusing at once.
+func (s NodeStatus) WaitsForFacts() bool { return slices.Contains(s.Capabilities, CapabilityFactWait) }
 
 type AppliedState struct {
 	Version   uint64 `json:"version"`
@@ -339,6 +354,9 @@ func (c *Client) call(ctx context.Context, method string, params []any) (json.Ra
 		// proxied to ordinary users or error messages containing request data.
 		if value.Code == -32011 {
 			return nil, ErrNodeResync
+		}
+		if value.Code == -32012 && (method == "ops_submitTransaction" || method == "ops_simulate") {
+			return nil, ErrFactsPending // only an execution waits for facts
 		}
 		return nil, fmt.Errorf("%w (code %d)", ErrNodeRejected, value.Code)
 	}
