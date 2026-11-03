@@ -121,7 +121,10 @@ type Server struct {
 	config            *config.Config
 	ensResolver       *ens.Resolver
 	jsonrpcProcessor  *JSONRPCProcessor
-	nodeExecution     *nodeExecutionBridge
+	// nodeOwnershipEvidence reads finalized deployments from the node for
+	// the admin ownership recovery (RD-1410, Reth mode only).
+	nodeOwnershipEvidence nodeEvidence
+	nodeExecution         *nodeExecutionBridge
 	// tracking is the separate execution-tracking database (RD-1410), opened
 	// only in Reth mode.
 	tracking             *executionTracking

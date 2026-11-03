@@ -2,6 +2,7 @@ package compliance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -77,6 +78,9 @@ func (c *Checker) allowMonitored(ctx context.Context, req *CheckRequest, info *T
 	if err := c.logWouldBlock(ctx, req, info, amountFiat, thresholdFiat, blockReason, currency); err != nil {
 		slog.Error("compliance monitor: failed to persist would-block log, failing closed",
 			"org", req.OrgID, "user", req.UserID, "error", err)
+		if req.Transaction.Renewal {
+			return nil, errRenewalLogUnavailable
+		}
 		return &CheckResult{
 			Allowed:      false,
 			Reason:       "compliance audit log unavailable, failing closed",
@@ -139,6 +143,13 @@ type TransactionBinding struct {
 	ChainID      uint64
 	DeploymentID string
 	Hash         string // 0x-prefixed lowercase hex
+	// Renewal is the lease keeper's re-check of an already admitted
+	// transaction (RD-1410 plan §4.8.5): every rule is evaluated again, but
+	// the travel-rule step is satisfied only by the record already bound to
+	// this transaction, revalidated against current coverage; it never claims
+	// or borrows another record. Infrastructure failures, including an
+	// unwritable compliance log, are errors (retryable), never denials.
+	Renewal bool
 }
 
 // TransactionClaimer is the store side of the one-claim-per-transaction
@@ -146,6 +157,9 @@ type TransactionBinding struct {
 // covers the transfer), or claim and bind an unused covering one.
 type TransactionClaimer interface {
 	ClaimTravelRuleRecordForTx(ctx context.Context, chainID uint64, deploymentID, txHash, orgID, userID, beneficiaryAddr, tokenAddr string, amountFiat float64) (*TravelRuleRecord, error)
+	// BoundTravelRuleRecordForTx re-finds the record bound to the transaction
+	// if it still covers the transfer; it never claims one (nil: none).
+	BoundTravelRuleRecordForTx(ctx context.Context, chainID uint64, deploymentID, txHash, orgID, userID, beneficiaryAddr, tokenAddr string, amountFiat float64) (*TravelRuleRecord, error)
 }
 
 // CheckResult is the outcome of a compliance check.
@@ -158,7 +172,14 @@ type CheckResult struct {
 	// emit a distinct metric / log line; the violation is also recorded in the
 	// compliance audit log with would_block=true.
 	Monitored bool
+	// TravelRuleRecordID is the travel-rule record the decision applied ("":
+	// none was needed).
+	TravelRuleRecordID string
 }
+
+// errRenewalLogUnavailable: in renewal mode an unwritable compliance log is
+// an infrastructure failure (retryable), not a denial.
+var errRenewalLogUnavailable = errors.New("compliance audit log unavailable")
 
 // Check performs a compliance check on the given transaction.
 func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, error) {
@@ -293,6 +314,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 			slog.Info("compliance allowed (unknown price policy)", "org", req.OrgID, "user", req.UserID, "reason", reason)
 			if err := c.logDecision(ctx, req, info, nil, nil, "allowed", "", nil, currency); err != nil {
 				slog.Error("failed to log allowed decision, failing closed", "org", req.OrgID, "user", req.UserID, "error", err)
+				if req.Transaction.Renewal {
+					return nil, errRenewalLogUnavailable
+				}
 				return &CheckResult{
 					Allowed:      false,
 					Reason:       "compliance audit log unavailable, failing closed",
@@ -346,6 +370,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 		// without an audit trail is a compliance violation. Deny instead.
 		if err := c.logDecision(ctx, req, info, &amountFiat, &threshold, "allowed", "", nil, currency); err != nil {
 			slog.Error("failed to log allowed decision, failing closed", "org", req.OrgID, "user", req.UserID, "error", err)
+			if req.Transaction.Renewal {
+				return nil, errRenewalLogUnavailable
+			}
 			return &CheckResult{
 				Allowed:      false,
 				Reason:       "compliance audit log unavailable, failing closed",
@@ -364,7 +391,14 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 	// in a single query to prevent TOCTOU race conditions.
 	// The record must cover the transfer amount (amount_fiat >= amountFiat).
 	var record *TravelRuleRecord
-	if claimer, ok := c.store.(TransactionClaimer); ok && req.Transaction.Hash != "" {
+	if req.Transaction.Renewal {
+		// Renewal: only the record bound to this transaction counts.
+		claimer, ok := c.store.(TransactionClaimer)
+		if !ok || req.Transaction.Hash == "" {
+			return nil, fmt.Errorf("renewal compliance requires the transaction-bound travel-rule store")
+		}
+		record, err = claimer.BoundTravelRuleRecordForTx(ctx, req.Transaction.ChainID, req.Transaction.DeploymentID, req.Transaction.Hash, req.OrgID, req.UserID, info.ToAddress, tokenAddr, amountFiat)
+	} else if claimer, ok := c.store.(TransactionClaimer); ok && req.Transaction.Hash != "" {
 		// One record per transaction (RD-1410): a retry of the same signed
 		// transaction re-uses its record instead of consuming another.
 		record, err = claimer.ClaimTravelRuleRecordForTx(ctx, req.Transaction.ChainID, req.Transaction.DeploymentID, req.Transaction.Hash, req.OrgID, req.UserID, info.ToAddress, tokenAddr, amountFiat)
@@ -401,6 +435,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 	// M2: Allowed decision — fail closed on log failure.
 	if err := c.logDecision(ctx, req, info, &amountFiat, &threshold, "allowed", "", &record.ID, currency); err != nil {
 		slog.Error("failed to log allowed decision, failing closed", "org", req.OrgID, "user", req.UserID, "error", err)
+		if req.Transaction.Renewal {
+			return nil, errRenewalLogUnavailable
+		}
 		return &CheckResult{
 			Allowed:      false,
 			Reason:       "compliance audit log unavailable, failing closed",
@@ -408,9 +445,10 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 		}, nil
 	}
 	return &CheckResult{
-		Allowed:      true,
-		Reason:       reason,
-		TransferInfo: info,
+		Allowed:            true,
+		Reason:             reason,
+		TransferInfo:       info,
+		TravelRuleRecordID: record.ID,
 	}, nil
 }
 

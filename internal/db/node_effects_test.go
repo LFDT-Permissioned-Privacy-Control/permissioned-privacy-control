@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"privacy-proxy/internal/compliance"
 	"privacy-proxy/internal/nodepolicy"
 	"privacy-proxy/internal/rbac"
 )
@@ -290,4 +291,40 @@ func TestOwnershipConflictSkipsOnlyTheConflictingAddress(t *testing.T) {
 	owner, err := f.d.GetContractByAddress(ctx, otherOrg, taken)
 	require.NoError(t, err)
 	require.NotNil(t, owner, "the other organisation keeps its address")
+}
+
+// G19 (store half): renewal re-finds only the record bound to its own
+// transaction — never claims an unused one, never another transaction's —
+// and the binding, not the record's expiry, is the authorization (K13).
+func TestBoundTravelRuleRecordIsFindOnly(t *testing.T) {
+	d := setupTestDB(t)
+	t.Cleanup(func() { d.Close() })
+	ctx := t.Context()
+	user, org := cacheGenFixtures(t, d, ctx)
+	beneficiary := "0x" + strings.Repeat("be", 20)
+	var unused string
+	require.NoError(t, d.Conn().QueryRowContext(ctx, `INSERT INTO travel_rule_records (org_id, originator_user_id, originator_data, beneficiary_data, transfer_type, beneficiary_address, amount_wei, amount_fiat, currency, expires_at)
+ VALUES ($1, $2, '{}', '{}', 'eth', $3, '1000', 5000, 'usd', NOW() + interval '1 day') RETURNING id`, org, user, beneficiary).Scan(&unused))
+	bound := func(hash string) *compliance.TravelRuleRecord {
+		r, err := d.BoundTravelRuleRecordForTx(ctx, effectsNetwork.ChainID, effectsNetwork.DeploymentID, hash, org, user, beneficiary, "native", 1000)
+		require.NoError(t, err)
+		return r
+	}
+	h := lowerHex(randomBytes(32))
+	require.Nil(t, bound(h), "nothing bound yet: no record, and none is claimed")
+	var usedAt *time.Time
+	require.NoError(t, d.Conn().QueryRowContext(ctx, `SELECT used_at FROM travel_rule_records WHERE id = $1`, unused).Scan(&usedAt))
+	require.Nil(t, usedAt, "a renewal lookup never consumes a record")
+	claimed, err := d.ClaimTravelRuleRecordForTx(ctx, effectsNetwork.ChainID, effectsNetwork.DeploymentID, h, org, user, beneficiary, "native", 1000)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	_, err = d.Conn().ExecContext(ctx, `UPDATE travel_rule_records SET expires_at = NOW() - interval '1 hour' WHERE id = $1`, claimed.ID)
+	require.NoError(t, err)
+	got := bound(h)
+	require.NotNil(t, got, "the bound record is revalidated, its expiry is not re-checked")
+	require.Equal(t, claimed.ID, got.ID)
+	require.Nil(t, bound(lowerHex(randomBytes(32))), "another transaction cannot use it")
+	r, err := d.BoundTravelRuleRecordForTx(ctx, effectsNetwork.ChainID, effectsNetwork.DeploymentID, h, org, user, beneficiary, "native", 6000)
+	require.NoError(t, err)
+	require.Nil(t, r, "a record that no longer covers the amount is no record")
 }

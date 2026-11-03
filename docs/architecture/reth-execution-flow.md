@@ -167,13 +167,19 @@ sequenceDiagram
 ```
 
 Defaults are a **one-second heartbeat interval**, **30-second fact freshness
-lease** and **one-minute identity lifetime**. A heartbeat renews freshness; it
+lease**, a **one-minute simulation identity lifetime** and a **five-minute
+transaction identity lifetime** (renewed while pending, see below). A heartbeat renews freshness; it
 does not change facts. Missing versions require resynchronization. Invalid,
 missing or expired facts prevent new execution.
 
-Before minting a request identity, OPS reads the current database version; it
-becomes the identity's minimum required snapshot version, so a revocation
-committed before the request always binds it. Readiness comes from a cached
+Before minting a request identity, OPS reads the current database version and
+the database clock in one statement; the version becomes the identity's minimum
+required snapshot version, so a revocation committed before the request always
+binds it, and the clock is the issue time, so identities from every OPS
+instance are ordered by one clock. A later identity for the same transaction
+replaces the stored one only if it dominates it (floor and expiry both at
+least as high); an earlier one is still sent, and the node answers it as a
+duplicate. Readiness comes from a cached
 node status (refreshed every second and on every acknowledgement), not a node
 call per request. If the node is ready but has not applied that version yet,
 OPS hands the request on when the node advertises `fact_wait_v1`: the node
@@ -247,7 +253,69 @@ Pool acceptance is not permission or finality. A denied pending transaction may
 be reconsidered if facts change while its identity remains valid. A current
 denial or expired identity also does not cancel a candidate already executing.
 OPS distinguishes these states from canonical inclusion, finality and completed
-bookkeeping; it does not automatically resubmit the transaction.
+bookkeeping, and keeps a pending transaction deliverable itself (next section).
+
+## Renewal and recovery
+
+The node keeps pending identities in memory only, so a node restart, a lost
+pool entry or a lapsing identity would leave a pending transaction unable to
+execute. The elected OPS instance runs one lease keeper, sharing the
+reconciler's in-memory schedule, that renews such a transaction.
+
+```mermaid
+sequenceDiagram
+    participant Rec as Reconciler (elected OPS)
+    participant Keep as Lease keeper (same term)
+    participant TDB as Execution-tracking PostgreSQL
+    participant DB as OPS PostgreSQL
+    participant AUD as Durable audit buffer
+    participant Node as Private Reth API and pool
+    participant Pub as Node public RPC (NODE_URL)
+    Rec->>Node: Status polls (batched where the node supports it)
+    Node-->>Rec: Outcome, boot id, finalized head, pool flag
+    Rec->>Pub: Still in the pool? (when the node reports no pool flag)
+    Rec->>Keep: Candidates: undelivered for this boot, boot changed, evicted, lease ending
+    Keep->>TDB: Re-read the candidates (delivery, claim, generation)
+    Keep->>DB: Full admission re-check, compliance renewal mode
+    Keep->>DB: Fact version and database clock (after every re-check)
+    Keep->>Keep: Sign: same principal, organization, signer, hash; lease capped at the maximum age
+    Keep->>AUD: ops.system.recovery / identity_renewal / renewal_refused / renewal_stopped
+    Keep->>TDB: New generation + history row + delivery claim (fenced by generation and context)
+    Keep->>Node: ops_submitTransaction on the recovery lane
+    Node-->>Keep: accepted + boot id, or -32013 (nonce_used / replaced)
+    Keep->>TDB: Acknowledgement against the answering boot (batched), or stop
+```
+
+- **Triggers.** A pending binding is renewed when its current generation is not
+  acknowledged by the node's current boot and no unexpired delivery claim for
+  that boot holds it (an OPS crash between recording and sending, a failed
+  send, a node restart), when the node's pool no longer holds it while its
+  identity is still registered (same-boot eviction), or when its lease is
+  within a quarter of the transaction identity lifetime of expiring. A reorg
+  back to pending keeps the delivery record of the boot that observed the
+  inclusion: that node process holds the identity until finality.
+- **Delivery claims and acknowledgements.** Recording an intent claims the row
+  for the delivering instance and node boot for 20 seconds; the keeper honours
+  any claim for the current boot, its own included, and a claim is void once
+  the boot changes. An acknowledgement is recorded against the boot id of the
+  node response that carried it, and only for the generation it delivered.
+- **Decisions.** Every renewal re-runs the full admission check and compliance
+  in renewal mode (only the travel-rule record bound to this transaction counts)
+  before signing at the current fact version. A refusal, the maximum age, or a
+  pool refusal stops renewal (`renewal_stopped`, not final). Every decision is
+  appended to the durable audit buffer before it is recorded, and recorded
+  before the identity is sent. A failed send of a recorded generation is
+  retried unchanged while the node keeps its boot.
+- **Final failure.** `dropped` is written only for a stopped binding whose
+  signer's nonce at the node-reported finalized block (read by that block's
+  hash, with the receipts, in one request) has passed its own nonce with no own
+  receipt, confirmed by a definitive private status answer, on two reads at
+  least 30 seconds apart. Lease expiry alone never
+  makes a transaction final, and a finalized own receipt beats a stop.
+- **Option A reconciliation.** Where the node advertises
+  `transaction_statuses_v1`, the reconciler polls up to 256 transactions per
+  call; a change of the node's canonical epoch re-polls every provisional row.
+  Otherwise it polls one transaction per call, as before.
 
 ## What happens for an RPC call
 

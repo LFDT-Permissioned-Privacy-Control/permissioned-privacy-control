@@ -351,6 +351,29 @@ func (d *DB) ClaimTravelRuleRecordForTx(ctx context.Context, chainID uint64, dep
 	return record, nil
 }
 
+// BoundTravelRuleRecordForTx is the renewal mode of the travel-rule step
+// (plan §4.8.5): the record bound to (network, tx_hash) if it still covers
+// the transfer (org, originator, beneficiary, token, amount), else nil. It
+// never claims a record; the bound record's own expiry is not re-checked
+// (the binding is the authorization, K13).
+func (d *DB) BoundTravelRuleRecordForTx(ctx context.Context, chainID uint64, deploymentID, txHash, orgID, userID, beneficiaryAddr, tokenAddr string, amountFiat float64) (*compliance.TravelRuleRecord, error) {
+	hash, err := txHashBytes(txHash)
+	if err != nil {
+		return nil, err
+	}
+	if chainID == 0 || chainID > 1<<63-1 || deploymentID == "" {
+		return nil, fmt.Errorf("invalid travel-rule transaction network")
+	}
+	record, err := scanTravelRuleRecord(d.conn.QueryRowContext(ctx, `SELECT `+travelRuleColumns+` FROM travel_rule_records
+ WHERE id = (SELECT travel_rule_record_id FROM node_tx_compliance_claims WHERE chain_id = $1 AND deployment_id = $2 AND tx_hash = $3)
+   AND org_id = $4 AND originator_user_id = $5 AND beneficiary_address = $6 AND COALESCE(token_address, 'native') = $7 AND amount_fiat >= $8`,
+		int64(chainID), deploymentID, hash, orgID, userID, strings.ToLower(beneficiaryAddr), strings.ToLower(tokenAddr), amountFiat))
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
 // ExternalIDsByUserID maps user ids to their external ids (DIDs); deleted
 // users are absent.
 func (d *DB) ExternalIDsByUserID(ctx context.Context, ids []string) (map[string]string, error) {

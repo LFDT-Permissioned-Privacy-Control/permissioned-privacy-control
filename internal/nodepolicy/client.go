@@ -69,6 +69,23 @@ func (e *PoolRejection) Error() string { return "transaction pool rejected: " + 
 // Unwrap classifies a pool rejection as a node rejection.
 func (e *PoolRejection) Unwrap() error { return ErrNodeRejected }
 
+// RejectedError is a node JSON-RPC error answer (errors.Is ErrNodeRejected).
+// Code -32000 is the node's own opaque refusal, which is also its answer for
+// a transaction it does not know.
+type RejectedError struct{ Code int }
+
+func (e *RejectedError) Error() string { return fmt.Sprintf("%s (code %d)", ErrNodeRejected, e.Code) }
+
+// Unwrap classifies the answer as a node rejection.
+func (e *RejectedError) Unwrap() error { return ErrNodeRejected }
+
+// NodeRefused reports whether err is the node's own opaque refusal (-32000),
+// as opposed to an internal error, a rate limit or no answer at all.
+func NodeRefused(err error) bool {
+	var rejected *RejectedError
+	return errors.As(err, &rejected) && rejected.Code == -32000
+}
+
 // CapabilityFactWait is advertised by a node that, instead of refusing at
 // once, waits a bounded time for an identity's minimum fact version and then
 // answers -32012 (RD-1411 §5.3). Optional: OPS refuses lag itself without it.
@@ -137,7 +154,10 @@ func (s NodeStatus) RequireReady(at time.Time, version uint64) error {
 // opening and discarding new ones, and a full transaction lane never delays
 // fact publication.
 type Client struct {
-	endpoint                       string
+	endpoint string
+	// controlEndpoint, when set, receives the control lane's calls (the
+	// node's control listener, OPS_NODE_POLICY_CONTROL_LISTEN).
+	controlEndpoint                string
 	token                          string
 	network                        Network
 	control, transaction, recovery *http.Client
@@ -197,6 +217,16 @@ func NewPooledClient(endpoint, token string, network Network, lanes Lanes) (*Cli
 		return nil, ErrEnvelope
 	}
 	return &Client{endpoint: endpoint, token: token, network: network, control: noRedirects(laneClient(lanes.Control)), transaction: noRedirects(laneClient(lanes.Transaction)), recovery: noRedirects(laneClient(lanes.Recovery))}, nil
+}
+
+// WithControlEndpoint sends fact publication and node status to the node's
+// separate control listener (same token and wire).
+func (c *Client) WithControlEndpoint(endpoint string) error {
+	if !validEndpoint(endpoint, c.token, c.network) {
+		return ErrEnvelope
+	}
+	c.controlEndpoint = endpoint
+	return nil
 }
 
 // NewClient builds the pooled client with DefaultLanes when client is nil.
@@ -357,7 +387,11 @@ func (c *Client) callOn(ctx context.Context, lane *http.Client, method string, p
 	if err != nil || len(body) > MaxEnvelopeBytes+4096 {
 		return nil, ErrEnvelope
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	endpoint := c.endpoint
+	if c.controlEndpoint != "" && (method == "ops_policyStatus" || method == "ops_policyApply") {
+		endpoint = c.controlEndpoint
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, ErrNodeUnavailable
 	}
@@ -436,7 +470,7 @@ func (c *Client) callOn(ctx context.Context, lane *http.Client, method string, p
 		if value.Code == -32012 && (method == "ops_submitTransaction" || method == "ops_simulate") {
 			return nil, ErrFactsPending // only an execution waits for facts
 		}
-		return nil, fmt.Errorf("%w (code %d)", ErrNodeRejected, value.Code)
+		return nil, &RejectedError{Code: value.Code}
 	}
 	return result, nil
 }

@@ -23,6 +23,17 @@ func (d *DB) NodePolicyVersion(ctx context.Context) (uint64, error) {
 	return version, err
 }
 
+// NodePolicyClock reads the fact version and the database clock in one
+// statement: the single issuing clock of identities (plan §4.8.3). Every OPS
+// instance signs against it, so the floor and issue time of identities read
+// later are never lower.
+func (d *DB) NodePolicyClock(ctx context.Context) (uint64, time.Time, error) {
+	var version uint64
+	var now time.Time
+	err := d.conn.QueryRowContext(ctx, `SELECT version, clock_timestamp() FROM node_policy_clock WHERE singleton`).Scan(&version, &now)
+	return version, now, err
+}
+
 // AcknowledgeNodePolicy records the node's acknowledgement of a committed
 // generation. When the version advanced it also prunes the change log through
 // it (raising the floor) and notifies node_policy_applied, so every OPS

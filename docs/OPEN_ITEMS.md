@@ -432,6 +432,21 @@ needs facts the node has not applied yet is handed to the node's bounded wait
 `Retry-After: 1` (reason `publication_pending`) instead of an immediate
 refusal; a node without that capability is refused the same way at once.
 
+**Resolved on the OPS side (delivery and recovery):** OPS keeps a pending
+transaction deliverable itself. The elected instance's lease keeper renews a
+pending transaction that the node no longer holds — never delivered, lost by a
+node restart (new boot id), evicted from the pool, or with an identity about
+to expire — after a full admission and compliance re-check, at the current
+fact version, audited before it takes effect, for at most
+`OPS_NODE_POLICY_MAX_AGE` (10 minutes by default). A refused re-check, the
+maximum age or a pool refusal stops renewal (`renewal_stopped`, not final);
+`dropped` is reported only on finalized nonce evidence. Open: the node does not
+yet report the batched status call, a pool flag, the finalized head for
+pending transactions or a canonical epoch, so OPS polls one transaction per
+call, checks pool membership through the public RPC and learns the finalized
+head only from finalized answers; congestion renewal (the renewal window,
+budget and backpressure) is separate work.
+
 Evidence: [load results and durability analysis](implementation/evidence/reth-runtime.md#where-the-stacks-throughput-actually-goes-2026-09-17),
 [current policy cost and theoretical ceiling](implementation/evidence/per-group-live-2026-09-25.md#theoretical-throughput-from-policy-cost).
 

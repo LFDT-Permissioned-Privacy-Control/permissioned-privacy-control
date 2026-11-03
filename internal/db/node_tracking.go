@@ -48,6 +48,27 @@ const (
 	TrackReasonNonceConsumed        int16 = 7
 	TrackReasonMaxAge               int16 = 8
 	TrackReasonFinalizedLeaseExpiry int16 = 9
+	// Renewal refusals (renewal_stopped, plan §4.8.1): the full admission
+	// re-check or the pool refused; none is final.
+	TrackReasonPrincipalBanned  int16 = 20
+	TrackReasonKYCMissing       int16 = 21
+	TrackReasonNotMember        int16 = 22
+	TrackReasonMethodNotAllowed int16 = 23
+	TrackReasonSenderUnlinked   int16 = 24
+	TrackReasonComplianceDenied int16 = 25
+	TrackReasonPrincipalDeleted int16 = 26
+	TrackReasonNonceConflict    int16 = 27
+	TrackReasonReplacedInPool   int16 = 28
+	// The deployment's read profile no longer accepts visibleTo.
+	TrackReasonVisibilityNotAllowed int16 = 29
+	// The node kept refusing a renewed identity.
+	TrackReasonNodeRejected int16 = 30
+	// Renewal triggers (history rows of system generations).
+	TrackReasonUndelivered   int16 = 40
+	TrackReasonNodeRestarted int16 = 41
+	TrackReasonEvicted       int16 = 42
+	TrackReasonReorged       int16 = 43
+	TrackReasonLeaseExpiring int16 = 44
 )
 
 // History actors (node_tx_identities.actor).
@@ -91,6 +112,38 @@ func TrackReasonName(reason int16) string {
 		return "max_age"
 	case TrackReasonFinalizedLeaseExpiry:
 		return "finalized_lease_expiry"
+	case TrackReasonPrincipalBanned:
+		return "principal_banned"
+	case TrackReasonKYCMissing:
+		return "kyc_missing"
+	case TrackReasonNotMember:
+		return "not_member"
+	case TrackReasonMethodNotAllowed:
+		return "method_not_allowed"
+	case TrackReasonSenderUnlinked:
+		return "sender_unlinked"
+	case TrackReasonComplianceDenied:
+		return "compliance_denied"
+	case TrackReasonPrincipalDeleted:
+		return "principal_deleted"
+	case TrackReasonNonceConflict:
+		return "nonce_conflict"
+	case TrackReasonReplacedInPool:
+		return "replaced_in_pool"
+	case TrackReasonVisibilityNotAllowed:
+		return "visible_to_not_allowed"
+	case TrackReasonNodeRejected:
+		return "node_rejected"
+	case TrackReasonUndelivered:
+		return "undelivered"
+	case TrackReasonNodeRestarted:
+		return "node_restarted"
+	case TrackReasonEvicted:
+		return "evicted"
+	case TrackReasonReorged:
+		return "reorged"
+	case TrackReasonLeaseExpiring:
+		return "lease_expiring"
 	default:
 		return ""
 	}
@@ -124,8 +177,10 @@ type TrackAdmission struct {
 	VisibleTo     []string
 	VisibleSender string // the sender DID; required when VisibleTo is set
 	// ClaimOwner is the instance delivering this generation; the claim keeps
-	// the lease keeper off the row until ClaimTTL passes.
+	// the lease keeper off the row until ClaimTTL passes, while the node is
+	// still ClaimBoot (the boot the request delivers to; Nil: unknown).
 	ClaimOwner uuid.UUID
+	ClaimBoot  uuid.UUID
 	ClaimTTL   time.Duration
 }
 
@@ -145,8 +200,9 @@ type AdmitOutcome uint8
 const (
 	// AdmitInserted: a new binding (generation 1).
 	AdmitInserted AdmitOutcome = iota + 1
-	// AdmitResubmitted: the same principal's binding exists in flight; its
-	// generation advanced (quota unchanged).
+	// AdmitResubmitted: the same principal's binding exists in flight and this
+	// envelope dominates the stored one (§4.8.3): it is the new generation
+	// (quota unchanged).
 	AdmitResubmitted
 	// AdmitRevived: the same principal's renewal_stopped or tombstone binding
 	// became pending again, a fresh admission.
@@ -162,6 +218,16 @@ const (
 	AdmitOverLimit
 	// AdmitInvalid: the admission itself is malformed. Nothing was written.
 	AdmitInvalid
+	// AdmitKept: the same principal's in-flight binding holds an envelope that
+	// dominates or equals this one (it was signed earlier, or is the same):
+	// the stored generation stays current and meets this attempt's floor.
+	// Sending this envelope is safe (the node answers a dominated attempt as
+	// success), but its delivery acknowledges nothing.
+	AdmitKept
+	// AdmitIncomparable: neither envelope dominates the other (only after a
+	// database clock step): the stored one is kept and nothing about this
+	// attempt is recorded; the caller re-reads the clock and signs again.
+	AdmitIncomparable
 )
 
 // AdmitResult is the result of one admission of a batch.
@@ -169,6 +235,9 @@ type AdmitResult struct {
 	Outcome    AdmitOutcome
 	Generation int32
 	State      int16
+	// ContextID is the binding's current context after the write (the
+	// winner): this admission's own when it was written.
+	ContextID uuid.UUID
 }
 
 // Written reports whether the admission's identity was recorded.
@@ -286,10 +355,14 @@ func (e *ExecDB) AdmitBatch(ctx context.Context, inc uuid.UUID, limit int64, bat
 					continue
 				}
 				row := written[i]
-				results[i] = AdmitResult{Outcome: AdmitResubmitted, Generation: row.generation, State: row.state}
+				results[i] = AdmitResult{Outcome: AdmitResubmitted, Generation: row.generation, State: row.state, ContextID: row.context}
 				switch {
 				case !row.prev.Valid:
 					results[i].Outcome = AdmitInserted
+				case !row.replaced && row.incomparable:
+					results[i].Outcome = AdmitIncomparable
+				case !row.replaced:
+					results[i].Outcome = AdmitKept
 				case row.prev.Int16 == TrackRenewalStopped || row.prev.Int16 == TrackTombstone:
 					results[i].Outcome = AdmitRevived
 				}
@@ -308,6 +381,11 @@ type admitRow struct {
 	prev       sql.NullInt16
 	state      int16
 	generation int32
+	context    uuid.UUID
+	// replaced: this admission's envelope is now the binding's (inserted,
+	// revived or dominating); incomparable: kept because neither envelope
+	// dominates the other.
+	replaced, incomparable bool
 }
 
 // admitAttempt runs one attempt after SAVEPOINT. It returns retry=true after
@@ -384,11 +462,14 @@ func admitAttempt(ctx context.Context, tx *sql.Tx, inc uuid.UUID, limit int64, b
 		if d > 0 {
 			plus = append(plus, i)
 		}
-		if !row.prev.Valid || before == TrackRenewalStopped || before == TrackTombstone {
+		if row.replaced && (!row.prev.Valid || before == TrackRenewalStopped || before == TrackTombstone) {
 			payloadHashes = append(payloadHashes, batch[i].Hash)
 			payloadRaw = append(payloadRaw, batch[i].Raw)
 		}
-		if row.generation >= 2 {
+		// Every envelope that may reach the node is recorded before transport
+		// (G38): a new generation, and also a kept one (the node may install
+		// it, e.g. when it no longer holds the stored identity).
+		if (row.generation >= 2 || !row.replaced) && !row.incomparable {
 			history = append(history, i)
 		}
 	}
@@ -404,7 +485,7 @@ func admitAttempt(ctx context.Context, tx *sql.Tx, inc uuid.UUID, limit int64, b
 			a, row := batch[i], written[i]
 			hashes[k], generations[k], contexts[k], envelopes[k], expiries[k], versions[k] = a.Hash, int64(row.generation), a.ContextID.String(), a.EnvelopeHash, a.ExpiresAt, int64(a.MinVersion)
 			reasons[k] = int64(TrackReasonResubmitted)
-			if row.prev.Valid && (row.prev.Int16 == TrackRenewalStopped || row.prev.Int16 == TrackTombstone) {
+			if row.replaced && row.prev.Valid && (row.prev.Int16 == TrackRenewalStopped || row.prev.Int16 == TrackTombstone) {
 				reasons[k] = int64(TrackReasonRevived)
 			}
 		}
@@ -441,7 +522,7 @@ func upsertRound(ctx context.Context, tx *sql.Tx, inc uuid.UUID, bucket int16, b
 	principals, orgs, contexts, visible, senders := make([]string, n), make([]string, n), make([]string, n), make([]string, n), make([]sql.NullString, n)
 	nonces, versions, ttls := make([]int64, n), make([]int64, n), make([]int64, n)
 	expiries := make([]time.Time, n)
-	owners := make([]sql.NullString, n)
+	owners, boots := make([]sql.NullString, n), make([]sql.NullString, n)
 	for k, i := range members {
 		a := batch[i]
 		hashes[k], signers[k], envelopes[k] = a.Hash, a.Signer, a.EnvelopeHash
@@ -463,24 +544,34 @@ func upsertRound(ctx context.Context, tx *sql.Tx, inc uuid.UUID, bucket int16, b
 		if a.ClaimOwner != uuid.Nil {
 			owners[k] = sql.NullString{String: a.ClaimOwner.String(), Valid: true}
 		}
+		if a.ClaimBoot != uuid.Nil {
+			boots[k] = sql.NullString{String: a.ClaimBoot.String(), Valid: true}
+		}
 	}
-	rows, err := tx.QueryContext(ctx, `INSERT INTO node_tx_binding AS b (tx_hash, principal_id, org_id, signer, nonce, state, generation, context_id, envelope_hash, expires_at, min_version, incarnation, issued_contexts, visible_to, visible_sender, claim_owner, claim_expires, payload_bucket)
- SELECT t.h, t.p, t.o, t.s, t.n, 1, 1, t.c, t.e, t.x, t.m, $13, ARRAY[t.c], ARRAY(SELECT jsonb_array_elements_text(t.v::jsonb)), t.vs, t.co,
+	// A same-principal conflict either replaces the stored envelope (a
+	// revival of a stopped or tombstoned binding, or an envelope that
+	// dominates it: floor and expiry both at least the stored ones, not both
+	// equal; §4.8.3) or keeps it unchanged. Every SET expression reads the
+	// stored row (b.*), so "replace" is evaluated once against it.
+	rows, err := tx.QueryContext(ctx, `INSERT INTO node_tx_binding AS b (tx_hash, principal_id, org_id, signer, nonce, state, generation, context_id, envelope_hash, expires_at, min_version, incarnation, issued_contexts, visible_to, visible_sender, claim_owner, claim_boot, claim_expires, payload_bucket)
+ SELECT t.h, t.p, t.o, t.s, t.n, 1, 1, t.c, t.e, t.x, t.m, $13, ARRAY[t.c], ARRAY(SELECT jsonb_array_elements_text(t.v::jsonb)), t.vs, t.co, t.cb,
         CASE WHEN t.co IS NULL THEN NULL ELSE clock_timestamp() + t.ttl * interval '1 millisecond' END, $14
- FROM unnest($1::bytea[], $2::uuid[], $3::uuid[], $4::bytea[], $5::bigint[], $6::uuid[], $7::bytea[], $8::timestamptz[], $9::bigint[], $10::text[], $11::text[], $12::uuid[], $15::bigint[])
-      WITH ORDINALITY AS t(h, p, o, s, n, c, e, x, m, v, vs, co, ttl, ord)
+ FROM unnest($1::bytea[], $2::uuid[], $3::uuid[], $4::bytea[], $5::bigint[], $6::uuid[], $7::bytea[], $8::timestamptz[], $9::bigint[], $10::text[], $11::text[], $12::uuid[], $15::bigint[], $16::uuid[])
+      WITH ORDINALITY AS t(h, p, o, s, n, c, e, x, m, v, vs, co, ttl, cb, ord)
  ORDER BY t.ord
  ON CONFLICT (tx_hash) DO UPDATE SET
    prev_state = b.state,
-   generation = b.generation + 1,
-   context_id = EXCLUDED.context_id,
-   envelope_hash = EXCLUDED.envelope_hash,
-   expires_at = EXCLUDED.expires_at,
-   min_version = EXCLUDED.min_version,
-   issued_contexts = (b.issued_contexts || EXCLUDED.context_id)[greatest(1, cardinality(b.issued_contexts) - 14):],
-   claim_owner = EXCLUDED.claim_owner,
-   claim_boot = NULL,
-   claim_expires = EXCLUDED.claim_expires,
+   generation = CASE WHEN `+replaceSQL+` THEN b.generation + 1 ELSE b.generation END,
+   context_id = CASE WHEN `+replaceSQL+` THEN EXCLUDED.context_id ELSE b.context_id END,
+   envelope_hash = CASE WHEN `+replaceSQL+` THEN EXCLUDED.envelope_hash ELSE b.envelope_hash END,
+   expires_at = CASE WHEN `+replaceSQL+` THEN EXCLUDED.expires_at ELSE b.expires_at END,
+   min_version = CASE WHEN `+replaceSQL+` THEN EXCLUDED.min_version ELSE b.min_version END,
+   issued_contexts = CASE WHEN EXCLUDED.context_id = ANY(b.issued_contexts)
+                               OR NOT (`+replaceSQL+` OR (b.min_version >= EXCLUDED.min_version AND b.expires_at >= EXCLUDED.expires_at)) THEN b.issued_contexts
+                          ELSE (b.issued_contexts || EXCLUDED.context_id)[greatest(1, cardinality(b.issued_contexts) - 14):] END,
+   claim_owner = CASE WHEN `+replaceSQL+` THEN EXCLUDED.claim_owner ELSE b.claim_owner END,
+   claim_boot = CASE WHEN `+replaceSQL+` THEN EXCLUDED.claim_boot ELSE b.claim_boot END,
+   claim_expires = CASE WHEN `+replaceSQL+` THEN EXCLUDED.claim_expires ELSE b.claim_expires END,
    state = CASE WHEN b.state IN (3, 4) THEN 1 ELSE b.state END,
    reason = CASE WHEN b.state IN (3, 4) THEN 0 ELSE b.reason END,
    created_at = CASE WHEN b.state IN (3, 4) THEN clock_timestamp() ELSE b.created_at END,
@@ -490,23 +581,38 @@ func upsertRound(ctx context.Context, tx *sql.Tx, inc uuid.UUID, bucket int16, b
  WHERE b.principal_id = EXCLUDED.principal_id AND b.org_id = EXCLUDED.org_id AND b.signer = EXCLUDED.signer
    AND b.visible_to = EXCLUDED.visible_to AND b.visible_sender IS NOT DISTINCT FROM EXCLUDED.visible_sender
    AND b.incarnation = EXCLUDED.incarnation
- RETURNING b.tx_hash, b.prev_state, b.state, b.generation`,
-		hashes, principals, orgs, signers, nonces, contexts, envelopes, expiries, versions, visible, senders, owners, inc.String(), bucket, ttls)
+ RETURNING b.tx_hash, b.prev_state, b.state, b.generation, b.context_id, b.min_version, b.expires_at`,
+		hashes, principals, orgs, signers, nonces, contexts, envelopes, expiries, versions, visible, senders, owners, inc.String(), bucket, ttls, boots)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	byHash := make(map[string]TrackAdmission, n)
+	for _, i := range members {
+		byHash[string(batch[i].Hash)] = batch[i]
+	}
 	out := map[string]admitRow{}
 	for rows.Next() {
 		var hash []byte
 		var row admitRow
-		if err := rows.Scan(&hash, &row.prev, &row.state, &row.generation); err != nil {
+		var minVersion int64
+		var expires time.Time
+		if err := rows.Scan(&hash, &row.prev, &row.state, &row.generation, &row.context, &minVersion, &expires); err != nil {
 			return nil, err
 		}
+		a := byHash[string(hash)]
+		row.replaced = row.context == a.ContextID
+		// Kept: the stored envelope covers the attempt (equal or dominating),
+		// or neither covers the other (incomparable: re-sign).
+		row.incomparable = !row.replaced && (uint64(minVersion) < a.MinVersion || expires.Before(a.ExpiresAt))
 		out[string(hash)] = row
 	}
 	return out, rows.Err()
 }
+
+// replaceSQL: a same-principal admission replaces the stored envelope when it
+// revives a stopped or tombstoned binding, or dominates the stored envelope.
+const replaceSQL = `(b.state IN (3, 4) OR (EXCLUDED.min_version >= b.min_version AND EXCLUDED.expires_at >= b.expires_at AND (EXCLUDED.min_version, EXCLUDED.expires_at) <> (b.min_version, b.expires_at)))`
 
 type finalStatus struct {
 	principal uuid.UUID
@@ -561,6 +667,108 @@ func (e *ExecDB) ReleaseUndelivered(ctx context.Context, inc uuid.UUID, hash []b
 	return released, err
 }
 
+// TrackRenewal is one lease-keeper generation (plan §4.8.7): decided on the
+// binding at (Generation, ContextID, AdmitXid), replacing its envelope.
+type TrackRenewal struct {
+	Hash         []byte
+	Generation   int32
+	ContextID    uuid.UUID
+	AdmitXid     uint64
+	NewContextID uuid.UUID
+	EnvelopeHash []byte
+	ExpiresAt    time.Time
+	MinVersion   uint64
+	Reason       int16 // the trigger, recorded in history
+	// TravelRuleRecord is the travel-rule record the renewal's compliance
+	// re-check accepted (uuid.Nil: none needed).
+	TravelRuleRecord uuid.UUID
+	ClaimOwner       uuid.UUID
+	ClaimBoot        uuid.UUID
+	ClaimTTL         time.Duration
+}
+
+// RenewBatch records keeper generations in one transaction (before any of
+// them is sent): each applies only to a binding that is still pending at the
+// generation, context and admission it was decided on, so a renewal never
+// touches a provisional, stopped or final row, a row a client resubmitted
+// meanwhile, or a hash released and admitted again (an UPDATE, never an
+// insert). It records the generation in history (actor system, with its
+// trigger and travel-rule record) and claims the row for the keeper. The
+// quota is unchanged (pending → pending). Returns which renewals applied.
+func (e *ExecDB) RenewBatch(ctx context.Context, inc uuid.UUID, renewals []TrackRenewal) ([]bool, error) {
+	byHash := map[string]int{}
+	var hashes [][]byte
+	for i, r := range renewals {
+		if len(r.Hash) != 32 || r.Generation <= 0 || r.ContextID == uuid.Nil || r.NewContextID == uuid.Nil || len(r.EnvelopeHash) != 32 || r.MinVersion == 0 || r.MinVersion > 1<<63-1 || r.ExpiresAt.IsZero() || r.ClaimOwner == uuid.Nil || r.ClaimTTL <= 0 {
+			return nil, fmt.Errorf("invalid tracking renewal")
+		}
+		if _, dup := byHash[string(r.Hash)]; dup {
+			return nil, fmt.Errorf("duplicate tracking renewal")
+		}
+		byHash[string(r.Hash)] = i
+		hashes = append(hashes, r.Hash)
+	}
+	applied := make([]bool, len(renewals))
+	if len(renewals) == 0 {
+		return applied, nil
+	}
+	err := e.trackTx(ctx, inc, func(tx *sql.Tx) error {
+		clear(applied)
+		locked, err := lockBindings(ctx, tx, inc, hashes)
+		if err != nil {
+			return err
+		}
+		var hs, envelopes [][]byte
+		var contexts, owners, records []string
+		var boots []sql.NullString
+		var expiries []time.Time
+		var versions, ttls, reasons []int64
+		for hash, row := range locked {
+			i := byHash[hash]
+			r := renewals[i]
+			if row.state != TrackPending || row.generation != r.Generation || row.context != r.ContextID || (r.AdmitXid != 0 && row.admitXid != r.AdmitXid) {
+				continue
+			}
+			applied[i] = true
+			hs, envelopes = append(hs, r.Hash), append(envelopes, r.EnvelopeHash)
+			contexts, owners = append(contexts, r.NewContextID.String()), append(owners, r.ClaimOwner.String())
+			record := sql.NullString{}
+			if r.TravelRuleRecord != uuid.Nil {
+				record = sql.NullString{String: r.TravelRuleRecord.String(), Valid: true}
+			}
+			records = append(records, record.String)
+			boot := sql.NullString{}
+			if r.ClaimBoot != uuid.Nil {
+				boot = sql.NullString{String: r.ClaimBoot.String(), Valid: true}
+			}
+			boots = append(boots, boot)
+			expiries, versions = append(expiries, r.ExpiresAt), append(versions, int64(r.MinVersion))
+			ttls, reasons = append(ttls, r.ClaimTTL.Milliseconds()), append(reasons, int64(r.Reason))
+		}
+		if len(hs) == 0 {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `WITH v AS (SELECT * FROM unnest($1::bytea[], $2::uuid[], $3::bytea[], $4::timestamptz[], $5::bigint[], $6::uuid[], $7::uuid[], $8::bigint[], $9::smallint[], $10::text[])
+              AS v(h, c, e, x, m, co, cb, ttl, r, tr)),
+ renewed AS (UPDATE node_tx_binding b SET
+   generation = b.generation + 1, context_id = v.c, envelope_hash = v.e, expires_at = v.x, min_version = v.m,
+   issued_contexts = (b.issued_contexts || v.c)[greatest(1, cardinality(b.issued_contexts) - 14):],
+   claim_owner = v.co, claim_boot = v.cb, claim_expires = clock_timestamp() + v.ttl * interval '1 millisecond'
+   FROM v WHERE b.tx_hash = v.h
+   RETURNING b.tx_hash, b.generation, v.c, v.e, v.x, v.m, v.r, v.tr)
+ INSERT INTO node_tx_identities (tx_hash, generation, context_id, envelope_hash, expires_at, min_version, reason, actor, travel_rule_record)
+ SELECT tx_hash, generation, c, e, x, m, r, $11, nullif(tr, '')::uuid FROM renewed`,
+			hs, contexts, envelopes, expiries, versions, owners, boots, ttls, reasons, records, trackActorSystem); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return applied, nil
+}
+
 // TrackTransition is one non-final state change of a binding.
 type TrackTransition struct {
 	Hash        []byte
@@ -568,6 +776,14 @@ type TrackTransition struct {
 	Generation  int32 // 0: any generation
 	Reason      int16
 	BlockNumber *uint64 // the including block (provisional)
+	// Boot and ContextID: the node boot whose status answer observed the
+	// inclusion (provisional), and the context that executed. Inclusion
+	// records the delivery of the current generation only when it is that
+	// context; the identity stays with that node process until finality, so
+	// a reorg back to pending needs no renewal unless the boot changed, the
+	// lease ran out or the pool lost the transaction.
+	Boot      uuid.UUID
+	ContextID uuid.UUID
 }
 
 func allowedTransition(from, to int16) bool {
@@ -585,9 +801,10 @@ func allowedTransition(from, to int16) bool {
 // ApplyTransitions applies non-final transitions in one transaction. A
 // transition applies only if the locked row is still in From (and at
 // Generation, when set); otherwise it is skipped, so a stale or repeated
-// observation writes nothing. Making a row provisional records its delivery
-// (the inclusion is the acknowledgement); a reorg back to pending clears it.
-// Returns which transitions applied.
+// observation writes nothing. Making a row provisional records the delivery
+// of its current generation to the observing boot when that generation's
+// context executed (the inclusion is the acknowledgement); a reorg back to
+// pending keeps it. Returns which transitions applied.
 func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transitions []TrackTransition) ([]bool, error) {
 	byHash := map[string]int{}
 	var hashes [][]byte
@@ -617,6 +834,7 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 		var hs [][]byte
 		var tos, reasons []int64
 		var blocks []sql.NullInt64
+		var boots, executed []sql.NullString
 		var stopped []int
 		for hash, row := range locked {
 			i := byHash[hash]
@@ -632,6 +850,16 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 				block = sql.NullInt64{Int64: int64(*t.BlockNumber), Valid: true}
 			}
 			blocks = append(blocks, block)
+			boot := sql.NullString{}
+			if t.Boot != uuid.Nil {
+				boot = sql.NullString{String: t.Boot.String(), Valid: true}
+			}
+			boots = append(boots, boot)
+			ctx := sql.NullString{}
+			if t.ContextID != uuid.Nil {
+				ctx = sql.NullString{String: t.ContextID.String(), Valid: true}
+			}
+			executed = append(executed, ctx)
 			if t.To == TrackRenewalStopped || t.To == TrackTombstone {
 				stopped = append(stopped, i)
 			}
@@ -639,17 +867,18 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 		if len(hs) == 0 {
 			return nil
 		}
+		// Inclusion proves delivery to the node boot that reported it; a reorg
+		// back to pending keeps that record (the node keeps the identity until
+		// finality), so only a restart, a lapsed lease or a lost pool entry
+		// makes the row undelivered again.
 		if _, err := tx.ExecContext(ctx, `UPDATE node_tx_binding b SET
    state = v.st,
    reason = v.r,
    block_number = CASE WHEN v.st = 2 THEN v.blk WHEN v.st = 1 THEN NULL ELSE b.block_number END,
-   delivered_generation = CASE WHEN v.st = 2 THEN b.generation WHEN v.st = 1 THEN NULL ELSE b.delivered_generation END,
-   delivered_boot = CASE WHEN v.st = 1 THEN NULL ELSE b.delivered_boot END,
-   claim_owner = CASE WHEN v.st = 1 THEN NULL ELSE b.claim_owner END,
-   claim_boot = CASE WHEN v.st = 1 THEN NULL ELSE b.claim_boot END,
-   claim_expires = CASE WHEN v.st = 1 THEN NULL ELSE b.claim_expires END
- FROM unnest($1::bytea[], $2::smallint[], $3::smallint[], $4::bigint[]) AS v(h, st, r, blk)
- WHERE b.tx_hash = v.h`, hs, tos, reasons, nullInts(blocks)); err != nil {
+   delivered_generation = CASE WHEN v.st = 2 AND (v.ctx IS NULL OR v.ctx = b.context_id) THEN b.generation ELSE b.delivered_generation END,
+   delivered_boot = CASE WHEN v.st = 2 AND (v.ctx IS NULL OR v.ctx = b.context_id) THEN coalesce(v.boot, b.delivered_boot) ELSE b.delivered_boot END
+ FROM unnest($1::bytea[], $2::smallint[], $3::smallint[], $4::bigint[], $5::uuid[], $6::uuid[]) AS v(h, st, r, blk, boot, ctx)
+ WHERE b.tx_hash = v.h`, hs, tos, reasons, nullInts(blocks), boots, executed); err != nil {
 			return err
 		}
 		if len(stopped) > 0 {
@@ -674,6 +903,7 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 type lockedBinding struct {
 	state          int16
 	generation     int32
+	context        uuid.UUID
 	principal, org uuid.UUID
 	admitXid       uint64
 }
@@ -681,7 +911,7 @@ type lockedBinding struct {
 // lockBindings locks the bindings of hashes in hash order (the global lock
 // order) and returns their current state.
 func lockBindings(ctx context.Context, tx *sql.Tx, inc uuid.UUID, hashes [][]byte) (map[string]lockedBinding, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT tx_hash, state, generation, principal_id, org_id, admit_xid::text FROM node_tx_binding WHERE tx_hash = ANY($1) AND incarnation = $2 ORDER BY tx_hash FOR UPDATE`, hashes, inc.String())
+	rows, err := tx.QueryContext(ctx, `SELECT tx_hash, state, generation, context_id, principal_id, org_id, admit_xid::text FROM node_tx_binding WHERE tx_hash = ANY($1) AND incarnation = $2 ORDER BY tx_hash FOR UPDATE`, hashes, inc.String())
 	if err != nil {
 		return nil, err
 	}
@@ -691,7 +921,7 @@ func lockBindings(ctx context.Context, tx *sql.Tx, inc uuid.UUID, hashes [][]byt
 		var hash []byte
 		var row lockedBinding
 		var xid string
-		if err := rows.Scan(&hash, &row.state, &row.generation, &row.principal, &row.org, &xid); err != nil {
+		if err := rows.Scan(&hash, &row.state, &row.generation, &row.context, &row.principal, &row.org, &xid); err != nil {
 			return nil, err
 		}
 		if row.admitXid, err = strconv.ParseUint(xid, 10, 64); err != nil {
@@ -726,6 +956,10 @@ type TrackFinal struct {
 	// AdmitXid, when set, must be the binding's: a binding released and
 	// admitted again since it was read is a different binding.
 	AdmitXid uint64
+	// RequireStopped: apply only to a binding that is renewal_stopped or a
+	// tombstone (dropped on finalized nonce evidence; a binding revived
+	// meanwhile is pending again and is left alone).
+	RequireStopped bool
 }
 
 // FinalizeBatch finalizes bindings in one transaction: delete the binding,
@@ -769,6 +1003,9 @@ func (e *ExecDB) FinalizeBatch(ctx context.Context, inc uuid.UUID, finals []Trac
 			if row.principal != f.PrincipalID || row.org != f.OrgID || (f.AdmitXid != 0 && row.admitXid != f.AdmitXid) {
 				continue
 			}
+			if f.RequireStopped && row.state != TrackRenewalStopped && row.state != TrackTombstone {
+				continue
+			}
 			applied[i] = true
 			delta -= isPending(row.state)
 			hs, states, reasons = append(hs, f.Hash), append(states, int64(f.State)), append(reasons, int64(f.Reason))
@@ -800,37 +1037,40 @@ func (e *ExecDB) FinalizeBatch(ctx context.Context, inc uuid.UUID, finals []Trac
 type TrackAck struct {
 	Hash       []byte
 	Generation int32
+	// Boot is the boot id of the node response that acknowledged it (never
+	// the cached one, §4.8.4).
+	Boot uuid.UUID
 }
 
 // FlushAcks records acknowledgements of rows that are still pending at the
-// acknowledged generation and not yet recorded as delivered. It is the batched
-// flush for rows that did not reach another transition first (R12.6): a row
-// already provisional, final or at a newer generation writes nothing. Rows
-// another writer holds are skipped (SKIP LOCKED) and stay in memory. The node
-// does not report a boot id yet, so delivered_boot stays NULL (never the
-// cached boot, §4.8.4). Returns the acknowledged hashes that are settled
-// (written or no longer applicable).
+// acknowledged generation and not yet recorded as delivered to that boot. It
+// is the batched flush for rows that did not reach another transition first
+// (R12.6): a row already provisional, final or at a newer generation writes
+// nothing (G28, G29). The boot recorded is the one of the response that
+// acknowledged the delivery (G35); it also releases the delivery claim. Rows
+// another writer holds are skipped (SKIP LOCKED) and stay in memory. Returns
+// the acknowledged hashes that are settled (written or no longer applicable).
 func (e *ExecDB) FlushAcks(ctx context.Context, inc uuid.UUID, acks []TrackAck) (map[string]bool, error) {
 	if len(acks) == 0 {
 		return map[string]bool{}, nil
 	}
 	sort.Slice(acks, func(i, j int) bool { return bytes.Compare(acks[i].Hash, acks[j].Hash) < 0 })
-	hashes, generations := make([][]byte, len(acks)), make([]int64, len(acks))
+	hashes, generations, boots := make([][]byte, len(acks)), make([]int64, len(acks)), make([]string, len(acks))
 	for i, a := range acks {
-		hashes[i], generations[i] = a.Hash, int64(a.Generation)
+		hashes[i], generations[i], boots[i] = a.Hash, int64(a.Generation), a.Boot.String()
 	}
 	settled := map[string]bool{}
 	err := e.trackTx(ctx, inc, func(tx *sql.Tx) error {
 		clear(settled)
 		// Rows locked by another writer are the only ones not settled here.
-		rows, err := tx.QueryContext(ctx, `WITH v AS (SELECT * FROM unnest($1::bytea[], $2::int[]) AS v(h, g)),
- target AS (SELECT b.tx_hash, v.g FROM node_tx_binding b JOIN v ON b.tx_hash = v.h
-            WHERE b.state = 1 AND b.generation = v.g AND b.delivered_generation IS DISTINCT FROM v.g AND b.incarnation = $3
+		rows, err := tx.QueryContext(ctx, `WITH v AS (SELECT * FROM unnest($1::bytea[], $2::int[], $4::uuid[]) AS v(h, g, boot)),
+ target AS (SELECT b.tx_hash, v.g, v.boot FROM node_tx_binding b JOIN v ON b.tx_hash = v.h
+            WHERE b.state = 1 AND b.generation = v.g AND (b.delivered_generation, b.delivered_boot) IS DISTINCT FROM (v.g, v.boot) AND b.incarnation = $3
             ORDER BY b.tx_hash FOR UPDATE OF b SKIP LOCKED),
- written AS (UPDATE node_tx_binding b SET delivered_generation = target.g, claim_owner = NULL, claim_boot = NULL, claim_expires = NULL
+ written AS (UPDATE node_tx_binding b SET delivered_generation = target.g, delivered_boot = target.boot, claim_owner = NULL, claim_boot = NULL, claim_expires = NULL
              FROM target WHERE b.tx_hash = target.tx_hash RETURNING b.tx_hash)
  SELECT v.h FROM v WHERE EXISTS (SELECT 1 FROM written w WHERE w.tx_hash = v.h)
-    OR NOT EXISTS (SELECT 1 FROM node_tx_binding b WHERE b.tx_hash = v.h AND b.state = 1 AND b.generation = v.g AND b.delivered_generation IS DISTINCT FROM v.g)`, hashes, generations, inc.String())
+    OR NOT EXISTS (SELECT 1 FROM node_tx_binding b WHERE b.tx_hash = v.h AND b.state = 1 AND b.generation = v.g AND (b.delivered_generation, b.delivered_boot) IS DISTINCT FROM (v.g, v.boot))`, hashes, generations, inc.String(), boots)
 		if err != nil {
 			return err
 		}
@@ -863,12 +1103,39 @@ type TrackedTransaction struct {
 	CreatedAt      time.Time
 	FinalAt        *time.Time
 	AdmitXid       uint64
+	// In-flight rows only: the binding's signer and nonce, its current
+	// envelope's floor and expiry, the delivery and claim state, and the
+	// database clock when it was read.
+	Signer              []byte
+	Nonce               uint64
+	MinVersion          uint64
+	ExpiresAt           time.Time
+	DeliveredGeneration *int32
+	DeliveredBoot       uuid.UUID // Nil: not recorded
+	ClaimOwner          uuid.UUID
+	ClaimBoot           uuid.UUID
+	ClaimExpires        *time.Time
+	DBNow               time.Time
 }
 
 // Final reports whether the row is a final status.
 func (t TrackedTransaction) Final() bool { return t.State >= TrackIncluded }
 
-const trackedColumns = `tx_hash, principal_id, org_id, state, reason, generation, context_id, issued_contexts, block_number, visible_to, visible_sender, created_at, admit_xid::text`
+// DeliveredTo reports whether the current generation was acknowledged by
+// the node boot (a delivery to an earlier boot was lost by its restart).
+func (t TrackedTransaction) DeliveredTo(boot uuid.UUID) bool {
+	return boot != uuid.Nil && t.DeliveredGeneration != nil && *t.DeliveredGeneration == t.Generation && t.DeliveredBoot == boot
+}
+
+// ClaimedFor reports whether a delivery claim holds the row at now for the
+// node boot: a claim is void once its boot is not the current one, and
+// expires so a crashed owner is taken over (§4.8.4).
+func (t TrackedTransaction) ClaimedFor(boot uuid.UUID, now time.Time) bool {
+	return t.ClaimOwner != uuid.Nil && t.ClaimExpires != nil && now.Before(*t.ClaimExpires) && t.ClaimBoot != uuid.Nil && t.ClaimBoot == boot
+}
+
+const trackedColumns = `tx_hash, principal_id, org_id, state, reason, generation, context_id, issued_contexts, block_number, visible_to, visible_sender, created_at, admit_xid::text,
+ signer, nonce, min_version, expires_at, delivered_generation, delivered_boot, claim_owner, claim_boot, claim_expires, clock_timestamp()`
 
 func scanTracked(row interface{ Scan(...any) error }) (TrackedTransaction, error) {
 	var t TrackedTransaction
@@ -876,8 +1143,23 @@ func scanTracked(row interface{ Scan(...any) error }) (TrackedTransaction, error
 	var sender sql.NullString
 	var xid string
 	var issued []string
-	if err := row.Scan(&t.Hash, &t.PrincipalID, &t.OrgID, &t.State, &t.Reason, &t.Generation, &t.ContextID, ScanTextArray(&issued), &block, ScanTextArray(&t.VisibleTo), &sender, &t.CreatedAt, &xid); err != nil {
+	var nonce, minVersion int64
+	var delivered sql.NullInt32
+	var deliveredBoot, claimOwner, claimBoot uuid.NullUUID
+	var claimExpires sql.NullTime
+	if err := row.Scan(&t.Hash, &t.PrincipalID, &t.OrgID, &t.State, &t.Reason, &t.Generation, &t.ContextID, ScanTextArray(&issued), &block, ScanTextArray(&t.VisibleTo), &sender, &t.CreatedAt, &xid,
+		&t.Signer, &nonce, &minVersion, &t.ExpiresAt, &delivered, &deliveredBoot, &claimOwner, &claimBoot, &claimExpires, &t.DBNow); err != nil {
 		return t, err
+	}
+	t.Nonce, t.MinVersion = uint64(nonce), uint64(minVersion)
+	if delivered.Valid {
+		g := delivered.Int32
+		t.DeliveredGeneration = &g
+	}
+	t.DeliveredBoot, t.ClaimOwner, t.ClaimBoot = deliveredBoot.UUID, claimOwner.UUID, claimBoot.UUID
+	if claimExpires.Valid {
+		at := claimExpires.Time
+		t.ClaimExpires = &at
 	}
 	for _, s := range issued {
 		id, err := uuid.Parse(s)
@@ -917,6 +1199,50 @@ func (e *ExecDB) LookupTracked(ctx context.Context, hash []byte) (TrackedTransac
 	}
 	final.FinalAt = &at
 	return final, nil
+}
+
+// TrackedBatch re-reads in-flight bindings by hash (missing hashes are
+// absent): the lease keeper's authoritative point read before it acts.
+func (e *ExecDB) TrackedBatch(ctx context.Context, hashes [][]byte) ([]TrackedTransaction, error) {
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	rows, err := e.pool.conn.QueryContext(ctx, `SELECT `+trackedColumns+` FROM node_tx_binding WHERE tx_hash = ANY($1)`, hashes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TrackedTransaction
+	for rows.Next() {
+		t, err := scanTracked(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// TrackedPayloads returns the raw transactions of in-flight bindings by hash
+// (absent once a payload bucket was truncated).
+func (e *ExecDB) TrackedPayloads(ctx context.Context, hashes [][]byte) (map[string][]byte, error) {
+	out := map[string][]byte{}
+	if len(hashes) == 0 {
+		return out, nil
+	}
+	rows, err := e.pool.conn.QueryContext(ctx, `SELECT b.tx_hash, p.raw_tx FROM node_tx_binding b JOIN node_tx_payload p ON p.bucket = b.payload_bucket AND p.tx_hash = b.tx_hash WHERE b.tx_hash = ANY($1)`, hashes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var hash, raw []byte
+		if err := rows.Scan(&hash, &raw); err != nil {
+			return nil, err
+		}
+		out[string(hash)] = raw
+	}
+	return out, rows.Err()
 }
 
 // TrackingHorizon is the snapshot xmin: every transaction below it has ended,

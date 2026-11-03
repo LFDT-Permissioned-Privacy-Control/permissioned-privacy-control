@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"privacy-proxy/internal/db"
 	"privacy-proxy/internal/loggate"
 	"privacy-proxy/internal/nodepolicy"
+	"privacy-proxy/internal/proxy"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +34,13 @@ import (
 type nodeFactVersion interface {
 	NodePolicyVersion(context.Context) (uint64, error)
 }
+
+// nodeFactClock is the single issuing clock (plan §4.8.3): the fact version
+// and the database time in one read. A source without it signs at the host
+// clock (unit fixtures).
+type nodeFactClock interface {
+	NodePolicyClock(context.Context) (uint64, time.Time, error)
+}
 type executionNodeClient interface {
 	PolicyStatus(context.Context) (nodepolicy.NodeStatus, error)
 	SubmitTransaction(context.Context, []byte, string) (nodepolicy.Submission, error)
@@ -43,7 +52,9 @@ type nodeExecutionBridge struct {
 	signer   nodepolicy.Signer
 	network  nodepolicy.Network
 	lifetime time.Duration
-	now      func() time.Time
+	// txLifetime is the transaction-identity lease (0: lifetime).
+	txLifetime time.Duration
+	now        func() time.Time
 	// tracking records each transaction's binding in the execution-tracking
 	// database before transport (RD-1410).
 	tracking *nodeTracking
@@ -349,12 +360,50 @@ func (o observingFactNode) ApplyPolicy(ctx context.Context, wire []byte) (nodepo
 	return applied, err
 }
 
-// readiness returns the database fact version the request requires. waits
-// reports that the node is behind and will wait for that version itself.
-func (b *nodeExecutionBridge) readiness(ctx context.Context) (version uint64, waits bool, err error) {
-	version, err = b.source.NodePolicyVersion(ctx)
+// currentBoot is the node's boot id from a fresh status read (Nil when the
+// status is missing, stale or failing); ready also requires that the node is
+// ready, so renewals go only to a node that can admit them.
+func (b *nodeExecutionBridge) currentBoot() (uuid.UUID, bool) {
+	boot, ready, _ := b.observedBoot()
+	return boot, ready
+}
+
+// observedBoot is currentBoot with the sequence of the status read it came
+// from, so a new boot id can be confirmed by a later, separate read.
+func (b *nodeExecutionBridge) observedBoot() (uuid.UUID, bool, uint64) {
+	o := b.cache.load()
+	if o == nil || o.err != nil || b.now().Sub(o.at) > nodeStatusMaxAge {
+		return uuid.Nil, false, 0
+	}
+	boot, err := uuid.Parse(o.status.BootID)
+	if err != nil || !nodepolicy.ValidBootID(o.status.BootID) {
+		return uuid.Nil, false, 0
+	}
+	return boot, o.status.Ready && o.status.ExpiresAt > b.now().Unix(), o.seq
+}
+
+// cachedBoot is currentBoot without the readiness requirement.
+func (b *nodeExecutionBridge) cachedBoot() uuid.UUID {
+	boot, _ := b.currentBoot()
+	return boot
+}
+
+// clock reads the fact version and the issuing time (plan §4.8.3).
+func (b *nodeExecutionBridge) clock(ctx context.Context) (uint64, time.Time, error) {
+	if c, ok := b.source.(nodeFactClock); ok {
+		return c.NodePolicyClock(ctx)
+	}
+	version, err := b.source.NodePolicyVersion(ctx)
+	return version, b.now(), err
+}
+
+// readiness returns the database fact version the request requires and the
+// issuing time read with it. waits reports that the node is behind and will
+// wait for that version itself.
+func (b *nodeExecutionBridge) readiness(ctx context.Context) (version uint64, at time.Time, waits bool, err error) {
+	version, at, err = b.clock(ctx)
 	if err != nil {
-		return 0, false, nodepolicy.ErrNodeUnavailable
+		return 0, time.Time{}, false, nodepolicy.ErrNodeUnavailable
 	}
 	// Taken after the version read: a status read with a higher sequence
 	// started after the database answered.
@@ -364,9 +413,9 @@ func (b *nodeExecutionBridge) readiness(ctx context.Context) (version uint64, wa
 		err = b.check(b.refreshAfter(ctx, mark), version)
 	}
 	if errors.Is(err, errFactWait) {
-		return version, true, nil
+		return version, at, true, nil
 	}
-	return version, false, err
+	return version, at, false, err
 }
 
 // executionStatus is the readiness report (/ready and /status): a live node
@@ -437,16 +486,21 @@ func (s *Server) executionStatus(ctx context.Context) apimodels.ExecutionStatus 
 	return result
 }
 func (b *nodeExecutionBridge) PrepareIdentity(ctx context.Context, request NodeExecutionIdentityRequest) ([]byte, error) {
-	version, waits, err := b.readiness(ctx)
+	// The fact version and the issue time come from one database read, so
+	// identities from every OPS instance are ordered by one clock (§4.8.3).
+	version, at, waits, err := b.readiness(ctx)
 	if err != nil {
 		return nil, err
 	}
-	at := b.now()
 	contextID := uuid.NewString()
 	if waits && !b.acquireFactWait(contextID) {
 		return nil, nodepolicy.ErrFactsPending
 	}
-	identity := nodepolicy.Identity{Header: nodepolicy.Header{Network: b.network, IssuedAt: at.Unix(), ExpiresAt: at.Add(b.lifetime).Unix()}, Scope: request.Scope, ContextID: contextID, PrincipalID: request.PrincipalID, OrgID: request.OrgID, Signer: request.Signer, BindingHash: request.BindingHash, MinSnapshotVersion: version}
+	lifetime := b.lifetime
+	if request.Scope == "transaction" && b.txLifetime > 0 {
+		lifetime = b.txLifetime
+	}
+	identity := nodepolicy.Identity{Header: nodepolicy.Header{Network: b.network, IssuedAt: at.Unix(), ExpiresAt: at.Add(lifetime).Unix()}, Scope: request.Scope, ContextID: contextID, PrincipalID: request.PrincipalID, OrgID: request.OrgID, Signer: request.Signer, BindingHash: request.BindingHash, MinSnapshotVersion: version}
 	wire, err := b.signer.Seal("identity", identity)
 	if err != nil {
 		b.releaseFactWait(contextID)
@@ -471,20 +525,41 @@ func (b *nodeExecutionBridge) SubmitTransaction(ctx context.Context, identity []
 	if err != nil || i.Scope != "transaction" {
 		return nodepolicy.Submission{}, nodepolicy.ErrIdentity
 	}
-	admission, err := trackingAdmission(i, identity, raw, metadata)
-	if err != nil {
-		return nodepolicy.Submission{}, nodepolicy.ErrIdentity
-	}
-	// The binding is durable before transport (I2, Q6 (a)): a node restart
-	// cannot let another principal sharing the signer rebind this hash.
-	result, inc, err := b.tracking.admit(ctx, admission)
-	if err != nil {
-		return nodepolicy.Submission{}, nodepolicy.ErrNodeUnavailable
+	var admission db.TrackAdmission
+	var result db.AdmitResult
+	var inc uuid.UUID
+	for attempt := 0; ; attempt++ {
+		if admission, err = trackingAdmission(i, identity, raw, metadata); err != nil {
+			return nodepolicy.Submission{}, nodepolicy.ErrIdentity
+		}
+		admission.ClaimBoot = b.cachedBoot()
+		// The binding is durable before transport (I2, Q6 (a)): a node restart
+		// cannot let another principal sharing the signer rebind this hash.
+		result, inc, err = b.tracking.admit(ctx, admission)
+		if err != nil {
+			return nodepolicy.Submission{}, nodepolicy.ErrNodeUnavailable
+		}
+		if result.Outcome != db.AdmitIncomparable || attempt >= 2 {
+			break
+		}
+		// Neither envelope dominates the other (a database clock step): sign
+		// again at the current clock (§4.8.3), bounded.
+		again, err := b.PrepareIdentity(ctx, NodeExecutionIdentityRequest{Scope: "transaction", PrincipalID: i.PrincipalID, OrgID: i.OrgID, Signer: i.Signer, BindingHash: i.BindingHash})
+		if err != nil {
+			return nodepolicy.Submission{}, err
+		}
+		defer b.releaseFactWait(identityContextID(again))
+		if i, err = verifier.OpenIdentity(again); err != nil {
+			return nodepolicy.Submission{}, nodepolicy.ErrIdentity
+		}
+		identity = again
 	}
 	switch result.Outcome {
 	case db.AdmitInvalid:
 		return nodepolicy.Submission{}, nodepolicy.ErrIdentity
 	case db.AdmitConflict:
+		return nodepolicy.Submission{}, errBindingConflict
+	case db.AdmitIncomparable:
 		return nodepolicy.Submission{}, nodepolicy.ErrNodeUnavailable
 	case db.AdmitOverLimit:
 		return nodepolicy.Submission{}, errPendingLimit
@@ -495,19 +570,80 @@ func (b *nodeExecutionBridge) SubmitTransaction(ctx context.Context, identity []
 	}
 	submitted, err := b.node.SubmitTransaction(ctx, identity, raw)
 	if err != nil {
-		if errors.Is(err, nodepolicy.ErrFactsPending) && result.Outcome == db.AdmitInserted {
+		var rejection *nodepolicy.PoolRejection
+		switch {
+		case errors.Is(err, nodepolicy.ErrFactsPending) && result.Outcome == db.AdmitInserted:
 			// The node refused this request's only identity before admission
 			// (-32012): the client retries the same raw transaction. Remove the
 			// fresh, never-delivered binding so it carries no pending work.
 			b.tracking.release(ctx, inc, admission.Hash, admission.ContextID)
+			return nodepolicy.Submission{}, err
+		case errors.As(err, &rejection):
+			// A definitive pool answer for these bytes now (T18): stop
+			// renewing, without finality (§4.8.1); it may still settle, and is
+			// dropped only once a finalized nonce passes it.
+			reason := db.TrackReasonNonceConflict
+			if rejection.Reason == nodepolicy.PoolReplaced {
+				reason = db.TrackReasonReplacedInPool
+			}
+			b.tracking.stop(ctx, inc, admission.Hash, result.Generation, reason)
+			return nodepolicy.Submission{}, errPoolRejected
+		case errors.Is(err, nodepolicy.ErrFactsPending):
+			return nodepolicy.Submission{}, err
+		default:
+			// The intent is saved and still pending: the lease keeper delivers
+			// it, so this request's outcome is unknown, not refused.
+			return nodepolicy.Submission{}, fmt.Errorf("%w: %w", errSubmissionPending, err)
 		}
-		return nodepolicy.Submission{}, err
 	}
-	// Acknowledged in memory only; recorded with the next transition or the
-	// batched flush (R12.6). Nothing more is written on the request path (G14).
-	b.tracking.ack(admission.Hash, result.Generation, inc)
+	// Acknowledged in memory only, against the answering boot (G35);
+	// recorded with the next transition or the batched flush (R12.6).
+	// Nothing more is written on the request path (G14). A kept (dominated)
+	// attempt acknowledges nothing: the stored generation is not the one sent.
+	answered, _ := uuid.Parse(submitted.BootID)
+	if result.Written() && result.ContextID == admission.ContextID {
+		b.tracking.ack(admission.Hash, result.Generation, inc, answered)
+	}
+	if answered != uuid.Nil && answered != b.cachedBoot() {
+		b.kickProbe() // the node restarted: refresh the status and the keeper's boot
+	}
 	return submitted, nil
 }
+
+// BindingConflicts is the pre-compliance probe of the binding
+// (bindingProber): the hash is bound to another principal, organisation or
+// signer, or can no longer execute. An unreadable binding is an error (the
+// request is refused as unavailable, not passed to compliance).
+func (b *nodeExecutionBridge) BindingConflicts(ctx context.Context, hash []byte, principalID, orgID, signer string) (bool, error) {
+	if b.tracking == nil || len(hash) != 32 {
+		return false, errTrackingUnavailable
+	}
+	row, err := b.tracking.store.LookupTracked(ctx, hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, errTrackingUnavailable
+	}
+	if row.PrincipalID.String() != principalID || row.OrgID.String() != orgID {
+		return true, nil
+	}
+	if row.Final() {
+		return row.State == db.TrackDropped, nil // can never execute again
+	}
+	return !strings.EqualFold("0x"+hex.EncodeToString(row.Signer), signer), nil
+}
+
+// errBindingConflict: the signed transaction is bound to an earlier
+// submission it does not match; refused before transport (G13).
+var errBindingConflict = errors.New("transaction conflicts with an earlier submission")
+
+// errPoolRejected: the node's pool refused the transaction's nonce (T18).
+var errPoolRejected = errors.New("transaction pool rejected the transaction")
+
+// errSubmissionPending: the intent was saved but its delivery failed; the
+// lease keeper delivers it, so the transaction may still execute.
+var errSubmissionPending = errors.New("transaction delivery pending")
 
 // Network is the execution network this bridge signs for.
 func (b *nodeExecutionBridge) Network() nodepolicy.Network { return b.network }
@@ -604,7 +740,11 @@ func loadNodePolicySigner(c config.NodePolicyConfig) (nodepolicy.Signer, error) 
 // connection lanes; the RD-1112 harness builds it the same way.
 func newNodePolicyClient(c config.NodePolicyConfig, network nodepolicy.Network) (*nodepolicy.Client, error) {
 	control, transaction, recovery := c.LaneSizes()
-	return nodepolicy.NewPooledClient(c.URL, c.Token, network, nodepolicy.Lanes{Control: control, Transaction: transaction, Recovery: recovery})
+	client, err := nodepolicy.NewPooledClient(c.URL, c.Token, network, nodepolicy.Lanes{Control: control, Transaction: transaction, Recovery: recovery})
+	if err == nil && c.ControlURL != "" {
+		err = client.WithControlEndpoint(c.ControlURL)
+	}
+	return client, err
 }
 
 // nodeErrorClass maps a node-path error to a fixed class for log keys; error
@@ -688,6 +828,8 @@ func (s *Server) initNodePolicy() error {
 	if s.tracking, err = openExecutionTracking(s.config, s.db, network); err != nil {
 		return err
 	}
+	txTTL, maxAge := c.TransactionLease()
+	s.tracking.payloadKeep = nodeTxPayloadKeepFor(maxAge)
 	client, err := newNodePolicyClient(c, network)
 	if err != nil {
 		return err
@@ -696,6 +838,7 @@ func (s *Server) initNodePolicy() error {
 	if err != nil {
 		return err
 	}
+	bridge.txLifetime = txTTL
 	schemaCtx, cancelSchema := context.WithTimeout(context.Background(), time.Minute)
 	err = s.db.CheckNodePolicySchema(schemaCtx)
 	if err == nil {
@@ -705,7 +848,7 @@ func (s *Server) initNodePolicy() error {
 	if err == nil {
 		// Partitions exist before the first finalization (K25); a maintenance
 		// step that timed out is retried by the retention pass.
-		err = ensureTrackingPartitions(schemaCtx, s.tracking.admin)
+		err = ensureTrackingPartitions(schemaCtx, s.tracking.admin, s.tracking.keep())
 	}
 	cancelSchema()
 	if err != nil {
@@ -714,8 +857,22 @@ func (s *Server) initNodePolicy() error {
 	tracking := newNodeTracking(s.tracking.runtime, s.tracking.meta.Incarnation, s.tracking.adopt(network))
 	bridge.tracking = tracking
 	if s.retentionCleaner != nil {
-		s.retentionCleaner.AttachTracking(trackingRetention{admin: s.tracking.admin, main: s.db, network: network}, s.config.RetentionNodeSubmissions)
+		s.retentionCleaner.AttachTracking(trackingRetention{admin: s.tracking.admin, main: s.db, network: network, keep: s.tracking.keep()}, s.config.RetentionNodeSubmissions)
 	}
+	// Public chain evidence for the lease keeper (eviction, dropped): the
+	// node's public RPC, read with the deployment's upstream credential.
+	var chain nodeChainReader
+	if s.proxy != nil {
+		header := s.config.RPCAPIKeyHeader
+		if header == "" {
+			header = proxy.DefaultAPIKeyHeader
+		}
+		apiKey := s.config.RPCAPIKey
+		chain = rpcChain{forward: func(ctx context.Context, body []byte) ([]byte, int, error) {
+			return s.proxy.ForwardWithAPIKeyHeaderContext(ctx, body, header, apiKey, "")
+		}}
+	}
+	rechecker := &admissionRechecker{ac: s.rbacAccessCtrl, compliance: s.complianceChecker, network: network, strictVisibleTo: s.config.ReadProfile.Strict()}
 	wake := make(chan struct{}, 1)
 	publisher, err := nodepolicy.NewPublisher(nodepolicy.PublisherConfig{Network: network, ConsumerID: c.ConsumerID, Signer: signer, Source: s.db, Node: observingFactNode{node: client, bridge: bridge}, Lifetime: c.FactTTL, Wake: wake})
 	if err != nil {
@@ -723,6 +880,7 @@ func (s *Server) initNodePolicy() error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.nodeExecution = bridge
+	s.nodeOwnershipEvidence = client
 	s.nodePolicyCancel = cancel
 	s.nodePolicyDone = make(chan struct{})
 	// Every instance probes the node's status (it serves requests whether or
@@ -757,6 +915,11 @@ func (s *Server) initNodePolicy() error {
 			defer slog.Info("node policy publisher term ended", "consumer_id", c.ConsumerID)
 			reconcilerDone := make(chan struct{})
 			reconciler := newNodeReconciler(tracking, s.db, client, s.auditBuffer, network)
+			reconciler.batched = func() bool {
+				o := bridge.cache.load()
+				return o != nil && o.err == nil && o.status.HasCapability(nodepolicy.CapabilityTransactionStatuses)
+			}
+			reconciler.keeper = &nodeKeeper{node: client, chain: chain, checker: rechecker, clock: s.db, signer: signer, network: network, ttl: txTTL, maxAge: maxAge, boot: bridge.observedBoot, now: time.Now}
 			go func() { defer close(reconcilerDone); runNodeReconciler(term, reconciler) }()
 			_ = publisher.Run(term, c.PublishInterval, report)
 			<-reconcilerDone

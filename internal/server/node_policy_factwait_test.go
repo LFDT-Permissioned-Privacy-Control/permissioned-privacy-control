@@ -68,7 +68,7 @@ func TestBridgeLeavesYoungLagToTheNodesWait(t *testing.T) {
 			}
 			bridge.observe(context.Background())
 			// The node was first seen behind age ago.
-			if _, _, err := bridge.readiness(context.Background()); c.age == 0 && c.waits && err != nil {
+			if _, _, _, err := bridge.readiness(context.Background()); c.age == 0 && c.waits && err != nil {
 				t.Fatal(err)
 			}
 			now = now.Add(c.age)

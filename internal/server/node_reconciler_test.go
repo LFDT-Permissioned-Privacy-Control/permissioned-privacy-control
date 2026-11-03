@@ -420,7 +420,7 @@ func TestSurvivingInstanceAdoptsNewIncarnation(t *testing.T) {
 		}
 	}
 	// Outstanding work issued before the recreation has no effect.
-	f.writer.ack(old.hash, 1, oldInc)
+	f.writer.ack(old.hash, 1, oldInc, uuid.New())
 	block := uint64(1)
 	if _, err := f.tracking.runtime.ApplyTransitions(ctx, oldInc, []db.TrackTransition{{Hash: old.hash, From: db.TrackPending, To: db.TrackProvisional, BlockNumber: &block}}); err == nil {
 		t.Fatal("old-incarnation work applied to the recreated database")

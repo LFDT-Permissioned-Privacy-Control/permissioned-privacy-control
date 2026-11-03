@@ -77,6 +77,15 @@ const (
 	// ReasonPendingLimit: the execution path's global pending-work limit is
 	// reached; retry after Retry-After (RD-1410).
 	ReasonPendingLimit = "pending_limit"
+	// ReasonTransactionConflict: the signed transaction is already bound to an
+	// earlier submission it does not match (another principal, organisation,
+	// signer or visibility list), or can no longer execute (409). Collapsed on
+	// the wire.
+	ReasonTransactionConflict = "transaction_conflict"
+	// ReasonPoolRejected: the node's pool refused the transaction's nonce
+	// (used, or held by another transaction without a sufficient fee bump);
+	// not final (409). Collapsed on the wire.
+	ReasonPoolRejected = "pool_rejected"
 	// ReasonInternalError: an internal failure (500) — generic by construction.
 	ReasonInternalError = "internal_error"
 

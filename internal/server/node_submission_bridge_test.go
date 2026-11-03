@@ -36,6 +36,7 @@ type recordingNode struct {
 	tracking  *testTracking
 	calls     atomic.Int64
 	submitErr error
+	boot      string // the boot id answered (empty: none)
 	mu        sync.Mutex
 	unbound   int // calls that found no binding row
 }
@@ -57,7 +58,7 @@ func (n *recordingNode) SubmitTransaction(ctx context.Context, identity []byte, 
 	if n.submitErr != nil {
 		return nodepolicy.Submission{}, n.submitErr
 	}
-	return nodepolicy.Submission{TransactionHash: i.BindingHash, ContextID: i.ContextID, Status: "accepted"}, nil
+	return nodepolicy.Submission{TransactionHash: i.BindingHash, ContextID: i.ContextID, Status: "accepted", BootID: n.boot}, nil
 }
 
 // signedTransfer is a signed raw transaction and its hash and sender.
@@ -182,8 +183,8 @@ func TestSharedSignerCannotRebindAfterNodeRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := node.calls.Load()
-	if _, err := tx.submit(t, bridge, uuid.NewString(), org); err == nil {
-		t.Fatal("another principal rebound the transaction")
+	if _, err := tx.submit(t, bridge, uuid.NewString(), org); !errors.Is(err, errBindingConflict) {
+		t.Fatalf("another principal rebound the transaction: %v", err)
 	}
 	if node.calls.Load() != calls {
 		t.Fatal("the conflicting identity reached the node")
@@ -217,7 +218,8 @@ func (c *countingTracking) FinalizeBatch(ctx context.Context, inc uuid.UUID, fs 
 // binding once (one admission) and nothing after the node accepted; the
 // acknowledgement waits in memory for the next transition or the flush.
 func TestAcceptedStateIsNotWrittenOnRequestPath(t *testing.T) {
-	bridge, _, tracking := newBridgeFixture(t)
+	bridge, node, tracking := newBridgeFixture(t)
+	node.boot = hexBoot(uuid.New()) // acknowledgements carry the answering boot
 	counting := &countingTracking{trackingStore: tracking.runtime}
 	bridge.tracking.store = counting
 	const n = 20

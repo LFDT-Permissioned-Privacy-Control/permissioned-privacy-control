@@ -169,6 +169,18 @@ func (p *JSONRPCProcessor) processNodeExecution(ctx context.Context, req *Proces
 		if binding.ChainID == 0 {
 			binding = compliance.TransactionBinding{}
 		}
+		// A hash already bound to another submitter is refused before the
+		// compliance step, which could otherwise consume and bind a
+		// travel-rule record to that transaction for this caller (G13).
+		if prober, ok := p.nodeExecution.(bindingProber); ok {
+			conflict, err := prober.BindingConflicts(ctx, transaction.Hash().Bytes(), admission.UserID, admission.OrgID, admission.Signer)
+			if err != nil {
+				return p.nodeExecutionFailure(ctx, req, nodepolicy.ErrNodeUnavailable)
+			}
+			if conflict {
+				return p.nodeExecutionFailure(ctx, req, errBindingConflict)
+			}
+		}
 		if denied := p.checkComplianceFor(ctx, req, admission.OrgID, admission.UserID, admission.Signer, to, data, value, binding); denied != nil {
 			return denied
 		}
@@ -272,6 +284,14 @@ func (p *JSONRPCProcessor) processNodeExecution(ctx context.Context, req *Proces
 	return &ProcessResult{StatusCode: http.StatusOK, ResponseBody: body}
 }
 
+// bindingProber reports whether a transaction hash is already bound to an
+// earlier submission of another principal, organisation or signer (or can no
+// longer execute); a different visibility list is caught at admission. An
+// error refuses the request as unavailable.
+type bindingProber interface {
+	BindingConflicts(ctx context.Context, hash []byte, principalID, orgID, signer string) (bool, error)
+}
+
 // The caller's options have already been vetted. Match the public RPC's
 // plain callTracer output without exposing logs, storage or stack snapshots.
 func nodeCallTraceParams(params []any) []any {
@@ -293,6 +313,21 @@ func (p *JSONRPCProcessor) nodeExecutionFailure(ctx context.Context, req *Proces
 		// The node has not applied the facts this request needs yet (its
 		// bounded wait expired): retryable, not a policy decision.
 		result := p.nodeExecutionError(ctx, req, http.StatusServiceUnavailable, "execution facts are being published; retry shortly", ReasonPublicationPending)
+		result.Error.RetryAfter = 1
+		return result
+	}
+	if errors.Is(err, errBindingConflict) {
+		// One opaque answer for every cause (another principal, organisation,
+		// signer or visibility list, or a hash that can no longer execute).
+		return p.nodeExecutionError(ctx, req, http.StatusConflict, "transaction conflicts with an earlier submission", ReasonTransactionConflict)
+	}
+	if errors.Is(err, errPoolRejected) {
+		return p.nodeExecutionError(ctx, req, http.StatusConflict, "transaction nonce is already used or held by another pending transaction", ReasonPoolRejected)
+	}
+	if errors.Is(err, errSubmissionPending) {
+		// The intent is saved and OPS delivers it: the transaction may still
+		// execute. Check its status, or resend the same signed transaction.
+		result := p.nodeExecutionError(ctx, req, http.StatusServiceUnavailable, "execution service unavailable; the transaction may still execute: check its status or resend it unchanged", ReasonExecutionUnavailable)
 		result.Error.RetryAfter = 1
 		return result
 	}

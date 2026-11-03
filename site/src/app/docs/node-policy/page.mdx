@@ -118,8 +118,9 @@ until the node reports finality. OPS then registers successful CREATE/CREATE2
 results and commits visibility bookkeeping. Wait for `reconciled: true` before
 depending on automatic deployment registration. A missing receipt, a policy
 denial or an expired identity does not prove that an already-running candidate
-cannot be included. OPS observes these states without automatically resending
-the transaction.
+cannot be included. While a transaction is pending, OPS keeps it deliverable
+itself (see [Renewal and recovery](#renewal-and-recovery)); the sender does not
+need to resend it after a node restart.
 
 ## Shared signers and service principals
 
@@ -165,8 +166,10 @@ Reth mode also needs the execution-tracking database
 [Configuration](/docs/configuration#execution-tracking-database-reth-mode)).
 In production it belongs on its own PostgreSQL instance.
 
-The default fact lifetime is 30 seconds, publication interval one second and
-identity lifetime one minute. OPS publishes a fact change as soon as it
+The default fact lifetime is 30 seconds, publication interval one second,
+simulation identity lifetime one minute (`OPS_NODE_POLICY_IDENTITY_TTL`) and
+transaction identity lifetime five minutes
+(`OPS_NODE_POLICY_TRANSACTION_IDENTITY_TTL`, 120 to 600 seconds). OPS publishes a fact change as soon as it
 commits; the publication interval is the heartbeat that renews the facts'
 lifetime and the fallback while change notifications are interrupted. Only
 changes to what the node enforces start a publication: memberships and their
@@ -182,12 +185,16 @@ publication:
 | --- | --- | --- |
 | `OPS_NODE_POLICY_CONTROL_CONNS` | 4 | fact publication and node status |
 | `OPS_NODE_POLICY_TRANSACTION_CONNS` | 64 | transaction submission and simulation |
-| `OPS_NODE_POLICY_RECOVERY_CONNS` | 16 | transaction outcome checks |
+| `OPS_NODE_POLICY_RECOVERY_CONNS` | 16 | transaction outcome checks and renewals |
 
 Each accepts 1 to 1024. Requests beyond a pool's size wait for one of its
 connections. The guarded Reth node's private listener accepts at most 128
-connections; keep the sum of all three pools across every OPS instance within
-it (84 per instance at the defaults).
+connections by default; keep the sum of all three pools across every OPS
+instance within it (84 per instance at the defaults). When the node also runs
+its separate control listener (`OPS_NODE_POLICY_CONTROL_LISTEN` on the node),
+set `OPS_NODE_POLICY_CONTROL_URL` to it: fact publication and readiness checks
+then use that listener, and only the transaction and recovery pools count
+against the main listener's limit.
 
 OPS checks the node's readiness in the background every second and, on every
 instance, right after each publication, not once per request. Every request
@@ -207,19 +214,45 @@ take every instance out of a load balancer at once.
 
 OPS records which principal submitted each transaction before it sends the
 transaction to the node, so another principal sharing the signing key cannot
-take it over, even after a node restart. Concurrent submissions share one
-database commit. A submission the node refuses because publication is pending
-(above) leaves nothing behind: resend the same signed transaction. A
-transaction already final is answered with its hash and not sent again.
+take it over, even after a node restart: such a submission is refused with 409
+and one generic message, before any compliance step runs. Concurrent
+submissions share one database commit. A submission the node refuses because
+publication is pending (above) leaves nothing behind: resend the same signed
+transaction. A transaction already final is answered with its hash and not
+sent again.
+
+Once OPS has recorded a submission, an error answer does not mean it was
+refused:
+
+| Answer | Meaning | What to do |
+|---|---|---|
+| 503, `Retry-After: 1`, reason `publication_pending` | Nothing was kept | Resend the same signed transaction |
+| 503, `Retry-After: 1`, "the transaction may still execute" | Recorded; delivery to the node failed | Check its status, or resend it unchanged (idempotent) |
+| 409, "nonce is already used or held by another pending transaction" | The node's pool refused its nonce. OPS stops renewing it; it can still settle if the competing transaction disappears | Check its status; replace it at the same nonce if needed |
+| 409, "conflicts with an earlier submission" | The signed transaction is bound to another submission | Do not retry |
 
 The owner can follow a transaction at `GET /api/v1/me/transactions/{hash}/execution`:
 
 | Status | Meaning | Final |
 |---|---|---|
-| `pending` | Submitted; waiting for inclusion | no |
+| `pending` | Submitted; waiting for inclusion. OPS keeps it deliverable | no |
 | `provisional` | Included in a block that is not finalized yet; it can still return to `pending` after a reorganization | no |
+| `renewal_stopped` | OPS no longer renews it (see the reason). It can still be included while its last identity is valid, and is then reported as included | no |
 | `included` | Executed in a finalized block | yes |
 | `reverted` | Reverted in a finalized block | yes |
+| `dropped` | Can never execute: a finalized transaction used its nonce (reason `nonce_consumed`) | yes |
+
+A `renewal_stopped` transaction carries one reason: `max_age` (pending longer
+than `OPS_NODE_POLICY_MAX_AGE`), `principal_banned`, `kyc_missing`,
+`not_member`, `organization_deleted`, `principal_deleted`,
+`method_not_allowed`, `sender_unlinked`, `visible_to_not_allowed`,
+`compliance_denied` (a re-check refused it), `nonce_conflict` /
+`replaced_in_pool` (the node's pool refused its nonce), or `node_rejected` (the
+node kept refusing a renewed identity). Resending the same
+signed transaction as the same principal is a new submission with every check.
+OPS reports `dropped` only once a finalized block has used the transaction's
+nonce and the transaction itself was never included; an expired identity alone
+never makes a transaction final.
 
 Final statuses are kept for `RETENTION_NODE_SUBMISSIONS` (7 days by default)
 and then the lookup answers 404. Ownership of deployed contracts and
@@ -259,3 +292,74 @@ finality depth. Its local finality behavior is for testing and does not establis
 external consensus. Use the repository's `docs/implementation/ops-reth-stack.md`
 for the isolated stack and acceptance commands. Keep node state and OPS databases
 persistent across restarts.
+
+## Renewal and recovery
+
+A transaction identity lets the node execute a transaction only while it is
+valid and only on the node process that received it: the node keeps pending
+identities in memory, so a node restart forgets them. The elected OPS instance
+runs a lease keeper that gives a pending transaction a new identity when the
+node no longer holds it:
+
+- it was recorded but never delivered (for example, OPS stopped between
+  recording it and sending it, or the send failed);
+- the node restarted (OPS sees a new node boot id), whether gracefully or after
+  a crash;
+- the node's pool lost it while its identity was still registered;
+- its identity is about to expire while it is still pending (within a quarter
+  of the transaction identity lifetime).
+
+A transaction that a reorganization returns to pending keeps its identity on
+the node until finality and needs no renewal unless one of the above applies.
+
+Every renewal first runs the whole admission check again on current data: the
+principal (deleted, banned, KYC), the organization and the membership, the
+method and the target contract, the linked signer, the read profile's
+`visibleTo` rule and compliance. Compliance re-evaluates every rule but accepts
+only the travel-rule record already bound to this transaction and never claims
+another one. A refusal stops renewal with that reason (`renewal_stopped`, not
+final); an infrastructure error is retried and decides nothing. A renewed
+identity carries the current fact version, so a revocation committed before the
+renewal always applies. OPS renews for at most `OPS_NODE_POLICY_MAX_AGE`
+(default 10 minutes, at least the transaction identity lifetime, at most 60
+minutes) after the transaction was submitted; after that it reports
+`renewal_stopped` with the reason `max_age`.
+
+The node itself enforces bans, KYC, memberships, linked signers, contract
+access and sanctions on current facts at execution. Checks that only OPS
+performs — the method allowlist, compliance and the read profile's `visibleTo`
+rule — are re-run at each renewal, so a change to them reaches a transaction
+that is already pending within one transaction identity lifetime (five minutes
+by default); a shorter `OPS_NODE_POLICY_TRANSACTION_IDENTITY_TTL` narrows that
+window.
+
+Renewals are sent only to a ready node, on the connection pool for outcome
+checks (`OPS_NODE_POLICY_RECOVERY_CONNS`). After a two-minute node outage, the
+pending transactions are renewed and included without any client action; a
+principal revoked meanwhile is not renewed, and its transactions never execute.
+
+Each renewal is an automated re-authorization performed by OPS on behalf of the
+original principal. It is recorded in the audit access log before it takes
+effect (as `ops.system.recovery`, or `ops.system.identity_renewal` for an
+expiring identity) with the principal, the organization, the transaction and
+the reason; refusals, stops and `dropped` decisions are recorded the same way
+(`ops.system.renewal_refused`, `ops.system.renewal_stopped`,
+`ops.system.dropped`). Without the durable audit buffer (`AUDIT_BUFFER_DIR`),
+OPS takes none of these decisions.
+
+If the execution-tracking database is lost or recreated, transactions in
+flight at that moment lose their OPS follow-up: a deployment that finalizes
+afterwards is not registered automatically. A named human with full authority
+over the deploying organization can register it from the node's finalized
+evidence with `POST /api/v1/admin/orgs/{org_id}/execution/ownership-recovery`
+(`{"transactionHash": "0x…"}`), within the node's evidence retention
+(`OPS_NODE_POLICY_MANIFEST_RETENTION` on the node). It applies at most once per
+transaction, never registers an address another organization owns, and is
+recorded in the RBAC audit log. Any transaction that is unknown, not final, not
+a deployment or not that organization's answers the same 404.
+
+To decide `dropped` and to notice a
+transaction the node's pool lost, OPS also reads the node's public RPC
+(`NODE_URL`): point it at the same single node as the private endpoint, not at
+a load-balanced pool of nodes. OPS records `dropped` only after the same
+evidence was read twice, at least 30 seconds apart.

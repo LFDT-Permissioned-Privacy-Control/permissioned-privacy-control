@@ -21,6 +21,9 @@ type trackingStore interface {
 	FlushAcks(context.Context, uuid.UUID, []db.TrackAck) (map[string]bool, error)
 	ApplyTransitions(context.Context, uuid.UUID, []db.TrackTransition) ([]bool, error)
 	FinalizeBatch(context.Context, uuid.UUID, []db.TrackFinal) ([]bool, error)
+	RenewBatch(context.Context, uuid.UUID, []db.TrackRenewal) ([]bool, error)
+	TrackedBatch(context.Context, [][]byte) ([]db.TrackedTransaction, error)
+	TrackedPayloads(context.Context, [][]byte) (map[string][]byte, error)
 	LookupTracked(context.Context, []byte) (db.TrackedTransaction, error)
 	TrackingHorizon(context.Context) (uint64, error)
 	ListTracked(context.Context, uint64, uint64, []byte, int) ([]db.TrackedTransaction, error)
@@ -99,6 +102,7 @@ type admitReply struct {
 type pendingAck struct {
 	generation int32
 	inc        uuid.UUID
+	boot       uuid.UUID
 	at         time.Time
 }
 
@@ -251,10 +255,27 @@ func (t *nodeTracking) release(ctx context.Context, inc uuid.UUID, hash []byte, 
 	}
 }
 
+// stop is the transition of a binding whose delivery the node's pool refused
+// definitively (-32013): pending → renewal_stopped at the generation the
+// request recorded, so the keeper does not renew it (not final, §4.8.1).
+func (t *nodeTracking) stop(ctx context.Context, inc uuid.UUID, hash []byte, generation int32, reason int16) {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, err := t.store.ApplyTransitions(writeCtx, inc, []db.TrackTransition{{Hash: hash, From: db.TrackPending, To: db.TrackRenewalStopped, Generation: generation, Reason: reason}}); err != nil && !trackingRecreated(err) {
+		if suppressed, ok := t.log.Allow("stop:"+nodeErrorClass(err), time.Now(), failureLogEvery); ok {
+			slog.Warn("execution-tracking stop failed; the keeper rediscovers the pool refusal", "error", err, "suppressed", suppressed)
+		}
+	}
+}
+
 // ack records a delivery acknowledgement in memory only (G14: nothing is
-// written on the request path). It is written later only if the row has
-// not reached another transition first (R12.6).
-func (t *nodeTracking) ack(hash []byte, generation int32, inc uuid.UUID) {
+// written on the request path), against the boot id of the node response
+// that carried it (G35). It is written later only if the row has not reached
+// another transition first (R12.6).
+func (t *nodeTracking) ack(hash []byte, generation int32, inc, boot uuid.UUID) {
+	if boot == uuid.Nil {
+		return
+	}
 	t.ackMu.Lock()
 	defer t.ackMu.Unlock()
 	if len(t.acks) >= ackBufferMax {
@@ -264,7 +285,7 @@ func (t *nodeTracking) ack(hash []byte, generation int32, inc uuid.UUID) {
 	if prior, ok := t.acks[key]; ok && prior.generation > generation {
 		return
 	}
-	t.acks[key] = pendingAck{generation: generation, inc: inc, at: time.Now()}
+	t.acks[key] = pendingAck{generation: generation, inc: inc, boot: boot, at: time.Now()}
 }
 
 func (t *nodeTracking) ackLoop(ctx context.Context) {
@@ -291,7 +312,7 @@ func (t *nodeTracking) flushAcks(ctx context.Context, before time.Time) {
 			continue
 		}
 		if a.at.Before(before) {
-			due = append(due, db.TrackAck{Hash: []byte(key), Generation: a.generation})
+			due = append(due, db.TrackAck{Hash: []byte(key), Generation: a.generation, Boot: a.boot})
 		}
 	}
 	t.ackMu.Unlock()
@@ -309,7 +330,7 @@ func (t *nodeTracking) flushAcks(ctx context.Context, before time.Time) {
 		t.ackMu.Lock()
 		for _, a := range chunk {
 			if settled[string(a.Hash)] {
-				if prior, ok := t.acks[string(a.Hash)]; ok && prior.generation == a.Generation {
+				if prior, ok := t.acks[string(a.Hash)]; ok && prior.generation == a.Generation && prior.boot == a.Boot {
 					delete(t.acks, string(a.Hash))
 				}
 			}

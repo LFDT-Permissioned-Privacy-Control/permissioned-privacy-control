@@ -25,6 +25,9 @@ type executionTracking struct {
 	// dedicated: the tracking database is not DATABASE_URL (development may
 	// co-locate); its migrations then refuse a foreign schema.
 	dedicated bool
+	// payloadKeep: how long a payload bucket is kept after its last use
+	// (nodeTxPayloadKeepFor the configured maximum age).
+	payloadKeep time.Duration
 }
 
 // openExecutionTracking opens the tracking database the way the audit
@@ -111,14 +114,30 @@ func (t *executionTracking) close(main *db.DB) {
 const (
 	// trackingPartitionsAhead: daily status/history partitions kept ahead.
 	trackingPartitionsAhead = 7
-	// nodeTxMaxAge is the plan's maximum age of a transaction identity
-	// (10 minutes); no identity created for a binding is valid after it.
+	// nodeTxMaxAge is the default maximum age of a transaction identity
+	// (OPS_NODE_POLICY_MAX_AGE, 10 minutes): the lease keeper renews a
+	// binding at most this long after admission.
 	nodeTxMaxAge = 10 * time.Minute
-	// nodeTxPayloadKeep: a payload bucket is truncated once its last use ended
-	// this long ago — the maximum age, the node's default finality bound
-	// (64 s) and a margin.
+	// nodeTxPayloadKeep is nodeTxPayloadKeepFor(nodeTxMaxAge).
 	nodeTxPayloadKeep = nodeTxMaxAge + 64*time.Second + 5*time.Minute
 )
+
+// nodeTxPayloadKeepFor: a payload bucket is truncated once its last use
+// ended this long ago — the maximum age (no renewal needs the raw transaction
+// after it), the node's default finality bound (64 s) and a margin.
+func nodeTxPayloadKeepFor(maxAge time.Duration) time.Duration {
+	if maxAge <= 0 {
+		return nodeTxPayloadKeep
+	}
+	return maxAge + 64*time.Second + 5*time.Minute
+}
+
+func (t *executionTracking) keep() time.Duration {
+	if t.payloadKeep > 0 {
+		return t.payloadKeep
+	}
+	return nodeTxPayloadKeep
+}
 
 // adopt returns the re-initialisation of a recreated tracking database (the
 // surviving instance adopts it, G59): migrate, record the network, create the
@@ -134,7 +153,7 @@ func (t *executionTracking) adopt(network nodepolicy.Network) func(context.Conte
 		if err != nil {
 			return uuid.Nil, err
 		}
-		if err := ensureTrackingPartitions(ctx, t.admin); err != nil {
+		if err := ensureTrackingPartitions(ctx, t.admin, t.keep()); err != nil {
 			return uuid.Nil, err
 		}
 		if seen, err := t.runtime.TrackingMeta(ctx); err != nil || seen != meta {
@@ -150,10 +169,15 @@ type trackingRetention struct {
 	admin   *db.ExecAdminDB
 	main    *db.DB
 	network nodepolicy.Network
+	keep    time.Duration
 }
 
 func (r trackingRetention) MaintainTracking(ctx context.Context, retention time.Duration) (audit.TrackingMaintenanceResult, error) {
-	done, err := r.admin.MaintainTracking(ctx, trackingPartitionsAhead, retention, nodeTxPayloadKeep)
+	keep := r.keep
+	if keep <= 0 {
+		keep = nodeTxPayloadKeep
+	}
+	done, err := r.admin.MaintainTracking(ctx, trackingPartitionsAhead, retention, keep)
 	return audit.TrackingMaintenanceResult{Created: done.Created, Dropped: done.Dropped, Truncated: done.Truncated, Skipped: done.Skipped}, err
 }
 
@@ -167,8 +191,8 @@ func (r trackingRetention) PruneNodeEffects(ctx context.Context, olderThan time.
 // ensureTrackingPartitions runs one maintenance pass and fails only when the
 // partitions finalization needs (today, tomorrow) are missing; anything else
 // it could not do (a lock timeout) is retried by the retention pass.
-func ensureTrackingPartitions(ctx context.Context, admin *db.ExecAdminDB) error {
-	_, err := admin.MaintainTracking(ctx, trackingPartitionsAhead, 0, nodeTxPayloadKeep)
+func ensureTrackingPartitions(ctx context.Context, admin *db.ExecAdminDB, keep time.Duration) error {
+	_, err := admin.MaintainTracking(ctx, trackingPartitionsAhead, 0, keep)
 	if err == nil {
 		return nil
 	}

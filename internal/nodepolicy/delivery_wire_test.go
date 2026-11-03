@@ -235,3 +235,52 @@ func TestBatchedTransactionStatusesAreStrict(t *testing.T) {
 		t.Fatalf("oversized batch sent: %v", err)
 	}
 }
+
+// A2 P5: with a control URL, fact publication and node status go to the
+// node's control listener; everything else stays on the main listener.
+func TestControlLaneUsesTheControlListener(t *testing.T) {
+	expected, identity, rawTx := signedSubmissionFixture(t, false)
+	var main, control atomic.Int64
+	serve := func(counter *atomic.Int64) *httptest.Server {
+		return rpcServer(t, func(method string, _ []json.RawMessage) (any, string) {
+			counter.Add(1)
+			if method == "ops_policyStatus" {
+				return readyStatus(testBootID), ""
+			}
+			return map[string]any{"transaction_hash": expected.BindingHash, "context_id": expected.ContextID, "status": "accepted", "boot_id": testBootID}, ""
+		})
+	}
+	mainServer, controlServer := serve(&main), serve(&control)
+	defer mainServer.Close()
+	defer controlServer.Close()
+	c, err := NewPooledClient(mainServer.URL, "private-test-token", identityFixture().Network, DefaultLanes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WithControlEndpoint("http://user:secret@example.invalid"); err == nil {
+		t.Fatal("a control URL with credentials accepted")
+	}
+	if err := c.WithControlEndpoint(controlServer.URL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.PolicyStatus(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SubmitTransaction(context.Background(), identity, rawTx); err != nil {
+		t.Fatal(err)
+	}
+	if control.Load() != 1 || main.Load() != 1 {
+		t.Fatalf("control=%d main=%d, want 1/1", control.Load(), main.Load())
+	}
+}
+
+// Only the node's own opaque refusal (-32000) counts as a definitive answer
+// about a transaction; internal errors and limits do not.
+func TestNodeRefusedIsTheOpaqueRefusalOnly(t *testing.T) {
+	if !NodeRefused(&RejectedError{Code: -32000}) || NodeRefused(&RejectedError{Code: -32603}) || NodeRefused(ErrNodeUnavailable) || NodeRefused(ErrNodeRejected) {
+		t.Fatal("NodeRefused misclassifies")
+	}
+	if !errors.Is(&RejectedError{Code: -32603}, ErrNodeRejected) {
+		t.Fatal("a rejection is a node rejection")
+	}
+}

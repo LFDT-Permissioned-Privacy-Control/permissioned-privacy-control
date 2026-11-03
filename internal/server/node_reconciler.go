@@ -27,6 +27,13 @@ type nodeOutcomeClient interface {
 	TransactionStatus(context.Context, string) (nodepolicy.TransactionStatus, error)
 }
 
+// batchedOutcomeClient is reconciliation option A (plan §4.5, G9): up to
+// nodepolicy.MaxStatusBatch hashes per call, used while the node advertises
+// nodepolicy.CapabilityTransactionStatuses.
+type batchedOutcomeClient interface {
+	TransactionStatuses(context.Context, []string) (nodepolicy.TransactionStatusBatch, error)
+}
+
 // nodeEffectsStore is the main-database side of finality: the exactly-once
 // effects transaction and the principal DIDs of the audit events.
 type nodeEffectsStore interface {
@@ -69,6 +76,20 @@ type trackedRow struct {
 	// audited: the finality event of this binding was appended; a retried
 	// finalization in the same term is not audited again.
 	audited bool
+
+	// Lease keeper state (in memory, per term): not a keeper candidate before
+	// keepAt; flag is a trigger the reconciler observed (evicted); resend is a
+	// recorded generation whose delivery is retried; dropAt spaces dropped
+	// evidence reads; evictAt spaces pool checks.
+	forcePoll   bool // re-poll a provisional row above the head (canonical change)
+	keepAt      time.Time
+	keepBackoff time.Duration
+	flag        int16
+	resend      *keeperResend
+	dropAt      time.Time
+	dropSeen    time.Time // first read of dropped evidence (two are required)
+	refreshAt   time.Time // next re-read of a stopped row
+	evictAt     time.Time
 }
 
 type nodeReconciler struct {
@@ -85,7 +106,18 @@ type nodeReconciler struct {
 	rows    map[string]*trackedRow
 	cursor  uint64 // admit_xid discovered below
 	scanned bool
-	head    uint64 // highest finalized block seen
+	// head and headHash: the highest effective finalized block the node
+	// reported (final and written).
+	head     uint64
+	headHash string
+	// canonical: the node's canonical epoch from batched status answers; a
+	// change re-polls every provisional row (a reorg below the head).
+	canonical     uint64
+	canonicalBoot string
+	canonicalSeen bool
+	// batched reports whether the node advertises the batched status call.
+	batched func() bool
+	keeper  *nodeKeeper
 }
 
 func newNodeReconciler(tracking *nodeTracking, main nodeEffectsStore, node nodeOutcomeClient, audit systemAuditBuffer, network nodepolicy.Network) *nodeReconciler {
@@ -111,8 +143,11 @@ func runNodeReconciler(ctx context.Context, r *nodeReconciler) {
 
 // reset drops the schedule: the next tick rescans the tracking database.
 func (r *nodeReconciler) reset() {
-	r.rows, r.cursor, r.scanned, r.head = map[string]*trackedRow{}, 0, false, 0
+	r.rows, r.cursor, r.scanned, r.head, r.headHash, r.canonicalSeen = map[string]*trackedRow{}, 0, false, 0, "", false
 	r.inc, r.epoch = r.tracking.incarnation(), r.tracking.epoch.Load()
+	if r.keeper != nil {
+		r.keeper.reset()
+	}
 }
 
 // tick runs one reconciliation pass.
@@ -124,7 +159,11 @@ func (r *nodeReconciler) tick(ctx context.Context) error {
 		return r.recreated(ctx, err)
 	}
 	observations := r.poll(ctx)
-	return r.recreated(ctx, r.apply(ctx, observations))
+	err := r.apply(ctx, observations)
+	if r.keeper != nil && !trackingRecreated(err) {
+		err = errors.Join(err, r.keeper.tick(ctx, r))
+	}
+	return r.recreated(ctx, err)
 }
 
 // recreated adopts a recreated tracking database and resets the schedule.
@@ -176,6 +215,9 @@ type observation struct {
 	tracked *trackedRow
 	status  nodepolicy.TransactionStatus
 	err     error
+	// pooled: the batched answer's pool flag for a not-included transaction
+	// (nil: unknown, the single call does not report it).
+	pooled *bool
 }
 
 // due reports whether a row is polled this tick. Provisional rows are polled
@@ -188,7 +230,7 @@ func (r *nodeReconciler) due(now time.Time) []*trackedRow {
 		if t.nextPoll.After(now) {
 			continue
 		}
-		if t.row.State == db.TrackProvisional && t.row.BlockNumber != nil && *t.row.BlockNumber > r.head {
+		if t.row.State == db.TrackProvisional && t.row.BlockNumber != nil && *t.row.BlockNumber > r.head && !t.forcePoll {
 			if lowest == nil || *t.row.BlockNumber < *lowest.row.BlockNumber {
 				lowest = t
 			}
@@ -207,6 +249,9 @@ func (r *nodeReconciler) due(now time.Time) []*trackedRow {
 
 func (r *nodeReconciler) poll(ctx context.Context) []observation {
 	rows := r.due(r.now())
+	if client, ok := r.node.(batchedOutcomeClient); ok && r.batched != nil && r.batched() && len(rows) > 0 {
+		return r.pollBatched(ctx, client, rows)
+	}
 	out := make([]observation, len(rows))
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, reconcilePollWorkers)
@@ -234,6 +279,83 @@ func (r *nodeReconciler) poll(ctx context.Context) []observation {
 	return out
 }
 
+// unknownContext stands for an executed context that is not a UUID OPS
+// issued: it never matches a binding's current context.
+var unknownContext = uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff")
+
+// reconcileBatchCalls bounds the batched status calls in flight per tick.
+const reconcileBatchCalls = 4
+
+// pollBatched is option A: the due rows in batches of MaxStatusBatch, a few
+// calls at a time. The batch's finalized head advances the head; a change of
+// the canonical epoch (a reorg) re-polls every provisional row next tick.
+func (r *nodeReconciler) pollBatched(ctx context.Context, client batchedOutcomeClient, rows []*trackedRow) []observation {
+	out := make([]observation, len(rows))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	slots := make(chan struct{}, reconcileBatchCalls)
+	type epochSeen struct {
+		epoch uint64
+		boot  string
+	}
+	var epochs []epochSeen
+	for start := 0; start < len(rows); start += nodepolicy.MaxStatusBatch {
+		chunk := rows[start:min(start+nodepolicy.MaxStatusBatch, len(rows))]
+		slots <- struct{}{}
+		wg.Add(1)
+		go func(start int, chunk []*trackedRow) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			hashes := make([]string, len(chunk))
+			for i, t := range chunk {
+				hashes[i] = t.hashHex
+			}
+			request, cancel := context.WithTimeout(ctx, reconcileStatusWait)
+			defer cancel()
+			batch, err := client.TransactionStatuses(request, hashes)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				epochs = append(epochs, epochSeen{batch.CanonicalEpoch, batch.BootID})
+				if f := batch.Finalized; f != nil && f.Number > r.head {
+					r.head, r.headHash = f.Number, f.Hash
+				}
+			}
+			for i, t := range chunk {
+				o := observation{tracked: t, err: err}
+				if err == nil {
+					entry := batch.Statuses[i]
+					switch {
+					case entry == nil:
+						o.err = nodepolicy.ErrNodeRejected // unknown to the node
+					case entry.Status.PrincipalID != t.row.PrincipalID.String() || entry.Status.OrgID != t.row.OrgID.String():
+						o.err = nodepolicy.ErrNodeResponse
+					default:
+						pooled := entry.Pooled
+						o.status, o.pooled = entry.Status, &pooled
+					}
+				}
+				out[start+i] = o
+			}
+		}(start, chunk)
+	}
+	wg.Wait()
+	// The epoch counts within one node process: a different value, or a new
+	// boot (a restart may have truncated unwritten blocks), re-polls every
+	// provisional row once and is adopted.
+	for _, seen := range epochs {
+		if r.canonicalSeen && (seen.epoch != r.canonical || seen.boot != r.canonicalBoot) {
+			for _, t := range r.rows {
+				if t.row.State == db.TrackProvisional {
+					t.nextPoll, t.forcePoll = time.Time{}, true
+				}
+			}
+		}
+		r.canonical, r.canonicalBoot, r.canonicalSeen = seen.epoch, seen.boot, true
+	}
+	return out
+}
+
 // apply turns one tick's observations into batched writes: provisional and
 // reorg transitions in one batch; finals audited first, then their main-
 // database effects, then one finality batch. Unchanged observations write
@@ -243,6 +365,7 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 	var transitions []db.TrackTransition
 	var finals []*observation
 	var failures []error
+	var evictChecks []*trackedRow
 	for i := range observations {
 		o := &observations[i]
 		t := o.tracked
@@ -254,11 +377,12 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 			}
 			continue
 		}
-		t.backoff, t.failures, t.nextPoll = 0, 0, now.Add(reconcileTick)
+		t.backoff, t.failures, t.nextPoll, t.forcePoll = 0, 0, now.Add(reconcileTick), false
 		outcome := o.status.Execution
-		if outcome.FinalizedBlockNumber != nil && *outcome.FinalizedBlockNumber > r.head {
-			r.head = *outcome.FinalizedBlockNumber
+		if outcome.FinalizedBlockNumber != nil && *outcome.FinalizedBlockNumber > r.head && outcome.FinalizedBlockHash != nil {
+			r.head, r.headHash = *outcome.FinalizedBlockNumber, *outcome.FinalizedBlockHash
 		}
+		answered, _ := uuid.Parse(o.status.BootID)
 		switch {
 		case outcome.Finalized && (outcome.Status == "included" || outcome.Status == "reverted"):
 			finals = append(finals, o)
@@ -266,7 +390,11 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 			switch t.row.State {
 			case db.TrackPending, db.TrackRenewalStopped:
 				block := *outcome.BlockNumber
-				transitions = append(transitions, db.TrackTransition{Hash: t.row.Hash, From: t.row.State, To: db.TrackProvisional, BlockNumber: &block})
+				executed, err := uuid.Parse(o.status.ContextID)
+				if err != nil {
+					executed = unknownContext // never the current context
+				}
+				transitions = append(transitions, db.TrackTransition{Hash: t.row.Hash, From: t.row.State, To: db.TrackProvisional, BlockNumber: &block, Boot: answered, ContextID: executed})
 			case db.TrackTombstone:
 				// Revived since it was read: re-read, transition next tick.
 				r.refresh(ctx, t)
@@ -281,8 +409,21 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 				t.backoff = min(max(2*t.backoff, 2*time.Second), reconcileMaxBackoff)
 				t.nextPoll = now.Add(t.backoff)
 			}
+			// Same-boot eviction (G37): pending at the node long after
+			// admission, but no longer in its pool.
+			if t.row.State == db.TrackPending && outcome.Status == "pending" && now.Sub(t.row.CreatedAt) > keeperEvictAfter && !t.evictAt.After(now) {
+				if o.pooled != nil {
+					t.evictAt = now.Add(keeperEvictAfter)
+					if !*o.pooled {
+						r.markEvicted(t)
+					}
+				} else {
+					evictChecks = append(evictChecks, t)
+				}
+			}
 		}
 	}
+	r.checkEvictions(ctx, evictChecks, now)
 	if len(transitions) > 0 {
 		applied, err := r.tracking.store.ApplyTransitions(ctx, r.inc, transitions)
 		if err != nil {
@@ -297,6 +438,13 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 			}
 			if ok {
 				t.row.State, t.row.BlockNumber = transitions[i].To, transitions[i].BlockNumber
+				if transitions[i].To == db.TrackProvisional && transitions[i].Boot != uuid.Nil && (transitions[i].ContextID == uuid.Nil || transitions[i].ContextID == t.row.ContextID) {
+					generation := t.row.Generation
+					t.row.DeliveredGeneration, t.row.DeliveredBoot = &generation, transitions[i].Boot
+				}
+				if transitions[i].To == db.TrackPending {
+					t.keepAt = time.Time{} // reorged out: the keeper reconsiders it
+				}
 			} else {
 				r.refresh(ctx, t)
 			}
@@ -308,6 +456,39 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// markEvicted flags a pending row the node's pool no longer holds: the keeper
+// renews it (the raw transaction is re-pooled with a new generation).
+func (r *nodeReconciler) markEvicted(t *trackedRow) {
+	t.flag, t.keepAt = db.TrackReasonEvicted, time.Time{}
+}
+
+// checkEvictions asks the node's public RPC whether it still holds pending
+// rows (the single status call does not report the pool). A transaction the
+// node holds in neither its pool nor its chain was evicted; an unavailable
+// answer decides nothing.
+func (r *nodeReconciler) checkEvictions(ctx context.Context, rows []*trackedRow, now time.Time) {
+	if len(rows) == 0 || r.keeper == nil || r.keeper.chain == nil {
+		return
+	}
+	if len(rows) > maxChainBatch {
+		rows = rows[:maxChainBatch]
+	}
+	hashes := make([]string, len(rows))
+	for i, t := range rows {
+		hashes[i] = t.hashHex
+		t.evictAt = now.Add(keeperEvictAfter)
+	}
+	known, err := r.keeper.chain.Known(ctx, hashes)
+	if err != nil {
+		return
+	}
+	for _, t := range rows {
+		if !known[t.hashHex] {
+			r.markEvicted(t)
+		}
+	}
 }
 
 // refresh re-reads a row whose transition did not apply or keeps failing

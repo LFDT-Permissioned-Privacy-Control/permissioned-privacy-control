@@ -469,14 +469,21 @@ func TestReleaseUndeliveredOnlyFreshInsert(t *testing.T) {
 
 // TestAckIsCoalescedIntoTheNextTransition is R12.6: an acknowledgement of a
 // row that already went provisional or final writes nothing; the provisional
-// transition itself records the delivery, and a reorg back clears it.
+// transition itself records the delivery to the node boot that observed the
+// inclusion, and a reorg back keeps it: that node process still holds the
+// identity until finality, so the row needs no renewal unless the boot
+// changes, the lease runs out or the pool loses it (B3b).
 func TestAckIsCoalescedIntoTheNextTransition(t *testing.T) {
 	f := newTrackingFixture(t)
 	ctx := context.Background()
 	p := newPrincipal()
 	h := randomBytes(32)
 	require.Equal(t, AdmitInserted, f.admitOne(0, p.admit(h)).Outcome)
-	require.True(t, f.transition(h, TrackPending, TrackProvisional, 0))
+	boot := uuid.New()
+	block := uint64(9)
+	applied, err := f.exec.ApplyTransitions(ctx, f.inc, []TrackTransition{{Hash: h, From: TrackPending, To: TrackProvisional, BlockNumber: &block, Boot: boot}})
+	require.NoError(t, err)
+	require.Equal(t, []bool{true}, applied)
 	var delivered sql.NullInt32
 	require.NoError(t, f.exec.pool.conn.QueryRow(`SELECT delivered_generation FROM node_tx_binding WHERE tx_hash = $1`, h).Scan(&delivered))
 	require.True(t, delivered.Valid && delivered.Int32 == 1, "inclusion records the delivery")
@@ -486,8 +493,10 @@ func TestAckIsCoalescedIntoTheNextTransition(t *testing.T) {
 	require.True(t, settled[string(h)], "nothing left to record")
 	require.Equal(t, before, tableMutations(t, f.exec.pool.conn, "node_tx_binding"), "the late acknowledgement writes nothing")
 	require.True(t, f.transition(h, TrackProvisional, TrackPending, 0))
-	require.NoError(t, f.exec.pool.conn.QueryRow(`SELECT delivered_generation FROM node_tx_binding WHERE tx_hash = $1`, h).Scan(&delivered))
-	require.False(t, delivered.Valid, "a reorged-out row is undelivered again")
+	row, err := f.exec.LookupTracked(ctx, h)
+	require.NoError(t, err)
+	require.True(t, row.DeliveredTo(boot), "a reorged-out row stays delivered to the boot that holds its identity")
+	require.False(t, row.DeliveredTo(uuid.New()), "and is undelivered for any other boot")
 }
 
 // TestTrackingLifecycleRowMutations proves R12.6's budget: a normal lifecycle

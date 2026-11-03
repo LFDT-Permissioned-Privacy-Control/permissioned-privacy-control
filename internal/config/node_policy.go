@@ -9,8 +9,11 @@ import (
 )
 
 type NodePolicyConfig struct {
-	Mode            string
-	URL             string
+	Mode string
+	URL  string
+	// ControlURL (optional) is the node's control listener; fact publication
+	// and node status use it instead of URL.
+	ControlURL      string
 	Token           string
 	PrivateKeyFile  string
 	KeyID           string
@@ -19,7 +22,13 @@ type NodePolicyConfig struct {
 	ConsumerID      string
 	FactTTL         time.Duration
 	PublishInterval time.Duration
-	IdentityTTL     time.Duration
+	// IdentityTTL is the lifetime of simulation identities.
+	IdentityTTL time.Duration
+	// TransactionIdentityTTL is the lease of a transaction identity, renewed
+	// by the lease keeper while the transaction is pending (plan §4.8.2);
+	// MaxAge bounds how long after admission it is renewed at all.
+	TransactionIdentityTTL time.Duration
+	MaxAge                 time.Duration
 	// Connection lanes to the private node (RD-1410): bounded
 	// keep-alive pools for fact publication/status, transactions and outcome
 	// status. The node's connection limit must cover the sum over instances.
@@ -44,7 +53,7 @@ func loadNodePolicy(get func(string) string) NodePolicyConfig {
 		}
 		return fallback
 	}
-	c := NodePolicyConfig{Mode: value("OPS_NODE_POLICY_MODE", "legacy"), URL: value("OPS_NODE_POLICY_URL", ""), Token: value("OPS_NODE_POLICY_TOKEN", ""), PrivateKeyFile: value("OPS_NODE_POLICY_PRIVATE_KEY_FILE", ""), KeyID: value("OPS_NODE_POLICY_KEY_ID", ""), DeploymentID: value("OPS_NODE_POLICY_DEPLOYMENT_ID", ""), ConsumerID: value("OPS_NODE_POLICY_CONSUMER_ID", "producer")}
+	c := NodePolicyConfig{Mode: value("OPS_NODE_POLICY_MODE", "legacy"), URL: value("OPS_NODE_POLICY_URL", ""), ControlURL: value("OPS_NODE_POLICY_CONTROL_URL", ""), Token: value("OPS_NODE_POLICY_TOKEN", ""), PrivateKeyFile: value("OPS_NODE_POLICY_PRIVATE_KEY_FILE", ""), KeyID: value("OPS_NODE_POLICY_KEY_ID", ""), DeploymentID: value("OPS_NODE_POLICY_DEPLOYMENT_ID", ""), ConsumerID: value("OPS_NODE_POLICY_CONSUMER_ID", "producer")}
 	if !c.Enabled() {
 		return c
 	}
@@ -70,6 +79,7 @@ func loadNodePolicy(get func(string) string) NodePolicyConfig {
 		dst           *time.Duration
 	}{
 		{"OPS_NODE_POLICY_FACT_TTL", "30s", &c.FactTTL}, {"OPS_NODE_POLICY_PUBLISH_INTERVAL", "1s", &c.PublishInterval}, {"OPS_NODE_POLICY_IDENTITY_TTL", "1m", &c.IdentityTTL},
+		{"OPS_NODE_POLICY_TRANSACTION_IDENTITY_TTL", "300s", &c.TransactionIdentityTTL}, {"OPS_NODE_POLICY_MAX_AGE", "10m", &c.MaxAge},
 	} {
 		*duration.dst, err = time.ParseDuration(value(duration.key, duration.fallback))
 		if err != nil {
@@ -92,6 +102,12 @@ func (c NodePolicyConfig) Validate() error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("OPS_NODE_POLICY_URL must be a private HTTP(S) endpoint without embedded credentials")
 	}
+	if c.ControlURL != "" {
+		u, err := url.Parse(c.ControlURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("OPS_NODE_POLICY_CONTROL_URL must be a private HTTP(S) endpoint without embedded credentials")
+		}
+	}
 	if len(c.Token) < 16 || strings.ContainsAny(c.Token, " \r\n\t") {
 		return fmt.Errorf("OPS_NODE_POLICY_TOKEN requires at least 16 bytes without whitespace")
 	}
@@ -106,7 +122,38 @@ func (c NodePolicyConfig) Validate() error {
 	if c.FactTTL < time.Second || c.FactTTL > 10*time.Minute || c.IdentityTTL < time.Second || c.IdentityTTL > 10*time.Minute || c.PublishInterval <= 0 || c.PublishInterval > c.FactTTL/3 {
 		return fmt.Errorf("node policy lifetimes must be 1s..10m and publish interval at most one third of fact lifetime")
 	}
+	ttl, maxAge := c.TransactionLease()
+	if ttl < MinTransactionIdentityTTL || ttl > MaxTransactionIdentityTTL {
+		return fmt.Errorf("OPS_NODE_POLICY_TRANSACTION_IDENTITY_TTL must be %s..%s", MinTransactionIdentityTTL, MaxTransactionIdentityTTL)
+	}
+	if maxAge < ttl || maxAge > MaxNodePolicyMaxAge {
+		return fmt.Errorf("OPS_NODE_POLICY_MAX_AGE must be at least OPS_NODE_POLICY_TRANSACTION_IDENTITY_TTL and at most %s", MaxNodePolicyMaxAge)
+	}
 	return nil
+}
+
+// Transaction-identity lease bounds (plan §4.8.2): the node's wire allows
+// identities of up to ten minutes; the maximum age stays within the raw
+// transaction retention of the execution-tracking database.
+const (
+	MinTransactionIdentityTTL     = 120 * time.Second
+	MaxTransactionIdentityTTL     = 600 * time.Second
+	DefaultTransactionIdentityTTL = 300 * time.Second
+	DefaultNodePolicyMaxAge       = 10 * time.Minute
+	MaxNodePolicyMaxAge           = 60 * time.Minute
+)
+
+// TransactionLease returns the transaction-identity lease and the maximum
+// age; a zero field (a literal configuration without them) takes its default.
+func (c NodePolicyConfig) TransactionLease() (ttl, maxAge time.Duration) {
+	ttl, maxAge = c.TransactionIdentityTTL, c.MaxAge
+	if ttl == 0 {
+		ttl = DefaultTransactionIdentityTTL
+	}
+	if maxAge == 0 {
+		maxAge = DefaultNodePolicyMaxAge
+	}
+	return ttl, maxAge
 }
 
 // LaneSizes returns the control, transaction and recovery lane sizes; a zero
