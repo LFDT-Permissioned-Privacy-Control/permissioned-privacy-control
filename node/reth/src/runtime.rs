@@ -11,7 +11,7 @@ use crate::{
     identity::{CandidateNote, CapturedIdentity, IdentityRegistry},
     manifest::{BlockManifest, ManifestEntry},
     policy::{DiagnosticReport, PolicyFactory},
-    stream::{AppliedFacts, FactStream},
+    stream::{AppliedFacts, FactStream, Prepared},
     wire::{Identity, Network, PolicyArtifact, VerifiedIdentity, Verifier},
 };
 use alloy_evm::revm::context::TxEnv;
@@ -320,6 +320,12 @@ impl PolicyRuntime {
         Ok(())
     }
 
+    /// The single fact writer, serialised by `facts`: validate against the
+    /// installed generation, make a snapshot or delta durable (its record, the
+    /// record list, then the `facts-head` pointer), and only then install it.
+    /// A heartbeat only renews the lease: it is installed without any write
+    /// and travels in the manifests of the blocks it made fresh. Any write
+    /// error leaves the previous facts installed.
     pub fn accept_facts(
         &self,
         kind: &str,
@@ -330,10 +336,29 @@ impl PolicyRuntime {
             .facts
             .lock()
             .map_err(|_| "policy ingestion unavailable")?;
-        let facts = self.feed.accept(kind, wire, now)?;
-        let checkpoint = facts.checkpoint(&self.archive)?;
-        self.archive.set_pointer("facts-head", checkpoint)?;
-        Ok(facts)
+        match self.feed.prepare(kind, wire, now)? {
+            Prepared::Unchanged(facts) => Ok(facts),
+            Prepared::Next { base, next, record } => {
+                // A delta extends a chain whose records must already be durable.
+                if record
+                    && kind == "delta"
+                    && base.as_ref().is_some_and(|b| b.checkpoint().is_none())
+                {
+                    return Err("policy facts are not durable".into());
+                }
+                let next = if record {
+                    self.archive.put(wire)?;
+                    let list = self.archive.put(&next.record_list()?)?;
+                    self.archive.set_pointer("facts-head", list)?;
+                    next.with_checkpoint(list)
+                } else {
+                    next
+                };
+                let next = Arc::new(next);
+                self.feed.install(base.as_ref(), next.clone())?;
+                Ok(next)
+            }
+        }
     }
 
     pub fn accept_identity(&self, wire: &[u8], now: i64) -> Result<Identity, String> {
@@ -378,6 +403,10 @@ impl PolicyRuntime {
 
     pub fn pin_candidate(&self, at: i64) -> Result<Arc<ExecutionHandle>, String> {
         let facts = self.feed.pin(at, 1)?;
+        // A block may only reference facts whose records are durable.
+        if facts.checkpoint().is_none() {
+            return Err("policy facts are not durable".into());
+        }
         let facts_version = facts.version();
         ExecutionHandle::new(
             facts,
@@ -449,9 +478,15 @@ impl PolicyRuntime {
         {
             return Err("execution manifest block mismatch".into());
         }
-        let restored =
-            FactStream::restore(self.verifier.clone(), &self.archive, manifest.records, at)?;
-        let facts = restored.pin(at, manifest.facts_version)?;
+        // The record list, then the embedded heartbeat if one renewed the
+        // lease, fresh at the block timestamp; missing lease evidence fails.
+        let facts = FactStream::restore_for_block(
+            self.verifier.clone(),
+            &self.archive,
+            manifest.records,
+            manifest.lease.as_ref(),
+            at,
+        )?;
         if facts.digest() != manifest.facts_digest || facts.version() != manifest.facts_version {
             return Err("execution replay facts mismatch".into());
         }
@@ -636,8 +671,11 @@ impl ExecutionHandle {
             timestamp: block.timestamp,
             facts_version: self.facts.version(),
             facts_digest: self.facts.digest(),
-            records: self.facts.checkpoint(archive)?,
-            lease: self.facts.lease_envelope()?,
+            records: self
+                .facts
+                .checkpoint()
+                .ok_or("policy facts are not durable")?,
+            lease: self.facts.heartbeat().cloned(),
             entries,
         })?;
         Ok((

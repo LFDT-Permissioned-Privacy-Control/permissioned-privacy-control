@@ -350,3 +350,39 @@ is published" — the measured number will be the disk's full-sync rate, not the
 system's. This is a design change to the node's admission path, not a tuning
 knob; it is the next item before quoting throughput.
 
+## Node durability per transaction, per block and per fact change (2026-11-03)
+
+The admission bottleneck described in the previous section is removed. These
+counts are proven by tests against an in-memory filesystem model that counts
+every write and `sync_all` (file and directory; the one parent-directory sync
+when a new 4096-block manifest directory is created is not modelled) and keeps
+only synced state
+across a simulated crash (`node/reth/tests/common/mod.rs`):
+
+| Event | Before | Now | Test |
+|---|---|---|---|
+| Identity admission (`ops_submitTransaction`) | 4 `sync_all` under one mutex, 3 signature checks | **0 storage operations**, 1 signature check, off the async workers | `admission_performs_no_storage_io`, `submission_performs_no_storage_io_and_verifies_once`, `identity_verified_once_per_submission`, `verification_and_admission_run_off_the_async_worker` |
+| Candidate execution of a transaction | 4 `sync_all` per build attempt | **0** | `candidate_execution_writes_nothing_to_disk` |
+| Produced block | 2 per transaction (envelope) + 4 per transaction (status) + checkpoint re-put of every record + 2 (manifest) | **2** (one manifest file and its directory) | `one_manifest_publication_per_block` |
+| Snapshot or delta | checkpoint re-put of every record since the snapshot | **6** (record, record list, head pointer), independent of chain length | `fact_record_written_once_before_install_independent_of_chain_length` |
+| Heartbeat | checkpoint re-put | **0**; it travels in the manifests of the blocks it made fresh | `heartbeat_never_written_separately`, `replay_after_snapshot_expiry_uses_embedded_heartbeat` |
+| Restart | read and verify every `tx-` identity ever stored | reads the layout marker, the fact head, its record list and records only | `restart_reads_are_independent_of_history` |
+
+A block manifest embeds the decoded identity envelope (key id, exact signed
+payload, signature) and outcome of every transaction, the id of the durable
+fact record list, and the heartbeat that made the facts fresh, compressed with
+zstd in a single-file segment with a checksummed index. The fact-change cost is
+constant in operations; its bytes grow with the record (a snapshot can be large)
+and by one id per record in the list. The fixture's 200
+transactions compress to less than a third of their JSON envelopes. Facts are
+installed only after their records are durable, by one serialised writer; a
+candidate block refuses facts without a durable record list.
+
+Crash cases run in process against the same model: a crash before or after the
+manifest's file or directory sync, between a fact record and its head pointer,
+and between the head pointer and installation. Every block whose assembly
+returned replays after restart, and neither the live nor the restored facts go
+backwards (the lease may: heartbeats are not persisted, so a restarted node is
+fresh again at the publisher's next heartbeat).
+Not yet covered here: throughput, which is measured end to end through OPS
+separately.

@@ -408,16 +408,17 @@ Evidence and theoretical policy-only throughput:
 Identity admission and candidate execution no longer write to disk, and
 admission no longer takes the fact-ingestion lock; pending identities and their
 latest candidate outcome are held in memory. Block assembly publishes one
-compressed execution manifest per block instead of per-transaction evidence
-objects. The earlier 2026-09-17
+compressed execution manifest per block (one file and one directory sync)
+instead of per-transaction evidence objects; a snapshot or delta writes three
+files (the record, a list of record ids and the head pointer) and a heartbeat
+writes nothing. The earlier 2026-09-17
 private-node load run measured **9.6–11.1 mined transactions/s** on a shared
 Apple M2 Max development setup. That historical result is not a fresh throughput
 measurement of the per-group build. The latest run verified live correctness
 and serial call latency, not sustained transaction throughput.
 
-**Remaining work before a high-TPS claim:** Profile and address the serialized
-durability path, preserving crash recovery and durable evidence before block
-publication; then measure sustained admission, inclusion and finality with
+**Remaining work before a high-TPS claim:** measure sustained admission,
+inclusion and finality end to end through OPS with
 representative contracts on the intended hardware and block configuration.
 The reciprocal of an in-process policy-check time excludes this work and cannot
 be quoted as achieved node TPS.

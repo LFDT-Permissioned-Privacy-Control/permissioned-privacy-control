@@ -130,7 +130,7 @@ sequenceDiagram
     Pub->>DB: Read consistent committed generation
     Pub->>Node: Signed snapshot or delta via ops_policyApply
     Node->>Node: Verify signature, network, version and complete graph
-    Node->>Node: Apply and checkpoint complete update
+    Node->>Node: Write the update durably, then install it
     Node-->>Pub: Acknowledge applied version and digest
     Pub->>DB: Record acknowledgement
     Exec->>Node: Pin fresh immutable snapshot for next candidate
@@ -302,7 +302,7 @@ flowchart TB
             Trust["Trusted OPS public keys and bearer token, from configuration"]
         end
         subgraph StateDir["Policy state directory"]
-            Objects["objects: signed fact envelopes and checkpoints"]
+            Objects["objects: signed fact records and record lists"]
             Pointers["pointers: facts-head"]
             Blocks["blocks: one compressed manifest per produced block,<br/>embedding its identities, outcomes and fact lease"]
         end
@@ -318,10 +318,15 @@ flowchart TB
     Runtime -->|"Executor inside the same process"| Reth
 ```
 
-Every applied fact update is retained as a signed object, and `facts-head`
-points at the latest checkpoint, so a restarted node resumes the same fact
-chain. The state directory carries a layout marker and is locked by the one
-node process using it; a directory in an older layout is refused. A pending transaction identity lives only in the node's memory, from
+Every snapshot and delta is written durably, with the record list it completes
+and the `facts-head` pointer, before the node installs it, so a restarted node
+resumes the same fact chain and a block never references unwritten facts. A
+heartbeat is not written: each block's manifest embeds the heartbeat that made
+its facts fresh. After a restart the node is ready while the latest record's own
+lease is valid, or again at the publisher's next heartbeat. The state directory
+carries a layout marker and is locked by the one node process using it; a
+directory in an older layout is refused. A pending transaction identity lives
+only in the node's memory, from
 admission until OPS observes the transaction's finalized receipt or its lease
 expires and a later admission reclaims it; admission does no storage I/O. A
 restarted node holds no pending identities: a pooled transaction cannot execute

@@ -4,8 +4,8 @@
 use crate::{
     archive::{ArtifactId, ArtifactStore},
     wire::{
-        Delta, Header, Heartbeat, Sanction, Snapshot, Verifier, decode_strict, hex_digest,
-        validate_snapshot,
+        Delta, Header, Heartbeat, Sanction, SignedEnvelope, Snapshot, Verifier, decode_strict,
+        hex_digest, validate_snapshot,
     },
 };
 use alloy_primitives::{B256, hex};
@@ -19,16 +19,18 @@ use std::{
 const MAX_CHAIN_BYTES: usize = 256 << 20;
 const MAX_CHAIN_RECORDS: usize = 8192;
 
+/// The durable record list: the snapshot and deltas a generation was built
+/// from, by content address. Written once per snapshot/delta; every block
+/// manifest built on that generation references it by id.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Checkpoint {
+struct RecordList {
     format_version: u32,
     facts_version: u64,
     facts_digest: B256,
     records: Vec<ArchivedRecord>,
-    heartbeat: Option<ArtifactId>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArchivedRecord {
     kind: String,
@@ -36,18 +38,16 @@ struct ArchivedRecord {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct RecordedEnvelope {
-    pub kind: String,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug)]
 pub struct AppliedFacts {
     snapshot: Arc<Snapshot>,
     digest: B256,
     lease: Header,
-    pub(crate) records: Vec<Arc<RecordedEnvelope>>,
-    pub(crate) heartbeat: Option<Arc<RecordedEnvelope>>,
+    records: Arc<Vec<ArchivedRecord>>,
+    chain_bytes: usize,
+    heartbeat: Option<Arc<SignedEnvelope>>,
+    /// The durable record-list object, once the records are on disk. Only
+    /// durable facts may be pinned by a candidate block.
+    checkpoint: Option<ArtifactId>,
 }
 
 impl AppliedFacts {
@@ -63,40 +63,47 @@ impl AppliedFacts {
     pub fn expires_at(&self) -> i64 {
         self.lease.expires_at
     }
-
-    /// The heartbeat that renewed this generation's lease, decoded, if any.
-    pub(crate) fn lease_envelope(&self) -> Result<Option<crate::wire::SignedEnvelope>, String> {
-        self.heartbeat
-            .as_ref()
-            .map(|record| crate::wire::decode_envelope("heartbeat", &record.bytes))
-            .transpose()
+    /// The durable record list, `None` until the records are durable.
+    pub fn checkpoint(&self) -> Option<ArtifactId> {
+        self.checkpoint
+    }
+    /// The heartbeat that renewed this generation's lease, if any. It is never
+    /// written separately: block manifests embed it.
+    pub fn heartbeat(&self) -> Option<&SignedEnvelope> {
+        self.heartbeat.as_deref()
     }
 
-    pub fn checkpoint(&self, store: &ArtifactStore) -> Result<ArtifactId, String> {
-        let records = self
-            .records
-            .iter()
-            .map(|record| {
-                Ok(ArchivedRecord {
-                    kind: record.kind.clone(),
-                    envelope: store.put(&record.bytes)?,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let heartbeat = self
-            .heartbeat
-            .as_ref()
-            .map(|record| store.put(&record.bytes))
-            .transpose()?;
-        let checkpoint = Checkpoint {
-            format_version: 1,
+    pub(crate) fn record_list(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(&RecordList {
+            format_version: 2,
             facts_version: self.version(),
             facts_digest: self.digest,
-            records,
-            heartbeat,
-        };
-        store.put(&serde_json::to_vec(&checkpoint).map_err(|_| "invalid policy checkpoint")?)
+            records: self.records.as_ref().clone(),
+        })
+        .map_err(|_| "invalid policy record list".into())
     }
+
+    pub(crate) fn with_checkpoint(&self, checkpoint: ArtifactId) -> Self {
+        Self {
+            checkpoint: Some(checkpoint),
+            ..self.clone()
+        }
+    }
+}
+
+/// The result of validating one fact envelope against the installed
+/// generation, before anything is written or installed.
+pub enum Prepared {
+    /// Already installed: nothing to write or install.
+    Unchanged(Arc<AppliedFacts>),
+    /// A new generation. `record` is true for a snapshot or delta, whose
+    /// envelope must be durable before `next` is installed; a heartbeat only
+    /// renews the lease.
+    Next {
+        base: Option<Arc<AppliedFacts>>,
+        next: AppliedFacts,
+        record: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -114,15 +121,18 @@ impl FactStream {
     }
 
     /// Reverify archived signatures and the entire linked stream. `at` is the
-    /// current time for startup, or the exact block timestamp for trusted replay.
-    /// Restoring an expired chain never grants a new lease.
+    /// current time for startup. Restoring an expired chain never grants a new
+    /// lease.
     pub fn restore(
         verifier: Verifier,
         store: &ArtifactStore,
         checkpoint: ArtifactId,
         at: i64,
     ) -> Result<Self, String> {
-        Self::restore_with_freshness(verifier, store, checkpoint, at, true)
+        let stream = Self::restore_records(verifier, store, checkpoint, at)?;
+        let facts = stream.latest()?.ok_or("missing retained policy facts")?;
+        stream.verifier.validate_header(&facts.lease, at)?;
+        Ok(stream)
     }
 
     pub(crate) fn restore_retained(
@@ -131,42 +141,64 @@ impl FactStream {
         checkpoint: ArtifactId,
         at: i64,
     ) -> Result<Self, String> {
-        Self::restore_with_freshness(verifier, store, checkpoint, at, false)
+        Self::restore_records(verifier, store, checkpoint, at)
     }
 
-    fn restore_with_freshness(
+    /// The facts a block was built on: its record list, then the embedded
+    /// heartbeat if one renewed the lease, fresh at the block timestamp `at`.
+    /// Missing or expired lease evidence fails closed.
+    pub fn restore_for_block(
+        verifier: Verifier,
+        store: &ArtifactStore,
+        checkpoint: ArtifactId,
+        lease: Option<&SignedEnvelope>,
+        at: i64,
+    ) -> Result<Arc<AppliedFacts>, String> {
+        let stream = Self::restore_records(verifier, store, checkpoint, at)?;
+        if let Some(lease) = lease {
+            stream.restore_record("heartbeat", &lease.to_wire(), at)?;
+        }
+        let facts = stream.latest()?.ok_or("missing retained policy facts")?;
+        stream.verifier.validate_header(&facts.lease, at)?;
+        if facts.checkpoint != Some(checkpoint) {
+            return Err("policy checkpoint state mismatch".into());
+        }
+        Ok(facts)
+    }
+
+    fn restore_records(
         verifier: Verifier,
         store: &ArtifactStore,
         checkpoint: ArtifactId,
         at: i64,
-        require_fresh: bool,
     ) -> Result<Self, String> {
-        let checkpoint: Checkpoint = decode_strict(&store.get(checkpoint)?)?;
-        if checkpoint.format_version != 1
-            || checkpoint.records.is_empty()
-            || checkpoint.records.len() > MAX_CHAIN_RECORDS
+        let list: RecordList = decode_strict(&store.get(checkpoint)?)?;
+        if list.format_version != 2
+            || list.records.is_empty()
+            || list.records.len() > MAX_CHAIN_RECORDS
         {
             return Err("invalid policy checkpoint".into());
         }
         let stream = Self::new(verifier);
-        for (index, record) in checkpoint.records.iter().enumerate() {
+        for (index, record) in list.records.iter().enumerate() {
             if record.kind != if index == 0 { "snapshot" } else { "delta" } {
                 return Err("invalid checkpoint record order".into());
             }
-            let bytes = store.get(record.envelope)?;
-            stream.restore_record(&record.kind, &bytes, at)?;
-        }
-        if let Some(id) = checkpoint.heartbeat {
-            stream.restore_record("heartbeat", &store.get(id)?, at)?;
+            stream.restore_record(&record.kind, &store.get(record.envelope)?, at)?;
         }
         let facts = stream.latest()?.ok_or("missing retained policy facts")?;
-        if require_fresh {
-            stream.verifier.validate_header(&facts.lease, at)?;
-        }
-        if facts.version() != checkpoint.facts_version || facts.digest() != checkpoint.facts_digest
+        if facts.version() != list.facts_version
+            || facts.digest() != list.facts_digest
+            || facts
+                .records
+                .as_ref()
+                .iter()
+                .map(|r| r.envelope)
+                .ne(list.records.iter().map(|r| r.envelope))
         {
             return Err("policy checkpoint state mismatch".into());
         }
+        stream.install(Some(&facts), Arc::new(facts.with_checkpoint(checkpoint)))?;
         Ok(stream)
     }
 
@@ -185,13 +217,12 @@ impl FactStream {
     }
 
     pub fn pin(&self, now: i64, minimum_version: u64) -> Result<Arc<AppliedFacts>, String> {
-        let current = self.current.lock().map_err(|_| "fact stream unavailable")?;
-        let facts = current.as_ref().ok_or("missing policy facts")?;
+        let facts = self.latest()?.ok_or("missing policy facts")?;
         self.verifier.validate_header(&facts.lease, now)?;
         if facts.version() < minimum_version {
             return Err("policy facts are behind execution context".into());
         }
-        Ok(facts.clone())
+        Ok(facts)
     }
 
     /// Watermark/status only; this does not authorize execution with expired facts.
@@ -203,43 +234,82 @@ impl FactStream {
             .clone())
     }
 
+    /// Validate in memory only and install: no durability. Unit tests and
+    /// restore use it; a node installs through `PolicyRuntime::accept_facts`,
+    /// and candidate blocks refuse facts without a durable record list.
     pub fn accept(
         &self,
         kind: &str,
         envelope: &[u8],
         now: i64,
     ) -> Result<Arc<AppliedFacts>, String> {
-        let payload = self.verifier.open(kind, envelope)?;
-        let digest = B256::from_slice(&Sha256::digest(&payload));
+        match self.prepare(kind, envelope, now)? {
+            Prepared::Unchanged(facts) => Ok(facts),
+            Prepared::Next { base, next, .. } => {
+                let next = Arc::new(next);
+                self.install(base.as_ref(), next.clone())?;
+                Ok(next)
+            }
+        }
+    }
+
+    /// Install `next` if `base` is still the installed generation (compare and
+    /// swap), so a stale writer can never overwrite a newer generation.
+    pub(crate) fn install(
+        &self,
+        base: Option<&Arc<AppliedFacts>>,
+        next: Arc<AppliedFacts>,
+    ) -> Result<(), String> {
         let mut current = self.current.lock().map_err(|_| "fact stream unavailable")?;
-        let record = Arc::new(RecordedEnvelope {
-            kind: kind.into(),
-            bytes: envelope.to_vec(),
-        });
+        let unchanged = match (current.as_ref(), base) {
+            (None, None) => true,
+            (Some(current), Some(base)) => Arc::ptr_eq(current, base),
+            _ => false,
+        };
+        if !unchanged {
+            return Err("policy facts changed concurrently".into());
+        }
+        *current = Some(next);
+        Ok(())
+    }
+
+    /// Verify and validate one envelope against the latest installed
+    /// generation. The stream lock is held only to read that generation:
+    /// verification, decoding and delta application run outside it.
+    pub fn prepare(&self, kind: &str, wire: &[u8], now: i64) -> Result<Prepared, String> {
+        let envelope = self.verifier.open_envelope(kind, wire)?;
+        let payload = &envelope.payload;
+        let digest = B256::from_slice(&Sha256::digest(payload));
+        let id = ArtifactId::of(wire);
+        let current = self.latest()?;
         let next = match kind {
             "snapshot" => {
-                let snapshot: Snapshot = decode_strict(&payload)?;
+                let snapshot: Snapshot = decode_strict(payload)?;
                 self.verifier.validate_header(&snapshot.header, now)?;
                 validate_snapshot(&snapshot)?;
                 if let Some(old) = current.as_ref() {
                     if snapshot.version == old.version() && digest == old.digest {
-                        return Ok(old.clone());
+                        return Ok(Prepared::Unchanged(old.clone()));
                     }
                     if snapshot.version <= old.version() {
                         return Err("conflicting or stale policy snapshot".into());
                     }
                 }
-                self.verifier.validate_header(&snapshot.header, now)?;
                 AppliedFacts {
                     lease: snapshot.header.clone(),
                     snapshot: Arc::new(snapshot),
                     digest,
-                    records: vec![record],
+                    records: Arc::new(vec![ArchivedRecord {
+                        kind: kind.into(),
+                        envelope: id,
+                    }]),
+                    chain_bytes: wire.len(),
                     heartbeat: None,
+                    checkpoint: None,
                 }
             }
             "delta" => {
-                let delta: Delta = decode_strict(&payload)?;
+                let delta: Delta = decode_strict(payload)?;
                 self.verifier.validate_header(&delta.header, now)?;
                 if delta.previous_version == 0
                     || delta.version <= delta.previous_version
@@ -251,33 +321,36 @@ impl FactStream {
                     .as_ref()
                     .ok_or("missing bootstrap policy snapshot")?;
                 if delta.version == old.version() && digest == old.digest {
-                    return Ok(old.clone());
+                    return Ok(Prepared::Unchanged(old.clone()));
                 }
                 if delta.previous_version != old.version()
                     || delta.previous_digest != hex::encode(old.digest)
                 {
                     return Err("resynchronisation required: policy delta gap or conflict".into());
                 }
-                self.verifier.validate_header(&delta.header, now)?;
                 if old.records.len() >= MAX_CHAIN_RECORDS
-                    || old.records.iter().map(|r| r.bytes.len()).sum::<usize>() + envelope.len()
-                        > MAX_CHAIN_BYTES
+                    || old.chain_bytes + wire.len() > MAX_CHAIN_BYTES
                 {
                     return Err("resynchronisation required: policy checkpoint limit".into());
                 }
                 let snapshot = apply_delta(old.snapshot(), &delta)?;
-                let mut records = old.records.clone();
-                records.push(record);
+                let mut records = old.records.as_ref().clone();
+                records.push(ArchivedRecord {
+                    kind: kind.into(),
+                    envelope: id,
+                });
                 AppliedFacts {
                     lease: delta.header,
                     snapshot: Arc::new(snapshot),
                     digest,
-                    records,
+                    records: Arc::new(records),
+                    chain_bytes: old.chain_bytes + wire.len(),
                     heartbeat: None,
+                    checkpoint: None,
                 }
             }
             "heartbeat" => {
-                let heartbeat: Heartbeat = decode_strict(&payload)?;
+                let heartbeat: Heartbeat = decode_strict(payload)?;
                 self.verifier.validate_header(&heartbeat.header, now)?;
                 let old = current
                     .as_ref()
@@ -294,19 +367,21 @@ impl FactStream {
                 if heartbeat.header.expires_at == old.lease.expires_at
                     && heartbeat.header.issued_at == old.lease.issued_at
                 {
-                    return Ok(old.clone());
+                    return Ok(Prepared::Unchanged(old.clone()));
                 }
                 AppliedFacts {
                     lease: heartbeat.header,
-                    heartbeat: Some(record),
+                    heartbeat: Some(Arc::new(envelope.clone())),
                     ..old.as_ref().clone()
                 }
             }
             _ => return Err("unexpected policy fact message kind".into()),
         };
-        let next = Arc::new(next);
-        *current = Some(next.clone());
-        Ok(next)
+        Ok(Prepared::Next {
+            base: current,
+            next,
+            record: kind != "heartbeat",
+        })
     }
 }
 

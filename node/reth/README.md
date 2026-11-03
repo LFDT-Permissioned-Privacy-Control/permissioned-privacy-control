@@ -144,7 +144,10 @@ come from the deployed consensus system.
 Policy facts are immutable for a candidate block. Signed delta updates are atomic,
 heartbeats extend only the installed digest's freshness lease, and produced blocks
 retain the exact verified snapshot chain and executed identity envelopes before
-publication. Self-import reuses that archive; ordinary simulations use current
+publication. Snapshots and deltas are durable before they are installed. Heartbeats
+are not written: each block's manifest carries the heartbeat, if one renewed the
+lease. After a restart the node therefore reports ready again at the next heartbeat
+if the latest snapshot or delta's own lease has expired. Self-import reuses that archive; ordinary simulations use current
 permissions even when querying historical chain state.
 
 Record-party getters run against live candidate storage. Every descendant code

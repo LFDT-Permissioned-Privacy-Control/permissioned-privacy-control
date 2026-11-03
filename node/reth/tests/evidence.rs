@@ -7,6 +7,7 @@ use common::{
     fixture::{AT, descriptor, execute, identity, seal, snapshot, verifier},
 };
 use ops_reth_policy::{archive::ArtifactStore, archive::BlockDescriptor, runtime::PolicyRuntime};
+use sha2::Digest;
 use std::{path::Path, sync::Arc};
 
 mod common;
@@ -283,5 +284,220 @@ fn a_rebuilt_block_keeps_the_first_published_evidence() {
             .context_id,
         "ctx-a",
         "status must describe the evidence on disk"
+    );
+}
+#[test]
+fn one_manifest_publication_per_block() {
+    let storage = MemoryStorage::new();
+    let runtime = ready(&storage);
+    let first = runtime.pin_candidate(AT).unwrap();
+    assert!(execute(&first, TX));
+    runtime.persist(&first, &block(1, 10)).unwrap();
+    // With a heartbeat installed the lease travels inside the manifest.
+    let digest = alloy_primitives::hex::encode(sha2::Sha256::digest(
+        serde_json::to_vec(&snapshot()).unwrap(),
+    ));
+    runtime
+        .accept_facts(
+            "heartbeat",
+            &seal(
+                "heartbeat",
+                &serde_json::json!({"network":common::fixture::network(),"issued_at":AT,"expires_at":AT + 60,"version":1,"digest":digest}),
+            ),
+            AT,
+        )
+        .unwrap();
+    for (number, hash) in [(2, 20), (3, 30)] {
+        let candidate = runtime.pin_candidate(AT).unwrap();
+        assert!(execute(&candidate, TX));
+        let before = storage.counts();
+        runtime.persist(&candidate, &block(number, hash)).unwrap();
+        let used = storage.counts() - before;
+        assert_eq!(
+            (used.writes, used.syncs),
+            (1, 2),
+            "block {number}: {used:?}"
+        );
+    }
+}
+
+/// Facts valid 1800000000..1800000060, renewed by a heartbeat to ..110, a
+/// block at 1800000070 and its manifest path.
+fn heartbeat_block(storage: &Arc<MemoryStorage>) -> BlockDescriptor {
+    let runtime = open(storage);
+    runtime
+        .accept_facts("snapshot", &seal("snapshot", &snapshot()), AT)
+        .unwrap();
+    let digest = alloy_primitives::hex::encode(sha2::Sha256::digest(
+        serde_json::to_vec(&snapshot()).unwrap(),
+    ));
+    runtime
+        .accept_facts(
+            "heartbeat",
+            &seal(
+                "heartbeat",
+                &serde_json::json!({"network":common::fixture::network(),"issued_at":1800000050,"expires_at":1800000110,"version":1,"digest":digest}),
+            ),
+            1800000050,
+        )
+        .unwrap();
+    let mut late = identity(TX, "ctx-late");
+    late["issued_at"] = serde_json::json!(1800000065);
+    late["expires_at"] = serde_json::json!(1800000125);
+    runtime
+        .accept_identity(&seal("identity", &late), 1800000070)
+        .unwrap();
+    let candidate = runtime.pin_candidate(1800000070).unwrap();
+    assert!(execute(&candidate, TX));
+    let block = BlockDescriptor {
+        timestamp: 1800000070,
+        ..block(1, 10)
+    };
+    runtime.persist(&candidate, &block).unwrap();
+    block
+}
+
+fn manifest_path(block: &BlockDescriptor) -> std::path::PathBuf {
+    Path::new(ROOT)
+        .join("blocks")
+        .join(format!("{:08x}", block.number / 4096))
+        .join(format!(
+            "{:016x}-{}",
+            block.number,
+            alloy_primitives::hex::encode(block.hash)
+        ))
+}
+
+#[test]
+fn replay_after_snapshot_expiry_uses_embedded_heartbeat() {
+    let storage = MemoryStorage::new();
+    let block = heartbeat_block(&storage);
+    storage.crash();
+    storage.restart();
+    let restarted = open(&storage);
+    assert!(
+        restarted.pin_candidate(1800000070).is_err(),
+        "heartbeats are not persisted: current facts are expired after restart"
+    );
+    assert!(execute(&restarted.replay(&block).unwrap(), TX));
+}
+
+#[test]
+fn replay_without_valid_lease_evidence_fails_closed() {
+    use ops_reth_policy::manifest::{read_entry, write_segment};
+    let storage = MemoryStorage::new();
+    let block = heartbeat_block(&storage);
+    let path = manifest_path(&block);
+    let original = {
+        use ops_reth_policy::storage::Storage;
+        read_entry(
+            &storage.read(&path, 1 << 30).unwrap().unwrap(),
+            block.number,
+            block.hash,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let verifier = verifier();
+    let digest = alloy_primitives::hex::encode(sha2::Sha256::digest(
+        serde_json::to_vec(&snapshot()).unwrap(),
+    ));
+    let lease = |issued: i64, version: u64, digest: &str| {
+        Some(
+            verifier
+                .open_envelope(
+                    "heartbeat",
+                    &seal(
+                        "heartbeat",
+                        &serde_json::json!({"network":common::fixture::network(),"issued_at":issued,"expires_at":issued + 60,"version":version,"digest":digest}),
+                    ),
+                )
+                .unwrap(),
+        )
+    };
+    let cases = [
+        ("no lease evidence", None, "validity window"),
+        (
+            "heartbeat issued after the block",
+            lease(1800000076, 1, &digest),
+            "future archived",
+        ),
+        (
+            "heartbeat for another version",
+            lease(1800000050, 2, &digest),
+            "state mismatch",
+        ),
+        (
+            "heartbeat for another digest",
+            lease(1800000050, 1, &"00".repeat(32)),
+            "state mismatch",
+        ),
+        (
+            "heartbeat that expired before the block",
+            lease(1800000005, 1, &digest),
+            "validity window",
+        ),
+    ];
+    for (name, lease, reason) in cases {
+        let mut tampered = original.clone();
+        tampered.lease = lease;
+        storage.tamper(&path, &write_segment(&[&tampered]).unwrap());
+        let error = open(&storage)
+            .replay(&block)
+            .err()
+            .unwrap_or_else(|| panic!("{name}: replayed"));
+        assert!(error.contains(reason), "{name}: {error}");
+    }
+    storage.tamper(&path, &write_segment(&[&original]).unwrap());
+    assert!(
+        open(&storage).replay(&block).is_ok(),
+        "control: the original replays"
+    );
+}
+
+/// Storage reads, lists and every path touched while opening a runtime whose
+/// archive holds `blocks` manifests.
+fn open_cost(blocks: u64) -> (common::Counts, Vec<std::path::PathBuf>) {
+    let storage = MemoryStorage::new();
+    let runtime = ready(&storage);
+    for number in 1..=blocks {
+        let candidate = runtime.pin_candidate(AT).unwrap();
+        assert!(execute(&candidate, TX));
+        runtime
+            .persist(
+                &candidate,
+                &BlockDescriptor {
+                    number,
+                    hash: B256::from(alloy_primitives::U256::from(number)),
+                    ..descriptor(vec![TX])
+                },
+            )
+            .unwrap();
+    }
+    drop(runtime);
+    let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    storage.set_hook({
+        let paths = paths.clone();
+        move |_, path| {
+            paths.lock().unwrap().push(path.to_owned());
+            Action::Proceed
+        }
+    });
+    let before = storage.counts();
+    drop(open(&storage));
+    let used = storage.counts() - before;
+    storage.clear_hook();
+    let paths = paths.lock().unwrap().clone();
+    (used, paths)
+}
+
+#[test]
+fn restart_reads_are_independent_of_history() {
+    let (small, _) = open_cost(10);
+    let (large, paths) = open_cost(200);
+    assert_eq!(small, large, "restart work grew with history");
+    assert!(
+        paths.iter().all(|path| !path.starts_with("/state/blocks")),
+        "restart touched block manifests: {paths:?}"
     );
 }

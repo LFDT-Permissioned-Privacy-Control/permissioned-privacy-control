@@ -137,6 +137,10 @@ fn fact_persistence_runs_off_the_async_worker() {
             !fired.load(Ordering::SeqCst) && !apply.is_finished(),
             "status waited for the fact write: {status}"
         );
+        assert_eq!(
+            status["result"]["version"], 0,
+            "facts installed before their records were durable"
+        );
         write.open();
         assert_eq!(apply.await.unwrap()["result"]["version"], 7);
         storage.clear_hook();

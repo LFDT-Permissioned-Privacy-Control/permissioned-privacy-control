@@ -124,8 +124,7 @@ fn produced_block_replays_original_facts_after_revocation_and_restart() {
     );
     let mut snapshot = fixture()["snapshot"].clone();
     runtime
-        .feed
-        .accept("snapshot", &seal("snapshot", &snapshot), 1800000010)
+        .accept_facts("snapshot", &seal("snapshot", &snapshot), 1800000010)
         .unwrap();
     let identity = json!({"network":network(),"issued_at":1800000000,"expires_at":1800000060,"scope":"transaction","context_id":"ctx-a","principal_id":"fixture_principal","org_id":"org_acme","signer":snapshot["principals"][0]["linked_addresses"][0],"binding_hash":format!("{:#x}",B256::repeat_byte(1)),"min_snapshot_version":1});
     runtime
@@ -169,8 +168,7 @@ fn produced_block_replays_original_facts_after_revocation_and_restart() {
     snapshot["version"] = json!(2);
     snapshot["principals"][0]["banned"] = json!(true);
     runtime
-        .feed
-        .accept("snapshot", &seal("snapshot", &snapshot), 1800000020)
+        .accept_facts("snapshot", &seal("snapshot", &snapshot), 1800000020)
         .unwrap();
     assert!(!execute(&runtime.pin_candidate(1800000020).unwrap()));
     let denied = runtime
@@ -220,7 +218,7 @@ fn produced_block_replays_original_facts_after_revocation_and_restart() {
     )
     .unwrap();
     assert!(
-        restarted.pin_candidate(1800000020).is_err(),
+        !execute(&restarted.pin_candidate(1800000020).unwrap()),
         "replay facts must not become current user permissions"
     );
     assert!(execute(&restarted.replay(&descriptor()).unwrap()));

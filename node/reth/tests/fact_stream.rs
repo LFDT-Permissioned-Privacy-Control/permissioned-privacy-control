@@ -152,33 +152,74 @@ fn a_new_snapshot_resynchronizes_but_old_versions_cannot_roll_back() {
 }
 
 #[test]
-fn checkpoint_restart_reverifies_signed_chain_and_freshness() {
-    use ops_reth_policy::archive::ArtifactStore;
+fn record_list_restart_reverifies_signed_chain_and_freshness() {
+    use ops_reth_policy::{archive::ArtifactStore, runtime::PolicyRuntime};
+    use std::sync::Arc;
     let directory =
         std::env::temp_dir().join(format!("ops-stream-checkpoint-{}", std::process::id()));
-    let store = ArtifactStore::open(&directory).unwrap();
-    let stream = FactStream::new(verifier());
+    let runtime = PolicyRuntime::new(
+        verifier(),
+        Arc::new(ArtifactStore::open(&directory).unwrap()),
+        16,
+    );
     let (wire, digest) = envelope("snapshot", &snapshot());
-    stream.accept("snapshot", &wire, 1020).unwrap();
+    runtime.accept_facts("snapshot", &wire, 1020).unwrap();
     let (delta_wire, delta_digest) = envelope("delta", &delta(&digest));
-    stream.accept("delta", &delta_wire, 1020).unwrap();
-    stream
-        .accept(
-            "heartbeat",
-            &envelope("heartbeat", &heartbeat(&delta_digest, 3)).0,
-            1080,
-        )
-        .unwrap();
-    let checkpoint = stream.pin(1150, 3).unwrap().checkpoint(&store).unwrap();
-    let restored = FactStream::restore(verifier(), &store, checkpoint, 1150).unwrap();
+    runtime.accept_facts("delta", &delta_wire, 1020).unwrap();
+    let (beat, _) = envelope("heartbeat", &heartbeat(&delta_digest, 3));
+    let renewed = runtime.accept_facts("heartbeat", &beat, 1080).unwrap();
+    let records = renewed.checkpoint().expect("durable record list");
+    let store = &runtime.archive;
+    let restored = FactStream::restore(verifier(), store, records, 1110).unwrap();
     assert_eq!(
-        hex::encode(restored.pin(1150, 3).unwrap().digest()),
+        hex::encode(restored.pin(1110, 3).unwrap().digest()),
         delta_digest
     );
-    assert!(FactStream::restore(verifier(), &store, checkpoint, 1180).is_err());
-    let mut doc: Value = serde_json::from_slice(&store.get(checkpoint).unwrap()).unwrap();
+    // The heartbeat is not in the record list: alone, the chain's own lease
+    // has expired at 1150; with the heartbeat a block embeds, it is fresh.
+    assert!(FactStream::restore(verifier(), store, records, 1150).is_err());
+    let lease = verifier().open_envelope("heartbeat", &beat).unwrap();
+    let block =
+        FactStream::restore_for_block(verifier(), store, records, Some(&lease), 1150).unwrap();
+    assert_eq!(block.expires_at(), 1180);
+    assert!(FactStream::restore_for_block(verifier(), store, records, Some(&lease), 1180).is_err());
+    let mut doc: Value = serde_json::from_slice(&store.get(records).unwrap()).unwrap();
     doc["facts_version"] = json!(4);
     let altered = store.put(&serde_json::to_vec(&doc).unwrap()).unwrap();
-    assert!(FactStream::restore(verifier(), &store, altered, 1150).is_err());
+    assert!(FactStream::restore(verifier(), store, altered, 1110).is_err());
+    drop(runtime);
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn chain_limits_require_a_new_snapshot() {
+    let stream = FactStream::new(verifier());
+    let (wire, mut digest) = envelope("snapshot", &snapshot());
+    stream.accept("snapshot", &wire, 1020).unwrap();
+    // A snapshot plus 8191 deltas is the longest chain a record list holds.
+    for version in 2..=8192u64 {
+        let mut next = delta(&digest);
+        next["previous_version"] = json!(version - 1);
+        next["version"] = json!(version);
+        let (wire, next_digest) = envelope("delta", &next);
+        stream.accept("delta", &wire, 1020).unwrap();
+        digest = next_digest;
+    }
+    let mut over = delta(&digest);
+    over["previous_version"] = json!(8192);
+    over["version"] = json!(8193);
+    let error = stream
+        .accept("delta", &envelope("delta", &over).0, 1020)
+        .unwrap_err();
+    assert!(error.contains("checkpoint limit"), "{error}");
+    let mut fresh = snapshot();
+    fresh["version"] = json!(9000);
+    let (fresh_wire, fresh_digest) = envelope("snapshot", &fresh);
+    stream.accept("snapshot", &fresh_wire, 1020).unwrap();
+    let mut after = delta(&fresh_digest);
+    after["previous_version"] = json!(9000);
+    after["version"] = json!(9001);
+    stream
+        .accept("delta", &envelope("delta", &after).0, 1020)
+        .expect("a new snapshot starts a new chain");
 }
