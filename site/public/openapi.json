@@ -15064,7 +15064,7 @@
         },
         "/api/v1/admin/orgs/{org_id}/execution/ownership-recovery": {
             "post": {
-                "description": "After the execution-tracking database was lost or recreated, a deployment that finalized meanwhile is not registered automatically. A named human with current full authority over the organization can register it from the node's finalized evidence: the node must report the transaction as included and final, deployed by a principal of this organization, within the node's evidence retention. Ownership is applied exactly once (a deployment already registered, by reconciliation or an earlier recovery, is not registered again), never below the replay floor, and never for an address another organization owns. Any transaction that is unknown, not final, not a deployment or not this organization's is answered with the same 404. The action is recorded in the RBAC audit log.",
+                "description": "After the execution-tracking database was lost or recreated, a deployment that finalized meanwhile is not registered automatically. A named human with current full authority over the organization can register it from the node's finalized evidence: the node must report the transaction as included and final, deployed by a principal of this organization, within the node's evidence retention. Ownership is applied exactly once (a deployment already registered, by reconciliation or an earlier recovery, is not registered again), never below the replay floor, and never for an address another organization owns. Any transaction that is unknown, not final, not a deployment or not this organization's is answered with the same 404. The action is recorded in the RBAC audit log in the same transaction as the change: if the record cannot be written, nothing is registered and the request fails with 500.",
                 "parameters": [
                     {
                         "description": "Organization UUID",
@@ -15156,6 +15156,16 @@
                             }
                         },
                         "description": "Too Many Requests"
+                    },
+                    "500": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "nothing was changed (for example the audit record could not be written)"
                     },
                     "503": {
                         "content": {

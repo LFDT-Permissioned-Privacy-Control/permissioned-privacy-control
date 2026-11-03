@@ -267,7 +267,9 @@ and then the lookup answers 404. Ownership of deployed contracts and
 created address another organization already owns is not registered again;
 the status then carries the note `effects_not_applied`. Every finalization is
 recorded in the access log as `ops.system.finalized` on behalf of the principal
-before it takes effect, and a refused effect as `ops.system.effects_refused`.
+before it takes effect, and a refused effect as `ops.system.effects_refused`,
+also before it takes effect; a transaction that finalizes again after an
+interruption keeps its `effects_not_applied` note.
 
 When several OPS instances share one database, exactly one of them publishes
 facts and reconciles submissions at a time. Each instance campaigns for a
@@ -489,7 +491,8 @@ evidence with `POST /api/v1/admin/orgs/{org_id}/execution/ownership-recovery`
 (`{"transactionHash": "0x…"}`), within the node's evidence retention
 (`OPS_NODE_POLICY_MANIFEST_RETENTION` on the node). It applies at most once per
 transaction, never registers an address another organization owns, and is
-recorded in the RBAC audit log. Any transaction that is unknown, not final, not
+recorded in the RBAC audit log in the same database transaction as the change:
+if the record cannot be written, nothing is registered and the request fails. Any transaction that is unknown, not final, not
 a deployment or not that organization's answers the same 404.
 
 To decide `dropped` and to notice a transaction the node's pool lost, OPS

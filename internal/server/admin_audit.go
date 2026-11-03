@@ -51,7 +51,30 @@ func (s *Server) recordAuditActionScoped(
 	if s.db == nil {
 		return
 	}
+	entry := auditEntry(c, action, resourceType, resourceID, resourceName, orgID, oldValue, newValue)
+	if err := s.db.CreateAuditLog(c.Request.Context(), entry); err != nil {
+		slog.Error("audit log write failed",
+			"action", action,
+			"resource_type", resourceType,
+			"resource_id", resourceID,
+			"actor_external_id", entry.ActorExternalID,
+			"err", err)
+	}
+}
 
+// auditEntry is the rbac_audit_log entry of an admin mutation by the
+// request's actor (recordAuditActionScoped's attribution). A mutation whose
+// audit row must commit in the same transaction builds it with this and hands
+// it to the store.
+func auditEntry(
+	c *gin.Context,
+	action string,
+	resourceType string,
+	resourceID string,
+	resourceName string,
+	orgID string,
+	oldValue, newValue map[string]any,
+) *rbac.AuditLogEntry {
 	authMethod := c.GetString("auth_method")
 	actorExternalID := "__super_admin__"
 	var actorID *string
@@ -76,7 +99,7 @@ func (s *Server) recordAuditActionScoped(
 		orgIDPtr = &orgID
 	}
 
-	entry := &rbac.AuditLogEntry{
+	return &rbac.AuditLogEntry{
 		ActorID:         actorID,
 		ActorExternalID: actorExternalID,
 		Action:          action,
@@ -87,14 +110,5 @@ func (s *Server) recordAuditActionScoped(
 		OldValue:        oldValue,
 		NewValue:        newValue,
 		IPAddress:       c.ClientIP(),
-	}
-
-	if err := s.db.CreateAuditLog(c.Request.Context(), entry); err != nil {
-		slog.Error("audit log write failed",
-			"action", action,
-			"resource_type", resourceType,
-			"resource_id", resourceID,
-			"actor_external_id", actorExternalID,
-			"err", err)
 	}
 }

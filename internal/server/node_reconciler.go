@@ -85,8 +85,9 @@ type trackedRow struct {
 	backoff  time.Duration
 	failures int // consecutive failed polls or finals
 	// audited: the finality event of this binding was appended; a retried
-	// finalization in the same term is not audited again.
-	audited bool
+	// finalization in the same term is not audited again. refusalAudited:
+	// likewise for its effects_refused event.
+	audited, refusalAudited bool
 
 	// Lease keeper state (in memory, per term): not a keeper candidate before
 	// keepAt; flag is a trigger the reconciler observed (evicted); resend is a
@@ -550,8 +551,11 @@ func (r *nodeReconciler) delay(t *trackedRow, now time.Time) {
 //  2. transactions with side effects apply them in the main database from a
 //     fresh read of the binding, exactly once by marker; a permanent refusal
 //     (below the replay floor, an address another organisation owns) is
-//     audited as ops.system.effects_refused, alerted, and finalized with a
-//     reason; other errors retry with a growing interval;
+//     audited as ops.system.effects_refused before it commits — an address
+//     refusal inside the effects transaction, a floor refusal (nothing
+//     applied) before the tracking finalize — alerted, and finalized with a
+//     reason (the marker keeps an address refusal, so a retry after the
+//     effects committed keeps it); other errors retry with a growing interval;
 //  3. one tracking finality batch deletes the bindings — only the bindings
 //     that were read (same admission) — and inserts the status rows.
 //
@@ -630,21 +634,44 @@ func (r *nodeReconciler) finalize(ctx context.Context, finals []*observation) er
 		}
 	}
 	var refusals [][]byte
+	var refused []*trackedRow
 	finalsToWrite := make([]db.TrackFinal, 0, len(batch))
 	for _, item := range batch {
 		if item.effect != nil {
+			t := item.o.tracked
+			// An address refusal commits with the ownership bit: its event is
+			// appended inside the effects transaction, before the commit.
+			item.effect.BeforeCommit = func(result db.NodeTxEffectsResult) error {
+				if result.OwnershipConflicts == 0 || t.refusalAudited {
+					return nil
+				}
+				event, err := r.systemEvent(item.o, item.final, dids, "ops.system.effects_refused", 403, db.TrackReasonName(db.TrackReasonOwnershipConflict))
+				if err != nil {
+					return err
+				}
+				// Bounded: the effects transaction holds the organization's
+				// configuration scope while it waits. A late success only
+				// over-reports (the decision is retried).
+				if err := r.appendWithin([][]byte{event}, effectsAuditWait); err != nil {
+					return fmt.Errorf("%w: %v", errSystemAuditUnavailable, err)
+				}
+				t.refusalAudited = true
+				return nil
+			}
 			reason, err := r.applyEffects(ctx, *item.effect)
 			if err != nil {
-				r.delay(item.o.tracked, now)
+				r.delay(t, now)
 				failures = append(failures, err)
 				continue // retried later; the binding stays
 			}
-			if reason != db.TrackReasonNone && reason != db.TrackReasonOrganizationDeleted {
+			if reason == db.TrackReasonEffectsBelowFloor && !t.refusalAudited {
+				// Nothing was applied: the refusal commits with the final
+				// status, so it is audited before the finality batch.
 				event, err := r.systemEvent(item.o, item.final, dids, "ops.system.effects_refused", 403, db.TrackReasonName(reason))
 				if err != nil {
 					return err
 				}
-				refusals = append(refusals, event)
+				refusals, refused = append(refusals, event), append(refused, t)
 			}
 			item.final.Reason = reason
 		}
@@ -653,6 +680,9 @@ func (r *nodeReconciler) finalize(ctx context.Context, finals []*observation) er
 	if len(refusals) > 0 {
 		if _, err := r.audit.AppendBatch(refusals); err != nil {
 			return fmt.Errorf("%w: %v", errSystemAuditUnavailable, err)
+		}
+		for _, t := range refused {
+			t.refusalAudited = true
 		}
 	}
 	if len(finalsToWrite) == 0 {
@@ -677,6 +707,30 @@ func (r *nodeReconciler) finalize(ctx context.Context, finals []*observation) er
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// effectsAuditWait bounds the audit append made inside an effects
+// transaction.
+const effectsAuditWait = 5 * time.Second
+
+// errAuditTimeout: the durable audit buffer did not answer in time.
+var errAuditTimeout = errors.New("durable audit buffer did not answer in time")
+
+// appendWithin appends events, waiting at most wait for the buffer.
+func (r *nodeReconciler) appendWithin(events [][]byte, wait time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.audit.AppendBatch(events)
+		done <- err
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return errAuditTimeout
+	}
 }
 
 // errSystemAuditUnavailable: a system decision could not be audited first,

@@ -40,12 +40,21 @@ type NodeTxEffects struct {
 	Visibility    bool
 	VisibleTo     []string
 	VisibleSender string
+	// BeforeCommit, when set, runs inside the effects transaction after the
+	// effects were applied and before it commits, with the result that will
+	// commit; an error rolls everything back. The reconciler appends a
+	// refusal's audit event here (audit before commit, plan §4.8.6). It may
+	// run more than once for one call (a serialization retry re-runs the
+	// transaction).
+	BeforeCommit func(NodeTxEffectsResult) error
 }
 
 // NodeTxEffectsResult reports what the call did; Note is
 // "organization_deleted" when the organization is gone (nothing applied).
 // OwnershipConflicts counts created addresses another organisation already
-// owns: they are never registered (the others are).
+// owns: they are never registered (the others are). The count is stored with
+// the ownership bit, so a call after the bit was set reports the refusal the
+// applying call decided.
 type NodeTxEffectsResult struct {
 	OwnershipApplied, VisibilityApplied bool
 	OwnershipConflicts                  int
@@ -96,89 +105,237 @@ func txHashBytes(hash string) ([]byte, error) {
 //
 // Lock order: floor, marker, then the organization's configuration scope.
 func (d *DB) ApplyNodeTxEffects(ctx context.Context, network nodepolicy.Network, effects NodeTxEffects) (NodeTxEffectsResult, error) {
+	if err := effects.validate(); err != nil {
+		return NodeTxEffectsResult{}, err
+	}
 	var result NodeTxEffectsResult
+	err := withRetry(ctx, func() error {
+		return d.WithTx(ctx, func(tx *Tx) error {
+			var err error
+			if result, err = applyNodeTxEffects(ctx, tx, network, effects); err != nil {
+				return err
+			}
+			if effects.BeforeCommit != nil {
+				return effects.BeforeCommit(result)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return NodeTxEffectsResult{}, err
+	}
+	return result, nil
+}
+
+func (effects NodeTxEffects) validate() error {
+	if _, err := txHashBytes(effects.TransactionHash); err != nil {
+		return err
+	}
+	if effects.BlockNumber > 1<<63-1 {
+		return fmt.Errorf("invalid block number")
+	}
+	if effects.Visibility && (len(effects.VisibleTo) == 0 || effects.VisibleSender == "") {
+		return fmt.Errorf("visibility effect without recipients or sender")
+	}
+	return nil
+}
+
+// applyNodeTxEffects is the effects transaction's body (see
+// ApplyNodeTxEffects), run in tx.
+func applyNodeTxEffects(ctx context.Context, tx *Tx, network nodepolicy.Network, effects NodeTxEffects) (NodeTxEffectsResult, error) {
+	var result NodeTxEffectsResult
+	if !effects.Ownership && !effects.Visibility {
+		return result, nil
+	}
 	hash, err := txHashBytes(effects.TransactionHash)
 	if err != nil {
 		return result, err
 	}
-	if !effects.Ownership && !effects.Visibility {
+	var floor int64
+	err = tx.tx.QueryRowContext(ctx, `SELECT floor_block FROM node_tx_effects_floor WHERE chain_id = $1 AND deployment_id = $2 FOR SHARE`, int64(network.ChainID), network.DeploymentID).Scan(&floor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return result, ErrReplayFloorMissing
+	}
+	if err != nil {
+		return result, err
+	}
+	if int64(effects.BlockNumber) <= floor {
+		return result, ErrBelowReplayFloor
+	}
+	if _, err := tx.tx.ExecContext(ctx, `INSERT INTO node_tx_effects_applied (chain_id, deployment_id, tx_hash, block_number) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`, int64(network.ChainID), network.DeploymentID, hash, int64(effects.BlockNumber)); err != nil {
+		return result, err
+	}
+	var ownershipDone, visibilityDone bool
+	var storedConflicts int
+	if err := tx.tx.QueryRowContext(ctx, `SELECT ownership, visibility, ownership_conflicts FROM node_tx_effects_applied WHERE chain_id = $1 AND deployment_id = $2 AND tx_hash = $3 FOR UPDATE`, int64(network.ChainID), network.DeploymentID, hash).Scan(&ownershipDone, &visibilityDone, &storedConflicts); err != nil {
+		return result, err
+	}
+	if effects.Ownership && ownershipDone {
+		// Decided by the call that set the bit: the same refusal, applied once.
+		result.OwnershipConflicts = storedConflicts
+	}
+	wantOwnership := effects.Ownership && !ownershipDone && len(effects.Created) > 0
+	wantVisibility := effects.Visibility && !visibilityDone
+	if !wantOwnership && !wantVisibility {
 		return result, nil
 	}
-	if effects.BlockNumber > 1<<63-1 {
-		return result, fmt.Errorf("invalid block number")
+	// Only registration writes configuration state, so only it takes the
+	// organisation's configuration scope; visibility needs the organisation
+	// to exist (FOR KEY SHARE conflicts with deletion).
+	var orgErr error
+	if wantOwnership {
+		orgErr = tx.AuthorizeDeploymentRegistration(ctx, effects.OrgID)
+	} else {
+		var id string
+		orgErr = tx.tx.QueryRowContext(ctx, `SELECT id FROM organizations WHERE id = $1 FOR KEY SHARE`, effects.OrgID).Scan(&id)
 	}
-	if effects.Visibility && (len(effects.VisibleTo) == 0 || effects.VisibleSender == "") {
-		return result, fmt.Errorf("visibility effect without recipients or sender")
+	if errors.Is(orgErr, sql.ErrNoRows) {
+		return NodeTxEffectsResult{Note: "organization_deleted"}, nil
 	}
-	err = withRetry(ctx, func() error {
-		result = NodeTxEffectsResult{}
-		return d.WithTx(ctx, func(tx *Tx) error {
-			var floor int64
-			err := tx.tx.QueryRowContext(ctx, `SELECT floor_block FROM node_tx_effects_floor WHERE chain_id = $1 AND deployment_id = $2 FOR SHARE`, int64(network.ChainID), network.DeploymentID).Scan(&floor)
-			if errors.Is(err, sql.ErrNoRows) {
-				return ErrReplayFloorMissing
+	if orgErr != nil {
+		return result, orgErr
+	}
+	if wantOwnership {
+		for _, created := range effects.Created {
+			err := reconcileNodeContract(ctx, tx, nodeContractOrigin{TransactionHash: effects.TransactionHash, PrincipalID: effects.PrincipalID, OrgID: effects.OrgID}, created)
+			if errors.Is(err, ErrNodeSubmissionConflict) {
+				// Owned by another organisation (checked before any write):
+				// never re-registered; the others still are.
+				result.OwnershipConflicts++
+				continue
 			}
+			if err != nil {
+				return result, err
+			}
+		}
+		result.OwnershipApplied = true
+	}
+	if wantVisibility {
+		if _, err := tx.tx.ExecContext(ctx, `INSERT INTO pending_tx_visibility (tx_hash, visible_to_dids, sender_did, org_id) VALUES ($1, $2, $3, $4)`, effects.TransactionHash, effects.VisibleTo, effects.VisibleSender, effects.OrgID); err != nil {
+			return result, err
+		}
+		result.VisibilityApplied = true
+	}
+	_, err = tx.tx.ExecContext(ctx, `UPDATE node_tx_effects_applied SET ownership = ownership OR $4, visibility = visibility OR $5,
+   ownership_conflicts = CASE WHEN $4 THEN $6 ELSE ownership_conflicts END
+ WHERE chain_id = $1 AND deployment_id = $2 AND tx_hash = $3`, int64(network.ChainID), network.DeploymentID, hash, result.OwnershipApplied, result.VisibilityApplied, result.OwnershipConflicts)
+	return result, err
+}
+
+// errEffectsChanged: the effects transaction's outcome differs from the
+// outcome its audit entry was prepared for; the whole step is retried.
+var errEffectsChanged = errors.New("node transaction effects changed while being audited")
+
+// errEffectsPreview ends the read-only preview transaction (rolled back).
+var errEffectsPreview = errors.New("node transaction effects preview")
+
+// ApplyNodeTxEffectsAudited is ApplyNodeTxEffects for a human-initiated
+// change (ownership recovery, G52): the rbac_audit_log entry describing the
+// outcome is written in the same transaction, linked into the audit hash
+// chain, so the change and its record commit together or not at all. As for
+// configuration activation, the outcome is first prepared in a transaction
+// that is rolled back, the entry is built from it and hashed, and the change
+// is applied again under the same locks; a different outcome (a concurrent
+// change) retries the whole step. Without the RBAC audit chain nothing is
+// applied (fail closed).
+func (d *DB) ApplyNodeTxEffectsAudited(ctx context.Context, network nodepolicy.Network, effects NodeTxEffects, entry func(NodeTxEffectsResult) *rbac.AuditLogEntry) (NodeTxEffectsResult, error) {
+	if err := effects.validate(); err != nil {
+		return NodeTxEffectsResult{}, err
+	}
+	if effects.BeforeCommit != nil || entry == nil {
+		return NodeTxEffectsResult{}, fmt.Errorf("invalid audited node transaction effects")
+	}
+	chain := d.getRBACAuditChain()
+	if chain == nil {
+		return NodeTxEffectsResult{}, errors.New("node transaction effects require the RBAC audit chain")
+	}
+	var result NodeTxEffectsResult
+	err := withRetry(ctx, func() error {
+		for attempt := 0; ; attempt++ {
+			var preview NodeTxEffectsResult
+			err := d.WithTx(ctx, func(tx *Tx) error {
+				var err error
+				if preview, err = applyNodeTxEffects(ctx, tx, network, effects); err != nil {
+					return err
+				}
+				return errEffectsPreview
+			})
+			if !errors.Is(err, errEffectsPreview) {
+				return err
+			}
+			if preview.Note != "" {
+				// Nothing would change (the organization is gone): no change,
+				// no audit row.
+				result = preview
+				return nil
+			}
+			audit := entry(preview)
+			if audit == nil {
+				return fmt.Errorf("missing node transaction effects audit entry")
+			}
+			oldValue, newValue, err := marshalAuditValues(audit)
 			if err != nil {
 				return err
 			}
-			if int64(effects.BlockNumber) <= floor {
-				return ErrBelowReplayFloor
-			}
-			if _, err := tx.tx.ExecContext(ctx, `INSERT INTO node_tx_effects_applied (chain_id, deployment_id, tx_hash, block_number) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`, int64(network.ChainID), network.DeploymentID, hash, int64(effects.BlockNumber)); err != nil {
-				return err
-			}
-			var ownershipDone, visibilityDone bool
-			if err := tx.tx.QueryRowContext(ctx, `SELECT ownership, visibility FROM node_tx_effects_applied WHERE chain_id = $1 AND deployment_id = $2 AND tx_hash = $3 FOR UPDATE`, int64(network.ChainID), network.DeploymentID, hash).Scan(&ownershipDone, &visibilityDone); err != nil {
-				return err
-			}
-			wantOwnership := effects.Ownership && !ownershipDone && len(effects.Created) > 0
-			wantVisibility := effects.Visibility && !visibilityDone
-			if !wantOwnership && !wantVisibility {
-				return nil
-			}
-			// Only registration writes configuration state, so only it takes
-			// the organisation's configuration scope; visibility needs the
-			// organisation to exist (FOR KEY SHARE conflicts with deletion).
-			var orgErr error
-			if wantOwnership {
-				orgErr = tx.AuthorizeDeploymentRegistration(ctx, effects.OrgID)
-			} else {
-				var id string
-				orgErr = tx.tx.QueryRowContext(ctx, `SELECT id FROM organizations WHERE id = $1 FOR KEY SHARE`, effects.OrgID).Scan(&id)
-			}
-			if errors.Is(orgErr, sql.ErrNoRows) {
-				result.Note = "organization_deleted"
-				return nil
-			}
-			if orgErr != nil {
-				return orgErr
-			}
-			if wantOwnership {
-				for _, created := range effects.Created {
-					err := reconcileNodeContract(ctx, tx, nodeContractOrigin{TransactionHash: effects.TransactionHash, PrincipalID: effects.PrincipalID, OrgID: effects.OrgID}, created)
-					if errors.Is(err, ErrNodeSubmissionConflict) {
-						// Owned by another organisation (checked before any
-						// write): never re-registered; the others still are.
-						result.OwnershipConflicts++
-						continue
-					}
-					if err != nil {
-						return err
-					}
+			_, err = chain.Append(func(string) (string, func(string) error, error) {
+				var id int64
+				if err := d.conn.QueryRowContext(ctx, `SELECT nextval('rbac_audit_log_id_seq')`).Scan(&id); err != nil {
+					return "", nil, err
 				}
-				result.OwnershipApplied = true
+				createdAt := time.Now().UTC().Truncate(time.Microsecond)
+				content := buildRBACAuditContent(id, createdAt, audit, oldValue, newValue)
+				return content, func(hash string) error {
+					return d.WithTx(ctx, func(tx *Tx) error {
+						// The RBAC chain mutex is held: never wait long for
+						// another writer's locks.
+						if _, err := tx.tx.ExecContext(ctx, `SET LOCAL lock_timeout = '5s'`); err != nil {
+							return err
+						}
+						applied, err := applyNodeTxEffects(ctx, tx, network, effects)
+						if err != nil {
+							return err
+						}
+						if applied != preview {
+							return errEffectsChanged
+						}
+						if _, err := tx.tx.ExecContext(ctx, `INSERT INTO rbac_audit_log
+ (id, actor_id, actor_external_id, action, resource_type, resource_id, resource_name, org_id, old_value, new_value, ip_address, created_at, entry_hash, hash_format_version)
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1)`, id, audit.ActorID, audit.ActorExternalID, audit.Action, audit.ResourceType,
+							audit.ResourceID, audit.ResourceName, audit.OrgID, oldValue, newValue, audit.IPAddress, createdAt, hash); err != nil {
+							return err
+						}
+						audit.ID, audit.CreatedAt = id, createdAt
+						result = applied
+						return nil
+					})
+				}, nil
+			})
+			if errors.Is(err, errEffectsChanged) && attempt < 2 {
+				continue
 			}
-			if wantVisibility {
-				if _, err := tx.tx.ExecContext(ctx, `INSERT INTO pending_tx_visibility (tx_hash, visible_to_dids, sender_did, org_id) VALUES ($1, $2, $3, $4)`, effects.TransactionHash, effects.VisibleTo, effects.VisibleSender, effects.OrgID); err != nil {
-					return err
-				}
-				result.VisibilityApplied = true
-			}
-			_, err = tx.tx.ExecContext(ctx, `UPDATE node_tx_effects_applied SET ownership = ownership OR $4, visibility = visibility OR $5 WHERE chain_id = $1 AND deployment_id = $2 AND tx_hash = $3`, int64(network.ChainID), network.DeploymentID, hash, result.OwnershipApplied, result.VisibilityApplied)
 			return err
-		})
+		}
 	})
-	return result, err
+	if err != nil {
+		return NodeTxEffectsResult{}, err
+	}
+	return result, nil
+}
+
+// marshalAuditValues encodes an entry's old and new values as CreateAuditLog
+// does (nil stays NULL).
+func marshalAuditValues(entry *rbac.AuditLogEntry) (oldValue, newValue []byte, err error) {
+	if entry.OldValue != nil {
+		if oldValue, err = json.Marshal(entry.OldValue); err != nil {
+			return nil, nil, err
+		}
+	}
+	if entry.NewValue != nil {
+		if newValue, err = json.Marshal(entry.NewValue); err != nil {
+			return nil, nil, err
+		}
+	}
+	return oldValue, newValue, nil
 }
 
 // PruneNodeTxEffects deletes the markers applied before olderThan and raises
