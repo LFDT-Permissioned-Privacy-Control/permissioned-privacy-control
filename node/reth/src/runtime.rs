@@ -205,8 +205,7 @@ impl PolicyRuntime {
                 return Err("durable execution binding conflict".into());
             }
         }
-        self.identities.release_expired(now)?;
-        let identity = self.identities.admit(verified, now)?;
+        let identity = self.identities.admit_reclaiming(verified, now)?;
         if identity.scope == "transaction" {
             let evidence = self.archive.put(&wire)?;
             self.archive
