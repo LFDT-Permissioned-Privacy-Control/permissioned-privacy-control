@@ -152,8 +152,10 @@ and applied on Reth are separate states, exposed by publication/readiness status
 A candidate block pins one coherent snapshot; it never adopts half a policy
 set or changes memberships halfway through execution. A revocation affects
 subsequent candidates once published. An already pinned candidate can still
-finish under its snapshot. Restart/replay uses retained signed evidence for the
-original execution; ordinary user queries use current permissions.
+finish under its snapshot. Self-import and replay of unfinalized blocks use the
+retained signed evidence of the original execution; finalized history the node
+already holds re-executes without it; ordinary user queries use current
+permissions.
 
 ## A signed transaction, step by step
 
@@ -391,6 +393,14 @@ included outcome stays provisional and can return to pending after a reorg.
   universal count. See [the accepted limitation](../OPEN_ITEMS.md#12-reth-per-group-permission-budget).
 - The tested stack uses a local Reth producer. Production multi-validator
   consensus integration and distribution of replay evidence are separate work.
+- A guarded node trusts its own finalized canonical history: a block at or below
+  the finalized head on its canonical chain (checked by hash) re-executes its
+  own transactions without policy and needs no manifest; any other block needs
+  its manifest. Consensus validation applies either way. After a restart the
+  finalized head is the canonical block at the persisted finalized height. This
+  relies on finality from consensus the operator controls, and it removes the
+  evidence re-check for finalized blocks: a change to a detective control that
+  needs change-management review.
 - Reth and the OPS signer are trusted components. Private policy programs and
   signed facts are visible to the node operator; this design does not provide
   operator blindness. Keep node data/private RPC away from end users and retain

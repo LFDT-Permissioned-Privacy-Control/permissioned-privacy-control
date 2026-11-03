@@ -384,5 +384,15 @@ and between the head pointer and installation. Every block whose assembly
 returned replays after restart, and neither the live nor the restored facts go
 backwards (the lease may: heartbeats are not persisted, so a restarted node is
 fresh again at the publisher's next heartbeat).
+A guarded node imports blocks at or below its finalized head on its canonical
+chain without manifests: only those blocks' own transactions execute, with no
+policy (`finalized_ancestor_without_manifest_imports_with_pass_through_policy`);
+unknown finality, a rival hash at the height, a block above finality, a
+finalized hash that is not canonical or above the best block, an engine payload
+and another network's block still need the manifest
+(`every_other_import_needs_its_manifest`,
+`another_networks_block_is_never_trusted`). This applies to history the node
+already holds; first-time imports have no known finality for their blocks.
+
 Not yet covered here: throughput, which is measured end to end through OPS
 separately.

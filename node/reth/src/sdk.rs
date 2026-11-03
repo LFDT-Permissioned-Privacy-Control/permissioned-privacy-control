@@ -4,7 +4,9 @@
 use crate::{
     archive::BlockDescriptor,
     policy::{PolicyEvm, PolicyFactory},
-    runtime::{ExecutionHandle, PolicyRuntime},
+    runtime::{
+        ChainView, ExecutionHandle, FinalityView, ImportExecution, ImportOrigin, PolicyRuntime,
+    },
 };
 use alloy_consensus::Header;
 use alloy_evm::{
@@ -29,16 +31,47 @@ use reth_ethereum::{
         builder::{BuilderContext, components::ExecutorBuilder},
     },
     primitives::{SealedBlock, SealedHeader},
+    provider::{BlockIdReader, BlockNumReader},
     rpc::types::engine::ExecutionData,
 };
-use std::{io, sync::Arc};
+use std::{fmt, io, sync::Arc};
 
 type InnerFactory = EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, PolicyFactory>;
+
+/// What executes a block: a pinned candidate or replay handle, or trusted
+/// finalized history.
+#[derive(Clone, Debug)]
+enum Execution {
+    Handle(Arc<ExecutionHandle>),
+    TrustedFinalized(PolicyFactory),
+}
 
 #[derive(Clone, Debug)]
 pub struct ExecutionCtx<'a> {
     inner: EthBlockExecutionCtx<'a>,
-    handle: Arc<ExecutionHandle>,
+    execution: Execution,
+}
+
+/// The node's canonical chain, read from its provider at each import, so a
+/// stage re-run or restart re-derives finality from persisted state.
+struct ProviderFinality<P>(P);
+
+impl<P> fmt::Debug for ProviderFinality<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ProviderFinality")
+    }
+}
+
+impl<P: BlockIdReader + BlockNumReader + Send + Sync> FinalityView for ProviderFinality<P> {
+    fn chain_view(&self, block_number: u64) -> Option<ChainView> {
+        let finalized = self.0.finalized_block_num_hash().ok().flatten()?;
+        Some(ChainView {
+            finalized: (finalized.number, finalized.hash),
+            best: self.0.best_block_number().ok()?,
+            canonical_at_block: self.0.block_hash(block_number).ok().flatten(),
+            canonical_at_finalized: self.0.block_hash(finalized.number).ok().flatten(),
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -61,7 +94,10 @@ impl BlockExecutorFactory for OpsBlockExecutorFactory {
         mut evm: PolicyEvm<DB, I>,
         ctx: Self::ExecutionCtx<'a>,
     ) -> Self::Executor<'a, DB, I> {
-        evm.install_context(ctx.handle.factory());
+        evm.install_context(match &ctx.execution {
+            Execution::Handle(handle) => handle.factory(),
+            Execution::TrustedFinalized(factory) => factory.clone(),
+        });
         self.inner.create_executor(evm, ctx.inner)
     }
 }
@@ -77,7 +113,11 @@ impl BlockAssembler<OpsBlockExecutorFactory> for OpsBlockAssembler {
         &self,
         input: BlockAssemblerInput<'_, '_, OpsBlockExecutorFactory>,
     ) -> Result<Block, BlockExecutionError> {
-        let handle = input.execution_ctx.handle;
+        let Execution::Handle(handle) = input.execution_ctx.execution else {
+            return Err(BlockExecutionError::msg(
+                "trusted finalized history is never assembled into a new block",
+            ));
+        };
         let inner = BlockAssemblerInput::<InnerFactory>::new(
             input.evm_env,
             input.execution_ctx.inner,
@@ -116,9 +156,14 @@ pub struct OpsEvmConfig {
     factory: OpsBlockExecutorFactory,
     assembler: OpsBlockAssembler,
     runtime: Arc<PolicyRuntime>,
+    finality: Arc<dyn FinalityView>,
 }
 impl OpsEvmConfig {
-    pub fn new(chain: Arc<ChainSpec>, runtime: Arc<PolicyRuntime>) -> Self {
+    pub fn new(
+        chain: Arc<ChainSpec>,
+        runtime: Arc<PolicyRuntime>,
+        finality: Arc<dyn FinalityView>,
+    ) -> Self {
         let inner = EthEvmConfig::new_with_evm_factory(chain, PolicyFactory::unconfigured());
         Self {
             factory: OpsBlockExecutorFactory {
@@ -130,6 +175,7 @@ impl OpsEvmConfig {
             },
             inner,
             runtime,
+            finality,
         }
     }
 }
@@ -178,12 +224,22 @@ impl ConfigureEvm for OpsEvmConfig {
                 .map(|tx| *tx.tx_hash())
                 .collect(),
         };
+        let execution = match self
+            .runtime
+            .import(&descriptor, ImportOrigin::Block, self.finality.as_ref())
+            .map_err(io::Error::other)?
+        {
+            ImportExecution::Replay(handle) => Execution::Handle(handle),
+            trusted @ ImportExecution::TrustedFinalized(_) => {
+                Execution::TrustedFinalized(trusted.factory())
+            }
+        };
         Ok(ExecutionCtx {
             inner: self
                 .inner
                 .context_for_block(block)
                 .expect("infallible Ethereum context"),
-            handle: self.runtime.replay(&descriptor).map_err(io::Error::other)?,
+            execution,
         })
     }
     fn context_for_next_block(
@@ -198,7 +254,7 @@ impl ConfigureEvm for OpsEvmConfig {
                 .inner
                 .context_for_next_block(parent, attributes)
                 .expect("infallible Ethereum context"),
-            handle,
+            execution: Execution::Handle(handle),
         })
     }
 }
@@ -226,12 +282,17 @@ impl ConfigureEngineEvm<ExecutionData> for OpsEvmConfig {
                 .map(keccak256)
                 .collect(),
         };
+        // An engine payload is never trusted here: it always replays its manifest.
+        // (A payload buffered for an unknown parent later takes the block path,
+        // where it is not canonical at its height and so replays as well.)
         Ok(ExecutionCtx {
             inner: self
                 .inner
                 .context_for_payload(payload)
                 .expect("infallible Ethereum context"),
-            handle: self.runtime.replay(&descriptor).map_err(io::Error::other)?,
+            execution: Execution::Handle(
+                self.runtime.replay(&descriptor).map_err(io::Error::other)?,
+            ),
         })
     }
     fn tx_iterator_for_payload(
@@ -256,6 +317,7 @@ where
         if ctx.chain_spec().chain.id() != self.0.network().chain_id {
             eyre::bail!("OPS policy network does not match node chain");
         }
-        Ok(OpsEvmConfig::new(ctx.chain_spec(), self.0))
+        let finality = Arc::new(ProviderFinality(ctx.provider().clone()));
+        Ok(OpsEvmConfig::new(ctx.chain_spec(), self.0, finality))
     }
 }

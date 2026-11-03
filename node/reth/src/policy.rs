@@ -40,10 +40,11 @@ use alloy_evm::{
         primitives::hardfork::SpecId,
     },
 };
-use alloy_primitives::{Address, Bytes, U256, address, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
 use serde::Serialize;
 use std::{
     cell::Cell,
+    collections::HashSet,
     error::Error,
     fmt,
     sync::{
@@ -67,6 +68,9 @@ pub struct PolicyFactory {
     diagnostic: Option<Arc<DiagnosticReport>>,
     candidate: Option<(Arc<PinnedPolicySnapshot>, Arc<DiagnosticReport>)>,
     timing: Option<Arc<PolicyTiming>>,
+    /// Trusted finalized history: exactly these transactions run as stock
+    /// Ethereum execution, without identity or policy; anything else is denied.
+    trusted: Option<Arc<HashSet<B256>>>,
 }
 
 /// One measured active policy check: the frame's application depth, how long the
@@ -150,6 +154,18 @@ impl PolicyFactory {
             diagnostic: None,
             candidate: None,
             timing: None,
+            trusted: None,
+        }
+    }
+
+    /// Execution of a finalized canonical block the node trusts (plan D1): its
+    /// own transactions run without policy. Policy gas, storage and warming
+    /// are isolated from application execution, so state is identical. Only
+    /// `PolicyRuntime::import` builds this.
+    pub(crate) fn trusted_finalized(transactions: Arc<HashSet<B256>>) -> Self {
+        Self {
+            trusted: Some(transactions),
+            ..Self::missing_context()
         }
     }
 
@@ -179,6 +195,10 @@ impl PolicyFactory {
     /// authenticated execution handle; public RPC cannot inherit ambient identity.
     #[cfg(feature = "reth-sdk")]
     pub(crate) fn unconfigured() -> Self {
+        Self::missing_context()
+    }
+
+    fn missing_context() -> Self {
         #[derive(Debug)]
         struct MissingContext;
         impl IdentityResolver for MissingContext {
@@ -245,6 +265,7 @@ impl EvmFactory for PolicyFactory {
                 ))
                 .build(),
             identities: self.identities.clone(),
+            trusted: self.trusted.clone(),
         }
     }
 }
@@ -252,6 +273,7 @@ impl EvmFactory for PolicyFactory {
 pub struct PolicyEvm<DB: Database, I> {
     inner: EthEvm<DB, (PolicyInspector<EthEvmContext<DB>>, I), PrecompilesMap>,
     identities: Arc<dyn IdentityResolver>,
+    trusted: Option<Arc<HashSet<B256>>>,
 }
 
 #[cfg(feature = "reth-sdk")]
@@ -266,6 +288,7 @@ impl<DB: Database, I: Inspector<EthEvmContext<DB>>> PolicyEvm<DB, I> {
             factory.timing,
         );
         self.identities = factory.identities;
+        self.trusted = factory.trusted;
     }
 }
 
@@ -300,6 +323,17 @@ impl<DB: Database, I: Inspector<EthEvmContext<DB>>> Evm for PolicyEvm<DB, I> {
             .binding
             .as_ref()
             .ok_or_else(|| deny("missing execution binding"))?;
+        if let Some(trusted) = &self.trusted {
+            let crate::context::ExecutionBinding::Transaction(hash) = binding else {
+                return Err(deny("not in the trusted block"));
+            };
+            if !trusted.contains(hash) {
+                return Err(deny("transaction is not in the trusted block"));
+            }
+            // Stock execution, as for protocol system calls.
+            self.inner.components_mut().1.0.active = false;
+            return self.inner.transact_raw(tx.env).map_err(map_error);
+        }
         if (self.inner.components().1.0.diagnostic.is_some()
             || self.inner.components().1.0.candidate.is_some())
             && !matches!(binding, crate::context::ExecutionBinding::Simulation { .. })

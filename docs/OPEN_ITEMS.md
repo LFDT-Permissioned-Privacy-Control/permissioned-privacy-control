@@ -417,6 +417,11 @@ Apple M2 Max development setup. That historical result is not a fresh throughput
 measurement of the per-group build. The latest run verified live correctness
 and serial call latency, not sustained transaction throughput.
 
+Guarded nodes no longer re-check the signed evidence of finalized blocks they
+re-execute (trusted finalized history). That changes a detective control and
+needs change-management and Compliance review, like the manifest retention
+period.
+
 **Remaining work before a high-TPS claim:** measure sustained admission,
 inclusion and finality end to end through OPS with
 representative contracts on the intended hardware and block configuration.

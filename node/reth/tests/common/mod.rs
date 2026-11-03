@@ -600,6 +600,14 @@ pub mod fixture {
 
     /// As `execute`, with the denial reason.
     pub fn execute_result(handle: &ExecutionHandle, hash: B256) -> Result<(), String> {
+        execute_with(handle.factory(), Some(hash))
+    }
+
+    /// Execute the fixture's call with `factory`, bound to `hash` (or unbound).
+    pub fn execute_with(
+        factory: ops_reth_policy::policy::PolicyFactory,
+        hash: Option<B256>,
+    ) -> Result<(), String> {
         let case = &lifecycle()["cases"][0];
         let signer = case["facts"]["signer"]
             .as_str()
@@ -632,7 +640,7 @@ pub mod fixture {
                 ..Default::default()
             },
         );
-        let mut evm = handle.factory().create_evm(
+        let mut evm = factory.create_evm(
             db,
             EvmEnv {
                 cfg_env: CfgEnv::new_with_spec(SpecId::PRAGUE),
@@ -647,7 +655,11 @@ pub mod fixture {
             .gas_price(0)
             .build()
             .unwrap();
-        evm.transact_raw(PolicyTx::bound(tx, ExecutionBinding::Transaction(hash)))
+        let tx = match hash {
+            Some(hash) => PolicyTx::bound(tx, ExecutionBinding::Transaction(hash)),
+            None => PolicyTx::unbound(tx),
+        };
+        evm.transact_raw(tx)
             .map(|_| ())
             .map_err(|error| format!("{error:?}"))
     }

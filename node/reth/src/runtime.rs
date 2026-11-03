@@ -17,7 +17,7 @@ use crate::{
 use alloy_evm::revm::context::TxEnv;
 use alloy_primitives::{Address, B256};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -117,6 +117,74 @@ pub struct TransactionStatus {
     pub finalized: bool,
     pub finalized_block_hash: Option<B256>,
     pub finalized_block_number: Option<u64>,
+}
+
+/// The node's canonical chain as seen for one block height: the finalized
+/// block, the best block number, and the canonical hashes at the block's
+/// height and at the finalized height.
+#[derive(Clone, Copy, Debug)]
+pub struct ChainView {
+    pub finalized: (u64, B256),
+    pub best: u64,
+    pub canonical_at_block: Option<B256>,
+    pub canonical_at_finalized: Option<B256>,
+}
+
+/// Read access to the node's canonical chain for trusted finalized history.
+pub trait FinalityView: Send + Sync + std::fmt::Debug {
+    /// `None` when no finalized block is known.
+    fn chain_view(&self, block_number: u64) -> Option<ChainView>;
+}
+
+/// Where a block executed for import came from. Trust never rests on the
+/// origin alone: a buffered engine payload can reach Reth's block path too,
+/// and is untrusted there because it is not yet canonical at its height.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportOrigin {
+    /// A block through Reth's block path (pipeline stages, re-execution,
+    /// buffered downloads).
+    Block,
+    /// An engine-API payload: never trusted, always replayed from its manifest.
+    Payload,
+}
+
+/// The transactions of one trusted finalized block. Only `import` creates it.
+#[derive(Debug)]
+pub struct TrustedTransactions(Arc<HashSet<B256>>);
+
+/// How an imported block executes.
+#[derive(Debug)]
+pub enum ImportExecution {
+    /// Replay from the block's manifest, with the policy and identities it embeds.
+    Replay(Arc<ExecutionHandle>),
+    /// A finalized canonical block: exactly its own transactions run without
+    /// policy (trusted finalized history).
+    TrustedFinalized(TrustedTransactions),
+}
+
+impl ImportExecution {
+    pub fn factory(&self) -> PolicyFactory {
+        match self {
+            Self::Replay(handle) => handle.factory(),
+            Self::TrustedFinalized(transactions) => {
+                PolicyFactory::trusted_finalized(transactions.0.clone())
+            }
+        }
+    }
+}
+
+/// Trusted only by hash, never by height alone: a finalized block known to the
+/// node, canonical at its height and not above the best block, and this block
+/// canonical at its own height at or below it.
+fn trusted_finalized(block: &BlockDescriptor, finality: &dyn FinalityView) -> bool {
+    let Some(view) = finality.chain_view(block.number) else {
+        return false;
+    };
+    let (number, hash) = view.finalized;
+    number <= view.best
+        && block.number <= number
+        && view.canonical_at_finalized == Some(hash)
+        && view.canonical_at_block == Some(block.hash)
 }
 
 /// Finality evidence from the node's canonical chain for one included
@@ -461,6 +529,29 @@ impl PolicyRuntime {
                 facts_version: 0,
             },
         )
+    }
+
+    /// Execution for importing `block`. A canonical ancestor of the known
+    /// finalized block, imported through the block path, needs no manifest:
+    /// only its own transactions run, without policy; ordinary consensus
+    /// validation still applies. Anything else replays its manifest and fails
+    /// closed without one. Forensic replay of finalized history must call
+    /// `replay` directly, which always checks the evidence.
+    pub fn import(
+        &self,
+        block: &BlockDescriptor,
+        origin: ImportOrigin,
+        finality: &dyn FinalityView,
+    ) -> Result<ImportExecution, String> {
+        if &block.network == self.network()
+            && origin == ImportOrigin::Block
+            && trusted_finalized(block, finality)
+        {
+            return Ok(ImportExecution::TrustedFinalized(TrustedTransactions(
+                Arc::new(block.transactions.iter().copied().collect()),
+            )));
+        }
+        self.replay(block).map(ImportExecution::Replay)
     }
 
     pub fn replay(&self, block: &BlockDescriptor) -> Result<Arc<ExecutionHandle>, String> {

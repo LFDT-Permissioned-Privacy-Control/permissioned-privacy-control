@@ -108,6 +108,9 @@ fn main() -> eyre::Result<()> {
             if selection.to_string().split(',').any(|s|matches!(s,"all"|"debug"|"trace")) {eyre::bail!("historical debug/trace RPC is reserved for authenticated forensic replay; use ops_simulate for calls");}
         }
         builder.config_mut().rpc.ipcdisable=true;
+        // A public "pending" query would build and persist a candidate block from
+        // the pool; OPS never needs one.
+        builder.config_mut().rpc.rpc_pending_block="none".parse().map_err(eyre::Report::msg)?;
         let listener=tokio::net::TcpListener::bind(required("OPS_NODE_POLICY_LISTEN")?).await?;
         let token=required("OPS_NODE_POLICY_TOKEN")?;
         let eth_builder:EthereumEthApiBuilder=Default::default();

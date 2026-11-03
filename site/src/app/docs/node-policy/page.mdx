@@ -186,6 +186,11 @@ acknowledgement cursor, not the instance — or leave it at its default. Configu
 `POLICY_SOLC` or the executable search path. `GET /ready` returns 503 until the
 node has fresh matching facts and required capabilities.
 
+On the guarded Reth node, public `pending` block queries return no block, and
+finalized history the node already holds re-executes without its policy
+evidence; blocks it imports for the first time need the producer's execution
+manifests.
+
 The development stack uses Reth's local block production and an explicit short
 finality depth. Its local finality behavior is for testing and does not establish
 external consensus. Use the repository's `docs/implementation/ops-reth-stack.md`

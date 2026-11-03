@@ -75,8 +75,14 @@ The `--dev` producer is intended for the local OPS stack. OPS blocks are ordinar
 Ethereum blocks: a vanilla Ethereum node imports and validates them (state and
 receipt roots) but cannot verify their authorization. A guarded `ops-reth` node
 replays each block it imports from the producer's execution manifest for that
-block, so production consensus integration must give every guarded importing node
-those manifests.
+block. Re-executing history it already holds at or below its finalized head (after
+a restart or an unwind, or for RPC) runs only those blocks' own transactions,
+without policy, under the same consensus validation. A node importing blocks for
+the first time, including a fresh follower during its initial sync, has no known
+finality for them, so production consensus integration must give every guarded
+importing node the producer's manifests.
+Public `pending` block queries are disabled: building one would execute and
+record a candidate block from the pool.
 The node can start before OPS publishes facts; private status remains unready
 and application execution fails closed until a fresh signed snapshot arrives.
 
