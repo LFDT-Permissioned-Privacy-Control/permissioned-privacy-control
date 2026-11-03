@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -466,4 +467,67 @@ func hexNonce(t *testing.T, r rpcReply) uint64 {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// The final ops_transactionStatuses wire (track A, A3): with a senders
+// parameter the answer adds receipts and the senders' nonces at the finalized
+// block; finalized is null while only genesis is final (and the nonces with
+// it); malformed parameters are the opaque -32000.
+func TestMockNodeTransactionEvidence(t *testing.T) {
+	node, clock, _, private := testNode(t, time.Second)
+	const token = "private-token-0123456789"
+	key := mustKey(t)
+	sender := strings.ToLower(crypto.PubkeyToAddress(key.PublicKey).Hex())
+	other := "0x" + strings.Repeat("0b", 20)
+	var hashes []string
+	for nonce := uint64(0); nonce < 2; nonce++ {
+		tx, raw := signedTransfer(t, key, nonce)
+		hash := strings.ToLower(tx.Hash().Hex())
+		hashes = append(hashes, hash)
+		mustOK(t, call(t, private.URL, token, "ops_submitTransaction", identityEnvelope(t, hash, "ctx-"+hash[2:10]), raw))
+	}
+	unknown := "0x" + strings.Repeat("cd", 32)
+	type evidence struct {
+		Finalized    *struct{ Number uint64 } `json:"finalized"`
+		Statuses     []json.RawMessage        `json:"statuses"`
+		Receipts     []*bool                  `json:"receipts"`
+		SenderNonces []uint64                 `json:"sender_nonces"`
+	}
+	read := func() (evidence, map[string]json.RawMessage) {
+		r := call(t, private.URL, token, "ops_transactionStatuses", append(slices.Clone(hashes), unknown), []string{sender, other})
+		var e evidence
+		var fields map[string]json.RawMessage
+		if r.Error != nil || json.Unmarshal(r.Result, &e) != nil || json.Unmarshal(r.Result, &fields) != nil {
+			t.Fatalf("evidence %s %+v", r.Result, r.Error)
+		}
+		return e, fields
+	}
+	if e, fields := read(); e.Finalized != nil || string(fields["sender_nonces"]) != "null" || len(e.Receipts) != 3 || *e.Receipts[0] {
+		t.Fatalf("only genesis final: %s", fields)
+	}
+	node.ProduceBlock()
+	clock.Advance(2 * time.Second)
+	node.ProduceBlock() // the first block is final now
+	e, _ := read()
+	if e.Finalized == nil || e.Finalized.Number != 1 || !*e.Receipts[0] || !*e.Receipts[1] || *e.Receipts[2] || len(e.SenderNonces) != 2 || e.SenderNonces[0] != 2 || e.SenderNonces[1] != 0 {
+		t.Fatalf("evidence after finality %+v", e)
+	}
+	// Statuses-only calls carry neither evidence field.
+	r := call(t, private.URL, token, "ops_transactionStatuses", hashes)
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(r.Result, &fields)
+	if _, ok := fields["receipts"]; ok || r.Error != nil {
+		t.Fatalf("statuses-only answer %s", r.Result)
+	}
+	for _, bad := range [][]any{
+		{[]string{strings.ToUpper(unknown)}},
+		{[]string{}},
+		{hashes, []string{"0xab"}},
+		{hashes, []string{sender}, []string{sender}},
+		{"not-an-array"},
+	} {
+		if r := call(t, private.URL, token, "ops_transactionStatuses", bad...); r.Error == nil || r.Error.Code != -32000 {
+			t.Fatalf("malformed params %v answered %+v", bad, r.Error)
+		}
+	}
 }

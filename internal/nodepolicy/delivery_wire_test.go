@@ -284,3 +284,77 @@ func TestNodeRefusedIsTheOpaqueRefusalOnly(t *testing.T) {
 		t.Fatal("a rejection is a node rejection")
 	}
 }
+
+// ops_transactionStatuses (final, A3): with the optional second parameter
+// (senders) the answer also carries receipts (true/false/null per hash) and
+// the senders' nonces at the finalized block (null when finality is unknown);
+// without it neither field may appear. finalized is null while only genesis is
+// final. Malformed evidence is a protocol error; an unrequested field too.
+func TestTransactionEvidenceIsStrict(t *testing.T) {
+	hashes := []string{"0x" + strings.Repeat("11", 32), "0x" + strings.Repeat("22", 32)}
+	senders := []string{"0x" + strings.Repeat("aa", 20)}
+	head := map[string]any{"number": 9, "hash": "0x" + strings.Repeat("33", 32), "timestamp": 1000}
+	for _, test := range []string{"ok", "no_finality", "unrequested_receipts", "short_receipts", "nonces_without_head", "short_nonces", "null_nonce", "missing_receipts", "genesis_head"} {
+		t.Run(test, func(t *testing.T) {
+			s := rpcServer(t, func(method string, params []json.RawMessage) (any, string) {
+				result := map[string]any{"boot_id": testBootID, "finalized": head, "canonical_epoch": 0, "statuses": []any{nil, nil}, "receipts": []any{false, nil}, "sender_nonces": []any{5}}
+				switch test {
+				case "no_finality":
+					result["finalized"], result["sender_nonces"] = nil, nil
+				case "unrequested_receipts":
+				case "short_receipts":
+					result["receipts"] = []any{false}
+				case "nonces_without_head":
+					result["finalized"] = nil
+				case "short_nonces":
+					result["sender_nonces"] = []any{}
+				case "null_nonce":
+					result["sender_nonces"] = []any{nil}
+				case "missing_receipts":
+					delete(result, "receipts")
+				case "genesis_head":
+					result["finalized"] = map[string]any{"number": 0, "hash": "0x" + strings.Repeat("44", 32), "timestamp": 0}
+				}
+				if test == "unrequested_receipts" {
+					if len(params) != 1 {
+						t.Errorf("statuses-only call sent %d params", len(params))
+					}
+				} else if len(params) != 2 {
+					t.Errorf("evidence call sent %d params", len(params))
+				}
+				return result, ""
+			})
+			defer s.Close()
+			c, err := NewClient(s.URL, "private-test-token", identityFixture().Network, s.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test == "unrequested_receipts" {
+				if _, err := c.TransactionStatuses(context.Background(), hashes); !errors.Is(err, ErrNodeResponse) {
+					t.Fatalf("evidence fields without a senders parameter accepted: %v", err)
+				}
+				return
+			}
+			batch, err := c.TransactionEvidence(context.Background(), hashes, senders)
+			switch test {
+			case "ok":
+				if err != nil || batch.Finalized == nil || len(batch.Receipts) != 2 || batch.Receipts[0] == nil || *batch.Receipts[0] || batch.Receipts[1] != nil || len(batch.SenderNonces) != 1 || batch.SenderNonces[0] != 5 {
+					t.Fatalf("evidence %+v %v", batch, err)
+				}
+			case "no_finality":
+				if err != nil || batch.Finalized != nil || batch.SenderNonces != nil {
+					t.Fatalf("no finality: %+v %v", batch, err)
+				}
+			default:
+				if !errors.Is(err, ErrNodeResponse) {
+					t.Fatalf("invalid evidence accepted: %+v %v", batch, err)
+				}
+			}
+		})
+	}
+	for _, bad := range [][]string{{}, {"0x" + strings.Repeat("AA", 20)}, {"0xaa"}, make([]string, MaxStatusBatch+1)} {
+		if _, err := (&Client{}).TransactionEvidence(context.Background(), hashes, bad); !errors.Is(err, ErrIdentity) {
+			t.Fatalf("invalid senders %v sent: %v", bad, err)
+		}
+	}
+}

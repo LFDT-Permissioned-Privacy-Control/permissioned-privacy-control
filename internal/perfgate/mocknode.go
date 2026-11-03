@@ -654,15 +654,7 @@ func (m *MockNode) transactionCount(params []json.RawMessage, _ *callInfo) (any,
 		if n >= uint64(len(m.blocks)) {
 			return nil, &rpcError{Code: -32000, Message: "header not found"}
 		}
-		sender, count := strings.ToLower(address), uint64(0)
-		for _, block := range m.blocks[1 : n+1] {
-			for _, hash := range block.Transactions {
-				if m.txs[hash].sender == sender {
-					count++
-				}
-			}
-		}
-		return hexUint(count), nil
+		return hexUint(m.nonceAtLocked(strings.ToLower(address), n)), nil
 	}
 	account := m.accounts[strings.ToLower(address)]
 	if account == nil {
@@ -1175,21 +1167,41 @@ type finalizedHead struct {
 }
 
 // transactionStatuses is ops_transactionStatuses (capability
-// transaction_statuses_v1, the shape OPS requests from the node): the boot
-// id, the finalized head, the canonical epoch and one entry per hash (null
-// when unknown), at most MaxStatusBatch hashes.
+// transaction_statuses_v1, the final A3 wire): the boot id, the finalized
+// head (null while only genesis is final), the canonical epoch and one entry
+// per hash (null when unknown), at most MaxStatusBatch hashes. With the
+// optional senders parameter it adds receipts (a canonical block holds the
+// hash) and the senders' nonces after the finalized block (null without one).
+// Malformed parameters are the node's opaque -32000.
 func (m *MockNode) transactionStatuses(params []json.RawMessage, _ *callInfo) (any, *rpcError) {
-	var hashes []string
-	if len(params) != 1 || json.Unmarshal(params[0], &hashes) != nil || len(hashes) == 0 || len(hashes) > MaxStatusBatch {
-		return nil, &rpcError{Code: -32602, Message: "invalid params"}
+	var hashes, senders []string
+	valid := func(raw json.RawMessage, size int, out *[]string) bool {
+		if json.Unmarshal(raw, out) != nil || len(*out) == 0 || len(*out) > MaxStatusBatch {
+			return false
+		}
+		for _, v := range *out {
+			if len(v) != 2+2*size || !strings.HasPrefix(v, "0x") || strings.ToLower(v) != v {
+				return false
+			}
+			if _, err := hex.DecodeString(v[2:]); err != nil {
+				return false
+			}
+		}
+		return true
+	}
+	if len(params) < 1 || len(params) > 2 || !valid(params[0], 32, &hashes) || (len(params) == 2 && !valid(params[1], 20, &senders)) {
+		return nil, errRejected
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	finalized := m.finalizedLocked()
+	if finalized != nil && finalized.Number == 0 {
+		finalized = nil // only genesis is final: no finality to report
+	}
 	out := make([]*batchedEntry, len(hashes))
 	for i, hash := range hashes {
-		if status := m.statusLocked(strings.ToLower(hash), finalized); status != nil {
-			tx := m.txs[strings.ToLower(hash)]
+		if status := m.statusLocked(hash, finalized); status != nil {
+			tx := m.txs[hash]
 			out[i] = &batchedEntry{transactionStatus: status, Pooled: tx.block == nil && m.accounts[tx.sender].pooled[tx.nonce] == tx}
 		}
 	}
@@ -1197,12 +1209,47 @@ func (m *MockNode) transactionStatuses(params []json.RawMessage, _ *callInfo) (a
 	if finalized != nil {
 		head = &finalizedHead{Number: finalized.Number, Hash: finalized.Hash, Timestamp: max(finalized.Time.Unix(), 1)}
 	}
-	return struct {
+	type batch struct {
 		BootID         string          `json:"boot_id"`
 		Finalized      *finalizedHead  `json:"finalized"`
 		CanonicalEpoch uint64          `json:"canonical_epoch"`
 		Statuses       []*batchedEntry `json:"statuses"`
-	}{m.bootID, head, m.epoch, out}, nil
+	}
+	answer := batch{m.bootID, head, m.epoch, out}
+	if senders == nil {
+		return answer, nil
+	}
+	receipts := make([]bool, len(hashes))
+	for i, hash := range hashes {
+		tx := m.txs[hash]
+		receipts[i] = tx != nil && tx.block != nil
+	}
+	var nonces []uint64
+	if finalized != nil {
+		nonces = make([]uint64, len(senders))
+		for j, sender := range senders {
+			nonces[j] = m.nonceAtLocked(sender, finalized.Number)
+		}
+	}
+	return struct {
+		batch
+		Receipts     []bool   `json:"receipts"`
+		SenderNonces []uint64 `json:"sender_nonces"`
+	}{answer, receipts, nonces}, nil
+}
+
+// nonceAtLocked is a sender's account nonce after block number: its
+// transactions included up to it (the mock's senders start at nonce 0).
+func (m *MockNode) nonceAtLocked(sender string, number uint64) uint64 {
+	var count uint64
+	for _, block := range m.blocks[1 : min(number, uint64(len(m.blocks)-1))+1] {
+		for _, hash := range block.Transactions {
+			if m.txs[hash].sender == sender {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // Stalled reports senders whose pooled transactions wait behind a nonce gap
