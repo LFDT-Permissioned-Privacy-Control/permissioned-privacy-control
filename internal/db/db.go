@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -889,6 +891,7 @@ func (d *DB) SealBufferedAccessLog(ctx context.Context, chain RBACAuditChain, re
 	if chain == nil {
 		return "", fmt.Errorf("seal access log: nil chain")
 	}
+	rec = ClampAccessLogRecord(rec)
 
 	var corrID *string
 	if rec.CorrelationID != "" {
@@ -935,6 +938,144 @@ func (d *DB) SealBufferedAccessLog(ctx context.Context, chain RBACAuditChain, re
 		return "", err
 	}
 	return hash, nil
+}
+
+// ClampAccessLogRecord makes a buffered record storable before it is hashed:
+// text fields cut to their access_logs column widths by character, NUL bytes
+// (which Postgres text rejects) replaced with U+FFFD, and invalid UTF-8
+// replaced the same way. Such a value (a method name reaches logAccess
+// unchecked) would otherwise fail its INSERT on every attempt and wedge the
+// single sealer. The stored row, its hash and its SIEM event all use the
+// clamped record.
+func ClampAccessLogRecord(rec AccessLogRecord) AccessLogRecord {
+	clean := func(s string, n int) string {
+		s = strings.ReplaceAll(strings.ToValidUTF8(s, "\uFFFD"), "\x00", "\uFFFD")
+		if n > 0 && utf8.RuneCountInString(s) > n {
+			s = string([]rune(s)[:n])
+		}
+		return s
+	}
+	rec.ExternalID = clean(rec.ExternalID, 255)
+	rec.Method = clean(rec.Method, 100)
+	rec.IPAddress = clean(rec.IPAddress, 45)
+	rec.CorrelationID = clean(rec.CorrelationID, 128)
+	rec.OrgID = clean(rec.OrgID, 0)
+	rec.DenialReason = clean(rec.DenialReason, 0)
+	if len(rec.Params) > 0 {
+		if cleaned := clean(string(rec.Params), 0); cleaned != string(rec.Params) {
+			rec.Params = []byte(cleaned)
+		}
+	}
+	return rec
+}
+
+// BatchAuditChain is a hash chain that links several entries in one step
+// (audit.HashChain).
+type BatchAuditChain interface {
+	AppendBatch(build func(prevHash string) (contents []string, write func(hashes []string) error, err error)) ([]string, error)
+}
+
+// BufferedAccessLog is one buffered access-log record and its buffer sequence.
+type BufferedAccessLog struct {
+	Seq    uint64
+	Record AccessLogRecord
+}
+
+// SealedAccessLog is what a batch seal stored for one record.
+type SealedAccessLog struct {
+	Hash      string
+	CreatedAt time.Time
+}
+
+// SealBufferedAccessLogs seals a batch of buffered records into the chain in
+// one statement (RD-1410): one round trip reserves their ids in
+// ascending order (id order = chain order), the hashes are linked in process
+// with the canonical v2 content of SealBufferedAccessLog, and one multi-row
+// INSERT writes every row. Under the chain's mutex the head advances only if
+// that INSERT succeeds; otherwise nothing is sealed and the chain is
+// unchanged. created_at is one timestamp per batch (the verifier orders the
+// chain by id, not by time). buffer_seq stays UNIQUE, so a double seal fails
+// the whole batch loudly. Records must be in ascending buffer sequence.
+func (d *DB) SealBufferedAccessLogs(ctx context.Context, chain BatchAuditChain, records []BufferedAccessLog, chainName string) ([]SealedAccessLog, error) {
+	if chain == nil {
+		return nil, fmt.Errorf("seal access logs: nil chain")
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+	n := len(records)
+	var sealed []SealedAccessLog
+	_, err := chain.AppendBatch(func(string) ([]string, func([]string) error, error) {
+		rows, err := d.conn.QueryContext(ctx, `SELECT nextval('access_logs_id_seq') FROM generate_series(1, $1)`, n)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reserve access_logs ids: %w", err)
+		}
+		ids := make([]int64, 0, n)
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, nil, fmt.Errorf("reserve access_logs ids: %w", err)
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil || len(ids) != n {
+			return nil, nil, fmt.Errorf("reserve access_logs ids: got %d of %d: %v", len(ids), n, err)
+		}
+		slices.Sort(ids)
+		createdAt := time.Now().UTC().Truncate(time.Microsecond)
+		contents := make([]string, n)
+		externalIDs, methods, ips, entryHashes := make([]string, n), make([]string, n), make([]string, n), make([]string, n)
+		statuses := make([]int32, n)
+		correlations, params, orgIDs, denials := make([]*string, n), make([]*string, n), make([]*string, n), make([]*string, n)
+		responses := make([]*int32, n)
+		created := make([]time.Time, n)
+		seqs := make([]int64, n)
+		for i, buffered := range records {
+			rec := ClampAccessLogRecord(buffered.Record)
+			respStatus := rec.StatusCode
+			if rec.ResponseStatus != nil {
+				respStatus = *rec.ResponseStatus
+				r := int32(*rec.ResponseStatus)
+				responses[i] = &r
+			}
+			paramsDigest := ""
+			if len(rec.Params) > 0 {
+				paramsDigest = string(rec.Params)
+				params[i] = &paramsDigest
+			}
+			contents[i] = AccessLogChainContent(ids[i], rec.ExternalID, rec.Method, rec.IPAddress, rec.StatusCode, respStatus, createdAt, rec.CorrelationID, paramsDigest)
+			externalIDs[i], methods[i], ips[i], statuses[i] = rec.ExternalID, rec.Method, rec.IPAddress, int32(rec.StatusCode)
+			correlations[i], orgIDs[i], denials[i] = nullableText(rec.CorrelationID), nullableText(rec.OrgID), nullableText(rec.DenialReason)
+			created[i], seqs[i] = createdAt, int64(buffered.Seq)
+		}
+		write := func(hashes []string) error {
+			copy(entryHashes, hashes)
+			res, err := d.conn.ExecContext(ctx, `INSERT INTO access_logs
+				(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, hash_format_version, created_at, entry_hash, buffer_seq, chain_name, org_id, denial_reason)
+				SELECT u.id, u.external_id, u.method, u.status_code, u.ip_address, u.correlation_id, u.request_params, u.response_status, 2, u.created_at, u.entry_hash, u.buffer_seq, $12, u.org_id, u.denial_reason
+				FROM unnest($1::bigint[], $2::text[], $3::text[], $4::int[], $5::text[], $6::text[], $7::text[], $8::int[], $9::timestamp[], $10::text[], $11::bigint[], $13::text[], $14::text[])
+				  AS u(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, created_at, entry_hash, buffer_seq, org_id, denial_reason)`,
+				ids, externalIDs, methods, statuses, ips, correlations, params, responses, created, entryHashes, seqs, chainName, orgIDs, denials)
+			if err != nil {
+				return fmt.Errorf("insert access_logs (batch seal): %w", err)
+			}
+			if affected, _ := res.RowsAffected(); affected != int64(n) {
+				return fmt.Errorf("insert access_logs (batch seal): expected %d rows, got %d", n, affected)
+			}
+			sealed = make([]SealedAccessLog, n)
+			for i := range sealed {
+				sealed[i] = SealedAccessLog{Hash: hashes[i], CreatedAt: createdAt}
+			}
+			return nil
+		}
+		return contents, write, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return sealed, nil
 }
 
 // AuditChainCheckpointRow is a persisted signed checkpoint (RD-1112 #8),

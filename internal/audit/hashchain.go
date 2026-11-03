@@ -94,3 +94,49 @@ func (h *HashChain) Append(build func(prevHash string) (content string, write fu
 	h.lastHash = hash
 	return hash, nil
 }
+
+// AppendBatch is Append for several entries at once: build receives the
+// current head and returns the entries' canonical contents in chain order and
+// one write that persists all of them with their hashes. The hashes link as
+// successive Appends would; the head advances to the last hash only if write
+// returns nil, otherwise the chain is unchanged (the same commit/rollback
+// contract, for the whole batch).
+func (h *HashChain) AppendBatch(build func(prevHash string) (contents []string, write func(hashes []string) error, err error)) ([]string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	prev := h.lastHash
+	contents, write, err := build(prev)
+	if err != nil {
+		return nil, err
+	}
+	if write == nil {
+		return nil, errAppendNilWrite
+	}
+	hashes := make([]string, len(contents))
+	link := prev
+	for i, content := range contents {
+		hasher := sha256.New()
+		hasher.Write([]byte(link))
+		hasher.Write([]byte(content))
+		link = hex.EncodeToString(hasher.Sum(nil))
+		hashes[i] = link
+	}
+	if err := write(hashes); err != nil {
+		return nil, err
+	}
+	if len(hashes) > 0 {
+		h.lastHash = link
+	}
+	return hashes, nil
+}
+
+// Reset sets the head to the chain's last persisted hash. The single writer
+// of a chain calls it after a write whose outcome is unknown (an error after
+// the statement may have committed), so the next entry links to what is
+// actually stored, not to stale memory.
+func (h *HashChain) Reset(lastHash string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lastHash = lastHash
+}

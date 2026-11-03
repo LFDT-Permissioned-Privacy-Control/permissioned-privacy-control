@@ -404,14 +404,13 @@ func TestAuditWritePath_MultiChainName_IndependentWalk(t *testing.T) {
 		func(ctx context.Context) (uint64, error) { return database.GetMaxAccessLogBufferSeq(ctx, chainB) },
 		sealer.Config{Batch: 1})
 
-	// Append to both buffers, then drain ONE entry at a time alternating A/B so
-	// the access_logs ids interleave across chain_names (id: A,B,A,B,...).
+	// Append and seal ONE entry at a time alternating A/B so the access_logs
+	// ids interleave across chain_names (id: A,B,A,B,...). A tick drains its
+	// whole buffer, so each buffer holds one entry when it ticks.
 	const per = 5
 	for i := 0; i < per; i++ {
 		appendRec(t, bufA, db.AccessLogRecord{ExternalID: fmt.Sprintf("did:a:%d", i), Method: "eth_chainId", StatusCode: 200, IPAddress: "203.0.113.1"})
 		appendRec(t, bufB, db.AccessLogRecord{ExternalID: fmt.Sprintf("did:b:%d", i), Method: "net_version", StatusCode: 200, IPAddress: "203.0.113.2"})
-	}
-	for i := 0; i < per; i++ {
 		if sealed, err := sealA.Tick(ctx); err != nil || sealed != 1 {
 			t.Fatalf("sealA tick %d: sealed=%d err=%v", i, sealed, err)
 		}

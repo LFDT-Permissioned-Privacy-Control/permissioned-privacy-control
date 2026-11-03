@@ -136,9 +136,14 @@ func TestConfigurationActivationAuditFailureRollsBackProjectionAndChain(t *testi
 	group := proposedGroup()
 	draft, err := d.SubmitConfigurationRevision(ctx, configurationSource(t, scope, 0, []configuration.Group{group}), author)
 	require.NoError(t, err)
-	_, err = d.Conn().ExecContext(ctx, `CREATE FUNCTION reject_configuration_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected audit failure'; END $$;
+	// CREATE OR REPLACE and the cleanup keep a rerun on the same database
+	// (a shared or reused test Postgres) from failing on the leftover function.
+	_, err = d.Conn().ExecContext(ctx, `CREATE OR REPLACE FUNCTION reject_configuration_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected audit failure'; END $$;
 CREATE TRIGGER reject_configuration_audit BEFORE INSERT ON rbac_audit_log FOR EACH ROW EXECUTE FUNCTION reject_configuration_audit()`)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = d.Conn().ExecContext(context.Background(), `DROP TRIGGER IF EXISTS reject_configuration_audit ON rbac_audit_log; DROP FUNCTION IF EXISTS reject_configuration_audit()`)
+	})
 	head := chain.LastHash()
 	_, err = d.ActivateConfigurationRevisions(ctx, scope, []string{draft.ID}, reviewer, func(context.Context, *Tx, ConfigurationActivation) error { return nil })
 	require.Error(t, err)

@@ -54,6 +54,7 @@ type SIEMForwarder struct {
 	batch []SIEMEvent
 	stop  chan struct{}
 	done  chan struct{}
+	kick  chan struct{} // a full batch is waiting: flush now
 
 	// Prometheus metrics (optional, set via SetMetrics)
 	batchesTotal       *prometheus.CounterVec
@@ -103,18 +104,38 @@ func NewSIEMForwarder(cfg SIEMConfig) (*SIEMForwarder, error) {
 		batch: make([]SIEMEvent, 0, cfg.BatchSize),
 		stop:  make(chan struct{}),
 		done:  make(chan struct{}),
+		kick:  make(chan struct{}, 1),
 	}, nil
 }
 
-// Send queues an event for the next batch. If the batch is full, an immediate flush is triggered.
+// maxQueuedBatches bounds the events waiting for the forwarder goroutine.
+const maxQueuedBatches = 100
+
+// Send queues an event for the next batch and never waits for the webhook:
+// a full batch wakes the forwarder goroutine, which flushes it. The audit
+// sealer calls Send, so a slow SIEM endpoint must not stall sealing (RD-1410).
+// When the forwarder falls more than maxQueuedBatches batches behind, the
+// oldest batch takes the failed-batch path (fallback log, dropped counter)
+// instead of growing without bound.
 func (s *SIEMForwarder) Send(event SIEMEvent) {
 	s.mu.Lock()
 	s.batch = append(s.batch, event)
 	full := len(s.batch) >= s.cfg.BatchSize
+	var overflow []SIEMEvent
+	if len(s.batch) > maxQueuedBatches*s.cfg.BatchSize {
+		overflow = append([]SIEMEvent(nil), s.batch[:s.cfg.BatchSize]...)
+		s.batch = append(s.batch[:0], s.batch[s.cfg.BatchSize:]...)
+	}
 	s.mu.Unlock()
 
+	if overflow != nil {
+		s.handleFailedBatch(overflow, fmt.Errorf("SIEM forwarder queue full (%d batches waiting)", maxQueuedBatches))
+	}
 	if full {
-		s.flush()
+		select {
+		case s.kick <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -138,28 +159,50 @@ func (s *SIEMForwarder) run() {
 	for {
 		select {
 		case <-s.stop:
-			s.flush()
+			s.flushBy(time.Now().Add(stopFlushBudget))
 			return
 		case <-ticker.C:
+			s.flush()
+		case <-s.kick:
 			s.flush()
 		}
 	}
 }
 
-func (s *SIEMForwarder) flush() {
-	s.mu.Lock()
-	if len(s.batch) == 0 {
-		s.mu.Unlock()
-		return
-	}
-	events := s.batch
-	s.batch = make([]SIEMEvent, 0, s.cfg.BatchSize)
-	s.mu.Unlock()
+// stopFlushBudget bounds the final flush at Stop: what is still queued after
+// it takes the failed-delivery path, so a SIEM outage cannot hold shutdown
+// for every queued batch's retries.
+const stopFlushBudget = 10 * time.Second
 
-	if err := s.send(events); err != nil {
-		s.handleFailedBatch(events, err)
-	} else if s.batchesTotal != nil {
-		s.batchesTotal.WithLabelValues("success").Inc()
+func (s *SIEMForwarder) flush() { s.flushBy(time.Time{}) }
+
+// flushBy sends everything queued, at most BatchSize events per request. With
+// a non-zero deadline, batches still queued once it has passed are handed to
+// handleFailedBatch instead of being sent.
+func (s *SIEMForwarder) flushBy(deadline time.Time) {
+	for {
+		s.mu.Lock()
+		if len(s.batch) == 0 {
+			s.mu.Unlock()
+			return
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			rest := s.batch
+			s.batch = make([]SIEMEvent, 0, s.cfg.BatchSize)
+			s.mu.Unlock()
+			s.handleFailedBatch(rest, fmt.Errorf("SIEM forwarder stopped before delivery"))
+			return
+		}
+		n := min(len(s.batch), s.cfg.BatchSize)
+		events := append([]SIEMEvent(nil), s.batch[:n]...)
+		s.batch = append(s.batch[:0], s.batch[n:]...)
+		s.mu.Unlock()
+
+		if err := s.send(events); err != nil {
+			s.handleFailedBatch(events, err)
+		} else if s.batchesTotal != nil {
+			s.batchesTotal.WithLabelValues("success").Inc()
+		}
 	}
 }
 

@@ -232,6 +232,14 @@ func (s *Server) Stop() {
 	if s.runtimeTracer != nil {
 		s.runtimeTracer.Stop()
 	}
+	// The audit sealer forwards to the SIEM: stop it first so the events of
+	// its final tick are flushed by the forwarder's Stop below.
+	if s.auditSealerCancel != nil {
+		s.auditSealerCancel()
+	}
+	if s.auditSealer != nil {
+		s.auditSealer.Wait()
+	}
 	if s.siemForwarder != nil {
 		s.siemForwarder.Stop()
 	}
@@ -247,14 +255,8 @@ func (s *Server) Stop() {
 	if s.visibilityReconciler != nil {
 		s.visibilityReconciler.Stop()
 	}
-	// RD-1112: stop the audit sealer's drain loop and wait for the in-flight
-	// tick to finish before closing its buffer, so Close never races a tick.
-	if s.auditSealerCancel != nil {
-		s.auditSealerCancel()
-	}
-	if s.auditSealer != nil {
-		s.auditSealer.Wait()
-	}
+	// RD-1112: the audit sealer stopped above (before the SIEM forwarder), so
+	// the buffer below is closed only after its last tick finished.
 	if s.auditCheckpointCancel != nil {
 		s.auditCheckpointCancel()
 	}
@@ -758,9 +760,22 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 
 	// Initialize enhanced audit: hash chain, SIEM forwarder, retention cleaner.
 	// RD-1147: the access_logs chain lives in the audit DB — seed it from there.
-	hashChainSeed, err := auditDB.GetLatestAccessLogHashForChain(context.Background(), cfg.AuditChainName)
-	if err != nil {
-		slog.Warn("failed to seed hash chain from DB, starting fresh", "error", err)
+	// Fail closed: a chain started from "" while rows exist forks it, which
+	// the integrity verifier reports as tampering. The audit database is
+	// already required to start (RD-1410).
+	var hashChainSeed string
+	for attempt := 1; ; attempt++ {
+		headCtx, cancelHead := context.WithTimeout(context.Background(), 10*time.Second)
+		hashChainSeed, err = auditDB.GetLatestAccessLogHashForChain(headCtx, cfg.AuditChainName)
+		cancelHead()
+		if err == nil {
+			break
+		}
+		if attempt == 3 {
+			return nil, fmt.Errorf("seed the access-log hash chain from the audit database: %w", err)
+		}
+		slog.Warn("reading the access-log chain head failed; retrying", "attempt", attempt, "error", err)
+		time.Sleep(time.Second)
 	}
 	hashChain := audit.NewHashChain(hashChainSeed)
 
@@ -848,59 +863,29 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 	// the per-request chain mutex + 2 PG round-trips that capped throughput. A
 	// single-writer sealer means no chain fork. Empty dir = synchronous legacy path.
 	if cfg.AuditBufferDir != "" {
-		auditBuf, bufErr := buffer.Open(cfg.AuditBufferDir)
+		// RequireSeed: no append is accepted until the buffer's sequence floor
+		// is the chain's sealed high-water (seeded below, before the request
+		// path exists), so a drained or recreated buffer never reuses a
+		// sequence the chain already sealed (RD-1410).
+		auditBuf, bufErr := buffer.Open(cfg.AuditBufferDir, buffer.RequireSeed())
 		if bufErr != nil {
 			return nil, fmt.Errorf("async audit buffer init (AUDIT_BUFFER_DIR=%q): %w", cfg.AuditBufferDir, bufErr)
 		}
 		s.auditBuffer = auditBuf
 
-		sealFn := func(ctx context.Context, seq uint64, data []byte) error {
-			var rec db.AccessLogRecord
-			if err := json.Unmarshal(data, &rec); err != nil {
-				// A corrupt buffered record must not wedge the sealer. Log loudly
-				// and skip it; the high-water advances past it on the next drain.
-				slog.Error("audit sealer: corrupt buffered record skipped", "seq", seq, "error", err)
-				return nil
-			}
-			hash, err := auditDB.SealBufferedAccessLog(ctx, hashChain, rec, seq, cfg.AuditChainName)
-			if err != nil {
-				return err
-			}
-			// SIEM forwarding moved here from logAccess (off the hot path).
-			if siemForwarder != nil {
-				outcome := "success"
-				if rec.StatusCode >= 400 {
-					outcome = "denied"
-				}
-				if rec.StatusCode >= 500 {
-					outcome = "error"
-				}
-				respStatus := rec.StatusCode
-				if rec.ResponseStatus != nil {
-					respStatus = *rec.ResponseStatus
-				}
-				ev := audit.SIEMEvent{
-					Timestamp:     time.Now().UTC(),
-					EventType:     "access",
-					CorrelationID: rec.CorrelationID,
-					ActorID:       rec.ExternalID,
-					Action:        rec.Method,
-					Outcome:       outcome,
-					Details:       fmt.Sprintf("decision=%d response=%d", rec.StatusCode, respStatus),
-					SourceIP:      rec.IPAddress,
-					EntryHash:     hash,
-				}
-				if rbac.IsPassthroughMethod(rec.Method) {
-					ev.MatchedVia = "passthrough"
-				}
-				siemForwarder.Send(ev)
-			}
-			return nil
+		sealing := &accessLogSealing{auditDB: auditDB, chain: hashChain, name: cfg.AuditChainName, siem: siemForwarder}
+		// A tick drains the whole backlog in multi-row batch writes; a failed
+		// batch is sealed record by record, stopping at the failing one.
+		s.auditSealer = sealer.New(auditBuf, sealing.seal, sealing.highWater, sealer.Config{SealBatch: sealing.sealBatch})
+		seedCtx, cancelSeed := context.WithTimeout(context.Background(), 15*time.Second)
+		seedErr := s.auditSealer.Seed(seedCtx)
+		cancelSeed()
+		if seedErr != nil {
+			_ = auditBuf.Close()
+			s.auditBuffer, s.auditSealer = nil, nil
+			s.Stop()
+			return nil, fmt.Errorf("async audit buffer: read the sealed chain high-water from the audit database: %w", seedErr)
 		}
-		highWater := func(ctx context.Context) (uint64, error) {
-			return auditDB.GetMaxAccessLogBufferSeq(ctx, cfg.AuditChainName)
-		}
-		s.auditSealer = sealer.New(auditBuf, sealFn, highWater, sealer.Config{})
 		sealerCtx, sealerCancel := context.WithCancel(context.Background())
 		s.auditSealerCancel = sealerCancel
 		go s.auditSealer.Run(sealerCtx)
