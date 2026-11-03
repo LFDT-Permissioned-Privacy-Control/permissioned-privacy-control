@@ -92,8 +92,15 @@ fn every_other_import_needs_its_manifest() {
     let mut not_canonical = view();
     not_canonical.canonical.insert(3, B256::repeat_byte(78));
     cases.push((
-        "finalized hash not canonical",
+        "finalized hash not canonical (a prospective forkchoice declaration)",
         not_canonical,
+        ImportOrigin::Block,
+    ));
+    let mut below = view();
+    below.canonical.remove(&1);
+    cases.push((
+        "below finality but not on the canonical chain",
+        below,
         ImportOrigin::Block,
     ));
     let mut ahead = view();

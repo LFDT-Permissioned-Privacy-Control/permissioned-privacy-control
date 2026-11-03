@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod archive;
+pub mod chain;
 pub mod context;
 pub mod facts;
 pub mod identity;

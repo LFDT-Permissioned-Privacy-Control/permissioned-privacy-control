@@ -56,9 +56,9 @@ belongs to OPS; the node only receives trusted public keys.
 | `OPS_NODE_POLICY_TOKEN` | Bearer token shared with OPS |
 | `OPS_NODE_POLICY_VERIFY_WORKERS` | Optional concurrent identity-admission jobs (signature verification, transaction decoding, signer recovery), 1–64; default `4` |
 | `OPS_NODE_POLICY_STATE_DIR` | Dedicated durable policy/archive directory on a local filesystem (a subdirectory, not a volume's root), used by one node process at a time: it is locked. Start from an empty directory: one written in an older layout is refused, there is no importer |
-| `OPS_NODE_POLICY_CAPACITY` | Optional pending identity limit; default `262144` (estimated at about 370 MB when full). A slot is held until OPS observes the transaction's finalized receipt, or until its lease expires. Startup refuses a value below ⌈1.25 × (expected tx/s × (2 s + finality bound) + pending limit)⌉ |
+| `OPS_NODE_POLICY_CAPACITY` | Optional pending identity limit; default `262144` (estimated at about 370 MB when full). A slot is held until the transaction's block is final and written by Reth, or until its lease expires. Startup refuses a value below ⌈1.25 × (expected tx/s × (2 s + finality bound) + pending limit)⌉ |
 | `OPS_NODE_POLICY_EXPECTED_TPS` | Optional sustained transactions per second the capacity must cover; default `2000` |
-| `OPS_NODE_POLICY_FINALITY_BOUND` | Optional seconds from inclusion to finality (finality depth × block time), at least `1`; default `64`. Set it from the deployed consensus, which has no universal fixed depth |
+| `OPS_NODE_POLICY_FINALITY_BOUND` | Optional seconds from inclusion until a block is both final and written by Reth (the larger of finality depth × block time and Reth's persistence lag), at least `1`; default `64`. Set it from the deployed consensus, which has no universal fixed depth |
 | `OPS_NODE_POLICY_PENDING_LIMIT` | Optional allowance for admitted submissions still awaiting inclusion, which capacity must also cover; default `37500` |
 | `OPS_POLICY_DECISION_LOG` | Set to `1` to print one `OPS_POLICY_DECISION {…}` JSON line per checked transaction on stderr (development diagnostic; off by default — it costs a synchronous write per transaction and records principal/selector pairs in the node log) |
 
@@ -111,8 +111,10 @@ to start with a public RPC module that replays, traces, validates or builds
 blocks through the guarded executor (`debug`, `trace`, `ots`, `flashbots`, `mev`,
 `testing`, or `all`), with `--rpc.forwarder` (it would send guarded
 transactions to a node without policy and hide local pool rejections) or with
-`--debug.reorg-frequency`. Public `eth_simulateV1` builds no blocks (its block
-limit is forced to 0). `eth_call`, `eth_estimateGas`, and `debug_traceCall` are available through
+`--debug.reorg-frequency`, or with a `--db.sync-mode` other than `durable`
+(finality is reported only for blocks Reth has written, which must survive a
+host crash). Public `eth_simulateV1` builds no blocks (its block limit is
+forced to 0). `eth_call`, `eth_estimateGas`, and `debug_traceCall` are available through
 signed private simulations; public calls cannot inherit an OPS principal.
 Nonempty state/code/storage and block overrides are rejected for every simulation
 mode. An authenticated call never authorizes replacing customer bytecode with a
@@ -159,13 +161,17 @@ transaction when later facts change. Included creation metadata is returned only
 when a canonical receipt matches the exact archived block, and includes nested
 successful CREATE/CREATE2 results. Reverted creations never become registration
 evidence. The status of an included transaction reports the identity that executed
-it, from the block's manifest. The bounded pending identity slot is released when
-OPS observes the finalized receipt: before finality a reorganization can return the
-transaction to the pool, where its registered identity lets it execute again while
-its lease is valid; after expiry the principal that submitted it must send it
-again through OPS.
-Permanent OPS registration and visibility projection wait for `finalized:true`,
-backed by the node's finalized forkchoice header and canonical block checks.
+it, from the block's manifest. The node itself releases the bounded pending
+identity slot once the transaction's canonical block is final and written (OPS's
+status poll of a finalized receipt releases it too): before finality a
+reorganization can return the transaction to the pool, where its registered
+identity lets it execute again, without OPS, while its lease is valid; after
+expiry the principal that submitted it must send it again through OPS.
+Permanent OPS registration and visibility projection wait for `finalized:true`.
+The node reports finality only up to the lower of Reth's forkchoice-finalized
+height and the height Reth has written to disk (a crash can lose newer blocks),
+checked against the canonical chain, and never takes it back. Trusted import of
+finalized history uses consensus finality alone.
 Wait for that reconciliation before calling a newly deployed contract across
 blocks. Inclusion alone remains provisional and can return to pending after a
 reorganization.

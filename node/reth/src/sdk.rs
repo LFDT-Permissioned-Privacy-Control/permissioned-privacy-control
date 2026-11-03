@@ -3,19 +3,21 @@
 
 use crate::{
     archive::BlockDescriptor,
+    chain::ChainState,
     policy::{PolicyEvm, PolicyFactory},
     runtime::{
         ChainView, ExecutionHandle, FinalityView, ImportExecution, ImportOrigin, PolicyRuntime,
     },
 };
 use alloy_consensus::Header;
+use alloy_eips::BlockNumHash;
 use alloy_evm::{
     EvmEnv,
     block::{BlockExecutorFactory, StateDB},
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext},
     revm::inspector::Inspector,
 };
-use alloy_primitives::keccak256;
+use alloy_primitives::{B256, keccak256};
 use reth_ethereum::{
     Block, EthPrimitives,
     chainspec::ChainSpec,
@@ -31,7 +33,10 @@ use reth_ethereum::{
         builder::{BuilderContext, components::ExecutorBuilder},
     },
     primitives::{SealedBlock, SealedHeader},
-    provider::{BlockIdReader, BlockNumReader},
+    provider::{
+        BlockHashReader, BlockIdReader, BlockNumReader, DatabaseProviderFactory,
+        TransactionsProvider,
+    },
     rpc::types::engine::ExecutionData,
 };
 use std::{fmt, io, sync::Arc};
@@ -71,6 +76,72 @@ impl<P: BlockIdReader + BlockNumReader + Send + Sync> FinalityView for ProviderF
             canonical_at_block: self.0.block_hash(block_number).ok().flatten(),
             canonical_at_finalized: self.0.block_hash(finalized.number).ok().flatten(),
         })
+    }
+}
+
+/// The node's canonical chain for effective finality and release. The
+/// persisted height comes from Reth's persisted-block notification, used
+/// only while it names a canonical block, and until the first notification
+/// from the height Reth had written at startup.
+pub struct ProviderChain<P> {
+    provider: P,
+    persisted: Box<dyn Fn() -> Option<BlockNumHash> + Send + Sync>,
+    at_start: Option<(u64, B256)>,
+}
+
+impl<P> ProviderChain<P> {
+    pub fn new(
+        provider: P,
+        persisted: impl Fn() -> Option<BlockNumHash> + Send + Sync + 'static,
+        at_start: Option<(u64, B256)>,
+    ) -> Self {
+        Self {
+            provider,
+            persisted: Box::new(persisted),
+            at_start,
+        }
+    }
+}
+
+impl<P> fmt::Debug for ProviderChain<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ProviderChain")
+    }
+}
+
+impl<P> ChainState for ProviderChain<P>
+where
+    P: BlockIdReader
+        + BlockHashReader
+        + TransactionsProvider<Transaction = reth_ethereum::TransactionSigned>
+        + Send
+        + Sync,
+{
+    fn finalized(&self) -> Option<(u64, B256)> {
+        let finalized = self.provider.finalized_block_num_hash().ok().flatten()?;
+        Some((finalized.number, finalized.hash))
+    }
+    fn persisted(&self) -> Option<u64> {
+        // Either way only while it is still the canonical block there.
+        let (number, hash) = match (self.persisted)() {
+            None => self.at_start?,
+            Some(persisted) => (persisted.number, persisted.hash),
+        };
+        (self.canonical_hash(number) == Some(hash)).then_some(number)
+    }
+    fn canonical_hash(&self, number: u64) -> Option<B256> {
+        self.provider.block_hash(number).ok().flatten()
+    }
+    fn transactions(&self, number: u64) -> Option<Vec<B256>> {
+        Some(
+            self.provider
+                .transactions_by_block(number.into())
+                .ok()
+                .flatten()?
+                .iter()
+                .map(|transaction| *transaction.tx_hash())
+                .collect(),
+        )
     }
 }
 
@@ -316,6 +387,13 @@ where
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         if ctx.chain_spec().chain.id() != self.0.network().chain_id {
             eyre::bail!("OPS policy network does not match node chain");
+        }
+        // Before launch nothing is being written: the database's finished
+        // block is what Reth has written.
+        let database = ctx.provider().database_provider_ro()?;
+        let written = database.best_block_number()?;
+        if let Some(hash) = database.block_hash(written)? {
+            self.0.set_persisted_at_start(written, hash);
         }
         let finality = Arc::new(ProviderFinality(ctx.provider().clone()));
         Ok(OpsEvmConfig::new(ctx.chain_spec(), self.0, finality))

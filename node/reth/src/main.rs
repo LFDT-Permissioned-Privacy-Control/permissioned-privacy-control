@@ -8,7 +8,7 @@ use ops_reth_policy::{
     archive::ArtifactStore,
     context::ExecutionBinding,
     runtime::PolicyRuntime,
-    sdk::OpsExecutorBuilder,
+    sdk::{OpsExecutorBuilder, ProviderChain},
     simulation,
     transaction::PolicyTx,
     wire::{Identity, Network, SimulationRequest, Verifier},
@@ -16,7 +16,7 @@ use ops_reth_policy::{
 use reth_ethereum::{
     PooledTransactionVariant,
     cli::interface::Cli,
-    node::core::args::{DebugArgs, RpcServerArgs},
+    node::core::args::{DatabaseArgs, DebugArgs, RpcServerArgs},
     node::{
         EthereumNode,
         builder::rpc::{BasicEngineApiBuilder, BasicEngineValidatorBuilder, RpcAddOns},
@@ -24,8 +24,9 @@ use reth_ethereum::{
     },
     pool::TransactionOrigin,
     primitives::{Recovered, WithEncoded},
+    provider::db::mdbx::SyncMode,
     rpc::{
-        api::eth::helpers::{Call, EthBlocks, EthTransactions},
+        api::eth::helpers::{Call, EthTransactions},
         builder::RethRpcModule,
         eth::{
             EthApiError, RpcInvalidTransactionError,
@@ -169,6 +170,19 @@ fn refuse_unsafe_debug(debug: &DebugArgs) -> eyre::Result<()> {
     Ok(())
 }
 
+/// The node reports finality, and releases identities, only for blocks Reth
+/// has written; a database sync mode that can lose committed blocks on a
+/// host crash would break that.
+fn refuse_unsafe_database(database: &DatabaseArgs) -> eyre::Result<()> {
+    if database
+        .sync_mode
+        .is_some_and(|mode| mode != SyncMode::Durable)
+    {
+        eyre::bail!("--db.sync-mode must be durable on the guarded node");
+    }
+    Ok(())
+}
+
 /// "Nonce too low" for a transaction whose own canonical receipt exists is an
 /// inclusion, not a rejection (Reth validates the nonce before it looks for a
 /// duplicate). A failed receipt lookup is transient: the registration stays.
@@ -241,7 +255,8 @@ fn main() -> eyre::Result<()> {
                 .map_err(|error| eyre::eyre!("{name}: {error}"))
         };
         let capacity = usize::try_from(setting("OPS_NODE_POLICY_CAPACITY", "262144")?)?;
-        // Slots are held until OPS observes finality: size them for the expected load.
+        // Slots are held until the transaction's block is final and written:
+        // size them for the expected load.
         ops_reth_policy::identity::validate_capacity(
             capacity,
             setting("OPS_NODE_POLICY_EXPECTED_TPS", "2000")?,
@@ -255,6 +270,7 @@ fn main() -> eyre::Result<()> {
         );
         refuse_unsafe_rpc(&builder.config().rpc)?;
         refuse_unsafe_debug(&builder.config().debug)?;
+        refuse_unsafe_database(&builder.config().db)?;
         force_rpc_settings(&mut builder.config_mut().rpc)?;
         let listener = tokio::net::TcpListener::bind(required("OPS_NODE_POLICY_LISTEN")?).await?;
         let token = required("OPS_NODE_POLICY_TOKEN")?;
@@ -279,6 +295,32 @@ fn main() -> eyre::Result<()> {
             .with_add_ons(addons)
             .launch_with_debug_capabilities()
             .await?;
+        // The node's own canonical chain drives finality: status, and identity
+        // release at finality on the maintenance thread, woken by Reth's
+        // finalized and persisted notifications.
+        let provider = handle.node.provider.clone();
+        let memory = provider.canonical_in_memory_state();
+        let written = memory.clone();
+        runtime.attach_chain(Arc::new(ProviderChain::new(
+            provider,
+            move || written.get_persisted_num_hash(),
+            runtime.persisted_at_start(),
+        )));
+        runtime.start_maintenance(Arc::new(now))?;
+        let (mut finalized, mut persisted) = (
+            memory.subscribe_finalized_block(),
+            memory.subscribe_persisted_block(),
+        );
+        let maintenance = runtime.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    changed = finalized.changed() => if changed.is_err() { break },
+                    changed = persisted.changed() => if changed.is_err() { break },
+                }
+                maintenance.wake_maintenance();
+            }
+        });
         let eth_submit = handle.node.rpc_registry.eth_api().clone();
         let eth_simulate = eth_submit.clone();
         let eth_status = eth_submit.clone();
@@ -310,63 +352,12 @@ fn main() -> eyre::Result<()> {
                     )
                     .map_err(|_| "invalid receipt block")?;
                     let success = receipt.get("status").and_then(Value::as_str) == Some("0x1");
-                    // Finality evidence from the node's canonical chain: the finalized
-                    // head, canonical at its own height, and the canonical hash at the
-                    // included height. Deciding from it is the runtime's.
-                    let mut finality = None;
-                    if let Some(finalized) = eth
-                        .rpc_block_header(BlockId::finalized())
-                        .await
-                        .map_err(|_| "finalized head lookup failed")?
-                    {
-                        let finalized = serde_json::to_value(finalized)
-                            .map_err(|_| "invalid finalized head")?;
-                        let final_hash: B256 = finalized["hash"]
-                            .as_str()
-                            .ok_or("finalized hash unavailable")?
-                            .parse()
-                            .map_err(|_| "invalid finalized hash")?;
-                        let final_number = u64::from_str_radix(
-                            finalized["number"]
-                                .as_str()
-                                .ok_or("finalized number unavailable")?
-                                .trim_start_matches("0x"),
-                            16,
-                        )
-                        .map_err(|_| "invalid finalized number")?;
-                        if let Some(canonical) = eth
-                            .rpc_block_header(BlockId::number(included))
-                            .await
-                            .map_err(|_| "canonical block lookup failed")?
-                        {
-                            let canonical = serde_json::to_value(canonical)
-                                .map_err(|_| "invalid canonical header")?;
-                            let canonical_hash: B256 = canonical["hash"]
-                                .as_str()
-                                .ok_or("canonical hash unavailable")?
-                                .parse()
-                                .map_err(|_| "invalid canonical hash")?;
-                            if let Some(final_canonical) = eth
-                                .rpc_block_header(BlockId::number(final_number))
-                                .await
-                                .map_err(|_| "canonical finalized lookup failed")?
-                            {
-                                let final_canonical = serde_json::to_value(final_canonical)
-                                    .map_err(|_| "invalid canonical finalized header")?;
-                                if final_canonical["hash"].as_str()
-                                    == Some(&format!("{final_hash:#x}"))
-                                {
-                                    finality = Some(ops_reth_policy::runtime::FinalityEvidence {
-                                        canonical_at_inclusion: canonical_hash,
-                                        finalized_number: final_number,
-                                        finalized_hash: final_hash,
-                                    });
-                                }
-                            }
-                        }
-                    }
+                    // Finality from the node's canonical chain, never above
+                    // what Reth has written (a crash cannot lose a block
+                    // reported final); deciding from it is the runtime's.
                     let lookup = runtime.clone();
                     tokio::task::spawn_blocking(move || {
+                        let finality = lookup.finality_evidence(included);
                         lookup.canonical_status(hash, (included, block), success, finality)
                     })
                     .await
@@ -701,5 +692,21 @@ mod tests {
         };
         assert!(refuse_unsafe_debug(&debug(&[])).is_ok());
         assert!(refuse_unsafe_debug(&debug(&["--debug.reorg-frequency", "5"])).is_err());
+    }
+
+    #[test]
+    fn non_durable_database_is_refused_at_startup() {
+        let database = |arguments: &[&str]| {
+            let mut command = vec!["ops-reth", "node"];
+            command.extend_from_slice(arguments);
+            let cli = Cli::<EthereumChainSpecParser>::try_parse_args_from(command).unwrap();
+            let reth_ethereum::cli::interface::Commands::Node(node) = cli.command else {
+                panic!("not the node command");
+            };
+            node.db
+        };
+        assert!(refuse_unsafe_database(&database(&[])).is_ok());
+        assert!(refuse_unsafe_database(&database(&["--db.sync-mode", "durable"])).is_ok());
+        assert!(refuse_unsafe_database(&database(&["--db.sync-mode", "safe-no-sync"])).is_err());
     }
 }

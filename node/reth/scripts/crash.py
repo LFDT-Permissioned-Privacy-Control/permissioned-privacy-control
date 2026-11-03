@@ -20,6 +20,8 @@ from the backup, while the node holds no identities. After every restart:
   refuses it;
 - every transaction with a canonical receipt reports `included` through
   `ops_transactionStatus`, from its block's manifest;
+- every transaction the node reported `finalized: true` before the stop kept
+  its block: the node reports finality only for blocks Reth has written;
 - a restored pooled transaction does not execute without an identity;
 - transactions without a receipt are submitted again, as their sender would
   (OPS does not resubmit them); every submission is accepted, also when the
@@ -282,7 +284,7 @@ def main():
     node = Node(args.binary, work, senders)
     report = dict(workdir=str(work), seed=args.seed, build=build_record(args.binary), rounds=[])
     state = dict(version=snapshot['version'], generation=0, cursor=0)
-    submitted, verified = [], {}
+    submitted, verified, final = [], {}, {}
 
     def publish():
         state['version'] += 1
@@ -329,8 +331,19 @@ def main():
             assert status['execution']['block_hash'] == found['blockHash'], status
             assert status['principal_id'] == 'fixture_principal', status
             verified[tx['hash']] = (int(found['blockNumber'], 16), found['blockHash'])
+            if status['execution']['finalized']:
+                final[tx['hash']] = found['blockHash']
             included += 1
         return included
+
+    def poll_finality():
+        """Status of every included transaction right before a stop: what OPS would record as final.
+        Newest first: the newest batch is the one a stop can lose."""
+        for tx in reversed(submitted):
+            answer = node.rpc('ops_transactionStatus', [tx['hash']], True, check=False, timeout=2)
+            execution = answer.get('result', {}).get('execution', {})
+            if execution.get('finalized'):
+                final[tx['hash']] = execution['block_hash']
 
     def restart(stopped, clean):
         """Restart after a stop and check what survived; returns the round record."""
@@ -346,6 +359,10 @@ def main():
             assert kept == saved_hash, f'saved block {saved_number} changed from {saved_hash} to {kept}'
         if clean:
             assert after >= stopped.committed, f'a clean stop lost blocks: {stopped.committed} -> {after}'
+        for tx_hash, block_hash in final.items():
+            found = node.rpc('eth_getTransactionReceipt', [tx_hash])
+            assert found and found['blockHash'] == block_hash, \
+                f'{tx_hash} was reported finalized in {block_hash} and is now {found and found["blockHash"]}'
         for tx_hash, (number, block_hash) in list(verified.items()):
             found = node.rpc('eth_getTransactionReceipt', [tx_hash])
             if found:
@@ -359,7 +376,7 @@ def main():
             assert 'error' in answer, f'status disclosed for a transaction without a receipt: {answer}'
         return dict(committed_at_stop=stopped.committed, saved_at_stop=saved_number, last_built_at_stop=stopped.last_added(),
                     head_after_restart=after, lost_blocks_with_txs=len(stopped.with_transactions(after)),
-                    status_refused=len(missing))
+                    status_refused=len(missing), finalized_kept=len(final))
 
     def resubmit_and_include(record):
         missing = [tx for tx in submitted if not receipt(tx)]
@@ -396,6 +413,10 @@ def main():
                 node.events.wait(lambda events: events.with_transactions(start), 10, 'a block with the batch')
                 number = node.events.with_transactions(start)[0]
                 node.events.wait(lambda events: events.committed >= number, 10, 'its commit')
+                # Ask for finality the moment the block is the head: before the
+                # node capped finality at what Reth had written, this reported
+                # a block a SIGKILL then lost as final.
+                poll_finality()
                 time.sleep(random.uniform(0, .05))
             node.kill()
             stopped = node.events.poll()

@@ -329,8 +329,11 @@ lease is valid, or again at the publisher's next heartbeat. The state directory
 carries a layout marker and is locked by the one node process using it; a
 directory in an older layout is refused. A pending transaction identity lives
 only in the node's memory, from
-admission until OPS observes the transaction's finalized receipt or its lease
-expires and a later admission reclaims it; admission does no storage I/O. A
+admission until the transaction's canonical block is final and written by Reth
+(the node releases it itself; OPS's status poll does too) or its lease expires
+and a later admission reclaims it; admission does no storage I/O. The node
+reports finality only up to the height Reth has written, so a crash never loses
+a block reported final. A
 restarted node holds no pending identities: a transaction not yet included
 cannot execute until the principal that submitted it sends it again through OPS
 (OPS does not resubmit it), and OPS's submission row keeps the principal binding
@@ -368,10 +371,11 @@ sequenceDiagram
     RT->>Dir: One compressed block manifest: identities, outcomes, facts, lease
     Note over RT,Dir: The manifest is durable before the block is returned
     Reth->>Reth: Persist block in chain database
+    Reth->>RT: Finalized and written: release the pending identity slot
     loop Reconciler until a final outcome
         OPS->>RT: ops_transactionStatus(hash)
         RT->>Reth: Canonical receipt and finalized head
-        RT->>RT: Release pending identity slot once finalized
+        RT->>RT: Finality capped at the height Reth has written
         RT-->>OPS: included or reverted, finality, created contracts
         OPS->>DB: Update row state and outcome
     end

@@ -49,7 +49,7 @@ genesis = dict(config=config, nonce='0x0', timestamp='0x0', gasLimit='0x1c9c380'
 (work / 'genesis.json').write_text(json.dumps(genesis))
 env = dict(os.environ, OPS_NODE_POLICY_CHAIN_ID='31337', OPS_NODE_POLICY_DEPLOYMENT_ID=network['deployment_id'], OPS_NODE_POLICY_PUBLIC_KEYS=json.dumps({'ops': base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()}), OPS_NODE_POLICY_STATE_DIR=str(work / 'policy'), OPS_NODE_POLICY_LISTEN=f'127.0.0.1:{private}', OPS_NODE_POLICY_TOKEN='local-runtime-smoke-token')
 log = open(work / 'node.log', 'w')
-command = [str(pathlib.Path(args.binary).resolve()), 'node', '--chain', str(work / 'genesis.json'), '--dev', '--dev.finality-depth', '1', '--dev.block-time', '1s', '--datadir', str(work / 'data'), '--http', '--http.addr', '127.0.0.1', '--http.port', str(public), '--http.api', 'eth,net,web3', '--authrpc.port', str(auth), '--addr', '127.0.0.1', '--port', str(p2p), '--disable-discovery', '--log.file.directory', str(work / 'logs'), '--color', 'never']
+command = [str(pathlib.Path(args.binary).resolve()), 'node', '--chain', str(work / 'genesis.json'), '--dev', '--dev.finality-depth', '1', '--dev.block-time', '1s', '--engine.persistence-threshold', '0', '--datadir', str(work / 'data'), '--http', '--http.addr', '127.0.0.1', '--http.port', str(public), '--http.api', 'eth,net,web3', '--authrpc.port', str(auth), '--addr', '127.0.0.1', '--port', str(p2p), '--disable-discovery', '--log.file.directory', str(work / 'logs'), '--color', 'never']
 process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
 try:
     for _ in range(100):
@@ -107,7 +107,8 @@ try:
         # says "nonce too low", its own receipt exists, so it is accepted.
         resent = result('ops_submitTransaction', [identity('transaction', tx['hash'], name + '-resent'), tx['raw']], True)
         assert resent['status'] == 'accepted' and resent['transaction_hash'] == tx['hash'], resent
-        for _ in range(100):
+        # Finality is reported only once Reth has written the block.
+        for _ in range(300):
             status = result('ops_transactionStatus', [tx['hash']], True)
             if status['execution'].get('finalized'): break
             time.sleep(.1)

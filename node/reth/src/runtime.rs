@@ -3,6 +3,7 @@
 
 use crate::{
     archive::{ArtifactStore, BlockDescriptor, Published},
+    chain::{ChainState, Finality},
     context::{
         CreatedContract, ExecutionBinding, ExecutionIdentity, ExecutionOutcome, IdentityResolver,
         PinnedPolicySnapshot,
@@ -18,8 +19,15 @@ use alloy_evm::revm::context::TxEnv;
 use alloy_primitives::{Address, B256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex, OnceLock, Weak},
+    time::Duration,
 };
+
+/// Newly final heights read per maintenance run; older ones are skipped (their
+/// slots still end with their lease).
+const RELEASE_HEIGHTS: u64 = 8192;
+/// The maintenance thread also runs this often without a wake-up.
+const MAINTENANCE_BACKSTOP: Duration = Duration::from_secs(10);
 
 /// Included transactions whose status answers are kept in memory (about the
 /// finality window at the default expected load), and at most this many blocks.
@@ -106,6 +114,42 @@ pub struct PolicyRuntime {
     /// Random per process start: every private response names it, so OPS
     /// knows which boot an acknowledgement belongs to.
     boot_id: String,
+    /// The node's canonical chain, attached once the node is built.
+    chain: OnceLock<Arc<dyn ChainState>>,
+    /// What may be treated as final: never above what Reth has written.
+    finality: Finality,
+    /// The highest final height whose identities were released.
+    released_through: Mutex<Option<u64>>,
+    /// The highest block Reth had written when the node started (its
+    /// persisted-block notification starts empty).
+    persisted_at_start: OnceLock<(u64, B256)>,
+    wake: Arc<Wake>,
+}
+
+/// Wake-ups of the maintenance thread.
+#[derive(Debug, Default)]
+struct Wake {
+    pending: Mutex<bool>,
+    signal: Condvar,
+}
+
+impl Wake {
+    fn notify(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = true;
+            self.signal.notify_one();
+        }
+    }
+
+    fn wait(&self, timeout: Duration) {
+        if let Ok(pending) = self.pending.lock()
+            && let Ok((mut pending, _)) =
+                self.signal
+                    .wait_timeout_while(pending, timeout, |pending| !*pending)
+        {
+            *pending = false;
+        }
+    }
 }
 
 /// 128 random bits as hex. `/dev/urandom` mixed with the clock and process
@@ -251,7 +295,131 @@ impl PolicyRuntime {
             facts: Mutex::new(()),
             status: Mutex::new(StatusCache::default()),
             boot_id: new_boot_id(),
+            chain: OnceLock::new(),
+            finality: Finality::default(),
+            released_through: Mutex::new(None),
+            persisted_at_start: OnceLock::new(),
+            wake: Arc::new(Wake::default()),
         }
+    }
+
+    /// Attach the node's canonical chain (once). Heights already final now
+    /// are never scanned for release: the registry started empty.
+    pub fn attach_chain(&self, chain: Arc<dyn ChainState>) {
+        if self.chain.set(chain.clone()).is_ok() {
+            let start = self
+                .finality
+                .observe(chain.as_ref())
+                .map(|(number, _)| number);
+            if let Ok(mut released) = self.released_through.lock() {
+                *released = start;
+            }
+        }
+    }
+
+    /// Record the highest block Reth had written at startup (read before the
+    /// node launches).
+    pub fn set_persisted_at_start(&self, number: u64, hash: B256) {
+        let _ = self.persisted_at_start.set((number, hash));
+    }
+
+    pub fn persisted_at_start(&self) -> Option<(u64, B256)> {
+        self.persisted_at_start.get().copied()
+    }
+
+    /// The effective finalized block: the canonical block at the lower of
+    /// the forkchoice-finalized and the written height, never going back.
+    /// `None` until a chain is attached and finality is known.
+    pub fn effective_finality(&self) -> Option<(u64, B256)> {
+        self.finality.observe(self.chain.get()?.as_ref())
+    }
+
+    /// Finality evidence for a transaction included at `included`: the
+    /// canonical hash there and the effective finalized block.
+    /// `None` if the finalized block is no longer canonical (a reorganization
+    /// below finality proves nothing about the new chain).
+    pub fn finality_evidence(&self, included: u64) -> Option<FinalityEvidence> {
+        let (finalized_number, finalized_hash) = self.effective_finality()?;
+        let chain = self.chain.get()?;
+        if chain.canonical_hash(finalized_number)? != finalized_hash {
+            return None;
+        }
+        Some(FinalityEvidence {
+            canonical_at_inclusion: chain.canonical_hash(included)?,
+            finalized_number,
+            finalized_hash,
+        })
+    }
+
+    /// One maintenance run: release the identities of transactions in newly
+    /// final canonical blocks (a reorganization before finality keeps them,
+    /// so the transaction executes again without OPS). Runs on the
+    /// maintenance thread, never on the block path.
+    pub fn maintain(&self, _now: i64) -> Result<(), String> {
+        let chain = self.chain.get().ok_or("node chain unavailable")?;
+        let Some((finalized, _)) = self.finality.observe(chain.as_ref()) else {
+            return Ok(());
+        };
+        let mut released = self
+            .released_through
+            .lock()
+            .map_err(|_| "identity release unavailable")?;
+        let from = match *released {
+            Some(through) if through >= finalized => return Ok(()),
+            Some(through) => (through + 1).max(finalized.saturating_sub(RELEASE_HEIGHTS - 1)),
+            None => finalized.saturating_sub(RELEASE_HEIGHTS - 1),
+        };
+        for number in from..=finalized {
+            // An unreadable block is retried by the next run.
+            let Some(transactions) = chain.transactions(number) else {
+                *released = number.checked_sub(1).or(*released);
+                return Ok(());
+            };
+            // A finalized inclusion makes every identity for the hash
+            // obsolete: released whatever its context.
+            for hash in transactions {
+                self.identities
+                    .finish(&ExecutionBinding::Transaction(hash))?;
+            }
+        }
+        *released = Some(finalized);
+        Ok(())
+    }
+
+    /// Ask the maintenance thread to run.
+    pub fn wake_maintenance(&self) {
+        self.wake.notify();
+    }
+
+    /// Start the maintenance thread: it runs on every wake-up (new
+    /// finality, a published manifest) and at least every 10 s, and stops
+    /// once the runtime is dropped.
+    pub fn start_maintenance(
+        self: &Arc<Self>,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> std::io::Result<()> {
+        let runtime: Weak<Self> = Arc::downgrade(self);
+        let wake = self.wake.clone();
+        std::thread::Builder::new()
+            .name("ops-policy-maintenance".into())
+            .spawn(move || {
+                loop {
+                    wake.wait(MAINTENANCE_BACKSTOP);
+                    let Some(runtime) = runtime.upgrade() else {
+                        return;
+                    };
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        runtime.maintain(clock())
+                    })) {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => eprintln!("ops policy maintenance failed: {error}"),
+                        Err(_) => eprintln!(
+                            "ops policy maintenance panicked; retrying at the next wake-up"
+                        ),
+                    }
+                }
+            })
+            .map(|_| ())
     }
     pub fn verifier(&self) -> &Verifier {
         &self.verifier
@@ -412,7 +580,16 @@ impl PolicyRuntime {
     /// earlier build of the same block already published equivalent evidence,
     /// that manifest stays and later answers come from it.
     pub fn persist(&self, handle: &ExecutionHandle, block: &BlockDescriptor) -> Result<(), String> {
+        // A new block is never at or below what is already final.
+        if self
+            .finality
+            .current()
+            .is_some_and(|(finalized, _)| block.number <= finalized)
+        {
+            return Err("produced block at or below the finalized height".into());
+        }
         let (status, published) = handle.publish(&self.archive, block)?;
+        self.wake.notify();
         let mut cache = self
             .status
             .lock()

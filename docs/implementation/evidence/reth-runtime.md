@@ -402,20 +402,44 @@ every resubmission was accepted and included, and the chain kept importing its
 own blocks. A last SIGKILL and restart without new facts read all 36 inclusions
 from disk, with no replay or manifest errors.
 
-Open risk shown by this run: with `--dev.finality-depth 1` the forkchoice update
-that makes a block the head also finalizes it, so the node can report
-`finalized: true` for a block that a crash then loses (both kills just after a
-commit lost such a block). OPS treats a finalized outcome as permanent
-(registration and visibility). The node does not yet hold finality back until
-Reth has written the block; with Reth's default persistence threshold that
-window is several blocks.
+That run showed an open risk: with `--dev.finality-depth 1` the forkchoice
+update that makes a block the head also finalizes it, so the node could report
+`finalized: true` for a block that a crash then lost, while OPS treats a
+finalized outcome as permanent (registration and visibility). The node now
+reports finality only up to the lower of the forkchoice-finalized height and the
+height Reth has written (its persisted-block notification, used only while it
+names a canonical block; before the first one, the height written at startup),
+and never takes it back (`finality_reported_only_up_to_persisted_height`).
+`crash.py` now asks for every included transaction's status the moment its
+block becomes the head, and after each restart checks that every transaction
+reported finalized kept its block. With the cap disabled it failed at once (a
+transaction reported finalized had no receipt after the kill). With the cap
+(2026-11-03, seed 1410, 28 transactions, binary `681a09f55d44…`, report
+`.tmp/ops-reth-crash-s7zw80_7/result.json`) every kill kept every finalized
+transaction (28 at the end) and all other checks passed. The startup height
+and every persisted-block notification count only while they name the
+canonical block, and finality evidence is withheld if the finalized block is
+no longer canonical (`stale_finality_is_no_evidence_after_a_reorganization_below_it`).
+
+The node releases a pending identity itself once its canonical block is final
+and written, from its own chain, woken by Reth's finalized and persisted
+notifications on a maintenance thread (never on the block path); a
+reorganization before finality keeps the identity, so the transaction executes
+again without OPS (`identity_released_at_finality_not_inclusion`,
+`reorg_before_finality_reexecutes_without_ops`,
+`release_scans_only_heights_finalized_since_attach`). A block at or below the
+final height is never published (`no_block_is_published_at_or_below_finality`).
+The node refuses a database sync mode other than durable
+(`non_durable_database_is_refused_at_startup`): "written" must survive a host
+crash.
 
 A guarded node imports blocks at or below its finalized head on its canonical
 chain without manifests: only those blocks' own transactions execute, with no
 policy (`finalized_ancestor_without_manifest_imports_with_pass_through_policy`);
 unknown finality, a rival hash at the height, a block above finality, a
-finalized hash that is not canonical or above the best block, an engine payload
-and another network's block still need the manifest
+finalized hash that is not canonical (a prospective forkchoice declaration) or
+above the best block, a block below finality that is not canonical, an engine
+payload and another network's block still need the manifest
 (`every_other_import_needs_its_manifest`,
 `another_networks_block_is_never_trusted`). This applies to history the node
 already holds; first-time imports have no known finality for their blocks.

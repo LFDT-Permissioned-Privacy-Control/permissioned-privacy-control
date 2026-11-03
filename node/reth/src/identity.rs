@@ -92,7 +92,8 @@ pub struct CapturedIdentity {
 pub const INCLUSION_BOUND_SECS: u64 = 2;
 
 /// Identities the registry must hold: every transaction from admission until
-/// its slot is released when OPS observes finality, plus an allowance for
+/// its slot is released at finality (the node's own finalized and written
+/// height, or OPS's status poll), plus an allowance for
 /// admitted submissions awaiting inclusion, with 25 % headroom: ⌈1.25 × (tps × (inclusion bound + finality bound) + pending limit)⌉.
 /// `None` on overflow.
 pub fn required_capacity(

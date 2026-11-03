@@ -200,12 +200,14 @@ Size the node for the expected load:
 | --- | --- | --- |
 | `OPS_NODE_POLICY_CAPACITY` | Submissions and simulations the node tracks at once; more are refused | 262144 (about 370 MB when full) |
 | `OPS_NODE_POLICY_EXPECTED_TPS` | Sustained transactions per second, at least 1 | 2000 |
-| `OPS_NODE_POLICY_FINALITY_BOUND` | Seconds from inclusion to finality of the deployed consensus (finality depth × block time), at least 1 | 64 |
+| `OPS_NODE_POLICY_FINALITY_BOUND` | Seconds from inclusion until a block is final and written by the node: the larger of the deployed consensus's finality (finality depth × block time) and the node's write lag, at least 1 | 64 |
 | `OPS_NODE_POLICY_PENDING_LIMIT` | Allowance for submissions still waiting for inclusion | 37500 |
 | `OPS_NODE_POLICY_VERIFY_WORKERS` | Submissions and simulations admitted in parallel, 1–64 | 4 |
 
-A submission holds its slot until OPS observes its finalized receipt, or until
-its lease expires. The node refuses to start when the capacity is below 1.25 ×
+A submission holds its slot until its block is final and written by the node,
+or until its lease expires. The node reports a transaction as finalized only
+once its block is final and written to disk, so a node crash never loses a
+block OPS has treated as final. The node refuses to start when the capacity is below 1.25 ×
 (transactions per second × (2 s + finality bound) + pending allowance).
 
 Submissions the node tracks are not kept across a node restart. A transaction
@@ -219,8 +221,9 @@ written; their transactions are then not included and need the same resend.
 
 The guarded node refuses to start with a public RPC module that replays,
 traces, validates or builds blocks (`debug`, `trace`, `ots`, `flashbots`, `mev`,
-`testing`, or `all`), with `--rpc.forwarder`, or with
-`--debug.reorg-frequency`; public `eth_simulateV1` returns an error. Use OPS's
+`testing`, or `all`), with `--rpc.forwarder`, with `--debug.reorg-frequency`, or
+with a `--db.sync-mode` other than `durable`; public `eth_simulateV1` returns an
+error. Use OPS's
 signed simulations for calls, estimates and traces.
 
 On the guarded Reth node, public `pending` block queries return no block, and
