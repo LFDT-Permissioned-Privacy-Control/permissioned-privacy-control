@@ -77,9 +77,9 @@ func TestSIEM_FailedSendWithFallback(t *testing.T) {
 
 	fwd := mustNewForwarder(t, SIEMConfig{
 		WebhookURL:      srv.URL,
-		BatchSize:        100,
-		FlushInterval:    50 * time.Millisecond,
-		FallbackLogPath:  fallbackPath,
+		BatchSize:       100,
+		FlushInterval:   50 * time.Millisecond,
+		FallbackLogPath: fallbackPath,
 	})
 
 	fwd.Send(SIEMEvent{Action: "eth_call", Outcome: "success"})
