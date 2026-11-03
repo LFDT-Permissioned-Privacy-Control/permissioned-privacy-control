@@ -42,11 +42,21 @@ const REQUIRED_CAPABILITIES: [&str; 8] = [
     "finalized_status_v1",
 ];
 
+/// What the transaction pool did with a submitted transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolSubmission {
+    /// Inserted under this hash.
+    Inserted(B256),
+    /// The pool already holds a transaction with the submitted hash, for
+    /// example one restored from the pool's backup after a restart.
+    AlreadyKnown,
+}
+
 #[async_trait]
 pub trait ExecutionBackend: Send + Sync {
     /// Advertise a capability only after its production path is wired.
     fn capabilities(&self) -> Vec<String>;
-    async fn submit(&self, identity: Identity, raw: Bytes) -> Result<B256, String>;
+    async fn submit(&self, identity: Identity, raw: Bytes) -> Result<PoolSubmission, String>;
     async fn transaction_status(&self, _hash: B256) -> Result<Value, String> {
         Err("transaction status is unavailable".into())
     }
@@ -327,9 +337,17 @@ impl PrivateApi {
                     .cpu
                     .run(move || admit_transaction(&runtime, &identity, &raw, clock()))
                     .await??;
-                let accepted = self.backend.submit(identity, raw.into()).await?;
-                if accepted != hash {
-                    return Err("transaction pool returned a different hash".into());
+                match self.backend.submit(identity, raw.into()).await? {
+                    PoolSubmission::Inserted(inserted) if inserted != hash => {
+                        return Err("transaction pool returned a different hash".into());
+                    }
+                    PoolSubmission::Inserted(_) => {}
+                    // The pool already holds this transaction: restored from
+                    // its backup after a restart, when the node held no
+                    // identity for it, or sent before by a retry. The identity
+                    // admitted above lets it execute, so the resend is
+                    // accepted and retries are idempotent.
+                    PoolSubmission::AlreadyKnown => {}
                 }
                 Ok(
                     json!({"transaction_hash":format!("{hash:#x}"),"context_id":context_id,"status":"accepted"}),

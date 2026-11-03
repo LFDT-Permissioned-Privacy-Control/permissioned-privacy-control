@@ -3,7 +3,7 @@ use alloy_rpc_types_trace::geth::GethDebugTracingCallOptions;
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ops_reth_policy::{
-    api::{ExecutionBackend, PrivateApi, serve},
+    api::{ExecutionBackend, PoolSubmission, PrivateApi, serve},
     archive::ArtifactStore,
     context::ExecutionBinding,
     runtime::PolicyRuntime,
@@ -23,6 +23,7 @@ use reth_ethereum::{
         api::eth::helpers::{Call, EthBlocks, EthTransactions},
         eth::{
             EthApiError,
+            error::RpcPoolError,
             primitives::{BlockId, TransactionRequest, state::EvmOverrides},
         },
     },
@@ -37,10 +38,11 @@ use std::{
 };
 
 type BackendFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send>>;
-type SubmitFn = Arc<dyn Fn(Identity, Bytes) -> BackendFuture<B256> + Send + Sync>;
+type SubmitFn = Arc<dyn Fn(Identity, Bytes) -> BackendFuture<PoolSubmission> + Send + Sync>;
 type StatusFn = Arc<dyn Fn(B256) -> BackendFuture<Value> + Send + Sync>;
 type SimulateFn =
     Arc<dyn Fn(Identity, SimulationRequest, Bytes) -> BackendFuture<Value> + Send + Sync>;
+
 struct Backend {
     submit: SubmitFn,
     simulate: SimulateFn,
@@ -63,7 +65,7 @@ impl ExecutionBackend for Backend {
         .map(str::to_owned)
         .collect()
     }
-    async fn submit(&self, identity: Identity, raw: Bytes) -> Result<B256, String> {
+    async fn submit(&self, identity: Identity, raw: Bytes) -> Result<PoolSubmission, String> {
         (self.submit)(identity, raw).await
     }
     async fn transaction_status(&self, hash: B256) -> Result<Value, String> {
@@ -86,6 +88,17 @@ fn now() -> i64 {
 }
 fn required(name: &str) -> eyre::Result<String> {
     std::env::var(name).map_err(|_| eyre::eyre!("{name} is required"))
+}
+
+/// The pool's answer to a submission. "Already known" means the pool holds a
+/// transaction with the submitted hash, for example one restored from its
+/// backup after a restart. Any other error is a rejection, reported opaquely.
+fn pool_submission(result: Result<B256, EthApiError>) -> Result<PoolSubmission, String> {
+    match result {
+        Ok(hash) => Ok(PoolSubmission::Inserted(hash)),
+        Err(EthApiError::PoolError(RpcPoolError::AlreadyKnown)) => Ok(PoolSubmission::AlreadyKnown),
+        Err(_) => Err("transaction pool rejected submission".into()),
+    }
 }
 
 fn main() -> eyre::Result<()> {
@@ -164,7 +177,7 @@ fn main() -> eyre::Result<()> {
                 serde_json::to_value(status).map_err(|_|"invalid execution status".into())
             })
         });
-        let submit:SubmitFn=Arc::new(move |_,raw| {let eth=eth_submit.clone();Box::pin(async move {eth.send_raw_transaction(raw).await.map_err(|_|"transaction pool rejected submission".into())})});
+        let submit:SubmitFn=Arc::new(move |_,raw| {let eth=eth_submit.clone();Box::pin(async move {pool_submission(eth.send_raw_transaction(raw).await)})});
         let simulation_runtime=runtime.clone();
         let simulate:SimulateFn=Arc::new(move |identity,request,_exact| {
             let eth=eth_simulate.clone();
@@ -211,4 +224,37 @@ fn main() -> eyre::Result<()> {
             result=&mut private=> {result??;eyre::bail!("private OPS policy listener stopped")},
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_ethereum::rpc::eth::RpcInvalidTransactionError;
+
+    #[test]
+    fn already_known_pool_error_is_an_already_pooled_transaction() {
+        let hash = B256::repeat_byte(7);
+        assert_eq!(
+            pool_submission(Ok(hash)),
+            Ok(PoolSubmission::Inserted(hash))
+        );
+        assert_eq!(
+            pool_submission(Err(EthApiError::PoolError(RpcPoolError::AlreadyKnown))),
+            Ok(PoolSubmission::AlreadyKnown)
+        );
+        for rejected in [
+            EthApiError::PoolError(RpcPoolError::ReplaceUnderpriced),
+            EthApiError::PoolError(RpcPoolError::TxPoolOverflow),
+            EthApiError::PoolError(RpcPoolError::Invalid(
+                RpcInvalidTransactionError::NonceTooLow { tx: 1, state: 2 },
+            )),
+            // Only the pool's typed answer counts, never an error's text.
+            EthApiError::PoolError(RpcPoolError::Other("already known".into())),
+        ] {
+            assert_eq!(
+                pool_submission(Err(rejected)),
+                Err("transaction pool rejected submission".into())
+            );
+        }
+    }
 }

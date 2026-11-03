@@ -229,7 +229,8 @@ impl PolicyRuntime {
     /// Restore retained facts. Expired facts are retained for stream
     /// continuity/status but `pin_candidate` still rejects. Pending identities
     /// live in memory only and are not restored: a pooled transaction cannot
-    /// execute until it is submitted again through OPS.
+    /// execute until it is submitted again with an identity, which is accepted
+    /// even while the pool still holds the transaction.
     pub fn open(
         verifier: Verifier,
         archive: Arc<ArtifactStore>,

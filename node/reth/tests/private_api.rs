@@ -3,16 +3,16 @@ use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::VerifyingKey;
 use ops_reth_policy::{
-    api::{ExecutionBackend, PrivateApi},
+    api::{ExecutionBackend, PoolSubmission, PrivateApi},
     archive::ArtifactStore,
     runtime::PolicyRuntime,
     wire::{Identity, Network, SimulationRequest, Verifier},
 };
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -22,6 +22,8 @@ struct Backend {
     simulations: AtomicUsize,
     mode: AtomicUsize,
     identities: Option<Arc<ops_reth_policy::identity::IdentityRegistry>>,
+    /// Hashes already pooled: Reth answers a second insertion "already known".
+    pooled: Mutex<HashSet<B256>>,
 }
 #[async_trait]
 impl ExecutionBackend for Backend {
@@ -40,11 +42,16 @@ impl ExecutionBackend for Backend {
         .map(str::to_string)
         .collect()
     }
-    async fn submit(&self, _identity: Identity, raw: Bytes) -> Result<B256, String> {
+    async fn submit(&self, _identity: Identity, raw: Bytes) -> Result<PoolSubmission, String> {
         use alloy_eips::eip2718::Decodable2718;
         let transaction = alloy_consensus::TxEnvelope::decode_2718(&mut raw.as_ref())
             .map_err(|_| "invalid fixture")?;
-        Ok(*transaction.tx_hash())
+        let hash = *transaction.tx_hash();
+        if self.pooled.lock().unwrap().insert(hash) {
+            Ok(PoolSubmission::Inserted(hash))
+        } else {
+            Ok(PoolSubmission::AlreadyKnown)
+        }
     }
     async fn transaction_status(&self, _hash: B256) -> Result<Value, String> {
         Ok(

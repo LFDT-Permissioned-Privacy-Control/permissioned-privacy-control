@@ -121,8 +121,12 @@ I/O. While an identity's lease is valid, the node refuses another principal,
 organization or signer for its transaction hash; an expired lease is reclaimed by
 a later admission. OPS's durable submission record refuses rebinding before
 anything reaches the node, including after the node has released or lost the
-identity. After a node restart the node holds no pending identities, so a pooled
-transaction cannot execute until it is submitted again through OPS. An `expired` status describes the current lease and is not final: a
+identity. After a node restart the node holds no pending identities, so a
+transaction not yet included cannot execute until the principal that submitted it
+sends the same signed transaction again through OPS; OPS does not resubmit it.
+The node accepts that resend even when its pool still holds the transaction:
+after a clean shutdown Reth restores the pool from its backup. An `expired`
+status describes the current lease and is not final: a
 previously pinned candidate can still settle, so OPS continues receipt polling.
 Once the expired lease has been reclaimed, a status request for the not-included
 transaction returns an error. Rule denials describe the current
@@ -134,7 +138,8 @@ evidence. The status of an included transaction reports the identity that execut
 it, from the block's manifest. The bounded pending identity slot is released when
 OPS observes the finalized receipt: before finality a reorganization can return the
 transaction to the pool, where its registered identity lets it execute again while
-its lease is valid; after expiry it must be submitted again through OPS.
+its lease is valid; after expiry the principal that submitted it must send it
+again through OPS.
 Permanent OPS registration and visibility projection wait for `finalized:true`,
 backed by the node's finalized forkchoice header and canonical block checks.
 Wait for that reconciliation before calling a newly deployed contract across

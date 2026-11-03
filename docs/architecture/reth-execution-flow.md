@@ -331,12 +331,14 @@ directory in an older layout is refused. A pending transaction identity lives
 only in the node's memory, from
 admission until OPS observes the transaction's finalized receipt or its lease
 expires and a later admission reclaims it; admission does no storage I/O. A
-restarted node holds no pending identities: a pooled transaction cannot execute
-until it is submitted again through OPS, and OPS's submission row keeps the
-principal binding meanwhile. The transaction pool itself
-is Reth's in-memory pool. Reth saves local pool transactions only on graceful
-shutdown, so a crash loses pooled transactions while OPS keeps their submission
-rows. A block's manifest, published once before the block is returned, embeds the
+restarted node holds no pending identities: a transaction not yet included
+cannot execute until the principal that submitted it sends it again through OPS
+(OPS does not resubmit it), and OPS's submission row keeps the principal binding
+meanwhile. The transaction pool itself is Reth's in-memory pool. Reth saves
+local pool transactions only on graceful shutdown and restores them at start, so
+a crash loses pooled transactions while OPS keeps their submission rows. The
+node accepts a resend even when the transaction is still pooled. A block's
+manifest, published once before the block is returned, embeds the
 signed identity and outcome of every transaction in the block and names the
 facts it was built on; self-import, forensic replay and the status of included
 transactions read it, ordinary queries do not.

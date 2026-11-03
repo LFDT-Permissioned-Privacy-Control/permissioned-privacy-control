@@ -669,12 +669,12 @@ pub mod fixture {
 /// private API with a fake pool backend.
 pub mod golden {
     use super::MemoryStorage;
-    use alloy_primitives::{B256, Bytes};
+    use alloy_primitives::Bytes;
     use async_trait::async_trait;
     use base64::{Engine, engine::general_purpose::STANDARD};
     use ed25519_dalek::VerifyingKey;
     use ops_reth_policy::{
-        api::{ExecutionBackend, PrivateApi},
+        api::{ExecutionBackend, PoolSubmission, PrivateApi},
         archive::ArtifactStore,
         runtime::PolicyRuntime,
         wire::{Identity, Network, SimulationRequest, Verifier},
@@ -700,11 +700,11 @@ pub mod golden {
             .map(str::to_string)
             .collect()
         }
-        async fn submit(&self, _identity: Identity, raw: Bytes) -> Result<B256, String> {
+        async fn submit(&self, _identity: Identity, raw: Bytes) -> Result<PoolSubmission, String> {
             use alloy_eips::eip2718::Decodable2718;
             let transaction = alloy_consensus::TxEnvelope::decode_2718(&mut raw.as_ref())
                 .map_err(|_| "invalid fixture")?;
-            Ok(*transaction.tx_hash())
+            Ok(PoolSubmission::Inserted(*transaction.tx_hash()))
         }
         async fn simulate(
             &self,
