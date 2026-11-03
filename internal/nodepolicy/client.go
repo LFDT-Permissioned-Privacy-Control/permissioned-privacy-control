@@ -32,13 +32,57 @@ var (
 	ErrFactsPending = errors.New("private execution node is waiting for newer policy facts")
 )
 
+// CapabilityBootID: every successful result carries the node process's
+// boot_id (T16), so OPS records each delivery against the boot that
+// acknowledged it and recovers what a restart lost. Required.
+const CapabilityBootID = "boot_id_v1"
+
+// CapabilityTransactionStatuses: the node answers ops_transactionStatuses, the
+// batched status call of reconciliation option A (plan §4.5). Optional: OPS
+// polls one hash per call without it.
+const CapabilityTransactionStatuses = "transaction_statuses_v1"
+
+// ValidBootID reports whether s is a node boot id: 32 lowercase hex characters.
+func ValidBootID(s string) bool {
+	if len(s) != 32 || strings.ToLower(s) != s {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+// Pool rejection reasons of -32013 (T18). Neither is final for OPS: a used
+// nonce is final only once it is finalized, and a competing pooled
+// transaction can leave the pool.
+const (
+	PoolNonceUsed = "nonce_used"
+	PoolReplaced  = "replaced"
+)
+
+// PoolRejection is the node's definitive pool answer for these bytes now
+// (-32013): the node undid exactly this registration. errors.Is(err,
+// ErrNodeRejected) holds for it.
+type PoolRejection struct{ Reason string }
+
+func (e *PoolRejection) Error() string { return "transaction pool rejected: " + e.Reason }
+
+// Unwrap classifies a pool rejection as a node rejection.
+func (e *PoolRejection) Unwrap() error { return ErrNodeRejected }
+
 // CapabilityFactWait is advertised by a node that, instead of refusing at
 // once, waits a bounded time for an identity's minimum fact version and then
 // answers -32012 (RD-1411 §5.3). Optional: OPS refuses lag itself without it.
 const CapabilityFactWait = "fact_wait_v1"
 
 // OptionalCapabilities are capabilities OPS uses when a node offers them.
-func OptionalCapabilities() []string { return []string{CapabilityFactWait} }
+func OptionalCapabilities() []string {
+	return []string{CapabilityFactWait, CapabilityTransactionStatuses}
+}
+
+// HasCapability reports whether the node advertises capability.
+func (s NodeStatus) HasCapability(capability string) bool {
+	return slices.Contains(s.Capabilities, capability)
+}
 
 // WaitsForFacts reports whether the node waits for a request's minimum fact
 // version instead of refusing at once.
@@ -48,6 +92,7 @@ type AppliedState struct {
 	Version   uint64 `json:"version"`
 	Digest    string `json:"digest"`
 	ExpiresAt int64  `json:"expires_at"`
+	BootID    string `json:"boot_id"`
 }
 type NodeStatus struct {
 	ProtocolVersion int      `json:"protocol_version"`
@@ -58,15 +103,17 @@ type NodeStatus struct {
 	ExpiresAt       int64    `json:"expires_at"`
 	Ready           bool     `json:"ready"`
 	Reason          string   `json:"reason"`
+	BootID          string   `json:"boot_id"`
 }
 type Submission struct {
 	TransactionHash string `json:"transaction_hash"`
 	ContextID       string `json:"context_id"`
 	Status          string `json:"status"`
+	BootID          string `json:"boot_id"`
 }
 
 func RequiredCapabilities() []string {
-	return []string{"per_frame_a5", "signed_identity_v1", "fact_stream_v1", "simulation_v1", "archive_v1", "candidate_simulation_v1", "scoped_diagnostics_v1", "finalized_status_v1"}
+	return []string{"per_frame_a5", "signed_identity_v1", "fact_stream_v1", "simulation_v1", "archive_v1", "candidate_simulation_v1", "scoped_diagnostics_v1", "finalized_status_v1", CapabilityBootID}
 }
 func (s NodeStatus) RequireReady(at time.Time, version uint64) error {
 	if !s.Ready || s.Version < version || s.ExpiresAt <= at.Unix() {
@@ -194,7 +241,7 @@ func (c *Client) PolicyStatus(ctx context.Context) (NodeStatus, error) {
 	if err := decodeStrict(raw, &out); err != nil {
 		return NodeStatus{}, ErrNodeResponse
 	}
-	if out.ProtocolVersion != ProtocolVersion || out.Network != c.network || (out.Version == 0 && (out.Digest != "" || out.ExpiresAt != 0 || out.Ready)) || (out.Version > 0 && (!hexDigest(out.Digest) || out.ExpiresAt <= 0)) {
+	if out.ProtocolVersion != ProtocolVersion || out.Network != c.network || !ValidBootID(out.BootID) || (out.Version == 0 && (out.Digest != "" || out.ExpiresAt != 0 || out.Ready)) || (out.Version > 0 && (!hexDigest(out.Digest) || out.ExpiresAt <= 0)) {
 		return NodeStatus{}, ErrNodeResponse
 	}
 	return out, nil
@@ -208,12 +255,24 @@ func (c *Client) ApplyPolicy(ctx context.Context, wire []byte) (AppliedState, er
 	if err != nil {
 		return out, err
 	}
-	if err := decodeStrict(raw, &out); err != nil || out.Version == 0 || !hexDigest(out.Digest) || out.ExpiresAt <= 0 {
+	if err := decodeStrict(raw, &out); err != nil || out.Version == 0 || !hexDigest(out.Digest) || out.ExpiresAt <= 0 || !ValidBootID(out.BootID) {
 		return AppliedState{}, ErrNodeResponse
 	}
 	return out, nil
 }
+
+// SubmitTransaction delivers a client's transaction on the transaction lane.
 func (c *Client) SubmitTransaction(ctx context.Context, identity []byte, rawTx string) (Submission, error) {
+	return c.submit(ctx, c.transaction, identity, rawTx)
+}
+
+// SubmitRecovery delivers a renewed or recovered identity on the recovery
+// lane (lease keeper deliveries never take transaction connections).
+func (c *Client) SubmitRecovery(ctx context.Context, identity []byte, rawTx string) (Submission, error) {
+	return c.submit(ctx, c.recovery, identity, rawTx)
+}
+
+func (c *Client) submit(ctx context.Context, lane *http.Client, identity []byte, rawTx string) (Submission, error) {
 	var out Submission
 	if len(identity) == 0 || len(identity) > MaxIdentityBytes || !json.Valid(identity) || len(rawTx) < 4 || !strings.HasPrefix(rawTx, "0x") {
 		return out, ErrIdentity
@@ -237,11 +296,11 @@ func (c *Client) SubmitTransaction(ctx context.Context, identity []byte, rawTx s
 	if submitted.BindingHash != expectedHash {
 		return out, ErrIdentity
 	}
-	raw, err := c.call(ctx, "ops_submitTransaction", []any{json.RawMessage(identity), rawTx})
+	raw, err := c.callOn(ctx, lane, "ops_submitTransaction", []any{json.RawMessage(identity), rawTx})
 	if err != nil {
 		return out, err
 	}
-	if err := decodeStrict(raw, &out); err != nil || out.TransactionHash != expectedHash || out.ContextID != submitted.ContextID || !identifier(out.ContextID) || out.Status != "accepted" {
+	if err := decodeStrict(raw, &out); err != nil || out.TransactionHash != expectedHash || out.ContextID != submitted.ContextID || !identifier(out.ContextID) || out.Status != "accepted" || !ValidBootID(out.BootID) {
 		return Submission{}, ErrNodeResponse
 	}
 	return out, nil
@@ -283,6 +342,11 @@ func (c *Client) Simulate(ctx context.Context, identity, request []byte) (json.R
 	return c.call(ctx, "ops_simulate", []any{json.RawMessage(identity), base64.StdEncoding.EncodeToString(request)})
 }
 func (c *Client) call(ctx context.Context, method string, params []any) (json.RawMessage, error) {
+	return c.callOn(ctx, nil, method, params)
+}
+
+// callOn sends one call on lane (nil: the method's own lane).
+func (c *Client) callOn(ctx context.Context, lane *http.Client, method string, params []any) (json.RawMessage, error) {
 	id := "ops-" + strconv.FormatUint(c.sequence.Add(1), 10)
 	body, err := json.Marshal(struct {
 		JSONRPC string `json:"jsonrpc"`
@@ -300,6 +364,9 @@ func (c *Client) call(ctx context.Context, method string, params []any) (json.Ra
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	client, idempotent := c.lane(method)
+	if lane != nil {
+		client = lane
+	}
 	if idempotent {
 		req.Header.Set("Idempotency-Key", id)
 	}
@@ -346,9 +413,20 @@ func (c *Client) call(ctx context.Context, method string, params []any) (json.Ra
 	if hasError {
 		var value struct {
 			Code int `json:"code"`
+			Data *struct {
+				Reason string `json:"reason"`
+			} `json:"data"`
 		}
 		if err := json.Unmarshal(rpcError, &value); err != nil {
 			return nil, ErrNodeResponse
+		}
+		if value.Code == -32013 && method == "ops_submitTransaction" {
+			// A definitive pool answer (T18); only the two documented reasons
+			// exist, anything else is a protocol violation.
+			if value.Data == nil || (value.Data.Reason != PoolNonceUsed && value.Data.Reason != PoolReplaced) {
+				return nil, ErrNodeResponse
+			}
+			return nil, &PoolRejection{Reason: value.Data.Reason}
 		}
 		// Node diagnostics belong to its private operator logs, never responses
 		// proxied to ordinary users or error messages containing request data.

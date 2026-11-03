@@ -68,13 +68,13 @@ func TestPrivateNodeClientBindsAuthenticatedRPCAndExactPayloads(t *testing.T) {
 			if len(req.Params) != 0 {
 				t.Error("status params")
 			}
-			result = NodeStatus{ProtocolVersion: 1, Network: identityFixture().Network, Capabilities: RequiredCapabilities(), Version: 7, Digest: strings.Repeat("a", 64), ExpiresAt: 1100, Ready: true, Reason: ""}
+			result = NodeStatus{ProtocolVersion: 1, Network: identityFixture().Network, Capabilities: RequiredCapabilities(), Version: 7, Digest: strings.Repeat("a", 64), ExpiresAt: 1100, Ready: true, Reason: "", BootID: testBootID}
 		case "ops_submitTransaction":
 			var submitted string
 			if len(req.Params) != 2 || json.Unmarshal(req.Params[1], &submitted) != nil || submitted != rawTx {
 				t.Error("submit payload changed")
 			}
-			result = Submission{TransactionHash: expectedIdentity.BindingHash, ContextID: expectedIdentity.ContextID, Status: "accepted"}
+			result = Submission{TransactionHash: expectedIdentity.BindingHash, ContextID: expectedIdentity.ContextID, Status: "accepted", BootID: testBootID}
 		case "ops_simulate":
 			var encoded string
 			if len(req.Params) != 2 {
@@ -149,7 +149,7 @@ func TestPrivateNodeClientRejectsMismatchedSubmission(t *testing.T) {
 	for _, what := range []string{"response_hash", "response_context", "input_binding"} {
 		t.Run(what, func(t *testing.T) {
 			i, _, rawTx := signedSubmissionFixture(t, false)
-			ack := Submission{TransactionHash: i.BindingHash, ContextID: i.ContextID, Status: "accepted"}
+			ack := Submission{TransactionHash: i.BindingHash, ContextID: i.ContextID, Status: "accepted", BootID: testBootID}
 			switch what {
 			case "response_hash":
 				ack.TransactionHash = identityFixture().BindingHash
@@ -181,7 +181,7 @@ func TestPrivateNodeClientBindsBlobConsensusHashExcludingSidecar(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]json.RawMessage
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": Submission{TransactionHash: i.BindingHash, ContextID: i.ContextID, Status: "accepted"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": Submission{TransactionHash: i.BindingHash, ContextID: i.ContextID, Status: "accepted", BootID: testBootID}})
 	}))
 	defer s.Close()
 	c, err := NewClient(s.URL, "private-test-token", i.Network, s.Client())
@@ -201,7 +201,7 @@ func TestPrivateNodeClientFailsClosedOnWrongResponses(t *testing.T) {
 				var req map[string]json.RawMessage
 				_ = json.Unmarshal(body, &req)
 				id := string(req["id"])
-				status := NodeStatus{ProtocolVersion: 1, Network: identityFixture().Network, Capabilities: RequiredCapabilities(), Version: 7, Digest: strings.Repeat("a", 64), ExpiresAt: 1100, Ready: true, Reason: ""}
+				status := NodeStatus{ProtocolVersion: 1, Network: identityFixture().Network, Capabilities: RequiredCapabilities(), Version: 7, Digest: strings.Repeat("a", 64), ExpiresAt: 1100, Ready: true, Reason: "", BootID: testBootID}
 				switch what {
 				case "http_failure":
 					w.WriteHeader(503)

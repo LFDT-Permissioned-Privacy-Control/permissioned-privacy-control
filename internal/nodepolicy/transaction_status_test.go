@@ -26,7 +26,7 @@ func TestTransactionStatusRequiresExactBindingAndCanonicalOutcome(t *testing.T) 
 				if req.Method != "ops_transactionStatus" || len(req.Params) != 1 || req.Params[0] != hash {
 					t.Errorf("wrong request %+v", req)
 				}
-				result := map[string]any{"transaction_hash": hash, "principal_id": "user-a", "org_id": "org-a", "context_id": "context-a", "execution": map[string]any{"status": "pending", "facts_version": uint64(7), "block_hash": nil, "block_number": nil, "reason_code": "", "created": []any{}}}
+				result := map[string]any{"transaction_hash": hash, "principal_id": "user-a", "org_id": "org-a", "context_id": "context-a", "boot_id": testBootID, "execution": map[string]any{"status": "pending", "facts_version": uint64(7), "block_hash": nil, "block_number": nil, "reason_code": "", "created": []any{}}}
 				outcome := result["execution"].(map[string]any)
 				outcome["finalized"], outcome["finalized_block_hash"], outcome["finalized_block_number"] = false, nil, nil
 				if test == "included" || test == "invalid_created" {
