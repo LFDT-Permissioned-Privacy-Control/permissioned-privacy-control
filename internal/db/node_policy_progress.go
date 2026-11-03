@@ -81,6 +81,14 @@ func (d *DB) CheckNodePolicySchema(ctx context.Context) error {
 	if !ok {
 		return errors.New("the database was migrated with an earlier V2 fact clock (migration 075); recreate it")
 	}
+	// RD-1410 rewrote migration 078 in place: per-transaction tracking moved
+	// to the execution-tracking database.
+	if err := d.conn.QueryRowContext(ctx, `SELECT to_regclass('node_tx_effects_floor') IS NOT NULL AND to_regclass('node_tx_compliance_claims') IS NOT NULL AND to_regclass('node_submissions') IS NULL`).Scan(&ok); err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("the database was migrated with an earlier V2 submission schema (migration 078); recreate it")
+	}
 	return nil
 }
 func (d *DB) NodePolicyProgress(ctx context.Context, consumer string) (NodePolicyProgress, error) {

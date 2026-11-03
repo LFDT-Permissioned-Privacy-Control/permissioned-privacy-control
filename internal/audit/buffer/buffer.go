@@ -301,6 +301,51 @@ func (b *Buffer) Append(data []byte) (uint64, error) {
 	return seq, nil
 }
 
+// AppendBatch durably stores every entry of data in one fsync'd write and
+// returns their sequences, which are contiguous and in order. Either every
+// entry is stored or none is (one Pebble batch); the sequences of a failed
+// batch complete as holes, like a failed Append, so they never hold the
+// frontier back.
+func (b *Buffer) AppendBatch(data [][]byte) ([]uint64, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	b.mu.Lock()
+	if !b.seeded {
+		b.mu.Unlock()
+		return nil, ErrNotSeeded
+	}
+	first := b.next + 1
+	b.next += uint64(len(data))
+	b.appended = true
+	b.mu.Unlock()
+	seqs := make([]uint64, len(data))
+	for i := range data {
+		seqs[i] = first + uint64(i)
+	}
+	defer func() {
+		for _, seq := range seqs {
+			b.complete(seq)
+		}
+	}()
+	batch := b.db.NewBatch()
+	defer batch.Close()
+	for i, entry := range data {
+		if b.beforeSet != nil {
+			if err := b.beforeSet(seqs[i]); err != nil {
+				return nil, fmt.Errorf("audit buffer append: %w", err)
+			}
+		}
+		if err := batch.Set(entryKey(seqs[i]), entry, nil); err != nil {
+			return nil, fmt.Errorf("audit buffer append: %w", err)
+		}
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return nil, fmt.Errorf("audit buffer append: %w", err)
+	}
+	return seqs, nil
+}
+
 // Drain returns up to max buffered entries in ascending sequence order, starting
 // after afterSeq (pass 0 to start from the beginning). The sealer uses this to
 // read the next batch to chain and persist.

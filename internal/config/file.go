@@ -57,6 +57,8 @@ var secretKeys = map[string]bool{
 	"DATABASE_URL":                         true, // bears a password in the DSN
 	"AUDIT_DATABASE_URL":                   true, // separate append-only audit DB, restricted-role DSN (RD-1147)
 	"AUDIT_ADMIN_DATABASE_URL":             true, // separate append-only audit DB, admin/owner DSN (RD-1147)
+	"EXECUTION_DATABASE_URL":               true, // execution-tracking DB, runtime DSN (RD-1410)
+	"EXECUTION_ADMIN_DATABASE_URL":         true, // execution-tracking DB, owner DSN (RD-1410)
 	"EXPLORER_DATABASE_URL":                true, // bears a password in the DSN
 	"REDIS_URL":                            true, // bears a password in the DSN
 	"REDIS_PASSWORD":                       true,

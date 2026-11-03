@@ -157,6 +157,7 @@ type rd1112Harness struct {
 	mock     *perfgate.MockNode
 	conns    map[string]*connCounter // TCP connections per mock listener
 	pool     map[string]int64        // the node clients' keep-alive pool sizes per listener
+	tracking *testTracking           // the V2 path's execution-tracking database
 	cleanups []func()
 }
 
@@ -303,6 +304,10 @@ func newRD1112NodeExecution(tb testing.TB, database *db.DB, h *rd1112Harness) No
 	if err != nil {
 		tb.Fatal(err)
 	}
+	// The execution-tracking database: the binding of every transaction is
+	// group-committed there before transport, as in production.
+	h.tracking = newTestTracking(tb, network)
+	bridge.tracking = newNodeTracking(h.tracking.runtime, h.tracking.meta.Incarnation, nil)
 	publisher, err := nodepolicy.NewPublisher(nodepolicy.PublisherConfig{Network: network, ConsumerID: "rd1112-" + uuid.NewString()[:8], Signer: signer, Source: database, Node: observingFactNode{node: client, bridge: bridge}, Lifetime: 30 * time.Second})
 	if err != nil {
 		tb.Fatal(err)
@@ -317,6 +322,8 @@ func newRD1112NodeExecution(tb testing.TB, database *db.DB, h *rd1112Harness) No
 	h.cleanups = append(h.cleanups, func() { cancel(); <-done })
 	waitProbe := bridge.startStatusProbe(ctx, time.Second)
 	h.cleanups = append(h.cleanups, func() { cancel(); waitProbe() })
+	waitTracking := bridge.tracking.run(ctx)
+	h.cleanups = append(h.cleanups, func() { cancel(); waitTracking() })
 	return bridge
 }
 
@@ -363,8 +370,8 @@ func TestRD1112HarnessPathsAcceptTheSameWorkload(t *testing.T) {
 			}
 			if path == rd1112V2 {
 				var rows int
-				if err := database.Conn().QueryRow(`SELECT count(*) FROM node_submissions`).Scan(&rows); err != nil || rows != 9 {
-					t.Fatalf("node submissions %d %v, want one per unique transaction", rows, err)
+				if rows = h.tracking.count(t, "node_tx_binding"); rows != 9 {
+					t.Fatalf("tracked bindings %d, want one per unique transaction", rows)
 				}
 			}
 			h.checkConnections(t)

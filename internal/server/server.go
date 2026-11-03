@@ -106,22 +106,25 @@ type Server struct {
 	policyCompiler *policydsl.Compiler
 	// compilerProbe shares one availability probe of policyCompiler between
 	// configuration context reads; see configuration_capabilities.go.
-	compilerProbe        compilerProbe
-	proxy                *proxy.Proxy
-	privadoVerifier      PrivadoVerifier
-	jwtService           *auth.JWTService
-	sessionStore         SessionManager
-	oauthSessionStore    OAuthSessionManager
-	challengeStore       ChallengeManager
-	rateLimiter          RateLimiterInterface
-	authRateLimiter      *AuthRateLimiter
-	disclosureService    *disclosure.DefaultService
-	complianceChecker    *compliance.Checker
-	priceService         *pricing.Service
-	config               *config.Config
-	ensResolver          *ens.Resolver
-	jsonrpcProcessor     *JSONRPCProcessor
-	nodeExecution        *nodeExecutionBridge
+	compilerProbe     compilerProbe
+	proxy             *proxy.Proxy
+	privadoVerifier   PrivadoVerifier
+	jwtService        *auth.JWTService
+	sessionStore      SessionManager
+	oauthSessionStore OAuthSessionManager
+	challengeStore    ChallengeManager
+	rateLimiter       RateLimiterInterface
+	authRateLimiter   *AuthRateLimiter
+	disclosureService *disclosure.DefaultService
+	complianceChecker *compliance.Checker
+	priceService      *pricing.Service
+	config            *config.Config
+	ensResolver       *ens.Resolver
+	jsonrpcProcessor  *JSONRPCProcessor
+	nodeExecution     *nodeExecutionBridge
+	// tracking is the separate execution-tracking database (RD-1410), opened
+	// only in Reth mode.
+	tracking             *executionTracking
 	nodePolicyCancel     context.CancelFunc
 	nodePolicyDone       chan struct{}
 	zkRoleExtractor      *auth.ZKRoleExtractor
@@ -286,6 +289,9 @@ func (s *Server) Stop() {
 		(s.db == nil || s.auditAdminDB.Conn() != s.db.Conn()) &&
 		(s.auditDB == nil || s.auditAdminDB.Conn() != s.auditDB.Conn()) {
 		s.auditAdminDB.Close()
+	}
+	if s.tracking != nil && s.db != nil {
+		s.tracking.close(s.db)
 	}
 	if s.db != nil {
 		s.db.Close()

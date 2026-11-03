@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/gin-gonic/gin"
 )
 
@@ -34,10 +37,6 @@ type executionNodeClient interface {
 	SubmitTransaction(context.Context, []byte, string) (nodepolicy.Submission, error)
 	Simulate(context.Context, []byte, []byte) (json.RawMessage, error)
 }
-type nodeSubmissionStore interface {
-	SaveNodeSubmission(context.Context, db.NodeSubmission) error
-	MarkNodeSubmissionAccepted(context.Context, nodepolicy.Network, string) error
-}
 type nodeExecutionBridge struct {
 	source   nodeFactVersion
 	node     executionNodeClient
@@ -45,6 +44,9 @@ type nodeExecutionBridge struct {
 	network  nodepolicy.Network
 	lifetime time.Duration
 	now      func() time.Time
+	// tracking records each transaction's binding in the execution-tracking
+	// database before transport (RD-1410).
+	tracking *nodeTracking
 
 	// cache holds the node's status, so preparing an identity reads only the
 	// database fact version per request (RD-1410).
@@ -461,8 +463,7 @@ func (b *nodeExecutionBridge) PrepareIdentity(ctx context.Context, request NodeE
 }
 func (b *nodeExecutionBridge) SubmitTransaction(ctx context.Context, identity []byte, raw string, metadata NodeSubmissionMetadata) (nodepolicy.Submission, error) {
 	defer b.releaseFactWait(identityContextID(identity))
-	store, ok := b.source.(nodeSubmissionStore)
-	if !ok {
+	if b.tracking == nil {
 		return nodepolicy.Submission{}, nodepolicy.ErrNodeUnavailable
 	}
 	verifier := nodepolicy.Verifier{Network: b.network, Keys: map[string]ed25519.PublicKey{b.signer.KeyID: b.signer.PrivateKey.Public().(ed25519.PublicKey)}, Now: b.now}
@@ -470,22 +471,88 @@ func (b *nodeExecutionBridge) SubmitTransaction(ctx context.Context, identity []
 	if err != nil || i.Scope != "transaction" {
 		return nodepolicy.Submission{}, nodepolicy.ErrIdentity
 	}
-	intent := db.NodeSubmission{Network: b.network, TransactionHash: i.BindingHash, PrincipalID: i.PrincipalID, OrgID: i.OrgID, Signer: i.Signer, ContextID: i.ContextID, RawTransaction: raw, IdentityEnvelope: identity, SenderDID: metadata.SenderDID, VisibleTo: metadata.VisibleTo}
-	if err := store.SaveNodeSubmission(ctx, intent); err != nil {
+	admission, err := trackingAdmission(i, identity, raw, metadata)
+	if err != nil {
+		return nodepolicy.Submission{}, nodepolicy.ErrIdentity
+	}
+	// The binding is durable before transport (I2, Q6 (a)): a node restart
+	// cannot let another principal sharing the signer rebind this hash.
+	result, inc, err := b.tracking.admit(ctx, admission)
+	if err != nil {
 		return nodepolicy.Submission{}, nodepolicy.ErrNodeUnavailable
+	}
+	switch result.Outcome {
+	case db.AdmitInvalid:
+		return nodepolicy.Submission{}, nodepolicy.ErrIdentity
+	case db.AdmitConflict:
+		return nodepolicy.Submission{}, nodepolicy.ErrNodeUnavailable
+	case db.AdmitOverLimit:
+		return nodepolicy.Submission{}, errPendingLimit
+	case db.AdmitFinal:
+		// Already final for this principal: the transaction has executed;
+		// answer as accepted without sending it again.
+		return nodepolicy.Submission{TransactionHash: i.BindingHash, ContextID: i.ContextID, Status: "accepted"}, nil
 	}
 	submitted, err := b.node.SubmitTransaction(ctx, identity, raw)
 	if err != nil {
+		if errors.Is(err, nodepolicy.ErrFactsPending) && result.Outcome == db.AdmitInserted {
+			// The node refused this request's only identity before admission
+			// (-32012): the client retries the same raw transaction. Remove the
+			// fresh, never-delivered binding so it carries no pending work.
+			b.tracking.release(ctx, inc, admission.Hash, admission.ContextID)
+		}
 		return nodepolicy.Submission{}, err
 	}
-	// The durable queued intent already guarantees recovery if this update
-	// fails after the node accepted. Do not claim submission failed in that case.
-	if err := store.MarkNodeSubmissionAccepted(ctx, b.network, i.BindingHash); err != nil {
-		if suppressed, ok := b.log.Allow("ack:"+nodeErrorClass(err), time.Now(), failureLogEvery); ok {
-			slog.Warn("node submission acknowledgement pending", "tx", i.BindingHash, "error", err, "suppressed", suppressed)
-		}
-	}
+	// Acknowledged in memory only; recorded with the next transition or the
+	// batched flush (R12.6). Nothing more is written on the request path (G14).
+	b.tracking.ack(admission.Hash, result.Generation, inc)
 	return submitted, nil
+}
+
+// Network is the execution network this bridge signs for.
+func (b *nodeExecutionBridge) Network() nodepolicy.Network { return b.network }
+
+// errPendingLimit: the global pending-work limit is reached (plan §4.8.2).
+var errPendingLimit = errors.New("pending execution work limit reached")
+
+// trackingAdmission is the tracking-database row of a signed transaction
+// identity. The envelope is stored by hash only.
+func trackingAdmission(i nodepolicy.Identity, identity []byte, raw string, metadata NodeSubmissionMetadata) (db.TrackAdmission, error) {
+	var a db.TrackAdmission
+	hash, err := hex.DecodeString(strings.TrimPrefix(i.BindingHash, "0x"))
+	if err != nil || len(hash) != 32 {
+		return a, nodepolicy.ErrIdentity
+	}
+	signer, err := hex.DecodeString(strings.TrimPrefix(i.Signer, "0x"))
+	if err != nil || len(signer) != 20 {
+		return a, nodepolicy.ErrIdentity
+	}
+	rawBytes, err := hex.DecodeString(strings.TrimPrefix(raw, "0x"))
+	if err != nil {
+		return a, nodepolicy.ErrIdentity
+	}
+	var transaction types.Transaction
+	if err := transaction.UnmarshalBinary(rawBytes); err != nil || transaction.Nonce() > 1<<63-1 || i.MinSnapshotVersion > 1<<63-1 {
+		return a, nodepolicy.ErrIdentity
+	}
+	principal, err := uuid.Parse(i.PrincipalID)
+	if err != nil {
+		return a, nodepolicy.ErrIdentity
+	}
+	org, err := uuid.Parse(i.OrgID)
+	if err != nil {
+		return a, nodepolicy.ErrIdentity
+	}
+	contextID, err := uuid.Parse(i.ContextID)
+	if err != nil {
+		return a, nodepolicy.ErrIdentity
+	}
+	envelope := sha256.Sum256(identity)
+	a = db.TrackAdmission{Hash: hash, PrincipalID: principal, OrgID: org, Signer: signer, Nonce: transaction.Nonce(), ContextID: contextID, EnvelopeHash: envelope[:], ExpiresAt: time.Unix(i.ExpiresAt, 0), MinVersion: i.MinSnapshotVersion, Raw: rawBytes}
+	if len(metadata.VisibleTo) > 0 {
+		a.VisibleTo, a.VisibleSender = metadata.VisibleTo, metadata.SenderDID
+	}
+	return a, nil
 }
 func (b *nodeExecutionBridge) Simulate(ctx context.Context, identity, request []byte) (json.RawMessage, error) {
 	defer b.releaseFactWait(identityContextID(identity))
@@ -556,6 +623,8 @@ func nodeErrorClass(err error) string {
 		return "snapshot_lag"
 	case errors.Is(err, nodepolicy.ErrFactsPending):
 		return "facts_pending"
+	case errors.Is(err, errPendingLimit):
+		return "pending_limit"
 	case errors.Is(err, nodepolicy.ErrFeedConflict):
 		return "feed_conflict"
 	case errors.Is(err, nodepolicy.ErrIdentity):
@@ -611,6 +680,14 @@ func (s *Server) initNodePolicy() error {
 		return err
 	}
 	network := nodepolicy.Network{ChainID: c.ChainID, DeploymentID: c.DeploymentID}
+	// Every system decision is audited in the durable buffer before it
+	// commits (plan §4.8.6); without the buffer none could be taken.
+	if s.auditBuffer == nil {
+		return fmt.Errorf("OPS_NODE_POLICY_MODE=reth requires AUDIT_BUFFER_DIR: system decisions (such as recording a finalized transaction) are audited in the durable buffer before they commit")
+	}
+	if s.tracking, err = openExecutionTracking(s.config, s.db, network); err != nil {
+		return err
+	}
 	client, err := newNodePolicyClient(c, network)
 	if err != nil {
 		return err
@@ -619,11 +696,25 @@ func (s *Server) initNodePolicy() error {
 	if err != nil {
 		return err
 	}
-	schemaCtx, cancelSchema := context.WithTimeout(context.Background(), 10*time.Second)
+	schemaCtx, cancelSchema := context.WithTimeout(context.Background(), time.Minute)
 	err = s.db.CheckNodePolicySchema(schemaCtx)
+	if err == nil {
+		// The replay floor exists before any effect may apply (absent = refuse).
+		err = s.db.EnsureNodeTxEffectsFloor(schemaCtx, network)
+	}
+	if err == nil {
+		// Partitions exist before the first finalization (K25); a maintenance
+		// step that timed out is retried by the retention pass.
+		err = ensureTrackingPartitions(schemaCtx, s.tracking.admin)
+	}
 	cancelSchema()
 	if err != nil {
 		return fmt.Errorf("node policy: %w", err)
+	}
+	tracking := newNodeTracking(s.tracking.runtime, s.tracking.meta.Incarnation, s.tracking.adopt(network))
+	bridge.tracking = tracking
+	if s.retentionCleaner != nil {
+		s.retentionCleaner.AttachTracking(trackingRetention{admin: s.tracking.admin, main: s.db, network: network}, s.config.RetentionNodeSubmissions)
 	}
 	wake := make(chan struct{}, 1)
 	publisher, err := nodepolicy.NewPublisher(nodepolicy.PublisherConfig{Network: network, ConsumerID: c.ConsumerID, Signer: signer, Source: s.db, Node: observingFactNode{node: client, bridge: bridge}, Lifetime: c.FactTTL, Wake: wake})
@@ -637,6 +728,7 @@ func (s *Server) initNodePolicy() error {
 	// Every instance probes the node's status (it serves requests whether or
 	// not it publishes); the probe stops with the node-policy context.
 	waitProbe := bridge.startStatusProbe(ctx, time.Second)
+	waitTracking := tracking.run(ctx)
 	// Fact changes wake the publisher and acknowledgements refresh every
 	// instance's node status at once; both timers stay as fallback.
 	notifyDone := make(chan struct{})
@@ -658,12 +750,14 @@ func (s *Server) initNodePolicy() error {
 	go func() {
 		defer close(s.nodePolicyDone)
 		defer waitProbe()
+		defer waitTracking()
 		defer func() { <-notifyDone }()
 		_ = nodepolicy.RunElected(ctx, s.db.NodePolicyLease(), c.PublishInterval, func(term context.Context) {
 			slog.Info("node policy publisher elected", "consumer_id", c.ConsumerID)
 			defer slog.Info("node policy publisher term ended", "consumer_id", c.ConsumerID)
 			reconcilerDone := make(chan struct{})
-			go func() { defer close(reconcilerDone); runNodeReconciler(term, s.db, client, network) }()
+			reconciler := newNodeReconciler(tracking, s.db, client, s.auditBuffer, network)
+			go func() { defer close(reconcilerDone); runNodeReconciler(term, reconciler) }()
 			_ = publisher.Run(term, c.PublishInterval, report)
 			<-reconcilerDone
 		}, report)

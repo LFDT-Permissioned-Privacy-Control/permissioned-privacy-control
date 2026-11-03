@@ -1,7 +1,7 @@
 .PHONY: build build-prod test test-unit test-e2e test-privacy-bypass run dev-stack full-stack-dev run-binary clean clean-build \
 	e2e e2e-all e2e-go e2e-playwright e2e-privacy e2e-chaos e2e-soak e2e-doctor e2e-debug e2e-down e2e-clean \
 	demo-e2e demo-e2e-debug demo-e2e-down \
-	db-migrate db-migrate-audit db-status db-new-migration install-tern seed \
+	db-migrate db-migrate-audit db-migrate-exec db-status db-new-migration install-tern seed \
 	contracts-install contracts-build contracts-deploy \
 	stop restart logs status \
 	demo demo-record demo-process demo-all demo-setup demo-clean \
@@ -340,6 +340,11 @@ db-migrate:
 # access_logs)
 db-migrate-audit:
 	go run ./cmd/migrate -audit
+
+# Migrate the execution-tracking database of the Reth path
+# (EXECUTION_ADMIN_DATABASE_URL, or <name>_exec derived from DATABASE_URL).
+db-migrate-exec:
+	go run ./cmd/migrate -exec
 
 # Show migration status using tern CLI
 db-status:

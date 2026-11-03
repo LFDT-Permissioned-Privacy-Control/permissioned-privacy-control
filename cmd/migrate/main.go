@@ -9,14 +9,47 @@ import (
 	"privacy-proxy/internal/config"
 	"privacy-proxy/internal/db"
 	migrationsaudit "privacy-proxy/internal/db/migrations_audit"
+	migrationsexec "privacy-proxy/internal/db/migrations_exec"
 )
 
 func main() {
 	ctx := context.Background()
 	auditOnly := flag.Bool("audit", false, "migrate the audit database (AUDIT_ADMIN_DATABASE_URL) instead of the main database")
+	execOnly := flag.Bool("exec", false, "migrate the execution-tracking database (EXECUTION_ADMIN_DATABASE_URL) instead of the main database")
 	flag.Parse()
 
+	if *auditOnly && *execOnly {
+		slog.Error("-audit and -exec migrate different databases; run them one at a time")
+		os.Exit(2)
+	}
+
 	cfg := config.Load()
+
+	// The execution-tracking database of the Reth path (RD-1410), with the
+	// same guards the server applies before it migrates it.
+	if *execOnly {
+		if cfg.ExecutionAdminDatabaseURL == "" {
+			slog.Error("execution-tracking database URL unresolved: set EXECUTION_ADMIN_DATABASE_URL, or a parseable DATABASE_URL to derive <name>_exec")
+			os.Exit(1)
+		}
+		if cfg.IsProduction() && cfg.ExecutionAdminDatabaseURL == cfg.DatabaseURL {
+			slog.Error("in production EXECUTION_ADMIN_DATABASE_URL must not equal DATABASE_URL (leave it unset to derive a separate <name>_exec database)")
+			os.Exit(1)
+		}
+		exec, err := openDBWithoutMigrate(cfg.ExecutionAdminDatabaseURL)
+		if err != nil {
+			slog.Error("failed to open execution-tracking database", "error", err)
+			os.Exit(1)
+		}
+		defer exec.Close()
+		slog.Info("running execution-tracking database migrations")
+		if err := db.NewExecAdminHandle(exec).MigrateExecOnly(ctx, migrationsexec.FS, cfg.ExecutionAdminDatabaseURL != cfg.DatabaseURL); err != nil {
+			slog.Error("execution-tracking migration failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("execution-tracking database is up to date")
+		return
+	}
 
 	// The audit migrations can rewrite access_logs (003); running them here,
 	// before the servers start, keeps that out of server start-up.

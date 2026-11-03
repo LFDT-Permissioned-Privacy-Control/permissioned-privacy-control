@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
+	"privacy-proxy/internal/compliance"
 	"privacy-proxy/internal/nodepolicy"
 	"privacy-proxy/internal/rbac"
 	"privacy-proxy/internal/tracer"
@@ -159,7 +160,16 @@ func (p *JSONRPCProcessor) processNodeExecution(ctx context.Context, req *Proces
 		if denied := p.strictProfileRejectsVisibleTo(ctx, req, true); denied != nil {
 			return denied
 		}
-		if denied := p.checkCompliance(ctx, req, admission.OrgID, admission.UserID, admission.Signer, to, data, value); denied != nil {
+		// The travel-rule step is bound to this signed transaction: a retry
+		// of the same raw transaction re-uses its record (RD-1410, G60).
+		binding := compliance.TransactionBinding{Hash: strings.ToLower(transaction.Hash().Hex())}
+		if n, ok := p.nodeExecution.(interface{ Network() nodepolicy.Network }); ok {
+			binding.ChainID, binding.DeploymentID = n.Network().ChainID, n.Network().DeploymentID
+		}
+		if binding.ChainID == 0 {
+			binding = compliance.TransactionBinding{}
+		}
+		if denied := p.checkComplianceFor(ctx, req, admission.OrgID, admission.UserID, admission.Signer, to, data, value, binding); denied != nil {
 			return denied
 		}
 		top := extractAndStripTopLevelVisibleTo(req)
@@ -283,6 +293,12 @@ func (p *JSONRPCProcessor) nodeExecutionFailure(ctx context.Context, req *Proces
 		// The node has not applied the facts this request needs yet (its
 		// bounded wait expired): retryable, not a policy decision.
 		result := p.nodeExecutionError(ctx, req, http.StatusServiceUnavailable, "execution facts are being published; retry shortly", ReasonPublicationPending)
+		result.Error.RetryAfter = 1
+		return result
+	}
+	if errors.Is(err, errPendingLimit) {
+		// Backpressure before renewal debt (plan §4.8.2): retryable.
+		result := p.nodeExecutionError(ctx, req, http.StatusServiceUnavailable, "execution queue is full; retry shortly", ReasonPendingLimit)
 		result.Error.RetryAfter = 1
 		return result
 	}

@@ -15380,10 +15380,14 @@ paths:
     get:
       description: 'Status for a transaction submitted by this named principal, with
         current organization membership and KYC required. Shared signing addresses
-        do not share status access. Queued, pending, denied and expired are nonterminal:
-        an execution already started may still be included. Included or reverted reflects
-        canonical node evidence; reconciled means OPS bookkeeping is committed. This
-        endpoint never returns raw transactions, signing envelopes or visibility recipients.'
+        do not share status access. pending and provisional (included in a block that
+        is not final yet) are nonterminal: a provisional transaction can return to
+        pending after a reorganization. included and reverted (in a finalized block)
+        are final; reconciled means OPS bookkeeping for the final status is committed,
+        and reconciliation_note effects_not_applied means a deployment or visibility
+        effect was refused. Final statuses are kept for the configured retention (RETENTION_NODE_SUBMISSIONS),
+        after which the transaction is not found. This endpoint never returns raw
+        transactions, signing envelopes or visibility recipients.'
       parameters:
       - description: Lowercase transaction hash
         in: path

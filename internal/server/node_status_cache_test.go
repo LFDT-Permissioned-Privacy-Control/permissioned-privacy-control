@@ -238,26 +238,20 @@ func TestNodeFailureLogsAreRateLimited(t *testing.T) {
 		t.Fatalf("%d failure lines for 200 failed requests, want 1 per interval", lines)
 	}
 
-	// The acknowledgement write failing after the node accepted is logged the
+	// A failing tracking database (no request reaches the node) is logged the
 	// same way.
-	network := nodepolicy.Network{ChainID: 31337, DeploymentID: "bridge-test"}
-	source := &nodeSubmitSource{ackErr: errors.New("db unavailable")}
-	node := &nodeSubmitClient{source: source, nodeClientFixture: nodeClientFixture{status: nodepolicy.NodeStatus{ProtocolVersion: 1, Network: network, Capabilities: nodepolicy.RequiredCapabilities(), Version: 7, Digest: strings.Repeat("a", 64), ExpiresAt: 1060, Ready: true}}}
-	bridge, err := newNodeExecutionBridge(source, node, nodepolicy.Signer{KeyID: "ops-a", PrivateKey: ed25519.NewKeyFromSeed(make([]byte, 32))}, network, time.Minute, func() time.Time { return time.Unix(1020, 0) })
-	if err != nil {
-		t.Fatal(err)
-	}
+	bridge, node, tracking := newBridgeFixture(t)
+	tracking.runtime.Close()
 	for i := 0; i < 100; i++ {
-		wire, err := bridge.PrepareIdentity(context.Background(), NodeExecutionIdentityRequest{Scope: "transaction", PrincipalID: uuid.NewString(), OrgID: uuid.NewString(), Signer: "0x" + strings.Repeat("11", 20), BindingHash: "0x" + strings.Repeat("22", 32)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := bridge.SubmitTransaction(context.Background(), wire, "0x01", NodeSubmissionMetadata{SenderDID: "did:test:author"}); err != nil {
-			t.Fatal(err)
+		if _, err := newSignedTransfer(t, 0).submit(t, bridge, uuid.NewString(), uuid.NewString()); err == nil {
+			t.Fatal("submission accepted without a tracking database")
 		}
 	}
-	if lines := capture.count("node submission acknowledgement pending"); lines != 1 {
-		t.Fatalf("%d acknowledgement lines for 100 failures, want 1 per interval", lines)
+	if node.calls.Load() != 0 {
+		t.Fatal("the node was called without a durable binding")
+	}
+	if lines := capture.count("execution-tracking admission batch failed"); lines != 1 {
+		t.Fatalf("%d tracking failure lines for 100 failures, want 1 per interval", lines)
 	}
 }
 

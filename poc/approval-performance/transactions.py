@@ -246,9 +246,11 @@ def main():
             (output / "receipts.json").write_text(json.dumps(receipts) + "\n")
             if args.node == "reth-v2":
                 # Lifecycle counts on the OPS side (plan §9.3, Codex 1.7) and node evidence size.
-                states = stack.psql("SELECT state || '=' || count(*) FROM node_submissions GROUP BY state")
-                report["v2"] = {"node_submissions_by_state": states.split("\n") if states else [],
-                                "node_submissions_reconciled": int(stack.psql("SELECT count(*) FROM node_submissions WHERE reconciled_at IS NOT NULL") or 0),
+                # Execution tracking lives in its own database (RD-1410): in-flight
+                # bindings by state, then insert-once final status rows.
+                states = stack.psql_exec("SELECT 'binding_' || state || '=' || count(*) FROM node_tx_binding GROUP BY state UNION ALL SELECT 'final_' || state || '=' || count(*) FROM node_tx_status GROUP BY state")
+                report["v2"] = {"tracking_by_state": states.split("\n") if states else [],
+                                "tracking_final": int(stack.psql_exec("SELECT count(*) FROM node_tx_status") or 0),
                                 "policy_archive_bytes": stack.node.archive_bytes(),
                                 "policy_archive_bytes_per_successful_tx": stack.node.archive_bytes() / max(good, 1),
                                 "ops_node_unavailable_lines": sum(1 for line in (stack.directory / "ops.log").open() if "private node execution failed" in line and "unavailable" in line),

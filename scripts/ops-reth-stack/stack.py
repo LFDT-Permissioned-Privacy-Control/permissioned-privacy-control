@@ -238,7 +238,7 @@ def start(args):
             sock.close()
         compose(state, "up", "-d", "--wait", timeout=90)
         password = state["secrets"]["database"]
-        sql = "CREATE DATABASE privacy_proxy_audit;\nCREATE DATABASE chain_indexer;\nCREATE DATABASE explorer;\nCREATE ROLE privacy_proxy_app LOGIN PASSWORD '"+password+"';\n"
+        sql = "CREATE DATABASE privacy_proxy_audit;\nCREATE DATABASE privacy_proxy_exec;\nCREATE DATABASE chain_indexer;\nCREATE DATABASE explorer;\nCREATE ROLE privacy_proxy_app LOGIN PASSWORD '"+password+"';\n"
         compose(state, "exec", "-T", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "privacy_proxy", input=sql, text=True, stdout=subprocess.DEVNULL)
         env = os.environ.copy()
         node_env = {**env, "OPS_NODE_POLICY_CHAIN_ID": "31337", "OPS_NODE_POLICY_DEPLOYMENT_ID": project,
@@ -255,6 +255,9 @@ def start(args):
         ops_env = {**env, "ENVIRONMENT": "development", "ALLOW_MOCK_LOGIN": "true", "MOCK_SIGNATURES": "false",
             "PORT": str(ports["ops"]), "NODE_URL": f"http://127.0.0.1:{ports['reth']}", "DATABASE_URL": dsn("privacy_proxy"),
             "AUDIT_ADMIN_DATABASE_URL": dsn("privacy_proxy_audit"), "AUDIT_DATABASE_URL": dsn("privacy_proxy_audit", "privacy_proxy_app"),
+            "EXECUTION_ADMIN_DATABASE_URL": dsn("privacy_proxy_exec"), "EXECUTION_DATABASE_URL": dsn("privacy_proxy_exec"),
+            # Reth mode audits system decisions through the durable buffer (RD-1410).
+            "AUDIT_BUFFER_DIR": str(directory/"audit-buffer"),
             "REDIS_URL": f"redis://:{password}@127.0.0.1:{ports['redis']}", "INDEXER_URL": f"127.0.0.1:{ports['indexer']}", "EXPLORER_DATABASE_URL": dsn("chain_indexer"),
             "VERIFIER_ID": "did:privado:verifier:dev-0000000000000000", "BASE_URL": ops, "FRONTEND_URL": ui, "CORS_ALLOWED_ORIGINS": ui+","+explorer_url,
             "JWT_SECRET": state["secrets"]["jwt"], "JWT_REFRESH_SECRET": state["secrets"]["refresh"], "ADMIN_API_TOKEN": state["secrets"]["admin"],

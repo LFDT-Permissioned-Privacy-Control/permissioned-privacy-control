@@ -277,7 +277,21 @@ type Config struct {
 	// NEVER runs CREATE DATABASE — infra must have provisioned the audit database
 	// already; the app only connects and migrates it.
 	AuditAdminDatabaseURL string
-	ExplorerDatabaseURL   string
+	// ExecutionDatabaseURL is the RUNTIME identity for the SEPARATE
+	// execution-tracking database (RD-1410): per-transaction bindings, status
+	// and history of the Reth execution path. It is used only in Reth mode
+	// (OPS_NODE_POLICY_MODE=reth). Like AUDIT_DATABASE_URL it is DERIVED from
+	// DATABASE_URL as "<name>_exec" on the SAME server when unset, reusing
+	// DATABASE_URL's credentials; an explicit URL may point at another
+	// server. The data is operational and lossable; a production deployment
+	// needs a separate Postgres instance for load isolation.
+	ExecutionDatabaseURL string
+	// ExecutionAdminDatabaseURL is the ADMIN/owner identity for the tracking
+	// database: it runs the tracking migrations and the partition maintenance
+	// (create ahead, drop expired). Derived the same way when unset. The app
+	// never runs CREATE DATABASE.
+	ExecutionAdminDatabaseURL string
+	ExplorerDatabaseURL       string
 	// IndexerURL, when non-empty, enables the gRPC chain-indexer backend for
 	// explorer reads. Methods not yet ported to gRPC fall back to direct
 	// SQL on the explorer postgres. Leave empty to use SQL exclusively.
@@ -409,6 +423,10 @@ type Config struct {
 	RetentionRBACAuditLogs   time.Duration // Retention for rbac_audit_log (default: 1 year)
 	RetentionTravelRecords   time.Duration // Retention for used travel_rule_records (default: 7 years)
 	RetentionCleanupInterval time.Duration // How often retention cleanup runs (default: 1 hour)
+	// RetentionNodeSubmissions is how long final transaction status records
+	// (and operational history) of the Reth execution path are kept in the
+	// tracking database (RD-1410; default 7 days, 0 = keep forever).
+	RetentionNodeSubmissions time.Duration
 	// MaxAccessLogRows caps the access_logs table at this row count using a
 	// FIFO sweep that runs alongside the time-based prune. 0 = unlimited
 	// (time-based retention only). The hash chain anchor table preserves the
@@ -637,6 +655,7 @@ func Load() *Config {
 	retentionRBACAuditLogs := parseDurationEnv("RETENTION_RBAC_AUDIT_LOGS", 365*24*time.Hour)    // 1 year
 	retentionTravelRecords := parseDurationEnv("RETENTION_TRAVEL_RECORDS", 7*365*24*time.Hour)   // ~7 years
 	retentionCleanupInterval := parseDurationEnv("RETENTION_CLEANUP_INTERVAL", 1*time.Hour)
+	retentionNodeSubmissions := parseDurationEnv("RETENTION_NODE_SUBMISSIONS", 7*24*time.Hour)
 
 	// FIFO row cap on access_logs (0 = unlimited).
 	var maxAccessLogRows int64
@@ -777,6 +796,16 @@ func Load() *Config {
 	if auditAdminDatabaseURL == "" {
 		auditAdminDatabaseURL = deriveAuditDatabaseURL(databaseURL)
 	}
+	// RD-1410: the execution-tracking database follows the same mechanism,
+	// "<name>_exec" on the same server when unset.
+	executionDatabaseURL := getEnv("EXECUTION_DATABASE_URL", "")
+	if executionDatabaseURL == "" {
+		executionDatabaseURL = deriveExecutionDatabaseURL(databaseURL)
+	}
+	executionAdminDatabaseURL := getEnv("EXECUTION_ADMIN_DATABASE_URL", "")
+	if executionAdminDatabaseURL == "" {
+		executionAdminDatabaseURL = deriveExecutionDatabaseURL(databaseURL)
+	}
 
 	return &Config{
 		NodePolicy:                          loadNodePolicy(os.Getenv),
@@ -851,6 +880,7 @@ func Load() *Config {
 		RetentionRBACAuditLogs:              retentionRBACAuditLogs,
 		RetentionTravelRecords:              retentionTravelRecords,
 		RetentionCleanupInterval:            retentionCleanupInterval,
+		RetentionNodeSubmissions:            retentionNodeSubmissions,
 		MaxAccessLogRows:                    maxAccessLogRows,
 		SIEMWebhookURL:                      siemWebhookURL,
 		SIEMAuthHeader:                      siemAuthHeader,
@@ -861,6 +891,8 @@ func Load() *Config {
 		AuditTamperWebhookURL:               auditTamperWebhookURL,
 		AuditDatabaseURL:                    auditDatabaseURL,
 		AuditAdminDatabaseURL:               auditAdminDatabaseURL,
+		ExecutionDatabaseURL:                executionDatabaseURL,
+		ExecutionAdminDatabaseURL:           executionAdminDatabaseURL,
 		ExplorerDatabaseURL:                 getEnv("EXPLORER_DATABASE_URL", ""),
 		IndexerURL:                          getEnv("INDEXER_URL", ""),
 		TunnelURLFile:                       getEnv("TUNNEL_URL_FILE", ""),
@@ -1057,6 +1089,12 @@ func (c *Config) Validate() error {
 	}
 	if getEnv("AUDIT_DATABASE_URL", "") == "" {
 		slog.Warn("AUDIT_DATABASE_URL is not set in production: the append-only audit database is DERIVED on the same server reusing DATABASE_URL's owner credentials, so the INSERT-only seal is not enforced. Provision a separate audit DB and set AUDIT_DATABASE_URL to its restricted-role DSN (RD-1164 #18).")
+	}
+	if c.NodePolicy.Enabled() && (getEnv("EXECUTION_DATABASE_URL", "") == "") != (getEnv("EXECUTION_ADMIN_DATABASE_URL", "") == "") {
+		slog.Warn("only one of EXECUTION_DATABASE_URL / EXECUTION_ADMIN_DATABASE_URL is set in production: the other is derived as <name>_exec on the main server, so the two can name different databases (startup then refuses). Set both (RD-1410).")
+	}
+	if c.NodePolicy.Enabled() && getEnv("EXECUTION_DATABASE_URL", "") == "" {
+		slog.Warn("EXECUTION_DATABASE_URL is not set in production: the execution-tracking database is DERIVED as <name>_exec on the same server as DATABASE_URL, so its per-transaction write load shares the main database's WAL, disk and replication. Provision a separate Postgres instance and set EXECUTION_DATABASE_URL / EXECUTION_ADMIN_DATABASE_URL (RD-1410).")
 	}
 
 	return nil
@@ -1263,6 +1301,19 @@ func parseDurationEnv(key string, defaultValue time.Duration) time.Duration {
 // only when AUDIT_DATABASE_URL is set explicitly to connect as the restricted
 // privacy_proxy_app role. See docs/configuration.
 func deriveAuditDatabaseURL(databaseURL string) string {
+	return deriveSiblingDatabaseURL(databaseURL, "_audit")
+}
+
+// deriveExecutionDatabaseURL derives the default execution-tracking DSN,
+// "<name>_exec" on the same server with DATABASE_URL's credentials (RD-1410),
+// exactly as deriveAuditDatabaseURL does for the audit database.
+func deriveExecutionDatabaseURL(databaseURL string) string {
+	return deriveSiblingDatabaseURL(databaseURL, "_exec")
+}
+
+// deriveSiblingDatabaseURL swaps the database name of a postgres:// URL to
+// "<name><suffix>"; "" when the URL has no host or database name.
+func deriveSiblingDatabaseURL(databaseURL, suffix string) string {
 	u, err := url.Parse(databaseURL)
 	if err != nil || u.Host == "" {
 		return ""
@@ -1271,6 +1322,6 @@ func deriveAuditDatabaseURL(databaseURL string) string {
 	if name == "" {
 		return ""
 	}
-	u.Path = "/" + name + "_audit"
+	u.Path = "/" + name + suffix
 	return u.String()
 }

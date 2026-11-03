@@ -197,6 +197,7 @@ sequenceDiagram
     participant User as User / application
     participant OPS as OPS RPC
     participant DB as OPS PostgreSQL
+    participant TDB as Execution-tracking PostgreSQL
     participant Node as Private Reth API and pool
     participant EVM as Guarded Reth EVM
     User->>OPS: eth_sendRawTransaction + authenticated session
@@ -204,7 +205,7 @@ sequenceDiagram
     OPS->>OPS: Admission and transaction compliance checks
     OPS->>Node: Verify readiness at current DB fact version
     OPS->>OPS: Sign identity bound to exact transaction hash
-    OPS->>DB: Persist submission and visibility intent
+    OPS->>TDB: Persist the transaction binding and visibility intent (group commit)
     OPS->>Node: ops_submitTransaction(identity, raw transaction)
     Node->>Node: Verify and retain identity and admit to pool
     Node-->>OPS: Accepted transaction hash
@@ -217,7 +218,8 @@ sequenceDiagram
     end
     Note over Node,EVM: Permitted execution can still revert in application code
     OPS->>Node: Poll canonical execution and finality status
-    OPS->>DB: Reconcile finalized creations and visibility
+    OPS->>DB: Apply finalized creations and visibility once
+    OPS->>TDB: Record the final status
 ```
 
 The signed identity names the **OPS principal**, organization, Ethereum signer,
@@ -303,7 +305,12 @@ the permission verdict for diagnostic traces. Preview never activates a policy.
 ## Where state lives
 
 OPS PostgreSQL is the authority for people, organizations, contracts and
-configuration. The node keeps two kinds of state: what it needs to execute now
+configuration. Per-transaction execution state — who submitted each pending
+transaction, its delivery and inclusion, and the final status kept for owner
+lookups — lives in a separate execution-tracking database, so no
+per-transaction write stream reaches the main database. Losing the tracking
+database loses only in-flight follow-up, never configuration, identity or
+audit. The node keeps two kinds of state: what it needs to execute now
 (memory) and the signed evidence it needs to prove or replay past execution
 (its policy state directory). Keys stay with their owners: the client keeps the
 wallet key, OPS keeps the signing key, and the node holds only OPS public keys.
@@ -323,10 +330,20 @@ flowchart TB
         Directory["Directory facts: users, memberships, linked addresses,<br/>groups and access, contracts and grants,<br/>shared infrastructure, preregistered addresses, sanctions"]
         Config["Configuration revisions and active execution<br/>policy revisions with compiled per-group artifacts"]
         Feed["node_policy_clock, node_policy_changes (changed keys,<br/>pruned at acknowledgement), node_policy_cursors (acknowledged version)"]
-        Subs["node_submissions: raw transaction, identity envelope,<br/>principal, organization, signer, visibility, state"]
+        Effects["node_tx_effects_applied (one marker per finalized<br/>transaction with side effects), node_tx_effects_floor,<br/>node_tx_compliance_claims (one travel-rule record per transaction)"]
         Visibility["pending_tx_visibility, tx_visible_to"]
         Audit["rbac_audit_log, hash-chained"]
         Lease["Publisher lease: session advisory lock"]
+    end
+    subgraph TDB["Execution-tracking PostgreSQL, operational and lossable"]
+        Binding["node_tx_binding: one row per pending transaction<br/>(principal, organization, signer, generation, state)"]
+        Payload["node_tx_payload: raw transaction, insert-once,<br/>dropped by time bucket"]
+        Status["node_tx_status: final status, daily partitions,<br/>dropped after RETENTION_NODE_SUBMISSIONS"]
+        History["node_tx_identities: later generations, stops"]
+        Quota["pending_quota, tracking_meta (network, incarnation)"]
+    end
+    subgraph AuditDB["Audit PostgreSQL, append-only"]
+        AccessLogs["access_logs, hash-chained: requests and<br/>system decisions such as finalization"]
     end
     subgraph Runtime["Guarded Reth policy runtime"]
         subgraph Memory["Memory"]
@@ -346,6 +363,8 @@ flowchart TB
     end
     Client -->|"Raw transaction or call, with session"| OPSProc
     OPSProc -->|"Reads and writes"| PG
+    OPSProc -->|"Per-transaction writes, batched"| TDB
+    OPSProc -->|"Through the durable audit buffer"| AuditDB
     OPSProc -->|"Signed facts and identities, private API"| Runtime
     Trust -.->|"Verifies every signed envelope"| Objects
     Runtime -->|"Executor inside the same process"| Reth
@@ -357,7 +376,7 @@ chain. A transaction identity is stored as an object with a `tx-` pointer when
 the node accepts it. At startup the node reloads identities that are unexpired
 and not yet terminal. The transaction pool itself is Reth's in-memory pool. Reth
 saves local pool transactions only on graceful shutdown, so a crash loses
-pooled transactions while OPS keeps their submission rows. A block manifest names the facts checkpoint
+pooled transactions while OPS keeps their binding rows and raw transactions. A block manifest names the facts checkpoint
 and the identity envelope behind every transaction in the block; self-import
 and forensic replay read it, ordinary queries do not.
 
@@ -367,17 +386,19 @@ The next diagram follows the records of one transaction across these stores.
 sequenceDiagram
     participant OPS as OPS process
     participant DB as OPS PostgreSQL
+    participant TDB as Execution-tracking PostgreSQL
+    participant AUD as Durable audit buffer
     participant RT as Node runtime memory
     participant Dir as Node policy state directory
     participant Reth as Reth pool and chain
     OPS->>DB: Read current fact version
     OPS->>OPS: Sign identity bound to the transaction hash
-    OPS->>DB: Insert node_submissions row, state queued
+    OPS->>TDB: Insert binding and payload rows, pending (one commit per batch of requests)
     OPS->>RT: ops_submitTransaction(identity, raw transaction)
     RT->>Dir: Identity envelope object and tx- pointer
     RT->>RT: Register pending identity
     RT->>Reth: Insert raw transaction into pool
-    OPS->>DB: Mark row accepted
+    Note over OPS: The acceptance is kept in memory and written only<br/>if no later transition records it first
     Reth->>RT: Build candidate block with pinned facts
     RT->>Dir: status- record (pending or denied)
     RT->>Dir: Block manifest, fact checkpoint, included- record
@@ -389,17 +410,22 @@ sequenceDiagram
         RT->>Dir: terminal- pointer once a receipt is canonical
         RT->>RT: Release pending identity slot
         RT-->>OPS: included or reverted, finality, created contracts
-        OPS->>DB: Update row state and outcome
+        OPS->>TDB: Included, not final: mark provisional (batched; nothing for unchanged polls)
     end
-    Note over OPS,DB: Final and included: one database transaction
+    OPS->>AUD: ops.system.finalized event, before the decision commits
+    Note over OPS,DB: With side effects: one main-database transaction, once per transaction (marker)
     OPS->>DB: Register created contracts and deploy grant
     OPS->>DB: Queue visibility in pending_tx_visibility
-    OPS->>DB: Set reconciled_at on the submission row
+    OPS->>TDB: Delete the binding, insert the final status (batched)
     DB->>DB: Visibility reconciler promotes to tx_visible_to
 ```
 
-Ownership and visibility are written only from finalized node evidence, in
-the same database transaction that closes the submission row. A newly
+Ownership and visibility are written only from finalized node evidence, in a
+main-database transaction guarded by a per-transaction marker, so a crash
+before the tracking database records the final status re-runs it without
+applying anything twice; the marker's effect bits also keep a grant an
+administrator revoked from coming back. Transactions without side effects
+write nothing to the main database. A newly
 registered contract is itself a fact change: it advances the fact version, so
 the next publication carries its ownership to the node. Until finality, an
 included outcome stays provisional and can return to pending after a reorg.

@@ -160,6 +160,11 @@ Configure the private policy endpoint with `OPS_NODE_POLICY_URL`,
 seed or private key. Configure the corresponding public key and matching network
 identity in the Reth launcher. Keep its private endpoint off user-facing networks.
 
+Reth mode also needs the execution-tracking database
+(`EXECUTION_DATABASE_URL`, `EXECUTION_ADMIN_DATABASE_URL`; see
+[Configuration](/docs/configuration#execution-tracking-database-reth-mode)).
+In production it belongs on its own PostgreSQL instance.
+
 The default fact lifetime is 30 seconds, publication interval one second and
 identity lifetime one minute. OPS publishes a fact change as soon as it
 commits; the publication interval is the heartbeat that renews the facts'
@@ -199,6 +204,30 @@ also refused with 503 when the node does not answer a readiness check, when its
 facts have expired, or when OPS has had no successful readiness answer for five
 seconds. `GET /ready` follows the same rule, so a short publication does not
 take every instance out of a load balancer at once.
+
+OPS records which principal submitted each transaction before it sends the
+transaction to the node, so another principal sharing the signing key cannot
+take it over, even after a node restart. Concurrent submissions share one
+database commit. A submission the node refuses because publication is pending
+(above) leaves nothing behind: resend the same signed transaction. A
+transaction already final is answered with its hash and not sent again.
+
+The owner can follow a transaction at `GET /api/v1/me/transactions/{hash}/execution`:
+
+| Status | Meaning | Final |
+|---|---|---|
+| `pending` | Submitted; waiting for inclusion | no |
+| `provisional` | Included in a block that is not finalized yet; it can still return to `pending` after a reorganization | no |
+| `included` | Executed in a finalized block | yes |
+| `reverted` | Reverted in a finalized block | yes |
+
+Final statuses are kept for `RETENTION_NODE_SUBMISSIONS` (7 days by default)
+and then the lookup answers 404. Ownership of deployed contracts and
+`visibleTo` rules are applied once a transaction is final, exactly once. A
+created address another organization already owns is not registered again;
+the status then carries the note `effects_not_applied`. Every finalization is
+recorded in the access log as `ops.system.finalized` on behalf of the principal
+before it takes effect, and a refused effect as `ops.system.effects_refused`.
 
 When several OPS instances share one database, exactly one of them publishes
 facts and reconciles submissions at a time. Each instance campaigns for a

@@ -74,6 +74,9 @@ const (
 	// policy facts the request needs (503 with Retry-After). It describes the
 	// deployment's publication, not any tenant's state.
 	ReasonPublicationPending = "publication_pending"
+	// ReasonPendingLimit: the execution path's global pending-work limit is
+	// reached; retry after Retry-After (RD-1410).
+	ReasonPendingLimit = "pending_limit"
 	// ReasonInternalError: an internal failure (500) — generic by construction.
 	ReasonInternalError = "internal_error"
 

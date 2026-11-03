@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -111,6 +112,28 @@ type RetentionStore interface {
 	LogAuditAction(ctx context.Context, action string, details map[string]any) error
 }
 
+// TrackingMaintainer is the execution-tracking database's retention surface
+// (Reth mode, RD-1410). Retention runs it at the cleanup interval with the
+// configured retention (drop expired status/history partitions, prune the
+// main-database effects markers); a fixed one-minute pass with retention 0
+// keeps partitions ahead and truncates expired payload buckets even when
+// retention cleanup is disabled.
+type TrackingMaintainer interface {
+	MaintainTracking(ctx context.Context, retention time.Duration) (TrackingMaintenanceResult, error)
+	PruneNodeEffects(ctx context.Context, olderThan time.Time) (int64, error)
+}
+
+// TrackingMaintenanceResult names what one tracking maintenance pass changed;
+// Skipped: another instance's pass held the maintenance lock.
+type TrackingMaintenanceResult struct {
+	Created, Dropped, Truncated []string
+	Skipped                     bool
+}
+
+// trackingMaintenanceEvery is the cadence of the partition-ahead and payload
+// pass; it is not configurable and does not depend on CleanupInterval.
+const trackingMaintenanceEvery = time.Minute
+
 // RetentionManager runs periodic retention cleanup on audit tables.
 type RetentionManager struct {
 	cfg        RetentionConfig
@@ -118,6 +141,99 @@ type RetentionManager struct {
 	stop       chan struct{}
 	done       chan struct{}
 	preregDone chan struct{}
+
+	trackingMu        sync.Mutex
+	tracking          TrackingMaintainer
+	trackingRetention time.Duration
+	trackingDone      chan struct{}
+}
+
+// AttachTracking adds the execution-tracking database to retention: its
+// expired status and history partitions are dropped at the cleanup interval
+// after retention (0 = keep forever), and the effects markers older than
+// retention are pruned. Call once, after Start.
+func (r *RetentionManager) AttachTracking(m TrackingMaintainer, retention time.Duration) {
+	r.trackingMu.Lock()
+	defer r.trackingMu.Unlock()
+	if r.tracking != nil || m == nil {
+		return
+	}
+	r.tracking, r.trackingRetention, r.trackingDone = m, retention, make(chan struct{})
+	go r.runTrackingMaintenance()
+}
+
+func (r *RetentionManager) attachedTracking() (TrackingMaintainer, time.Duration) {
+	r.trackingMu.Lock()
+	defer r.trackingMu.Unlock()
+	return r.tracking, r.trackingRetention
+}
+
+func (r *RetentionManager) runTrackingMaintenance() {
+	defer close(r.trackingDone)
+	ticker := time.NewTicker(trackingMaintenanceEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.stop:
+			return
+		case <-ticker.C:
+		}
+		m, _ := r.attachedTracking()
+		ctx, cancel := context.WithTimeout(context.Background(), trackingMaintenanceEvery)
+		result, err := m.MaintainTracking(ctx, 0)
+		cancel()
+		if err != nil {
+			slog.Error("retention: execution-tracking maintenance failed", "error", err)
+		} else if len(result.Created)+len(result.Truncated) > 0 {
+			slog.Info("retention: execution-tracking maintenance", "created", result.Created, "truncated", result.Truncated)
+		}
+	}
+}
+
+// cleanupTracking is the cleanup-interval pass over the tracking database.
+func (r *RetentionManager) cleanupTracking(ctx context.Context, now time.Time) {
+	m, retention := r.attachedTracking()
+	if m == nil {
+		return
+	}
+	slog.Info("retention: execution tracking", "retention", retention)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	var result TrackingMaintenanceResult
+	var err error
+	// The one-minute pass may hold the maintenance lock: wait for it briefly
+	// instead of skipping this interval's drops.
+	for attempt := 0; attempt < 30; attempt++ {
+		result, err = m.MaintainTracking(ctx, retention)
+		if err != nil || !result.Skipped {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-r.stop:
+			return
+		case <-time.After(2 * time.Second):
+			continue
+		}
+		break
+	}
+	switch {
+	case err != nil:
+		slog.Error("retention: error maintaining execution tracking", "error", err)
+	case result.Skipped:
+		slog.Warn("retention: execution-tracking partition drops skipped: another maintenance pass held the lock; retried next interval")
+	case len(result.Dropped) > 0:
+		slog.Info("retention: dropped expired execution-tracking partitions", "partitions", result.Dropped)
+	}
+	if retention <= 0 {
+		return // forever: effects markers are kept as long as the evidence
+	}
+	pruned, err := m.PruneNodeEffects(ctx, now.Add(-retention))
+	if err != nil {
+		slog.Error("retention: error pruning node effects markers", "error", err)
+	} else if pruned > 0 {
+		slog.Info("retention: pruned node effects markers; replay floor raised", "count", pruned)
+	}
 }
 
 // RetentionCleaner is an alias for RetentionManager for API compatibility.
@@ -162,6 +278,12 @@ func (r *RetentionManager) Stop() {
 	close(r.stop)
 	<-r.done
 	<-r.preregDone
+	r.trackingMu.Lock()
+	done := r.trackingDone
+	r.trackingMu.Unlock()
+	if done != nil {
+		<-done
+	}
 }
 
 func (r *RetentionManager) run() {
@@ -263,6 +385,9 @@ func (r *RetentionManager) cleanup() {
 	// time prune handles the bulk and the FIFO step only kicks in when row
 	// counts grow beyond MaxAccessLogRows during a single retention window.
 	r.trimAccessLogsFIFO(ctx)
+
+	// RD-1410: final transaction status and history of the Reth path.
+	r.cleanupTracking(ctx, now)
 }
 
 // trimAccessLogsFIFO drains rows from access_logs in batches until the row

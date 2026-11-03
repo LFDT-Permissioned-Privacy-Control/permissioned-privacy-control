@@ -70,8 +70,7 @@ func TestReconcileScopeLockDoesNotBlockAdmission(t *testing.T) {
 	d := setupTestDB(t)
 	ctx := t.Context()
 	user, org := cacheGenFixtures(t, d, ctx)
-	pending := submissionFixture(user, org)
-	require.NoError(t, d.SaveNodeSubmission(ctx, pending))
+	require.NoError(t, d.EnsureNodeTxEffectsFloor(ctx, effectsNetwork))
 	release := holdScope(t, d, org)
 
 	// Request path: the compliance decision record references the org. The
@@ -82,9 +81,10 @@ func TestReconcileScopeLockDoesNotBlockAdmission(t *testing.T) {
 	_, err := d.CreateComplianceLog(write, &compliance.ComplianceLog{OrgID: org, UserID: user, TransferType: "native", FromAddress: "0x" + strings.Repeat("11", 20), ToAddress: "0x" + strings.Repeat("22", 20), AmountWei: "1", Currency: "USD", Decision: "allowed"})
 	require.NoError(t, err, "a request's FK check waited for the reconciliation scope")
 
-	// A non-registering outcome (pending) is recorded without the scope lock.
-	status := nodepolicy.TransactionStatus{TransactionHash: pending.TransactionHash, PrincipalID: user, OrgID: org, ContextID: pending.ContextID, Execution: nodepolicy.ExecutionOutcome{Status: "pending", FactsVersion: 1, Created: []nodepolicy.CreatedContract{}}}
-	require.NoError(t, d.RecordNodeOutcome(write, pending.Network, status), "a pending outcome waited for the scope lock")
+	// A finalized outcome without a created contract (a visibility effect
+	// only) is applied without the scope lock.
+	_, err = d.ApplyNodeTxEffects(write, effectsNetwork, NodeTxEffects{TransactionHash: lowerHex(randomBytes(32)), PrincipalID: user, OrgID: org, BlockNumber: 3, Visibility: true, VisibleTo: []string{"did:test:recipient"}, VisibleSender: "did:test:sender"})
+	require.NoError(t, err, "a non-registering finalization waited for the scope lock")
 
 	// Exclusion is preserved: another scope locker and an org deletion wait.
 	require.True(t, blockedOnLock(t, d, func(tx *Tx) error { return tx.AuthorizeDeploymentRegistration(ctx, org) }), "a second scope locker must still wait")
@@ -106,22 +106,16 @@ func TestRegisteringOutcomeStillTakesTheScope(t *testing.T) {
 	d := setupTestDB(t)
 	ctx := t.Context()
 	user, org := cacheGenFixtures(t, d, ctx)
-	in := submissionFixture(user, org)
-	require.NoError(t, d.SaveNodeSubmission(ctx, in))
+	require.NoError(t, d.EnsureNodeTxEffectsFloor(ctx, effectsNetwork))
 	release := holdScope(t, d, org)
-	block := "0x" + strings.Repeat("44", 32)
-	number := uint64(12)
-	outcome := nodepolicy.TransactionStatus{TransactionHash: in.TransactionHash, PrincipalID: user, OrgID: org, ContextID: in.ContextID, Execution: nodepolicy.ExecutionOutcome{Status: "included", FactsVersion: 7, BlockHash: &block, BlockNumber: &number, Created: []nodepolicy.CreatedContract{{Address: "0x" + strings.Repeat("55", 20), OrgID: org, PrincipalID: user}}}}
-	outcome.Execution.Finalized, outcome.Execution.FinalizedBlockHash, outcome.Execution.FinalizedBlockNumber = true, &block, &number
+	effects := NodeTxEffects{TransactionHash: lowerHex(randomBytes(32)), PrincipalID: user, OrgID: org, BlockNumber: 12, Ownership: true, Created: []nodepolicy.CreatedContract{{Address: "0x" + strings.Repeat("55", 20), OrgID: org, PrincipalID: user}}}
 	short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
 	defer cancel()
-	var stored NodeSubmission
-	err := d.RecordNodeOutcome(short, in.Network, outcome)
+	_, err := d.ApplyNodeTxEffects(short, effectsNetwork, effects)
 	var pgErr *pgconn.PgError
 	require.True(t, errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &pgErr) && pgErr.Code == "57014"), "registration must wait for the scope, got %v", err)
 	release()
-	require.NoError(t, d.RecordNodeOutcome(ctx, in.Network, outcome))
-	stored, err = d.GetNodeSubmission(ctx, in.Network, in.TransactionHash)
+	applied, err := d.ApplyNodeTxEffects(ctx, effectsNetwork, effects)
 	require.NoError(t, err)
-	require.NotNil(t, stored.ReconciledAt)
+	require.True(t, applied.OwnershipApplied)
 }

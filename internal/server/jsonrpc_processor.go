@@ -1416,6 +1416,12 @@ func visibleToFieldPresent(req *ProcessRequest, rawTx bool) bool {
 // Called from both eth_sendTransaction and eth_sendRawTransaction paths.
 // Returns nil if compliance passes or is disabled, or a ProcessResult with an error.
 func (p *JSONRPCProcessor) checkCompliance(ctx context.Context, req *ProcessRequest, orgID, userID, from, to, data, value string) *ProcessResult {
+	return p.checkComplianceFor(ctx, req, orgID, userID, from, to, data, value, compliance.TransactionBinding{})
+}
+
+// checkComplianceFor is checkCompliance with the travel-rule step bound to a
+// signed transaction (the Reth path: one record per transaction, RD-1410).
+func (p *JSONRPCProcessor) checkComplianceFor(ctx context.Context, req *ProcessRequest, orgID, userID, from, to, data, value string, tx compliance.TransactionBinding) *ProcessResult {
 	if p.complianceChecker == nil {
 		return nil
 	}
@@ -1429,6 +1435,7 @@ func (p *JSONRPCProcessor) checkCompliance(ctx context.Context, req *ProcessRequ
 		Data:          data,
 		Value:         value,
 		CorrelationID: req.CorrelationID,
+		Transaction:   tx,
 	})
 	if p.metrics != nil {
 		p.metrics.ComplianceCheckDuration.WithLabelValues().Observe(time.Since(compStart).Seconds())

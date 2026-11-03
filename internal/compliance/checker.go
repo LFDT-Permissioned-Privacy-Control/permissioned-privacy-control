@@ -127,6 +127,25 @@ type CheckRequest struct {
 	Data          string // calldata (hex)
 	Value         string // transfer value (hex)
 	CorrelationID string // request correlation ID for audit trail
+	// Transaction binds the travel-rule step to one signed transaction (the
+	// Reth execution path, RD-1410). When set and the store supports it, the
+	// step claims at most one record per transaction and a retry of the same
+	// transaction re-uses it; zero keeps the per-call claim.
+	Transaction TransactionBinding
+}
+
+// TransactionBinding identifies a signed transaction on one network.
+type TransactionBinding struct {
+	ChainID      uint64
+	DeploymentID string
+	Hash         string // 0x-prefixed lowercase hex
+}
+
+// TransactionClaimer is the store side of the one-claim-per-transaction
+// travel-rule step: re-find the record bound to the transaction (if it still
+// covers the transfer), or claim and bind an unused covering one.
+type TransactionClaimer interface {
+	ClaimTravelRuleRecordForTx(ctx context.Context, chainID uint64, deploymentID, txHash, orgID, userID, beneficiaryAddr, tokenAddr string, amountFiat float64) (*TravelRuleRecord, error)
 }
 
 // CheckResult is the outcome of a compliance check.
@@ -344,7 +363,14 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 	// Uses ClaimUnusedTravelRuleRecord which does UPDATE ... FOR UPDATE SKIP LOCKED
 	// in a single query to prevent TOCTOU race conditions.
 	// The record must cover the transfer amount (amount_fiat >= amountFiat).
-	record, err := c.store.ClaimUnusedTravelRuleRecord(ctx, req.OrgID, req.UserID, info.ToAddress, tokenAddr, amountFiat)
+	var record *TravelRuleRecord
+	if claimer, ok := c.store.(TransactionClaimer); ok && req.Transaction.Hash != "" {
+		// One record per transaction (RD-1410): a retry of the same signed
+		// transaction re-uses its record instead of consuming another.
+		record, err = claimer.ClaimTravelRuleRecordForTx(ctx, req.Transaction.ChainID, req.Transaction.DeploymentID, req.Transaction.Hash, req.OrgID, req.UserID, info.ToAddress, tokenAddr, amountFiat)
+	} else {
+		record, err = c.store.ClaimUnusedTravelRuleRecord(ctx, req.OrgID, req.UserID, info.ToAddress, tokenAddr, amountFiat)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to claim travel rule record: %w", err)
 	}

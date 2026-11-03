@@ -3,19 +3,20 @@ package server
 import (
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"privacy-proxy/internal/apimodels"
+	"privacy-proxy/internal/db"
 	"privacy-proxy/internal/nodepolicy"
 )
 
 // getMyNodeTransactionStatus returns the caller's own durable execution state.
 // @Summary My transaction execution status
-// @Description Status for a transaction submitted by this named principal, with current organization membership and KYC required. Shared signing addresses do not share status access. Queued, pending, denied and expired are nonterminal: an execution already started may still be included. Included or reverted reflects canonical node evidence; reconciled means OPS bookkeeping is committed. This endpoint never returns raw transactions, signing envelopes or visibility recipients.
+// @Description Status for a transaction submitted by this named principal, with current organization membership and KYC required. Shared signing addresses do not share status access. pending and provisional (included in a block that is not final yet) are nonterminal: a provisional transaction can return to pending after a reorganization. included and reverted (in a finalized block) are final; reconciled means OPS bookkeeping for the final status is committed, and reconciliation_note effects_not_applied means a deployment or visibility effect was refused. Final statuses are kept for the configured retention (RETENTION_NODE_SUBMISSIONS), after which the transaction is not found. This endpoint never returns raw transactions, signing envelopes or visibility recipients.
 // @Tags Profile
 // @Produce json
 // @Param hash path string true "Lowercase transaction hash"
@@ -67,8 +68,12 @@ func (s *Server) getMyNodeTransactionStatus(c *gin.Context) {
 		missing()
 		return
 	}
-	network := nodepolicy.Network{ChainID: s.config.NodePolicy.ChainID, DeploymentID: s.config.NodePolicy.DeploymentID}
-	stored, err := s.db.GetNodeSubmission(ctx, network, hash)
+	if s.tracking == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "transaction status unavailable"})
+		return
+	}
+	key, _ := hex.DecodeString(hash[2:])
+	stored, err := s.tracking.runtime.LookupTracked(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
 		missing()
 		return
@@ -77,11 +82,11 @@ func (s *Server) getMyNodeTransactionStatus(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "transaction status unavailable"})
 		return
 	}
-	if stored.PrincipalID != user.ID {
+	if stored.PrincipalID.String() != user.ID {
 		missing()
 		return
 	}
-	memberships, err := s.db.ListUserMembershipsInOrg(ctx, user.ID, stored.OrgID)
+	memberships, err := s.db.ListUserMembershipsInOrg(ctx, user.ID, stored.OrgID.String())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "transaction status unavailable"})
 		return
@@ -90,14 +95,23 @@ func (s *Server) getMyNodeTransactionStatus(c *gin.Context) {
 		missing()
 		return
 	}
-	response := apimodels.NodeTransactionProgress{TransactionHash: stored.TransactionHash, ContextID: stored.ContextID, Status: stored.State, Reconciled: stored.ReconciledAt != nil, ReconciliationNote: stored.ReconciliationNote}
-	if len(stored.Outcome) > 0 {
-		var status nodepolicy.TransactionStatus
-		if err := json.Unmarshal(stored.Outcome, &status); err != nil || status.Validate() != nil || status.PrincipalID != stored.PrincipalID || status.OrgID != stored.OrgID || status.TransactionHash != hash {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "transaction status unavailable"})
-			return
-		}
-		response.Execution = &status.Execution
+	c.JSON(http.StatusOK, nodeTransactionProgress(hash, stored))
+}
+
+// nodeTransactionProgress is the owner's view of a tracked transaction: the
+// state, its block once included, and the final reason.
+func nodeTransactionProgress(hash string, t db.TrackedTransaction) apimodels.NodeTransactionProgress {
+	out := apimodels.NodeTransactionProgress{TransactionHash: hash, Status: db.TrackStateName(t.State), Reconciled: t.Final(), ReconciliationNote: db.TrackReasonName(t.Reason)}
+	if t.ContextID != uuid.Nil {
+		out.ContextID = t.ContextID.String()
 	}
-	c.JSON(http.StatusOK, response)
+	switch t.State {
+	case db.TrackProvisional, db.TrackIncluded, db.TrackReverted:
+		status := "included"
+		if t.State == db.TrackReverted {
+			status = "reverted"
+		}
+		out.Execution = &nodepolicy.ExecutionOutcome{Status: status, BlockNumber: t.BlockNumber, Finalized: t.Final(), Created: []nodepolicy.CreatedContract{}}
+	}
+	return out
 }

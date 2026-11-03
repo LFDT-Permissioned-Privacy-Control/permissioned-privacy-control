@@ -66,6 +66,7 @@ type Stack struct {
 	AuditDB    *sql.DB
 	Admin      *sql.DB // superuser on the main instance (postgres DB)
 	ExecAdmin  *sql.DB // superuser on the tracking instance
+	ExecDB     *sql.DB // owner connection to the execution-tracking database
 	mainName   string
 	opsLog     *os.File
 	opsExited  chan struct{}
@@ -165,11 +166,12 @@ func StartStack(ctx context.Context, o StackOptions) (*Stack, error) {
 		"ENVIRONMENT": "development", "GIN_MODE": "release", "PORT": port, "BASE_URL": s.URL, "NODE_URL": publicURL,
 		"DATABASE_URL":       s.PG.DSN(s.mainName, "postgres", s.PG.Password),
 		"AUDIT_DATABASE_URL": s.PG.DSN(s.mainName+"_audit", "privacy_proxy_app", appPassword),
-		// Provisioned for the execution-tracking design (plan §4.11). Today's
-		// code does not read it; the runner measures the database either way.
-		"EXECUTION_DATABASE_URL": s.ExecPG.DSN(s.mainName+"_exec", "postgres", s.ExecPG.Password),
-		"REDIS_URL":              fmt.Sprintf("redis://:%s@127.0.0.1:%s/0", redisPassword, s.Redis.Port),
-		"JWT_SECRET":             "perfgate-access-secret-" + randomHex(16), "JWT_REFRESH_SECRET": "perfgate-refresh-secret-" + randomHex(16),
+		// The execution-tracking database (plan §4.11), on its own instance
+		// with SeparateDB; Reth mode migrates and uses it.
+		"EXECUTION_DATABASE_URL":       s.ExecPG.DSN(s.mainName+"_exec", "postgres", s.ExecPG.Password),
+		"EXECUTION_ADMIN_DATABASE_URL": s.ExecPG.DSN(s.mainName+"_exec", "postgres", s.ExecPG.Password),
+		"REDIS_URL":                    fmt.Sprintf("redis://:%s@127.0.0.1:%s/0", redisPassword, s.Redis.Port),
+		"JWT_SECRET":                   "perfgate-access-secret-" + randomHex(16), "JWT_REFRESH_SECRET": "perfgate-refresh-secret-" + randomHex(16),
 		"ADMIN_API_TOKEN": s.AdminToken, "ALLOW_MOCK_LOGIN": "true", "MOCK_SIGNATURES": "false", "ENABLE_TRAVEL_RULE": "true",
 		"VERIFIER_ID": "did:privado:verifier:dev-0000000000000000", "DISABLE_COINGECKO": "true",
 		// The database pool is the product default (DB_MAX_OPEN_CONNS unset) on
@@ -202,6 +204,9 @@ func StartStack(ctx context.Context, o StackOptions) (*Stack, error) {
 		return nil, err
 	}
 	if s.AuditDB, err = OpenDB(s.PG.DSN(s.mainName+"_audit", "postgres", s.PG.Password)); err != nil {
+		return nil, err
+	}
+	if s.ExecDB, err = OpenDB(s.ExecPG.DSN(s.mainName+"_exec", "postgres", s.ExecPG.Password)); err != nil {
 		return nil, err
 	}
 	if err := s.startOPS(ctx); err != nil {
@@ -271,7 +276,7 @@ func (s *Stack) Close() {
 		s.opsLog.Close()
 	}
 	s.Node.Close()
-	for _, db := range []*sql.DB{s.MainDB, s.AuditDB, s.Admin, s.ExecAdmin} {
+	for _, db := range []*sql.DB{s.MainDB, s.AuditDB, s.Admin, s.ExecAdmin, s.ExecDB} {
 		if db != nil {
 			db.Close()
 		}

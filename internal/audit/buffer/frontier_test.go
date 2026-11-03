@@ -3,6 +3,7 @@ package buffer
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -168,5 +169,51 @@ func TestHighWaterIsMonotone(t *testing.T) {
 	defer b.Close()
 	if got := b.AllocatedThrough(); got != 5 {
 		t.Fatalf("recovered floor %d, want 5", got)
+	}
+}
+
+// TestAppendBatchIsOneDurableContiguousWrite: a batch gets contiguous
+// sequences after earlier appends, is drained in order, and a failed batch
+// stores nothing and never holds the frontier back.
+func TestAppendBatchIsOneDurableContiguousWrite(t *testing.T) {
+	dir := t.TempDir()
+	fail := false
+	b, err := Open(dir, WithBeforeSetForTest(func(seq uint64) error {
+		if fail && seq == 5 {
+			return errors.New("injected")
+		}
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Append([]byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	seqs, err := b.AppendBatch([][]byte{[]byte("b"), []byte("c"), []byte("d")})
+	if err != nil || len(seqs) != 3 || seqs[0] != 2 || seqs[2] != 4 {
+		t.Fatalf("batch seqs %v %v", seqs, err)
+	}
+	fail = true
+	if _, err := b.AppendBatch([][]byte{[]byte("e"), []byte("f")}); err == nil {
+		t.Fatal("injected failure not reported")
+	}
+	fail = false
+	if seq, err := b.Append([]byte("g")); err != nil || seq != 7 {
+		t.Fatalf("append after a failed batch: %d %v", seq, err)
+	}
+	entries, err := b.Drain(0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range entries {
+		got = append(got, string(e.Data))
+	}
+	if strings.Join(got, "") != "abcdg" {
+		t.Fatalf("drained %q, want abcdg (the failed batch stored nothing; its holes do not block)", got)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

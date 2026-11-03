@@ -650,8 +650,13 @@ func summarizeAudit(report *Gate2Report, records []RequestRecord, p Phases) {
 func reconcileReport(ctx context.Context, stack *Stack, report *Gate2Report, stamps map[string]Stamp, p Phases, offset time.Duration) *ReconcileReport {
 	r := &ReconcileReport{StatesAtEnd: map[string]int64{}}
 	windowSeconds := p.WindowEnd.Sub(p.WindowStart).Seconds()
-	// Database timestamps are on the VM clock: db = host + offset.
-	_ = stack.MainDB.QueryRowContext(ctx, `SELECT count(*) FILTER (WHERE created_at >= $1 AND created_at < $2), count(*) FILTER (WHERE reconciled_at >= $1 AND reconciled_at < $2) FROM node_submissions`, p.WindowStart.Add(offset), p.WindowEnd.Add(offset)).Scan(&r.IntentsInWindow, &r.FinalizedInWindow)
+	// Database timestamps are on the VM clock: db = host + offset. The
+	// execution path tracks transactions in the execution-tracking database
+	// (RD-1410): bindings until final, then insert-once status rows.
+	// Intents = submissions answered inside the window (each answered
+	// submission's binding was committed before it was sent).
+	r.IntentsInWindow = int64(report.Window.CompletedInWindow)
+	_ = stack.ExecDB.QueryRowContext(ctx, `SELECT count(*) FROM node_tx_status WHERE final_at >= $1 AND final_at < $2`, p.WindowStart.Add(offset), p.WindowEnd.Add(offset)).Scan(&r.FinalizedInWindow)
 	r.FinalizedPerSecond = float64(r.FinalizedInWindow) / windowSeconds
 	series := report.Series["unreconciled_finalized_backlog"]
 	r.BacklogTrend = Trend(seriesBetween(series, p.WindowStart, p.WindowEnd))
@@ -674,7 +679,8 @@ func reconcileReport(ctx context.Context, stack *Stack, report *Gate2Report, sta
 	if r.FinalizedPerSecond > 0 {
 		r.ProjectedDrainSec = float64(r.BacklogAtWindowEnd) / r.FinalizedPerSecond
 	}
-	if rows, err := stack.MainDB.QueryContext(ctx, `SELECT state, count(*) FROM node_submissions GROUP BY state`); err == nil {
+	if rows, err := stack.ExecDB.QueryContext(ctx, `SELECT CASE state WHEN 1 THEN 'pending' WHEN 2 THEN 'provisional' WHEN 3 THEN 'renewal_stopped' ELSE 'tombstone' END, count(*) FROM node_tx_binding GROUP BY 1
+ UNION ALL SELECT CASE state WHEN 10 THEN 'included' WHEN 11 THEN 'reverted' ELSE 'dropped' END, count(*) FROM node_tx_status GROUP BY 1`); err == nil {
 		for rows.Next() {
 			var state string
 			var n int64
@@ -686,7 +692,7 @@ func reconcileReport(ctx context.Context, stack *Stack, report *Gate2Report, sta
 	}
 	reconciled := map[string]time.Time{}
 	queried := time.Now()
-	if rows, err := stack.MainDB.QueryContext(ctx, `SELECT tx_hash, reconciled_at FROM node_submissions WHERE reconciled_at IS NOT NULL`); err == nil {
+	if rows, err := stack.ExecDB.QueryContext(ctx, `SELECT '0x' || encode(tx_hash, 'hex'), final_at FROM node_tx_status`); err == nil {
 		for rows.Next() {
 			var hash string
 			var at time.Time

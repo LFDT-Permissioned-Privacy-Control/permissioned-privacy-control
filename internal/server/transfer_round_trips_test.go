@@ -140,11 +140,13 @@ func TestTransferRoundTripsPerRequest(t *testing.T) {
 
 // Round-trip budgets per steady-state transfer (TestTransferRoundTripsPerRequest).
 // Before the request-path DB budget change: legacy 12, V2 15. Legacy no longer
-// re-sends the sender's system link once it is known; V2's remaining per-request
-// writes (intent INSERT, accepted UPDATE) move to the execution-tracking design.
+// re-sends the sender's system link once it is known. V2's per-request intent
+// INSERT and accepted UPDATE left the main database (RD-1410): the binding is
+// one group-committed write in the execution-tracking database, and the
+// acknowledgement is not written on the request path.
 const (
 	legacyTransferRoundTrips = 11
-	v2TransferRoundTrips     = 15
+	v2TransferRoundTrips     = 13
 )
 
 // The system link is still written for a new sender, and a link deleted by

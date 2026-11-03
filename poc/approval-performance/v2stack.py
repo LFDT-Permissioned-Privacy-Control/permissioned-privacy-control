@@ -102,7 +102,8 @@ class V2Stack(g.GasstormStack):
             pg = docker("run", "-d", "--rm", "--name", prefix + "-pg", "--label", "ops-approvals-demo=true",
                         "-e", "POSTGRES_PASSWORD=postgres", "-e", "POSTGRES_DB=ops_approvals_demo",
                         "-e", "AUDIT_APP_PASSWORD=audit-demo-only", "-p", "127.0.0.1::5432",
-                        "-v", str(h.ROOT / "scripts/init-audit-db.sh") + ":/docker-entrypoint-initdb.d/10-audit.sh:ro", "postgres:15-alpine")
+                        "-v", str(h.ROOT / "scripts/init-audit-db.sh") + ":/docker-entrypoint-initdb.d/10-audit.sh:ro",
+                        "-v", str(h.ROOT / "scripts/init-exec-db.sh") + ":/docker-entrypoint-initdb.d/20-exec.sh:ro", "postgres:15-alpine")
             self.containers.append(pg)
             self.pg = pg
             pgport = docker("port", pg, "5432/tcp").rsplit(":", 1)[1]
@@ -192,8 +193,12 @@ class V2Stack(g.GasstormStack):
         request(prefix + "/revisions/" + candidate["id"] + "/activate", "POST", {"coactivate": []}, reviewer)
         self.policy_digest = candidate.get("digest")
 
-    def psql(self, sql):
-        return subprocess.check_output(["docker", "exec", self.pg, "psql", "-qtA", "-U", "postgres", "-d", "ops_approvals_demo", "-c", sql], text=True).strip()
+    def psql(self, sql, database="ops_approvals_demo"):
+        return subprocess.check_output(["docker", "exec", self.pg, "psql", "-qtA", "-U", "postgres", "-d", database, "-c", sql], text=True).strip()
+
+    def psql_exec(self, sql):
+        """Query the execution-tracking database (derived <name>_exec, RD-1410)."""
+        return self.psql(sql, "ops_approvals_demo_exec")
 
     def close(self):
         # Every step runs even if an earlier one fails: containers must never outlive a run.
