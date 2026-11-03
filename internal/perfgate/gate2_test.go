@@ -3,6 +3,7 @@ package perfgate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -191,41 +192,110 @@ func TestGate2(t *testing.T) {
 	if warmup < lag+30*time.Second && os.Getenv("OPS_GATE2_SMOKE") != "1" {
 		t.Fatalf("warm-up %s is shorter than finality lag + 30 s (plan §9.5)", warmup)
 	}
-	config := Gate2Config{
-		Name:        envOr("OPS_GATE2_NAME", filepath.Base(output)),
-		Binary:      os.Getenv("OPS_GATE2_SERVER"),
-		Mode:        envOr("OPS_GATE2_MODE", "legacy"),
-		Loop:        envOr("OPS_GATE2_LOOP", "open"),
-		Rate:        envInt(t, "OPS_GATE2_RATE", 5250),
-		Concurrency: envInt(t, "OPS_GATE2_CONCURRENCY", 32),
-		Warmup:      warmup,
-		Window:      envDuration(t, "OPS_GATE2_WINDOW", 60*time.Second),
-		Drain:       envDuration(t, "OPS_GATE2_DRAIN", 60*time.Second),
-		Latency:     envDuration(t, "OPS_GATE2_LATENCY", time.Millisecond),
-		FinalityLag: lag,
-		Users:       envInt(t, "OPS_GATE2_USERS", 100),
-		PerUser:     envInt(t, "OPS_GATE2_WALLETS_PER_USER", 10),
-		SeparateDB:  os.Getenv("OPS_GATE2_SEPARATE_TRACKING_DB") == "1",
-		MockProcs:   envInt(t, "OPS_GATE2_MOCK_GOMAXPROCS", 3),
-		ExtraEnv:    extraEnv(os.Getenv("OPS_GATE2_EXTRA_ENV")),
-		Q6:          q6FromEnv(t),
-		Dir:         output,
-		MinFreeGiB:  15,
-		Log:         t.Logf,
+	loop := envOr("OPS_GATE2_LOOP", "open")
+	// R12.1: the closed loop is a sweep (default 32, 128, 256 in flight), one
+	// independent case with a fresh stack per concurrency.
+	concurrencies := []int{0} // the open loop has no fixed concurrency
+	if loop == "closed" {
+		var err error
+		if concurrencies, err = parseConcurrencies(envOr("OPS_GATE2_CONCURRENCY", "32,128,256")); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	for _, concurrency := range concurrencies {
+		if ctx.Err() != nil {
+			t.Fatal("interrupted: remaining sweep cases skipped")
+		}
+		dir, name := output, envOr("OPS_GATE2_NAME", filepath.Base(output))
+		if len(concurrencies) > 1 {
+			dir, name = filepath.Join(output, "c"+strconv.Itoa(concurrency)), name+"-c"+strconv.Itoa(concurrency)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		config := Gate2Config{
+			Name:        name,
+			Binary:      os.Getenv("OPS_GATE2_SERVER"),
+			Mode:        envOr("OPS_GATE2_MODE", "legacy"),
+			Loop:        loop,
+			Rate:        envInt(t, "OPS_GATE2_RATE", 5250),
+			Concurrency: concurrency,
+			Connections: envInt(t, "OPS_GATE2_CONNECTIONS", 0),
+			Warmup:      warmup,
+			Window:      envDuration(t, "OPS_GATE2_WINDOW", 60*time.Second),
+			Drain:       envDuration(t, "OPS_GATE2_DRAIN", 60*time.Second),
+			Latency:     envDuration(t, "OPS_GATE2_LATENCY", time.Millisecond),
+			FinalityLag: lag,
+			Users:       envInt(t, "OPS_GATE2_USERS", 100),
+			PerUser:     envInt(t, "OPS_GATE2_WALLETS_PER_USER", 10),
+			SeparateDB:  os.Getenv("OPS_GATE2_SEPARATE_TRACKING_DB") == "1",
+			MockProcs:   envInt(t, "OPS_GATE2_MOCK_GOMAXPROCS", 3),
+			ExtraEnv:    extraEnv(os.Getenv("OPS_GATE2_EXTRA_ENV")),
+			Q6:          q6FromEnv(t),
+			Dir:         dir,
+			MinFreeGiB:  15,
+			Log:         t.Logf,
+		}
+		if len(concurrencies) == 1 {
+			runGate2Case(ctx, t, config)
+			continue
+		}
+		// One subtest per case, so a failed case does not skip the rest.
+		t.Run(name, func(t *testing.T) {
+			config.Log = t.Logf
+			runGate2Case(ctx, t, config)
+		})
+	}
+}
+
+func runGate2Case(ctx context.Context, t *testing.T, config Gate2Config) {
 	report, err := RunGate2(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteReport(filepath.Join(output, "gate2-report.json"), report); err != nil {
+	if err := WriteReport(filepath.Join(config.Dir, "gate2-report.json"), report); err != nil {
 		t.Fatal(err)
 	}
 	w := report.Window
 	if report.Aborted != "" {
 		t.Errorf("run aborted: %s", report.Aborted)
 	}
-	t.Logf("%s %s/%s: achieved %.1f/s in the %.0f s window (%d completed), rejected in window %d, latency p50/p99/max %d/%d/%d ms",
-		config.Name, config.Mode, config.Loop, w.AchievedPerSecond, w.WindowSeconds, w.CompletedInWindow, w.Phase["window"].Rejected, w.LatencyMS.P50, w.LatencyMS.P99, w.LatencyMS.Max)
+	if !w.Valid {
+		t.Errorf("%s: %s", config.Name, w.InvalidReason)
+	}
+	for _, note := range report.Errors {
+		t.Logf("%s: %s", config.Name, note)
+	}
+	t.Logf("%s %s/%s: achieved %.1f/s in the %.0f s window (%d completed), rejected in window %d, runner transport errors %d, connections opened %d (pool %d), latency p50/p99/max %d/%d/%d ms",
+		config.Name, config.Mode, config.Loop, w.AchievedPerSecond, w.WindowSeconds, w.CompletedInWindow, w.Phase["window"].Rejected, w.RunnerTransportErrors, w.ConnectionsOpened, report.Config.Connections, w.LatencyMS.P50, w.LatencyMS.P99, w.LatencyMS.Max)
+}
+
+// parseConcurrencies reads a comma-separated list of positive in-flight counts.
+func parseConcurrencies(spec string) ([]int, error) {
+	var out []int
+	for _, field := range strings.Split(spec, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(field))
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("OPS_GATE2_CONCURRENCY: %q is not a positive integer list", spec)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+func TestParseConcurrenciesAndOpenLoopPool(t *testing.T) {
+	got, err := parseConcurrencies("32, 128,256")
+	if err != nil || len(got) != 3 || got[0] != 32 || got[1] != 128 || got[2] != 256 {
+		t.Fatalf("sweep %v %v", got, err)
+	}
+	if _, err := parseConcurrencies("32,0"); err == nil {
+		t.Fatal("a zero concurrency must be refused")
+	}
+	for rate, want := range map[int]int{100: 64, 5250: 1313, 50_000: 4096} {
+		if got := OpenLoopConnections(rate); got != want {
+			t.Fatalf("pool for %d/s = %d, want %d", rate, got, want)
+		}
+	}
 }

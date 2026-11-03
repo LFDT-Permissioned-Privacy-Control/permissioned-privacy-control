@@ -26,7 +26,10 @@
 //	OPS_GATE2_MODE          legacy | reth (Reth policy mode, private ops_* API)
 //	OPS_GATE2_LOOP          open (fixed offered rate) | closed (fixed concurrency)
 //	OPS_GATE2_RATE          offered requests per second (default 5250)
-//	OPS_GATE2_CONCURRENCY   closed-loop workers (default 32)
+//	OPS_GATE2_CONCURRENCY   closed-loop sweep, comma-separated (default 32,128,256;
+//	                        one independent case per value, output subdir c<N>)
+//	OPS_GATE2_CONNECTIONS   open-loop keep-alive pool = bound on requests in flight
+//	                        (default rate × 250 ms, 64..4096; closed loop: the concurrency)
 //	OPS_GATE2_LATENCY       added mock-node latency (default 1ms)
 //	OPS_GATE2_FINALITY_LAG  mock finality lag (default 1s)
 //	OPS_GATE2_WARMUP        default finality lag + 30s (never shorter outside smoke runs)
@@ -39,7 +42,12 @@
 // Achieved throughput counts only successful responses completed inside the
 // steady window; warm-up and drain are excluded, and every non-success
 // (HTTP error, JSON-RPC error, transport error, unfinished request) is a
-// rejection. The report also carries per-stage latency split at the mock's
+// rejection. The load client is a keep-alive pool with no per-request
+// timeout (requests end at the run deadline, window end + drain), so it
+// never churns connections. Runner transport errors (no HTTP response at all)
+// are also reported on their own: a result is valid only with none of them,
+// because they measure the runner and the host rather than OPS (plan rev 12,
+// R12.1). The report also carries per-stage latency split at the mock's
 // arrival/reply stamps, per-database commit and write-transaction rates, WAL
 // bytes and syncs, database and process CPU, audit buffer length, seal rate
 // and drain, reconciliation backlog and lag (Reth mode), and the host's

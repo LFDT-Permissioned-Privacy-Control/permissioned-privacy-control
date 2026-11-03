@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -22,18 +24,59 @@ type Target struct {
 	Expected []string
 }
 
-// NewLoadClient keeps connections alive and bounds them, so a server stall
-// shows up as latency from the scheduled time instead of port exhaustion.
+// NewLoadClient is the runner's keep-alive pool: at most maxConns
+// connections, all kept idle between requests, so the runner never opens and
+// discards a connection per request. It has no per-request timeout: a
+// mid-flight timeout closes its connection, and redialing under load is what
+// exhausted the host's ephemeral ports in P0 (R12.1). The run context bounds
+// requests instead. Idle connections are dropped after 30 s, before the OPS
+// server's own 60 s idle timeout, so a reused connection is never one the
+// server is closing.
 func NewLoadClient(maxConns int) *http.Client {
 	transport := &http.Transport{
 		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		MaxIdleConns:        maxConns,
 		MaxIdleConnsPerHost: maxConns,
 		MaxConnsPerHost:     maxConns,
-		IdleConnTimeout:     90 * time.Second,
+		IdleConnTimeout:     30 * time.Second,
 		DisableCompression:  true,
 	}
-	return &http.Client{Transport: transport, Timeout: 60 * time.Second}
+	return &http.Client{Transport: transport}
+}
+
+// ServerTimeoutAfter is a safe lower bound on the time after which a
+// connection the OPS server drops is its own timeout rather than a runner or
+// host fault: its WriteTimeout (30 s, cmd/server/main.go) drops the
+// connection; its ReadTimeout (10 s) only cancels the handler's context.
+const ServerTimeoutAfter = 9 * time.Second
+
+// classifyNoResponse classifies a request that got no HTTP response. A reset
+// or EOF on a request the server held for at least ServerTimeoutAfter is
+// "server_timeout": a rejection by OPS. Every other kind is a runner-side
+// failure (the request never produced a server decision).
+func classifyNoResponse(err error, sent time.Time) string {
+	kind := transportKind(err)
+	if (kind == "eof" || kind == "reset") && !sent.IsZero() && time.Since(sent) >= ServerTimeoutAfter {
+		return "server_timeout"
+	}
+	return kind
+}
+
+func transportKind(err error) string {
+	var netErr net.Error
+	var opErr *net.OpError
+	switch {
+	case errors.As(err, &opErr) && opErr.Op == "dial":
+		return "dial"
+	case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF):
+		return "eof"
+	case errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE):
+		return "reset"
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return "timeout"
+	default:
+		return "other"
+	}
 }
 
 func send(ctx context.Context, client *http.Client, t Target, i int, r *RequestRecord) {
@@ -48,19 +91,30 @@ func send(ctx context.Context, client *http.Client, t Target, i int, r *RequestR
 	}
 	// Sent is when a connection was obtained, so waiting for a pooled
 	// connection shows up as send lag rather than server time.
-	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { r.Sent = time.Now() }}))
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		r.Sent = time.Now()
+		r.NewConn = !info.Reused
+	}}))
 	resp, err := client.Do(req)
 	if err != nil {
-		// A run abort cancels in-flight requests: those stay unfinished.
-		r.TransportError = ctx.Err() == nil
+		// The run deadline cancels in-flight requests: those stay unfinished.
+		if ctx.Err() == nil {
+			r.TransportError, r.TransportErrorKind = true, classifyNoResponse(err, r.Sent)
+		}
 		return
 	}
+	// Read the whole body so the connection goes back to the pool.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	r.Done = time.Now()
 	r.HTTPStatus = resp.StatusCode
 	if err != nil {
-		r.TransportError = true
+		if ctx.Err() == nil {
+			r.TransportError, r.TransportErrorKind = true, classifyNoResponse(err, r.Sent)
+		} else {
+			r.Done = time.Time{}
+		}
 		return
 	}
 	var reply struct {
@@ -83,33 +137,56 @@ func send(ctx context.Context, client *http.Client, t Target, i int, r *RequestR
 }
 
 // OpenLoop offers requests 0..n-1 at rate per second from start, regardless of
-// completions (a catch-up pacer: a late dispatcher fires immediately, so the
-// offered rate does not drift). It returns once every request has ended or ctx
-// is done; unfinished requests keep a zero Done.
-func OpenLoop(ctx context.Context, client *http.Client, t Target, rate, n int, start time.Time) []RequestRecord {
+// completions, through a fixed pool of workers (the client's connection
+// count). Request i is due at start + i/rate; the next free worker sends it at
+// once if it is overdue (a catch-up pacer, so the offered rate does not drift).
+// When every worker is busy the due requests wait in the runner, and that wait
+// is part of their latency, which is measured from the schedule. So the
+// server never sees more than workers requests at once and the runner never
+// opens more than workers connections, while an overloaded server still shows
+// up as latency, as requests unfinished at the run deadline, and as requests
+// never sent: admission stops at the end of the offered schedule
+// (start + n/rate, the end of the steady window), so a backlog is not sent
+// into the drain. Every one of the n requests gets a record with its scheduled
+// time, so records[i] always belongs to request i and an unsent request is a
+// rejection, never a missing row.
+func OpenLoop(ctx context.Context, client *http.Client, t Target, rate, n int, start time.Time, workers int) []RequestRecord {
 	records := make([]RequestRecord, n)
 	interval := time.Second / time.Duration(rate)
+	for i := range records {
+		records[i].Scheduled = start.Add(time.Duration(i) * interval)
+	}
+	scheduleEnd := start.Add(time.Duration(n) * interval)
+	if workers <= 0 {
+		workers = 1
+	}
+	var next atomic.Int64
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		if ctx.Err() != nil {
-			wg.Wait()
-			return records[:i]
-		}
-		scheduled := start.Add(time.Duration(i) * interval)
-		if d := time.Until(scheduled); d > 0 {
-			select {
-			case <-ctx.Done():
-				wg.Wait()
-				return records[:i] // never-dispatched requests are not records
-			case <-time.After(d):
-			}
-		}
-		records[i].Scheduled = scheduled
+	for w := 0; w < workers; w++ {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
-			send(ctx, client, t, i, &records[i])
-		}(i)
+			timer := time.NewTimer(time.Hour)
+			timer.Stop()
+			defer timer.Stop()
+			for ctx.Err() == nil {
+				i := int(next.Add(1) - 1)
+				if i >= n {
+					return
+				}
+				if d := time.Until(records[i].Scheduled); d > 0 {
+					timer.Reset(d)
+					select {
+					case <-ctx.Done():
+						return
+					case <-timer.C:
+					}
+				} else if time.Now().After(scheduleEnd) {
+					return // the offered schedule is over: the backlog stays unsent
+				}
+				send(ctx, client, t, i, &records[i])
+			}
+		}()
 	}
 	wg.Wait()
 	return records

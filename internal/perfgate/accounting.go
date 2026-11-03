@@ -1,6 +1,7 @@
 package perfgate
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strconv"
@@ -18,6 +19,11 @@ type RequestRecord struct {
 	HTTPStatus     int
 	RPCError       int
 	TransportError bool
+	// TransportErrorKind classifies a request that got no HTTP response
+	// (dial, eof, reset, timeout, other): a runner-side failure.
+	TransportErrorKind string
+	// NewConn is set when the request did not reuse a pooled connection.
+	NewConn bool
 	// OK means HTTP 200, no JSON-RPC error and the expected transaction hash.
 	OK bool
 }
@@ -69,15 +75,69 @@ type WindowReport struct {
 	Unfinished                int                   `json:"unfinished"`
 	LatencyMS                 Millis                `json:"latency_ms"`
 	SendLagMS                 Millis                `json:"send_lag_ms"`
+	// RunnerTransportErrors counts requests, in every phase, that got no HTTP
+	// response at all (refused or failed dials, resets, EOFs). They are
+	// rejections too, but they measure the runner and the host, not OPS: a
+	// result is valid only when there are none (R12.1).
+	RunnerTransportErrors int            `json:"runner_transport_errors"`
+	TransportErrorKinds   map[string]int `json:"transport_error_kinds"`
+	// NotSent counts requests the runner never sent: the offered schedule
+	// ended (or the run was aborted) while every worker was busy. They are
+	// rejections; a non-zero count means the pool was saturated.
+	NotSent int `json:"not_sent"`
+	// ConnectionsOpened counts requests that had to open a connection instead
+	// of reusing a pooled one; with a healthy keep-alive pool it stays at or
+	// below the pool size.
+	ConnectionsOpened int `json:"connections_opened"`
+	// PeakInFlight is the most requests the runner had outstanding at once
+	// (from Sent/Done), and ServiceMS the server-side time Sent→Done of the
+	// successful window requests, without the runner's queueing.
+	PeakInFlight  int    `json:"peak_in_flight"`
+	ServiceMS     Millis `json:"service_ms"`
+	Valid         bool   `json:"valid"`
+	InvalidReason string `json:"invalid_reason,omitempty"`
 }
 
 // Account computes the window report. Latency and send lag cover successful
 // requests scheduled inside the window, including those that finished during
 // the drain, so a slow tail is not hidden by the window edge.
 func Account(records []RequestRecord, p Phases) WindowReport {
-	report := WindowReport{WindowSeconds: p.WindowEnd.Sub(p.WindowStart).Seconds(), Phase: map[string]PhaseCount{"warmup": {}, "window": {}, "drain": {}}, Failures: map[string]int{}}
-	var latency, lag []time.Duration
+	report := WindowReport{WindowSeconds: p.WindowEnd.Sub(p.WindowStart).Seconds(), Phase: map[string]PhaseCount{"warmup": {}, "window": {}, "drain": {}}, Failures: map[string]int{}, TransportErrorKinds: map[string]int{}}
+	var latency, lag, service []time.Duration
+	type edge struct {
+		at    time.Time
+		delta int
+	}
+	var edges []edge
+	var lastEvent time.Time
 	for _, r := range records {
+		for _, at := range []time.Time{r.Sent, r.Done} {
+			if at.After(lastEvent) {
+				lastEvent = at
+			}
+		}
+	}
+	for _, r := range records {
+		if r.NewConn {
+			report.ConnectionsOpened++
+		}
+		if !r.Sent.IsZero() {
+			end := r.Done
+			if end.IsZero() {
+				end = lastEvent // never answered: in flight until the last event of the run
+			}
+			edges = append(edges, edge{r.Sent, 1}, edge{end.Add(time.Nanosecond), -1})
+		}
+		if r.TransportError && r.TransportErrorKind == "server_timeout" {
+			report.TransportErrorKinds[r.TransportErrorKind]++
+		} else if r.TransportError {
+			report.RunnerTransportErrors++
+			kind := r.TransportErrorKind
+			if kind == "" {
+				kind = "other"
+			}
+			report.TransportErrorKinds[kind]++
+		}
 		inWindow := p.of(r.Scheduled) == "window"
 		if inWindow {
 			report.ScheduledInWindow++
@@ -96,15 +156,20 @@ func Account(records []RequestRecord, p Phases) WindowReport {
 			if inWindow {
 				latency = append(latency, r.Done.Sub(r.Scheduled))
 				lag = append(lag, r.Sent.Sub(r.Scheduled))
+				service = append(service, r.Done.Sub(r.Sent))
 			}
 		} else {
 			count.Rejected++
 			if inWindow {
 				report.RejectedScheduledInWindow++
 			}
-			report.Failures[failureClass(r)]++
-			if r.Done.IsZero() && !r.TransportError {
+			class := failureClass(r)
+			report.Failures[class]++
+			switch class {
+			case "unfinished":
 				report.Unfinished++
+			case "not_sent":
+				report.NotSent++
 			}
 		}
 		report.Phase[phase] = count
@@ -114,13 +179,33 @@ func Account(records []RequestRecord, p Phases) WindowReport {
 	}
 	report.LatencyMS = Percentiles(latency)
 	report.SendLagMS = Percentiles(lag)
+	report.ServiceMS = Percentiles(service)
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].at.Equal(edges[j].at) {
+			return edges[i].delta < edges[j].delta // an end before a start at the same instant
+		}
+		return edges[i].at.Before(edges[j].at)
+	})
+	inFlight := 0
+	for _, e := range edges {
+		inFlight += e.delta
+		report.PeakInFlight = max(report.PeakInFlight, inFlight)
+	}
+	report.Valid = report.RunnerTransportErrors == 0
+	if !report.Valid {
+		report.InvalidReason = fmt.Sprintf("%d runner transport errors %v: the run measured the runner or the host, not OPS", report.RunnerTransportErrors, report.TransportErrorKinds)
+	}
 	return report
 }
 
 func failureClass(r RequestRecord) string {
 	switch {
+	case r.TransportError && r.TransportErrorKind == "server_timeout":
+		return "server_timeout"
 	case r.TransportError:
 		return "transport"
+	case r.Sent.IsZero() && r.Done.IsZero():
+		return "not_sent"
 	case r.Done.IsZero():
 		return "unfinished"
 	case r.HTTPStatus != 200:

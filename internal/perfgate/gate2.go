@@ -28,6 +28,7 @@ type Gate2Config struct {
 	Loop        string            `json:"loop"` // open | closed
 	Rate        int               `json:"rate"`
 	Concurrency int               `json:"concurrency"`
+	Connections int               `json:"connections"` // runner keep-alive pool = bound on requests in flight (see OpenLoopConnections)
 	Warmup      time.Duration     `json:"warmup"`
 	Window      time.Duration     `json:"window"`
 	Drain       time.Duration     `json:"drain"`
@@ -75,6 +76,11 @@ type Gate2Report struct {
 	Errors         []string                    `json:"errors,omitempty"`
 	Aborted        string                      `json:"aborted,omitempty"`
 	Q6             *Q6Report                   `json:"q6,omitempty"`
+
+	// NodeConnectionsInWindow is the TCP connections OPS opened to the mock
+	// node per listener during the steady window: near zero with pooled
+	// keep-alive node clients, ~one per call when they churn.
+	NodeConnectionsInWindow map[string]int64 `json:"node_connections_opened_in_window"`
 }
 
 // AuditReport is the async audit pipeline under the real event mix. Every
@@ -111,6 +117,14 @@ type ReconcileReport struct {
 	TailDrainedWithin30s bool             `json:"tail_drained_within_30s"`
 }
 
+// OpenLoopConnections is the default open-loop pool: the offered rate times a
+// 250 ms latency budget, between 64 and 4096. A server slower than that at the
+// offered rate makes requests wait in the runner (measured as latency from the
+// schedule) instead of opening more connections.
+func OpenLoopConnections(rate int) int {
+	return min(4096, max(64, (rate+3)/4))
+}
+
 func freeGiB(path string) float64 {
 	var st syscall.Statfs_t
 	if syscall.Statfs(path, &st) != nil {
@@ -145,6 +159,11 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 	if c.MockProcs <= 0 {
 		c.MockProcs = 3
 	}
+	if c.Loop == "closed" {
+		c.Connections = c.Concurrency
+	} else if c.Connections <= 0 {
+		c.Connections = OpenLoopConnections(c.Rate)
+	}
 	report := &Gate2Report{Config: c, Clusters: map[string]ClusterDelta{}, PerTx: map[string]float64{}, Statements: map[string][]Statement{}, Series: map[string][]Sample{}, WaitEvents: map[string]int{}}
 	report.Machine = machineInfo(c.Dir)
 	node := MockNodeConfig{ChainID: 31337, DeploymentID: "perfgate-" + c.Name, PrivateToken: "perfgate-private-" + randomHex(16), BlockTime: time.Second, FinalityLag: c.FinalityLag, Latency: c.Latency}
@@ -171,7 +190,9 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 		}
 		logf("baseline execution policy activated (author/reviewer)")
 	}
-	if runEnd := time.Now().Add(2*time.Second + c.Warmup + c.Window + c.Drain); runEnd.After(seededAt.Add(29 * time.Minute)) {
+	// The load runs to WindowEnd + Drain, then the audit drain is observed for
+	// up to another Drain.
+	if runEnd := time.Now().Add(2*time.Second + c.Warmup + c.Window + 2*c.Drain); runEnd.After(seededAt.Add(29 * time.Minute)) {
 		return nil, fmt.Errorf("run would outlive the 30 min access tokens issued at seed time")
 	}
 	seconds := int((c.Warmup + c.Window) / time.Second)
@@ -245,7 +266,9 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 		main, exec      ClusterSnapshot
 		ops, mock, self float64
 		metrics         string
+		node            MockStats
 		err, cpuErr     error
+		nodeErr         error
 	}
 	takeSnap := func() snap {
 		var s snap
@@ -259,6 +282,7 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 		s.cpuErr = errors.Join(opsErr, mockErr)
 		s.self = SelfCPUSeconds()
 		s.metrics, _ = stack.Metrics()
+		s.node, s.nodeErr = stack.Node.Stats()
 		return s
 	}
 	var before, after snap
@@ -296,17 +320,24 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 			report.Q6, q6Err = q6run.Run(runCtx, phases, stack.Node.Stamps)
 		}()
 	}
-	client := NewLoadClient(4096)
+	// Requests are bounded by the run deadline, not by a per-request client
+	// timeout (R12.1): whatever is still in flight at the end of the drain
+	// bound is unfinished and counts as a rejection, as before.
+	loadCtx, stopLoad := context.WithDeadline(runCtx, phases.WindowEnd.Add(c.Drain))
+	defer stopLoad()
+	client := NewLoadClient(c.Connections)
 	var records []RequestRecord
 	if c.Loop == "closed" {
 		time.Sleep(time.Until(start))
-		records = ClosedLoop(runCtx, client, target, c.Concurrency, phases.WindowEnd)
+		records = ClosedLoop(loadCtx, client, target, c.Concurrency, phases.WindowEnd)
 		if len(records) == len(target.Bodies) {
 			report.Errors = append(report.Errors, "closed loop ran out of pre-signed transactions before the window ended; the rate is understated")
 		}
 	} else {
-		records = OpenLoop(runCtx, client, target, c.Rate, total, start)
+		records = OpenLoop(loadCtx, client, target, c.Rate, total, start, c.Connections)
 	}
+	stopLoad()
+	client.CloseIdleConnections()
 	snapWG.Wait()
 	if q6Done != nil {
 		<-q6Done
@@ -321,6 +352,21 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 	report.Aborted = abortReason
 
 	report.Window = Account(records, phases)
+	if !report.Window.Valid {
+		report.Errors = append(report.Errors, "invalid result: "+report.Window.InvalidReason)
+	}
+	if w := report.Window; c.Loop == "open" && abortReason == "" && (w.NotSent > 0 || w.PeakInFlight >= c.Connections) {
+		report.Errors = append(report.Errors, fmt.Sprintf("runner pool saturated (peak %d of %d in flight, %d not sent): OPS saw at most %d concurrent requests; rerun with a larger OPS_GATE2_CONNECTIONS before reading this as OPS capacity", w.PeakInFlight, c.Connections, w.NotSent, c.Connections))
+	}
+	if before.nodeErr == nil && after.nodeErr == nil {
+		// With Q6 on, "private" also counts the prototype's own node client.
+		report.NodeConnectionsInWindow = map[string]int64{}
+		for listener, n := range after.node.ConnectionsOpened {
+			report.NodeConnectionsInWindow[listener] = n - before.node.ConnectionsOpened[listener]
+		}
+	} else {
+		report.Errors = append(report.Errors, fmt.Sprintf("mock stats at a window edge: %v %v", before.nodeErr, after.nodeErr))
+	}
 	if before.err != nil || after.err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("snapshot: %v %v", before.err, after.err))
 	} else {
@@ -422,7 +468,9 @@ func machineInfo(dir string) map[string]any {
 }
 
 func timeWait() int {
-	out, err := runQuiet("sh", "-c", "netstat -an -p tcp | grep -c TIME_WAIT || true")
+	// Absolute path: the test's PATH need not contain /usr/sbin, and a missing
+	// netstat made this sampler report 0 in every P0 run.
+	out, err := runQuiet("sh", "-c", "/usr/sbin/netstat -an -p tcp | grep -c TIME_WAIT || true")
 	if err != nil {
 		return -1
 	}

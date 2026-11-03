@@ -26,6 +26,14 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+// setupClient serves seeding and control calls: a small keep-alive pool, so
+// setup does not leave TIME_WAIT sockets behind for the timed phases.
+var setupClient = func() *http.Client {
+	c := NewLoadClient(16)
+	c.Timeout = 60 * time.Second
+	return c
+}()
+
 // StackOptions describes one full-server stack: real OPS binary, real
 // Postgres (main, audit, tracking), real Redis, mocked node.
 type StackOptions struct {
@@ -233,7 +241,7 @@ func (s *Stack) startOPS(ctx context.Context) error {
 			return ctx.Err()
 		default:
 		}
-		resp, err := http.Get(ready)
+		resp, err := setupClient.Get(ready)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -300,7 +308,7 @@ func (s *Stack) api(method, path string, body any, token string, admin bool, out
 		} else if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := setupClient.Do(req)
 		if err != nil {
 			return err
 		}
@@ -544,7 +552,7 @@ func (s *Stack) WaitFactsCurrent(ctx context.Context, limit time.Duration) (uint
 
 // Metrics scrapes the OPS Prometheus endpoint.
 func (s *Stack) Metrics() (string, error) {
-	resp, err := http.Get(s.URL + "/metrics")
+	resp, err := setupClient.Get(s.URL + "/metrics")
 	if err != nil {
 		return "", err
 	}

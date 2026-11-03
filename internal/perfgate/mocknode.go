@@ -135,6 +135,9 @@ type MockStats struct {
 	FinalizedTxs   int64                 `json:"finalized_txs"`
 	StalledSenders int                   `json:"stalled_senders"`
 	StalledTxs     int                   `json:"stalled_txs"`
+	// ConnectionsOpened counts TCP connections accepted per listener (public,
+	// private): OPS's node clients churning connections show up here.
+	ConnectionsOpened map[string]int64 `json:"connections_opened,omitempty"`
 }
 
 func NewMockNode(cfg MockNodeConfig) *MockNode {

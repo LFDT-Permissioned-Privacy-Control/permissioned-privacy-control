@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -199,8 +200,11 @@ func ServeMockProcess(configPath, readyPath string) error {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
+	var publicConns, privateConns atomic.Int64
 	control.HandleFunc("/control/stats", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(node.Stats())
+		stats := node.Stats()
+		stats.ConnectionsOpened = map[string]int64{"public": publicConns.Load(), "private": privateConns.Load()}
+		_ = json.NewEncoder(w).Encode(stats)
 	})
 	control.HandleFunc("/control/stamps", func(w http.ResponseWriter, _ *http.Request) {
 		out := bufio.NewWriterSize(w, 1<<20)
@@ -222,13 +226,21 @@ func ServeMockProcess(configPath, readyPath string) error {
 	for _, target := range []struct {
 		url     *string
 		handler http.Handler
-	}{{&ready.Public, node.Public()}, {&ready.Private, node.Private()}, {&ready.Control, control}} {
+		conns   *atomic.Int64
+	}{{&ready.Public, node.Public(), &publicConns}, {&ready.Private, node.Private(), &privateConns}, {&ready.Control, control, nil}} {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			return err
 		}
 		*target.url = "http://" + l.Addr().String()
 		server := &http.Server{Handler: target.handler, ReadHeaderTimeout: 5 * time.Second}
+		if counter := target.conns; counter != nil {
+			server.ConnState = func(_ net.Conn, state http.ConnState) {
+				if state == http.StateNew {
+					counter.Add(1)
+				}
+			}
+		}
 		go func() { _ = server.Serve(l) }()
 	}
 	ctx, cancel := context.WithCancel(context.Background())

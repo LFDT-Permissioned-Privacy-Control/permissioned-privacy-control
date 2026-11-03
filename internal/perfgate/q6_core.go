@@ -391,7 +391,8 @@ func (r *Q6Run) Run(ctx context.Context, phases Phases, stamps func() (map[strin
 		go instances[i].ackLoop(runCtx)
 	}
 	client := NewLoadClient(1024)
-	var delivered sync.Map // hash hex -> workload index, only for committed, node-accepted rows
+	client.Timeout = 60 * time.Second // the prototype's node calls carry no run deadline of their own
+	var delivered sync.Map            // hash hex -> workload index, only for committed, node-accepted rows
 	reconcileCtx, stopReconcile := context.WithCancel(ctx)
 	reconcileDone := make(chan struct{})
 	go func() {
