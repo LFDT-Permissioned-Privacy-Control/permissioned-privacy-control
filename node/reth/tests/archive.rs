@@ -9,6 +9,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+mod common;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Temp(PathBuf);
 impl Temp {
@@ -141,5 +143,73 @@ fn corrupt_content_never_becomes_replay_evidence() {
         store
             .put(b"exact retained snapshot + delta + lease envelopes")
             .is_err()
+    );
+}
+
+#[test]
+fn only_synced_objects_survive_a_crash() {
+    use common::{Action, MemoryStorage, Op};
+    use std::path::Path;
+    let storage = MemoryStorage::new();
+    let root = Path::new("/state");
+    let store = ArtifactStore::open_with(root, storage.clone()).unwrap();
+    let kept = store.put(b"durable evidence").unwrap();
+    assert_eq!(storage.counts().syncs, 2, "file sync + directory sync");
+    storage.set_hook(|op, _| match op {
+        Op::SyncDir => Action::Fail,
+        _ => Action::Proceed,
+    });
+    assert!(store.put(b"entry never made durable").is_err());
+    storage.crash();
+    storage.restart();
+    let reopened = ArtifactStore::open_with(root, storage.clone()).unwrap();
+    assert_eq!(reopened.get(kept).unwrap(), b"durable evidence");
+    let lost = ArtifactStore::open_with(root, MemoryStorage::new())
+        .unwrap()
+        .put(b"entry never made durable")
+        .unwrap();
+    assert!(
+        reopened.get(lost).is_err(),
+        "unsynced directory entry survived"
+    );
+}
+
+#[test]
+fn publication_leaves_no_temp_name_after_a_crash() {
+    use common::MemoryStorage;
+    use std::path::Path;
+    let storage = MemoryStorage::new();
+    let root = Path::new("/state");
+    let store = ArtifactStore::open_with(root, storage.clone()).unwrap();
+    store.put(b"evidence").unwrap();
+    storage.crash();
+    storage.restart();
+    let names = storage.names(&root.join("objects"));
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(!names[0].starts_with('.'), "{names:?}");
+}
+
+#[test]
+fn retry_after_a_failed_directory_sync_makes_the_object_durable() {
+    use common::{Action, MemoryStorage, Op};
+    use std::path::Path;
+    let storage = MemoryStorage::new();
+    let root = Path::new("/state");
+    let store = ArtifactStore::open_with(root, storage.clone()).unwrap();
+    storage.set_hook(|op, _| match op {
+        Op::SyncDir => Action::Fail,
+        _ => Action::Proceed,
+    });
+    assert!(store.put(b"evidence").is_err());
+    storage.clear_hook();
+    let id = store.put(b"evidence").unwrap();
+    storage.crash();
+    storage.restart();
+    assert_eq!(
+        ArtifactStore::open_with(root, storage.clone())
+            .unwrap()
+            .get(id)
+            .unwrap(),
+        b"evidence"
     );
 }

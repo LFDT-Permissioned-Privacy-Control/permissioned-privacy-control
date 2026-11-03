@@ -11,6 +11,7 @@ pub mod runtime;
 pub mod sdk;
 #[cfg(feature = "reth-sdk")]
 pub mod simulation;
+pub mod storage;
 pub mod stream;
 pub mod transaction;
 pub mod wire;

@@ -2,18 +2,22 @@
 //! addresses, not issuer signatures. Replay must also verify the retained signed
 //! checkpoint and identities before constructing an execution handle.
 
-use crate::wire::{Network, decode_strict, identifier};
+use crate::{
+    storage::{DiskStorage, Storage},
+    wire::{Network, decode_strict, identifier},
+};
 use alloy_primitives::{B256, hex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
-    fmt,
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    fmt, io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const MAX_OBJECT: usize = 64 << 20;
@@ -64,17 +68,33 @@ pub struct BlockManifest {
 #[derive(Debug)]
 pub struct ArtifactStore {
     root: PathBuf,
+    storage: Arc<dyn Storage>,
 }
 
 impl ArtifactStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
-        private_directory(root.as_ref())?;
-        private_directory(&root.as_ref().join("objects"))?;
-        private_directory(&root.as_ref().join("blocks"))?;
-        private_directory(&root.as_ref().join("pointers"))?;
-        Ok(Self {
-            root: root.as_ref().to_owned(),
-        })
+        Self::open_with(root, Arc::new(DiskStorage))
+    }
+
+    /// Open on an explicit storage implementation (tests count and fault-inject).
+    pub fn open_with(root: impl AsRef<Path>, storage: Arc<dyn Storage>) -> Result<Self, String> {
+        let root = root.as_ref().to_owned();
+        for directory in [
+            root.clone(),
+            root.join("objects"),
+            root.join("blocks"),
+            root.join("pointers"),
+        ] {
+            storage
+                .ensure_private_dir(&directory)
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::PermissionDenied => {
+                        "execution archive requires a private directory".to_owned()
+                    }
+                    _ => io_error(error),
+                })?;
+        }
+        Ok(Self { root, storage })
     }
 
     pub fn put(&self, bytes: &[u8]) -> Result<ArtifactId, String> {
@@ -82,12 +102,13 @@ impl ArtifactStore {
             return Err("invalid execution artifact size".into());
         }
         let id = ArtifactId(B256::from_slice(&Sha256::digest(bytes)));
-        publish_immutable(&self.root.join("objects"), &id.to_string(), bytes)?;
+        self.publish_immutable(&self.root.join("objects"), &id.to_string(), bytes)?;
         Ok(id)
     }
 
     pub fn get(&self, id: ArtifactId) -> Result<Vec<u8>, String> {
-        let bytes = read_bounded(&self.root.join("objects").join(id.to_string()), MAX_OBJECT)?;
+        let bytes =
+            self.read_bounded(&self.root.join("objects").join(id.to_string()), MAX_OBJECT)?;
         if B256::from_slice(&Sha256::digest(&bytes)) != id.0 {
             return Err("execution artifact digest mismatch".into());
         }
@@ -100,41 +121,42 @@ impl ArtifactStore {
         pointer_key(key)?;
         self.get(id)?;
         let bytes = serde_json::to_vec(&id).map_err(|_| "invalid execution archive pointer")?;
-        replace_atomic(&self.root.join("pointers"), key, &bytes)
+        self.replace_atomic(&self.root.join("pointers"), key, &bytes)
     }
 
     pub fn pointer(&self, key: &str) -> Result<Option<ArtifactId>, String> {
         pointer_key(key)?;
-        let path = self.root.join("pointers").join(key);
-        match fs::symlink_metadata(&path) {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(io_error(err)),
-            Ok(_) => decode_strict(&read_bounded(&path, 256)?).map(Some),
-        }
+        self.storage
+            .read(&self.root.join("pointers").join(key), 256)
+            .map_err(io_error)?
+            .map(|bytes| decode_strict(&bytes))
+            .transpose()
     }
 
     pub fn remove_pointer(&self, key: &str) -> Result<(), String> {
         pointer_key(key)?;
         let directory = self.root.join("pointers");
-        match fs::remove_file(directory.join(key)) {
-            Ok(()) => File::open(directory)
-                .and_then(|file| file.sync_all())
-                .map_err(io_error),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(io_error(error)),
+        if self
+            .storage
+            .remove(&directory.join(key))
+            .map_err(io_error)?
+        {
+            self.storage.sync_dir(&directory).map_err(io_error)?;
         }
+        Ok(())
     }
 
     pub fn pointers(&self, prefix: &str) -> Result<Vec<ArtifactId>, String> {
         pointer_key(prefix)?;
         let mut result = Vec::new();
-        for entry in fs::read_dir(self.root.join("pointers")).map_err(io_error)? {
-            let entry = entry.map_err(io_error)?;
-            let name = entry.file_name();
-            let name = name.to_str().ok_or("invalid execution archive pointer")?;
+        for name in self
+            .storage
+            .list(&self.root.join("pointers"))
+            .map_err(io_error)?
+        {
             if name.starts_with(prefix) {
                 result.push(
-                    self.pointer(name)?
+                    self.pointer(&name)?
                         .ok_or("missing execution archive pointer")?,
                 );
             }
@@ -150,7 +172,7 @@ impl ArtifactStore {
         if bytes.len() > MAX_MANIFEST {
             return Err("execution manifest too large".into());
         }
-        publish_immutable(
+        self.publish_immutable(
             &self.root.join("blocks"),
             &hex::encode(manifest.block.hash),
             &bytes,
@@ -160,7 +182,7 @@ impl ArtifactStore {
     /// Reserved for block self-import and trusted forensic replay. Historical user
     /// RPC calls must choose current permissions instead of this archive.
     pub fn load_for_block(&self, expected: &BlockDescriptor) -> Result<BlockManifest, String> {
-        let bytes = read_bounded(
+        let bytes = self.read_bounded(
             &self.root.join("blocks").join(hex::encode(expected.hash)),
             MAX_MANIFEST,
         )?;
@@ -198,80 +220,77 @@ impl ArtifactStore {
         self.get(manifest.checkpoint)?;
         Ok(())
     }
-}
 
-fn private_directory(path: &Path) -> Result<(), String> {
-    match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => {
-            if let Some(parent) = path.parent() {
-                File::open(parent)
-                    .and_then(|file| file.sync_all())
-                    .map_err(io_error)?;
-            }
+    fn read_bounded(&self, path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+        self.storage
+            .read(path, limit)
+            .map_err(|_| "invalid execution archive file".to_owned())?
+            .ok_or_else(|| "invalid execution archive file".to_owned())
+    }
+
+    /// temp file → `sync_all` → hard link → unlink temp → directory `sync_all`:
+    /// 2 syncs. The temp name is gone before the directory sync, so a crash
+    /// afterwards leaves only the published name.
+    fn publish_immutable(&self, directory: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
+        let destination = directory.join(name);
+        let temporary = directory.join(temporary_name());
+        // Only our own temp is ever removed: a failed create leaves nothing to clean.
+        self.storage
+            .write_synced(&temporary, bytes)
+            .map_err(io_error)?;
+        let linked = self
+            .storage
+            .link(&temporary, &destination)
+            .map_err(io_error);
+        let cleanup = self
+            .storage
+            .remove(&temporary)
+            .map(|_| ())
+            .map_err(io_error);
+        if !linked? && self.read_bounded(&destination, bytes.len())? != bytes {
+            return Err("conflicting immutable execution artifact".into());
         }
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(err) => return Err(io_error(err)),
+        cleanup?;
+        self.storage.sync_dir(directory).map_err(io_error)
     }
-    let meta = fs::symlink_metadata(path).map_err(io_error)?;
-    if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
-        return Err("execution archive requires a private directory".into());
+
+    /// temp file → `sync_all` → rename → directory `sync_all`: 2 syncs.
+    fn replace_atomic(&self, directory: &Path, key: &str, bytes: &[u8]) -> Result<(), String> {
+        let temporary = directory.join(temporary_name());
+        self.storage
+            .write_synced(&temporary, bytes)
+            .map_err(io_error)?;
+        let result = self
+            .storage
+            .rename(&temporary, &directory.join(key))
+            .and_then(|_| self.storage.sync_dir(directory))
+            .map_err(io_error);
+        if result.is_err() {
+            let _ = self.storage.remove(&temporary);
+        }
+        result
     }
-    Ok(())
 }
 
-fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
-    let meta = fs::symlink_metadata(path).map_err(io_error)?;
-    if !meta.is_file() || meta.len() == 0 || meta.len() > limit as u64 {
-        return Err("invalid execution archive file".into());
-    }
-    let mut bytes = Vec::new();
-    File::open(path)
-        .map_err(io_error)?
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
-    if bytes.is_empty() || bytes.len() > limit {
-        return Err("invalid execution archive file".into());
-    }
-    Ok(bytes)
-}
-
-fn publish_immutable(directory: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
-    let destination = directory.join(name);
-    let temporary = directory.join(format!(
-        ".pending-{}-{}",
+/// Unique across process restarts even when the pid repeats (pid 1 in a
+/// container): the wall-clock time of this process's first temp name is part
+/// of every name.
+fn temporary_name() -> String {
+    static STARTED: OnceLock<u128> = OnceLock::new();
+    let started = STARTED.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    });
+    format!(
+        ".pending-{}-{started}-{}",
         std::process::id(),
         NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(io_error)?;
-    let result = (|| {
-        file.write_all(bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(io_error)?;
-        match fs::hard_link(&temporary, &destination) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if read_bounded(&destination, bytes.len())? != bytes {
-                    return Err("conflicting immutable execution artifact".into());
-                }
-            }
-            Err(err) => return Err(io_error(err)),
-        }
-        File::open(directory)
-            .and_then(|file| file.sync_all())
-            .map_err(io_error)
-    })();
-    drop(file);
-    let cleanup = fs::remove_file(&temporary).map_err(io_error);
-    result.and(cleanup)
+    )
 }
 
-fn io_error(_: std::io::Error) -> String {
+fn io_error(_: io::Error) -> String {
     "execution archive unavailable".into()
 }
 
@@ -286,32 +305,4 @@ fn pointer_key(key: &str) -> Result<(), String> {
         return Err("invalid execution archive pointer".into());
     }
     Ok(())
-}
-
-fn replace_atomic(directory: &Path, key: &str, bytes: &[u8]) -> Result<(), String> {
-    let temporary = directory.join(format!(
-        ".pending-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(io_error)?;
-    let result = (|| {
-        file.write_all(bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(io_error)?;
-        fs::rename(&temporary, directory.join(key)).map_err(io_error)?;
-        File::open(directory)
-            .and_then(|file| file.sync_all())
-            .map_err(io_error)
-    })();
-    drop(file);
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
 }
