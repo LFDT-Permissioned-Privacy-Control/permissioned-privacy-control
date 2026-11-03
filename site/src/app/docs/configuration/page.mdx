@@ -114,6 +114,19 @@ The access log is a tamper-evident hash chain (an ISO 27001 / SOC 2 detective co
   { name: "AUDIT_CHECKPOINT_INTERVAL", default: "1m", description: "How often a signed checkpoint is written per chain." },
 ]} />
 
+Audit events — access-log entries, administrative and wallet-link events, and tamper alerts — can also be forwarded to your SIEM:
+
+<EnvTable vars={[
+  { name: "SIEM_WEBHOOK_URL", default: "(none)", description: "Endpoint that receives batches of audit events as JSON arrays. In production it must be HTTPS and must not resolve to a loopback, private or cloud-metadata address. Empty = no SIEM forwarding." },
+  { name: "SIEM_AUTH_HEADER", default: "(none)", description: "Value sent as the Authorization header to the SIEM endpoint. A secret: inject it from your secrets manager, never from the config file." },
+  { name: "SIEM_BATCH_SIZE", default: "100 (500 with AUDIT_BUFFER_DIR)", description: "Events per request, 1 to 10000. Check your SIEM's request size limit: an event is a few hundred bytes. A request the endpoint refuses outright (a 4xx other than 408 or 429) is not retried." },
+  { name: "SIEM_SENDERS", default: "4", description: "Requests in flight at once, 1 to 32. Delivery capacity is about SIEM_SENDERS × SIEM_BATCH_SIZE events per request time (round trip plus the endpoint's processing): 4 × 500 at 50 ms is about 40,000 events a second, well above the proxy's audit rate at full load. Events of different requests can arrive out of order; order them by timestamp." },
+  { name: "SIEM_FLUSH_INTERVAL", default: "10s", description: "A partial batch is sent at the latest after this long." },
+  { name: "SIEM_FALLBACK_LOG_PATH", default: "(none)", description: "Local file that receives, as JSON lines, every event the SIEM could not take: a failed delivery, a queue more than 100 batches behind, or what was still undelivered ten seconds into shutdown. Without it those events are dropped (and counted); in production the proxy warns at startup when a SIEM is configured without it." },
+]} />
+
+**SIEM fallback log.** It holds audit events, which contain user identifiers and IP addresses: restrict access to it as you do to the audit database, and include it in your log inventory and retention policy. It is not rotated by the proxy and grows by roughly the SIEM's missing traffic during an outage, so put it on its own volume (never the `AUDIT_BUFFER_DIR` volume: a full disk there stops the audit buffer) and rotate it. An event whose delivery was cancelled at shutdown can be both in the SIEM and in the file; deduplicate on `entry_hash` when you replay it. Events wait for delivery in memory: up to about 100 batches (about 50,000 events with the buffered defaults) are lost to the SIEM if the process is killed. The audit database still holds every one of them.
+
 **Durable-buffer note:** with `AUDIT_BUFFER_DIR` set, an entry is durable on the local volume the instant the request returns, but only reaches the (replicated, backed-up) database when the sealer next runs. Keep the buffer on a durable/replicated volume and the seal interval short so the un-sealed window stays small.
 
 **Volume ownership:** the proxy runs as a non-root user (uid 1000), and the buffer open is **fail-hard** — if the directory isn't writable the backend will not start (with an error naming the uid). A fresh **Docker named volume** mounted at the image's pre-created buffer path (`/var/lib/pp/auditbuf`) inherits the right ownership automatically, so no `chown` is needed. On **Kubernetes**, set the pod's `securityContext.fsGroup: 1000` so the mounted volume is group-writable. For any other path or a bind mount, ensure the directory is writable by uid 1000 (owned by it, or group-writable via a matching `fsGroup`).

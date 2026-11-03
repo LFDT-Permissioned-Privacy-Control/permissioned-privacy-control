@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestSIEMForwarderSendErrorNamesDestination(t *testing.T) {
 	for _, branch := range auditStrictReasonBranches {
 		t.Run(branch.name, func(t *testing.T) {
 			s := &SIEMForwarder{cfg: SIEMConfig{WebhookURL: branch.url}}
-			assertNamesDestinationNotEnvVar(t, s.send(events), "SIEM webhook URL failed SSRF guard: ")
+			assertNamesDestinationNotEnvVar(t, s.send(context.Background(), events), "SIEM webhook URL failed SSRF guard: ")
 		})
 	}
 }

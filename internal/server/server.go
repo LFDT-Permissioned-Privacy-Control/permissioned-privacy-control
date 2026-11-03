@@ -371,6 +371,23 @@ func buildExplorerBackend(sqlStore *explorer.Store, indexerURL string) (explorer
 	return b, nil
 }
 
+// webhookOrigin is the scheme and host of a webhook URL, for logs: a
+// collector token in the path, query or user info stays out of them.
+func webhookOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "(unparseable)"
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// siemDropsWithoutFallback reports a production SIEM without a fallback log:
+// a batch the endpoint cannot take (an outage, or a queue that fell too far
+// behind) is then counted and dropped instead of being kept on local disk.
+func siemDropsWithoutFallback(cfg *config.Config) bool {
+	return cfg.IsProduction() && cfg.SIEMWebhookURL != "" && cfg.SIEMFallbackLogPath == ""
+}
+
 // warnIfPoolExceedsServer warns at startup when one instance's pool alone can
 // open more connections than the database server accepts (RD-1410). Several
 // instances, the audit pools on the same server and other clients all count
@@ -874,6 +891,7 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 			BatchSize:       cfg.SIEMBatchSize,
 			FlushInterval:   cfg.SIEMFlushInterval,
 			FallbackLogPath: cfg.SIEMFallbackLogPath,
+			Senders:         cfg.SIEMSenders,
 			AllowInsecure:   !cfg.IsProduction(),
 		})
 		if siemErr != nil {
@@ -882,7 +900,10 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 		siemForwarder.SetMetrics(m.SIEMBatchesTotal, m.SIEMEventsDroppedTotal)
 		siemForwarder.Start()
 		s.siemForwarder = siemForwarder
-		slog.Info("SIEM forwarding enabled", "webhook", cfg.SIEMWebhookURL, "batch_size", cfg.SIEMBatchSize, "flush_interval", cfg.SIEMFlushInterval)
+		slog.Info("SIEM forwarding enabled", "webhook", webhookOrigin(cfg.SIEMWebhookURL), "batch_size", cfg.SIEMBatchSize, "senders", cfg.SIEMSenders, "flush_interval", cfg.SIEMFlushInterval)
+		if siemDropsWithoutFallback(cfg) {
+			slog.Warn("SIEM forwarding has no fallback log: events the SIEM endpoint cannot take are dropped; set SIEM_FALLBACK_LOG_PATH to keep them on local disk")
+		}
 	}
 
 	// RD-1112: async access-log auditing. When AUDIT_BUFFER_DIR is set, the hot

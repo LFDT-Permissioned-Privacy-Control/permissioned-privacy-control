@@ -436,7 +436,9 @@ type Config struct {
 	// SIEM webhook configuration
 	SIEMWebhookURL      string        // SIEM webhook endpoint (empty = disabled)
 	SIEMAuthHeader      string        // Authorization header for SIEM webhook
-	SIEMBatchSize       int           // Events per SIEM batch (default: 100)
+	SIEMBatchSize       int           // Events per SIEM batch (default: 100; 500 with AUDIT_BUFFER_DIR)
+	SIEMSenders         int           // Concurrent SIEM deliveries (default: 4, 1..32)
+	siemErr             error         // an invalid SIEM_SENDERS or SIEM_BATCH_SIZE, reported by Validate
 	SIEMFlushInterval   time.Duration // Max time before flushing SIEM batch (default: 10s)
 	SIEMFallbackLogPath string        // If set, failed SIEM batches written here as JSON lines (M4 fix)
 
@@ -668,13 +670,31 @@ func Load() *Config {
 	// SIEM webhook configuration
 	siemWebhookURL := getEnv("SIEM_WEBHOOK_URL", "")
 	siemAuthHeader := getEnv("SIEM_AUTH_HEADER", "")
+	// The async audit buffer hands the SIEM every sealed record at the
+	// sealer's pace (up to about 10,500 records/s at the RD-1410 target), so
+	// buffered mode batches more per request: 4 senders × 500 events per
+	// 50 ms round trip ≈ 40,000 events/s. Synchronous mode keeps 100.
 	siemBatchSize := 100
+	if getEnv("AUDIT_BUFFER_DIR", "") != "" {
+		siemBatchSize = 500
+	}
+	var siemErr error
 	if bsStr := getEnv("SIEM_BATCH_SIZE", ""); bsStr != "" {
-		if n, err := strconv.Atoi(bsStr); err == nil && n > 0 {
+		if n, err := strconv.Atoi(bsStr); err != nil || n < 1 || n > maxSIEMBatchSize {
+			siemErr = fmt.Errorf("SIEM_BATCH_SIZE must be an integer in 1..%d", maxSIEMBatchSize)
+		} else {
 			siemBatchSize = n
 		}
 	}
 	siemFlushInterval := parseDurationEnv("SIEM_FLUSH_INTERVAL", 10*time.Second)
+	siemSenders := 4
+	if v := getEnv("SIEM_SENDERS", ""); v != "" {
+		if n, err := strconv.Atoi(v); err != nil || n < 1 || n > maxSIEMSenders {
+			siemErr = errors.Join(siemErr, fmt.Errorf("SIEM_SENDERS must be an integer in 1..%d", maxSIEMSenders))
+		} else {
+			siemSenders = n
+		}
+	}
 
 	// RD-858: scheduled audit-chain integrity verifier.
 	auditIntegrityInterval := parseDurationEnv("AUDIT_INTEGRITY_VERIFY_INTERVAL", 15*time.Minute)
@@ -885,6 +905,8 @@ func Load() *Config {
 		SIEMWebhookURL:                      siemWebhookURL,
 		SIEMAuthHeader:                      siemAuthHeader,
 		SIEMBatchSize:                       siemBatchSize,
+		SIEMSenders:                         siemSenders,
+		siemErr:                             siemErr,
 		SIEMFlushInterval:                   siemFlushInterval,
 		SIEMFallbackLogPath:                 getEnv("SIEM_FALLBACK_LOG_PATH", ""),
 		AuditIntegrityVerifyInterval:        auditIntegrityInterval,
@@ -1005,6 +1027,9 @@ func (c *Config) AzureADEnabled() bool {
 // regardless of environment — misconfiguring Path B breaks login for everyone.
 func (c *Config) Validate() error {
 	if err := c.NodePolicy.Validate(); err != nil {
+		return err
+	}
+	if err := c.validateSIEM(); err != nil {
 		return err
 	}
 	if err := c.validatePool(); err != nil {
@@ -1216,6 +1241,29 @@ func getEnv(key, defaultValue string) string {
 		}
 	}
 	return defaultValue
+}
+
+// maxSIEMSenders bounds SIEM_SENDERS: more parallel requests than this point
+// at a SIEM endpoint that cannot keep up, not at one that needs more.
+const maxSIEMSenders = 32
+
+// maxSIEMBatchSize bounds SIEM_BATCH_SIZE: the forwarder keeps up to 100
+// batches in memory, and SIEM endpoints limit the size of one request.
+const maxSIEMBatchSize = 10_000
+
+// validateSIEM refuses an invalid SIEM_SENDERS or SIEM_BATCH_SIZE instead of
+// silently using the default. Zero in a literal configuration takes the default.
+func (c *Config) validateSIEM() error {
+	if c.siemErr != nil {
+		return c.siemErr
+	}
+	if c.SIEMSenders < 0 || c.SIEMSenders > maxSIEMSenders {
+		return fmt.Errorf("SIEM_SENDERS must be an integer in 1..%d", maxSIEMSenders)
+	}
+	if c.SIEMBatchSize < 0 || c.SIEMBatchSize > maxSIEMBatchSize {
+		return fmt.Errorf("SIEM_BATCH_SIZE must be an integer in 1..%d", maxSIEMBatchSize)
+	}
+	return nil
 }
 
 // maxDBPoolConns bounds DB_MAX_OPEN_CONNS; beyond it a pooler is the answer.
