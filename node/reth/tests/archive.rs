@@ -1,7 +1,7 @@
 use alloy_primitives::B256;
 use ops_reth_policy::{
-    archive::{ArtifactStore, BlockDescriptor, BlockManifest, BoundIdentity},
-    wire::Network,
+    archive::{ArtifactId, ArtifactStore},
+    manifest::{BlockManifest, ManifestEntry},
 };
 use std::{
     fs,
@@ -27,123 +27,108 @@ impl Drop for Temp {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-fn block() -> BlockDescriptor {
-    BlockDescriptor {
-        network: Network {
-            chain_id: 31337,
-            deployment_id: "test-a".into(),
-        },
+fn manifest(store: &ArtifactStore) -> BlockManifest {
+    let verifier = common::fixture::verifier();
+    let envelope = |hash: B256| {
+        verifier
+            .open_envelope(
+                "identity",
+                &common::fixture::seal("identity", &common::fixture::identity(hash, "ctx")),
+            )
+            .unwrap()
+    };
+    BlockManifest {
         hash: B256::repeat_byte(1),
         parent_hash: B256::repeat_byte(2),
         number: 3,
         timestamp: 1020,
-        transactions: vec![B256::repeat_byte(4), B256::repeat_byte(5)],
-    }
-}
-fn manifest(store: &ArtifactStore) -> BlockManifest {
-    let envelope = store.put(b"exact signed envelope bytes").unwrap();
-    BlockManifest {
-        format_version: 1,
-        block: block(),
         facts_version: 7,
         facts_digest: B256::repeat_byte(6),
-        checkpoint: store
-            .put(b"exact retained snapshot + delta + lease envelopes")
+        records: store
+            .put(b"exact retained snapshot + delta record list")
             .unwrap(),
-        identities: block()
-            .transactions
+        lease: None,
+        entries: [B256::repeat_byte(4), B256::repeat_byte(5)]
             .into_iter()
-            .map(|transaction_hash| BoundIdentity {
-                transaction_hash,
-                envelope,
-                outcome: ops_reth_policy::context::ExecutionOutcome {
-                    success: true,
-                    denied: false,
-                    reason_code: String::new(),
-                    created: Vec::new(),
-                },
+            .map(|hash| ManifestEntry {
+                envelope: envelope(hash),
+                success: true,
+                reason_code: String::new(),
+                created: Vec::new(),
             })
             .collect(),
     }
 }
 
 #[test]
-fn immutable_artifacts_and_manifest_survive_restart() {
+fn manifest_survives_restart_and_republish_is_idempotent() {
     let temp = Temp::new();
     let store = ArtifactStore::open(&temp.0).unwrap();
     let expected = manifest(&store);
-    store.publish(&expected).unwrap();
-    store.publish(&expected).unwrap(); // Idempotent retry after acknowledgement loss.
+    store.publish_manifest(&expected).unwrap();
+    store.publish_manifest(&expected).unwrap(); // Retry after acknowledgement loss.
+    // Another build of the same block with another lease binds the same
+    // transactions: the existing manifest stays.
+    let mut rebuilt = expected.clone();
+    rebuilt.lease = None;
+    rebuilt.facts_version = 8;
+    store.publish_manifest(&rebuilt).unwrap();
     drop(store);
     let reopened = ArtifactStore::open(&temp.0).unwrap();
-    let recovered = reopened.load_for_block(&block()).unwrap();
-    assert_eq!(recovered, expected);
+    assert_eq!(reopened.manifest(3, expected.hash).unwrap(), Some(expected));
     assert_eq!(
-        reopened.get(recovered.identities[0].envelope).unwrap(),
-        b"exact signed envelope bytes"
+        fs::read_dir(temp.0.join("objects")).unwrap().count(),
+        1,
+        "identities live only inside the manifest"
     );
-    assert_eq!(fs::read_dir(temp.0.join("objects")).unwrap().count(), 2);
 }
 
 #[test]
-fn exact_block_and_transaction_order_are_required() {
+fn exact_block_is_required() {
     let temp = Temp::new();
     let store = ArtifactStore::open(&temp.0).unwrap();
-    store.publish(&manifest(&store)).unwrap();
-    for changed in 0..5 {
-        let mut wrong = block();
-        match changed {
-            0 => wrong.hash = B256::repeat_byte(9),
-            1 => wrong.parent_hash = B256::repeat_byte(9),
-            2 => wrong.timestamp += 1,
-            3 => wrong.transactions.reverse(),
-            _ => wrong.network.deployment_id = "test-b".into(),
-        }
-        assert!(
-            store.load_for_block(&wrong).is_err(),
-            "accepted different block field {changed}"
-        );
-    }
+    store.publish_manifest(&manifest(&store)).unwrap();
+    assert_eq!(store.manifest(3, B256::repeat_byte(9)).unwrap(), None);
+    assert_eq!(store.manifest(4, B256::repeat_byte(1)).unwrap(), None);
+    assert!(store.manifest(3, B256::repeat_byte(1)).unwrap().is_some());
 }
 
 #[test]
-fn conflicting_manifest_and_incomplete_evidence_cannot_be_published() {
+fn conflicting_manifest_and_missing_records_cannot_be_published() {
     let temp = Temp::new();
     let store = ArtifactStore::open(&temp.0).unwrap();
     let original = manifest(&store);
     let mut missing = original.clone();
-    missing.checkpoint = store.put(b"missing checkpoint").unwrap();
-    fs::remove_file(temp.0.join("objects").join(missing.checkpoint.to_string())).unwrap();
-    assert!(store.publish(&missing).is_err());
-    assert!(store.load_for_block(&block()).is_err());
-    store.publish(&original).unwrap();
+    missing.records = ArtifactId::of(b"never stored");
+    assert!(store.publish_manifest(&missing).is_err());
+    assert_eq!(store.manifest(3, original.hash).unwrap(), None);
+    store.publish_manifest(&original).unwrap();
     let mut conflicting = original.clone();
-    conflicting.facts_version += 1;
-    assert!(store.publish(&conflicting).is_err());
-    assert_eq!(store.load_for_block(&block()).unwrap(), original);
-    let mut incomplete = original.clone();
-    incomplete.identities.pop();
-    assert!(store.publish(&incomplete).is_err());
+    conflicting.entries.reverse();
+    assert!(store.publish_manifest(&conflicting).is_err());
+    assert_eq!(store.manifest(3, original.hash).unwrap(), Some(original));
 }
 
 #[test]
-fn corrupt_content_never_becomes_replay_evidence() {
+fn corrupt_manifest_never_becomes_replay_evidence() {
     let temp = Temp::new();
     let store = ArtifactStore::open(&temp.0).unwrap();
     let expected = manifest(&store);
-    store.publish(&expected).unwrap();
-    fs::write(
-        temp.0.join("objects").join(expected.checkpoint.to_string()),
-        b"tampered",
-    )
-    .unwrap();
-    assert!(store.get(expected.checkpoint).is_err());
-    assert!(store.load_for_block(&block()).is_err());
-    assert!(
-        store
-            .put(b"exact retained snapshot + delta + lease envelopes")
-            .is_err()
-    );
+    store.publish_manifest(&expected).unwrap();
+    let path = temp
+        .0
+        .join("blocks")
+        .join(format!("{:08x}", 0))
+        .join(format!(
+            "{:016x}-{}",
+            3,
+            alloy_primitives::hex::encode(expected.hash)
+        ));
+    let mut bytes = fs::read(&path).unwrap();
+    let middle = bytes.len() / 3;
+    bytes[middle] ^= 1;
+    fs::write(&path, &bytes).unwrap();
+    assert!(store.manifest(3, expected.hash).is_err());
 }
 
 #[test]
@@ -309,4 +294,40 @@ fn a_state_directory_has_one_node_process() {
     assert!(error.contains("in use"), "{error}");
     drop(first);
     ArtifactStore::open(&temp.0).unwrap();
+}
+
+#[test]
+fn republish_keeps_equivalent_evidence_and_refuses_another_principal() {
+    let temp = Temp::new();
+    let store = ArtifactStore::open(&temp.0).unwrap();
+    let original = manifest(&store);
+    assert_eq!(
+        store.publish_manifest(&original).unwrap(),
+        ops_reth_policy::archive::Published::New
+    );
+    let mut renewed = original.clone();
+    renewed.facts_version += 1;
+    let verifier = common::fixture::verifier();
+    let mut later = common::fixture::identity(B256::repeat_byte(4), "ctx-later");
+    later["issued_at"] = serde_json::json!(1800000005);
+    renewed.entries[0].envelope = verifier
+        .open_envelope("identity", &common::fixture::seal("identity", &later))
+        .unwrap();
+    assert_eq!(
+        store.publish_manifest(&renewed).unwrap(),
+        ops_reth_policy::archive::Published::Existing,
+        "a rebuild differing only in facts and identity lease times"
+    );
+    let mut other = later.clone();
+    other["principal_id"] = serde_json::json!("another_principal");
+    let mut rebound = original.clone();
+    rebound.entries[0].envelope = verifier
+        .open_envelope("identity", &common::fixture::seal("identity", &other))
+        .unwrap();
+    assert!(store.publish_manifest(&rebound).is_err());
+    let mut outcome = original.clone();
+    outcome.entries[1].reason_code = "APPLICATION_REVERTED".into();
+    outcome.entries[1].success = false;
+    assert!(store.publish_manifest(&outcome).is_err());
+    assert_eq!(store.manifest(3, original.hash).unwrap(), Some(original));
 }

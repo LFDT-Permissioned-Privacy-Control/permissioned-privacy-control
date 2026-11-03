@@ -152,11 +152,8 @@ fn reencoded_evidence_with_another_field_order_still_replays() {
         transactions: vec![B256::repeat_byte(1)],
     };
     handle.persist(&archive, &block).unwrap();
-    let manifest = archive.load_for_block(&block).unwrap();
-    assert_eq!(
-        archive.get(manifest.identities[0].envelope).unwrap(),
-        encoded
-    );
+    let manifest = archive.manifest(1, block.hash).unwrap().unwrap();
+    assert_eq!(manifest.entries[0].envelope.to_wire(), encoded);
     assert!(execute(
         &runtime.replay(&block).unwrap(),
         B256::repeat_byte(1)

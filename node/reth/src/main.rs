@@ -145,7 +145,7 @@ fn main() -> eyre::Result<()> {
                         }
                     }
                     let lookup=runtime.clone();
-                    tokio::task::spawn_blocking(move||lookup.canonical_status(hash,block,success,finality)).await.map_err(|_|"status lookup failed")??
+                    tokio::task::spawn_blocking(move||lookup.canonical_status(hash,(included,block),success,finality)).await.map_err(|_|"status lookup failed")??
                 } else {
                     // Not included: only a live (registered) identity has a status.
                     let identity=runtime.live_identity(hash).ok_or("unknown execution identity")?;

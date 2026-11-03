@@ -2,13 +2,14 @@
 //! each candidate block. Replay handles are built only from exact block manifests.
 
 use crate::{
-    archive::{ArtifactStore, BlockDescriptor, BlockManifest, BoundIdentity},
+    archive::{ArtifactStore, BlockDescriptor, Published},
     context::{
         CreatedContract, ExecutionBinding, ExecutionIdentity, ExecutionOutcome, IdentityResolver,
         PinnedPolicySnapshot,
     },
     facts::FactsPolicy,
     identity::{CandidateNote, CapturedIdentity, IdentityRegistry},
+    manifest::{BlockManifest, ManifestEntry},
     policy::{DiagnosticReport, PolicyFactory},
     stream::{AppliedFacts, FactStream},
     wire::{Identity, Network, PolicyArtifact, VerifiedIdentity, Verifier},
@@ -16,9 +17,82 @@ use crate::{
 use alloy_evm::revm::context::TxEnv;
 use alloy_primitives::{Address, B256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
+
+/// Included transactions whose status answers are kept in memory (about the
+/// finality window at the default expected load), and at most this many blocks.
+const STATUS_CACHE_TRANSACTIONS: usize = 262_144;
+const STATUS_CACHE_BLOCKS: usize = 1024;
+
+/// Who a status answer names for a transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusIdentity {
+    pub principal_id: String,
+    pub org_id: String,
+    pub context_id: String,
+}
+
+impl From<&Identity> for StatusIdentity {
+    fn from(identity: &Identity) -> Self {
+        Self {
+            principal_id: identity.principal_id.clone(),
+            org_id: identity.org_id.clone(),
+            context_id: identity.context_id.clone(),
+        }
+    }
+}
+
+/// What a status answer needs from one included transaction. Its identity was
+/// verified when the projection was built (on publication or on load).
+#[derive(Clone, Debug)]
+struct IncludedTransaction {
+    identity: StatusIdentity,
+    reason_code: String,
+    created: Vec<CreatedContract>,
+}
+
+/// A block's manifest reduced to its status answers.
+#[derive(Debug)]
+struct BlockStatus {
+    facts_version: u64,
+    transactions: HashMap<B256, IncludedTransaction>,
+}
+
+#[derive(Debug, Default)]
+struct StatusCache {
+    blocks: HashMap<(u64, B256), Arc<BlockStatus>>,
+    order: VecDeque<(u64, B256)>,
+    transactions: usize,
+}
+
+impl StatusCache {
+    fn insert(&mut self, key: (u64, B256), status: Arc<BlockStatus>) {
+        self.transactions += status.transactions.len();
+        match self.blocks.insert(key, status) {
+            Some(old) => self.transactions -= old.transactions.len(),
+            None => self.order.push_back(key),
+        }
+        while self.order.len() > 1
+            && (self.transactions > STATUS_CACHE_TRANSACTIONS
+                || self.order.len() > STATUS_CACHE_BLOCKS)
+        {
+            if let Some(old) = self.order.pop_front()
+                && let Some(old) = self.blocks.remove(&old)
+            {
+                self.transactions -= old.transactions.len();
+            }
+        }
+    }
+
+    fn remove(&mut self, key: (u64, B256)) {
+        if let Some(old) = self.blocks.remove(&key) {
+            self.transactions -= old.transactions.len();
+            self.order.retain(|cached| *cached != key);
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct PolicyRuntime {
@@ -28,6 +102,7 @@ pub struct PolicyRuntime {
     verifier: Verifier,
     /// Serialises fact ingestion. Identity admission never takes it.
     facts: Mutex<()>,
+    status: Mutex<StatusCache>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -76,6 +151,7 @@ impl PolicyRuntime {
             archive,
             verifier,
             facts: Mutex::new(()),
+            status: Mutex::new(StatusCache::default()),
         }
     }
     pub fn verifier(&self) -> &Verifier {
@@ -112,44 +188,87 @@ impl PolicyRuntime {
         self.identities.live(&ExecutionBinding::Transaction(hash))
     }
 
-    /// The identity a status answer describes. `Some(block)`: the identity that
-    /// executed `hash` in that block, from its manifest, signature re-verified at
-    /// its issue time (status never renews a lease or grants execution).
-    /// `None`: the live registry entry. Unknown is an error, so status is never
-    /// disclosed for a hash OPS did not submit.
-    pub fn status_identity(&self, hash: B256, block: Option<B256>) -> Result<Identity, String> {
-        let Some(block) = block else {
-            return self
-                .live_identity(hash)
-                .ok_or_else(|| "unknown execution identity".into());
+    /// The status projection of block (number, hash): from memory, or else from
+    /// its manifest, whose identities are verified at their issue time (status
+    /// never renews a lease or grants execution). `None` when this node has no
+    /// manifest for the block.
+    fn block_status(&self, number: u64, hash: B256) -> Result<Option<Arc<BlockStatus>>, String> {
+        if let Some(status) = self
+            .status
+            .lock()
+            .map_err(|_| "execution status unavailable")?
+            .blocks
+            .get(&(number, hash))
+        {
+            return Ok(Some(status.clone()));
+        }
+        let Some(manifest) = self.archive.manifest(number, hash)? else {
+            return Ok(None);
         };
-        let manifest = self.archive.manifest_by_hash(block)?;
-        if &manifest.block.network != self.network() {
-            return Err("execution manifest network mismatch".into());
+        let mut transactions = HashMap::with_capacity(manifest.entries.len());
+        for entry in manifest.entries {
+            let identity = self.verifier.verify_archived_identity(entry.envelope)?;
+            if identity.scope != "transaction" {
+                return Err("invalid archived execution identity".into());
+            }
+            let transaction = identity
+                .binding_hash
+                .parse::<B256>()
+                .map_err(|_| "invalid archived execution identity")?;
+            let included = IncludedTransaction {
+                identity: (&identity).into(),
+                reason_code: entry.reason_code,
+                created: entry.created,
+            };
+            if transactions.insert(transaction, included).is_some() {
+                return Err("execution manifest transaction mismatch".into());
+            }
         }
-        let entry = manifest
-            .identities
-            .iter()
-            .find(|entry| entry.transaction_hash == hash)
-            .ok_or("unknown execution identity")?;
-        let envelope = self
-            .verifier
-            .decode_envelope("identity", &self.archive.get(entry.envelope)?)?;
-        let identity = self.verifier.verify_archived_identity(envelope)?;
-        if identity.scope != "transaction" || identity.binding_hash != format!("{hash:#x}") {
-            return Err("retained identity mismatch".into());
-        }
-        Ok(identity)
+        let status = Arc::new(BlockStatus {
+            facts_version: manifest.facts_version,
+            transactions,
+        });
+        self.status
+            .lock()
+            .map_err(|_| "execution status unavailable")?
+            .insert((number, hash), status.clone());
+        Ok(Some(status))
     }
 
-    /// `Some(block)`: the included status from that block's evidence. `None`:
-    /// the latest candidate outcome noted in memory for a pending transaction.
+    /// The identity a status answer describes. `Some((number, block))`: the
+    /// identity that executed `hash` in that block, from its manifest. `None`:
+    /// the live registry entry. Unknown is an error, so status is never
+    /// disclosed for a hash OPS did not submit.
+    pub fn status_identity(
+        &self,
+        hash: B256,
+        block: Option<(u64, B256)>,
+    ) -> Result<StatusIdentity, String> {
+        let Some((number, block)) = block else {
+            return self
+                .live_identity(hash)
+                .map(|identity| (&identity).into())
+                .ok_or_else(|| "unknown execution identity".into());
+        };
+        self.block_status(number, block)?
+            .and_then(|status| {
+                status
+                    .transactions
+                    .get(&hash)
+                    .map(|transaction| transaction.identity.clone())
+            })
+            .ok_or_else(|| "unknown execution identity".into())
+    }
+
+    /// `Some((number, block))`: the included status from that block's manifest.
+    /// `None`: the latest candidate outcome noted in memory for a pending
+    /// transaction.
     pub fn transaction_status(
         &self,
         hash: B256,
-        canonical_block: Option<B256>,
+        canonical_block: Option<(u64, B256)>,
     ) -> Result<Option<TransactionStatus>, String> {
-        let Some(block) = canonical_block else {
+        let Some((number, block)) = canonical_block else {
             return Ok(self
                 .identities
                 .candidate_note(hash)
@@ -165,15 +284,40 @@ impl PolicyRuntime {
                     finalized_block_number: None,
                 }));
         };
-        let key = format!(
-            "included-{}-{}",
-            alloy_primitives::hex::encode(hash),
-            alloy_primitives::hex::encode(block)
-        );
-        self.archive
-            .pointer(&key)?
-            .map(|id| crate::wire::decode_strict(&self.archive.get(id)?))
-            .transpose()
+        Ok(self.block_status(number, block)?.and_then(|status| {
+            status
+                .transactions
+                .get(&hash)
+                .map(|transaction| TransactionStatus {
+                    status: "produced".into(),
+                    facts_version: status.facts_version,
+                    block_hash: Some(block),
+                    block_number: Some(number),
+                    reason_code: transaction.reason_code.clone(),
+                    created: transaction.created.clone(),
+                    finalized: false,
+                    finalized_block_hash: None,
+                    finalized_block_number: None,
+                })
+        }))
+    }
+
+    /// Publish a candidate's manifest for the assembled block (before it is
+    /// returned to Reth) and keep its status answers in memory. When an
+    /// earlier build of the same block already published equivalent evidence,
+    /// that manifest stays and later answers come from it.
+    pub fn persist(&self, handle: &ExecutionHandle, block: &BlockDescriptor) -> Result<(), String> {
+        let (status, published) = handle.publish(&self.archive, block)?;
+        let mut cache = self
+            .status
+            .lock()
+            .map_err(|_| "execution status unavailable")?;
+        let key = (block.number, block.hash);
+        match published {
+            Published::New => cache.insert(key, Arc::new(status)),
+            Published::Existing => cache.remove(key),
+        }
+        Ok(())
     }
 
     pub fn accept_facts(
@@ -210,7 +354,7 @@ impl PolicyRuntime {
     pub fn canonical_status(
         &self,
         hash: B256,
-        block: B256,
+        block: (u64, B256),
         success: bool,
         finality: Option<FinalityEvidence>,
     ) -> Result<TransactionStatus, String> {
@@ -295,33 +439,52 @@ impl PolicyRuntime {
             return Err("execution replay network mismatch".into());
         }
         let at = i64::try_from(block.timestamp).map_err(|_| "invalid block timestamp")?;
-        let manifest = self.archive.load_for_block(block)?;
-        let restored = FactStream::restore(
-            self.verifier.clone(),
-            &self.archive,
-            manifest.checkpoint,
-            at,
-        )?;
+        let manifest = self
+            .archive
+            .manifest(block.number, block.hash)?
+            .ok_or("missing execution manifest")?;
+        if manifest.parent_hash != block.parent_hash
+            || manifest.timestamp != block.timestamp
+            || manifest.entries.len() != block.transactions.len()
+        {
+            return Err("execution manifest block mismatch".into());
+        }
+        let restored =
+            FactStream::restore(self.verifier.clone(), &self.archive, manifest.records, at)?;
         let facts = restored.pin(at, manifest.facts_version)?;
         if facts.digest() != manifest.facts_digest || facts.version() != manifest.facts_version {
             return Err("execution replay facts mismatch".into());
         }
         let mut captured = HashMap::new();
-        for entry in &manifest.identities {
+        let mut expected = HashMap::new();
+        for (hash, entry) in block.transactions.iter().zip(&manifest.entries) {
             let (identity, envelope) = self
                 .verifier
-                .verify_identity(&self.archive.get(entry.envelope)?, at)?
+                .verify_identity_parts(entry.envelope.clone(), at)?
                 .into_parts();
-            if identity.scope != "transaction"
-                || identity.binding_hash != format!("{:#x}", entry.transaction_hash)
-            {
+            if identity.scope != "transaction" || identity.binding_hash != format!("{hash:#x}") {
                 return Err("execution replay identity mismatch".into());
             }
-            captured.insert(
-                ExecutionBinding::Transaction(entry.transaction_hash),
-                CapturedIdentity {
-                    identity,
-                    envelope: Some(envelope),
+            let binding = ExecutionBinding::Transaction(*hash);
+            if captured
+                .insert(
+                    binding.clone(),
+                    CapturedIdentity {
+                        identity,
+                        envelope: Some(envelope),
+                    },
+                )
+                .is_some()
+            {
+                return Err("execution manifest transaction mismatch".into());
+            }
+            expected.insert(
+                binding,
+                ExecutionOutcome {
+                    success: entry.success,
+                    denied: false,
+                    reason_code: entry.reason_code.clone(),
+                    created: entry.created.clone(),
                 },
             );
         }
@@ -334,18 +497,7 @@ impl PolicyRuntime {
                 at,
                 captured: Mutex::new(captured),
                 outcomes: Mutex::new(HashMap::new()),
-                expected: Some(
-                    manifest
-                        .identities
-                        .iter()
-                        .map(|entry| {
-                            (
-                                ExecutionBinding::Transaction(entry.transaction_hash),
-                                entry.outcome.clone(),
-                            )
-                        })
-                        .collect(),
-                ),
+                expected: Some(expected),
                 facts_version: manifest.facts_version,
             },
         )
@@ -416,7 +568,22 @@ impl ExecutionHandle {
         Ok(self.factory().candidate(snapshot))
     }
 
+    /// The facts version this handle executes with.
+    pub fn facts_version(&self) -> u64 {
+        self.facts.version()
+    }
+
+    /// Publish this candidate's manifest for the assembled `block` before the
+    /// block is returned; the manifest itself is one publication.
     pub fn persist(&self, archive: &ArtifactStore, block: &BlockDescriptor) -> Result<(), String> {
+        self.publish(archive, block).map(|_| ())
+    }
+
+    fn publish(
+        &self,
+        archive: &ArtifactStore,
+        block: &BlockDescriptor,
+    ) -> Result<(BlockStatus, Published), String> {
         if block.network != self.network || block.timestamp != self.at as u64 {
             return Err("produced block execution context mismatch".into());
         }
@@ -430,61 +597,56 @@ impl ExecutionHandle {
             .outcomes
             .lock()
             .map_err(|_| "execution outcomes unavailable")?;
-        let identities = block
-            .transactions
-            .iter()
-            .map(|hash| {
-                let identity = captured
-                    .get(&ExecutionBinding::Transaction(*hash))
-                    .ok_or("missing executed transaction identity")?;
-                let envelope = identity
-                    .envelope
-                    .as_ref()
-                    .ok_or("missing executed transaction evidence")?;
-                Ok(BoundIdentity {
-                    transaction_hash: *hash,
-                    envelope: archive.put(&envelope.to_wire())?,
-                    outcome: outcomes
-                        .get(&ExecutionBinding::Transaction(*hash))
-                        .cloned()
-                        .ok_or("missing executed transaction outcome")?,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let checkpoint = self.facts.checkpoint(archive)?;
-        let manifest = BlockManifest {
-            format_version: 1,
-            block: block.clone(),
+        let mut entries = Vec::with_capacity(block.transactions.len());
+        let mut transactions = HashMap::with_capacity(block.transactions.len());
+        for hash in &block.transactions {
+            let binding = ExecutionBinding::Transaction(*hash);
+            let identity = captured
+                .get(&binding)
+                .ok_or("missing executed transaction identity")?;
+            let envelope = identity
+                .envelope
+                .as_ref()
+                .ok_or("missing executed transaction evidence")?;
+            let outcome = outcomes
+                .get(&binding)
+                .ok_or("missing executed transaction outcome")?;
+            if outcome.denied || (!outcome.success && !outcome.created.is_empty()) {
+                return Err("invalid included execution outcome".into());
+            }
+            entries.push(ManifestEntry {
+                envelope: envelope.as_ref().clone(),
+                success: outcome.success,
+                reason_code: outcome.reason_code.clone(),
+                created: outcome.created.clone(),
+            });
+            let included = IncludedTransaction {
+                identity: (&identity.identity).into(),
+                reason_code: outcome.reason_code.clone(),
+                created: outcome.created.clone(),
+            };
+            if transactions.insert(*hash, included).is_some() {
+                return Err("execution manifest transaction mismatch".into());
+            }
+        }
+        let published = archive.publish_manifest(&BlockManifest {
+            hash: block.hash,
+            parent_hash: block.parent_hash,
+            number: block.number,
+            timestamp: block.timestamp,
             facts_version: self.facts.version(),
             facts_digest: self.facts.digest(),
-            checkpoint,
-            identities,
-        };
-        archive.publish(&manifest)?;
-        for entry in &manifest.identities {
-            let status = TransactionStatus {
-                status: "produced".into(),
+            records: self.facts.checkpoint(archive)?,
+            lease: self.facts.lease_envelope()?,
+            entries,
+        })?;
+        Ok((
+            BlockStatus {
                 facts_version: self.facts.version(),
-                block_hash: Some(block.hash),
-                block_number: Some(block.number),
-                reason_code: entry.outcome.reason_code.clone(),
-                created: entry.outcome.created.clone(),
-                finalized: false,
-                finalized_block_hash: None,
-                finalized_block_number: None,
-            };
-            let id = archive
-                .put(&serde_json::to_vec(&status).map_err(|_| "invalid execution status")?)?;
-            archive.set_pointer(
-                &format!(
-                    "included-{}-{}",
-                    alloy_primitives::hex::encode(entry.transaction_hash),
-                    alloy_primitives::hex::encode(block.hash)
-                ),
-                id,
-            )?;
-        }
-        Ok(())
+                transactions,
+            },
+            published,
+        ))
     }
 }
 

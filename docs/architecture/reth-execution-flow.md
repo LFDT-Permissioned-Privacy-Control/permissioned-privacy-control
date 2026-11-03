@@ -302,9 +302,9 @@ flowchart TB
             Trust["Trusted OPS public keys and bearer token, from configuration"]
         end
         subgraph StateDir["Policy state directory"]
-            Objects["objects: signed fact envelopes, checkpoints,<br/>identity envelopes, status records"]
-            Pointers["pointers: facts-head, included-"]
-            Blocks["blocks: one execution manifest per produced block"]
+            Objects["objects: signed fact envelopes and checkpoints"]
+            Pointers["pointers: facts-head"]
+            Blocks["blocks: one compressed manifest per produced block,<br/>embedding its identities, outcomes and fact lease"]
         end
     end
     subgraph Reth["Reth"]
@@ -329,9 +329,10 @@ until it is submitted again through OPS, and OPS's submission row keeps the
 principal binding meanwhile. The transaction pool itself
 is Reth's in-memory pool. Reth saves local pool transactions only on graceful
 shutdown, so a crash loses pooled transactions while OPS keeps their submission
-rows. A block manifest names the facts checkpoint
-and the identity envelope behind every transaction in the block; self-import
-and forensic replay read it, ordinary queries do not.
+rows. A block's manifest, published once before the block is returned, embeds the
+signed identity and outcome of every transaction in the block and names the
+facts it was built on; self-import, forensic replay and the status of included
+transactions read it, ordinary queries do not.
 
 The next diagram follows the records of one transaction across these stores.
 
@@ -351,7 +352,7 @@ sequenceDiagram
     OPS->>DB: Mark row accepted
     Reth->>RT: Build candidate block with pinned facts
     RT->>RT: Candidate outcome (pending or denied), memory only
-    RT->>Dir: Block manifest, fact checkpoint, included- record
+    RT->>Dir: One compressed block manifest: identities, outcomes, facts, lease
     Note over RT,Dir: The manifest is durable before the block is returned
     Reth->>Reth: Persist block in chain database
     loop Reconciler until a final outcome

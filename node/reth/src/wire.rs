@@ -262,25 +262,25 @@ impl Verifier {
         kind: &str,
         wire: &[u8],
     ) -> Result<SignedEnvelope, String> {
-        if wire.is_empty()
-            || wire.len() > MAX_ENVELOPE_BYTES
-            || !matches!(kind, "identity" | "snapshot" | "delta" | "heartbeat")
-        {
+        decode_envelope(kind, wire)
+    }
+
+    /// Verify an archived decoded identity envelope, valid at `at`. Bounded like
+    /// the wire path: by the size of its JSON encoding.
+    pub fn verify_identity_parts(
+        &self,
+        envelope: SignedEnvelope,
+        at: i64,
+    ) -> Result<VerifiedIdentity, String> {
+        if envelope.kind != "identity" || envelope.to_wire().len() > MAX_IDENTITY_BYTES {
             return Err("invalid node policy envelope".into());
         }
-        let envelope: Envelope = decode_strict(wire)?;
-        if envelope.version != 1 || envelope.kind != kind || !identifier(&envelope.key_id) {
-            return Err("invalid node policy envelope".into());
-        }
-        let decoded = SignedEnvelope {
-            kind: envelope.kind,
-            key_id: envelope.key_id,
-            payload: decode_base64(&envelope.payload)?,
-            signature: decode_base64(&envelope.signature)?
-                .try_into()
-                .map_err(|_| "untrusted node policy signature".to_owned())?,
-        };
-        Ok(decoded)
+        self.verify(&envelope)?;
+        let identity = self.identity_fields(&envelope.payload, at)?;
+        Ok(VerifiedIdentity {
+            identity,
+            envelope: Arc::new(envelope),
+        })
     }
 
     /// Verify an envelope in decoded form: its kind, key and signature over the
@@ -380,6 +380,29 @@ impl Verifier {
         }
         Ok(())
     }
+}
+
+/// Decode a JSON envelope without verifying it; callers must `Verifier::verify`.
+pub(crate) fn decode_envelope(kind: &str, wire: &[u8]) -> Result<SignedEnvelope, String> {
+    if wire.is_empty()
+        || wire.len() > MAX_ENVELOPE_BYTES
+        || !matches!(kind, "identity" | "snapshot" | "delta" | "heartbeat")
+    {
+        return Err("invalid node policy envelope".into());
+    }
+    let envelope: Envelope = decode_strict(wire)?;
+    if envelope.version != 1 || envelope.kind != kind || !identifier(&envelope.key_id) {
+        return Err("invalid node policy envelope".into());
+    }
+    let decoded = SignedEnvelope {
+        kind: envelope.kind,
+        key_id: envelope.key_id,
+        payload: decode_base64(&envelope.payload)?,
+        signature: decode_base64(&envelope.signature)?
+            .try_into()
+            .map_err(|_| "untrusted node policy signature".to_owned())?,
+    };
+    Ok(decoded)
 }
 
 fn signing_bytes(kind: &str, key_id: &str, payload: &[u8]) -> Vec<u8> {

@@ -145,16 +145,14 @@ fn produced_block_replays_original_facts_after_revocation_and_restart() {
         .accept_identity(&seal("identity", &renewed), 1800000010)
         .unwrap();
     original.persist(&runtime.archive, &descriptor()).unwrap();
-    let manifest = runtime.archive.load_for_block(&descriptor()).unwrap();
+    let manifest = runtime
+        .archive
+        .manifest(1, descriptor().hash)
+        .unwrap()
+        .unwrap();
     let captured = runtime
         .verifier()
-        .open_identity(
-            &runtime
-                .archive
-                .get(manifest.identities[0].envelope)
-                .unwrap(),
-            1800000010,
-        )
+        .open_identity(&manifest.entries[0].envelope.to_wire(), 1800000010)
         .unwrap();
     assert_eq!(
         captured.context_id, "ctx-a",
@@ -162,7 +160,7 @@ fn produced_block_replays_original_facts_after_revocation_and_restart() {
     );
     assert_eq!(
         runtime
-            .transaction_status(B256::repeat_byte(1), Some(descriptor().hash))
+            .transaction_status(B256::repeat_byte(1), Some((1, descriptor().hash)))
             .unwrap()
             .unwrap()
             .status,
@@ -228,7 +226,7 @@ fn produced_block_replays_original_facts_after_revocation_and_restart() {
     assert!(execute(&restarted.replay(&descriptor()).unwrap()));
     assert_eq!(
         restarted
-            .status_identity(B256::repeat_byte(1), Some(descriptor().hash))
+            .status_identity(B256::repeat_byte(1), Some((1, descriptor().hash)))
             .unwrap()
             .context_id,
         "ctx-a",
@@ -242,7 +240,7 @@ fn produced_block_replays_original_facts_after_revocation_and_restart() {
     );
     assert!(
         restarted
-            .status_identity(B256::repeat_byte(2), Some(descriptor().hash))
+            .status_identity(B256::repeat_byte(2), Some((1, descriptor().hash)))
             .is_err()
     );
     let mut wrong = descriptor();
@@ -266,7 +264,7 @@ fn produced_block_replays_original_facts_after_revocation_and_restart() {
     );
     assert!(
         foreign
-            .status_identity(B256::repeat_byte(1), Some(descriptor().hash))
+            .status_identity(B256::repeat_byte(1), Some((1, descriptor().hash)))
             .is_err()
     );
     std::fs::remove_dir_all(directory).unwrap();
@@ -300,7 +298,7 @@ fn finalized_release_frees_the_slot_and_the_manifest_keeps_the_executed_binding(
         runtime
             .canonical_status(
                 B256::repeat_byte(1),
-                B256::repeat_byte(99),
+                (1, B256::repeat_byte(99)),
                 true,
                 final_evidence()
             )
@@ -310,7 +308,7 @@ fn finalized_release_frees_the_slot_and_the_manifest_keeps_the_executed_binding(
     runtime
         .canonical_status(
             B256::repeat_byte(1),
-            descriptor().hash,
+            (1, descriptor().hash),
             true,
             final_evidence(),
         )
@@ -336,14 +334,14 @@ fn finalized_release_frees_the_slot_and_the_manifest_keeps_the_executed_binding(
     );
     assert_eq!(
         restarted
-            .status_identity(B256::repeat_byte(1), Some(descriptor().hash))
+            .status_identity(B256::repeat_byte(1), Some((1, descriptor().hash)))
             .unwrap()
             .principal_id,
         "fixture_principal"
     );
     assert!(
         restarted
-            .transaction_status(B256::repeat_byte(1), Some(descriptor().hash))
+            .transaction_status(B256::repeat_byte(1), Some((1, descriptor().hash)))
             .unwrap()
             .is_some()
     );
@@ -400,7 +398,7 @@ fn live(runtime: &PolicyRuntime) -> bool {
 fn identity_released_at_finality_not_inclusion() {
     let (runtime, directory) = included("finality");
     let tx = B256::repeat_byte(1);
-    let block = descriptor().hash;
+    let block = (1, descriptor().hash);
     let provisional = runtime.canonical_status(tx, block, true, None).unwrap();
     assert_eq!(
         (provisional.status.as_str(), provisional.finalized),
@@ -451,7 +449,7 @@ fn identity_released_at_finality_not_inclusion() {
 fn reorg_before_finality_reexecutes_without_ops() {
     let (runtime, directory) = included("reorg");
     runtime
-        .canonical_status(B256::repeat_byte(1), descriptor().hash, true, None)
+        .canonical_status(B256::repeat_byte(1), (1, descriptor().hash), true, None)
         .unwrap();
     // A reorg drops the block and the transaction returns to the pool: a new
     // candidate executes it again with the still-live identity, no OPS call.

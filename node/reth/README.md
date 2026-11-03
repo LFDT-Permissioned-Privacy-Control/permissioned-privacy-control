@@ -71,9 +71,12 @@ node/reth/target/release/ops-reth node \
   --http --http.addr 127.0.0.1 --http.api eth,net,web3
 ```
 
-The `--dev` producer is intended for the local OPS stack. Production consensus
-integration needs the same durable execution manifests at every importing node;
-an arbitrary Ethereum peer cannot import OPS blocks without that evidence.
+The `--dev` producer is intended for the local OPS stack. OPS blocks are ordinary
+Ethereum blocks: a vanilla Ethereum node imports and validates them (state and
+receipt roots) but cannot verify their authorization. A guarded `ops-reth` node
+replays each block it imports from the producer's execution manifest for that
+block, so production consensus integration must give every guarded importing node
+those manifests.
 The node can start before OPS publishes facts; private status remains unready
 and application execution fails closed until a fresh signed snapshot arrives.
 
@@ -200,7 +203,7 @@ isolated policy-interpreter cost or full OPS/explorer throughput. It does not
 establish the roadmap's 5,000 TPS target.
 
 Transaction admission and candidate execution no longer write to disk. Block
-assembly still writes per-transaction evidence objects; see
+assembly publishes one compressed execution manifest per block; see
 [sustained throughput work](../../docs/OPEN_ITEMS.md#13-reth-sustained-transaction-throughput).
 The current group's in-process timings imply only a
 [policy-only theoretical ceiling](../../docs/implementation/evidence/per-group-live-2026-09-25.md#theoretical-throughput-from-policy-cost),

@@ -9,11 +9,13 @@
 //! - `tmp/`: files being written, cleared at every open;
 //! - `objects/`: content-addressed immutable objects;
 //! - `pointers/`: node-owned mutable names for objects (`facts-head`);
-//! - `blocks/`: one execution manifest per produced block.
+//! - `blocks/<height / 4096 as {:08x}>/<height as {:016x}>-<hash>`: one execution manifest per
+//!   produced block, a one-entry segment (see `manifest`).
 
 use crate::{
+    manifest::{BlockManifest, read_entry, write_segment},
     storage::{DiskStorage, Storage},
-    wire::{Network, decode_strict, identifier},
+    wire::{Network, decode_strict},
 };
 use alloy_primitives::{B256, hex};
 use serde::{Deserialize, Serialize};
@@ -23,19 +25,30 @@ use std::{
     fmt, io,
     path::{Path, PathBuf},
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 const MAX_OBJECT: usize = 64 << 20;
-const MAX_MANIFEST: usize = 16 << 20;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ArtifactId(B256);
+impl ArtifactId {
+    /// The content address of `bytes`.
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(B256::from_slice(&Sha256::digest(bytes)))
+    }
+    pub fn as_b256(&self) -> B256 {
+        self.0
+    }
+    pub(crate) fn from_b256(value: B256) -> Self {
+        Self(value)
+    }
+}
 impl fmt::Display for ArtifactId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&hex::encode(self.0))
@@ -53,32 +66,25 @@ pub struct BlockDescriptor {
     pub transactions: Vec<B256>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BoundIdentity {
-    pub transaction_hash: B256,
-    pub envelope: ArtifactId,
-    pub outcome: crate::context::ExecutionOutcome,
+/// Whether `publish_manifest` wrote the manifest or found an equivalent one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Published {
+    New,
+    Existing,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BlockManifest {
-    pub format_version: u32,
-    pub block: BlockDescriptor,
-    pub facts_version: u64,
-    /// Digest of the exact last applied snapshot/delta payload, not checkpoint JSON.
-    pub facts_digest: B256,
-    /// Immutable checkpoint document referencing retained signed stream artifacts.
-    pub checkpoint: ArtifactId,
-    pub identities: Vec<BoundIdentity>,
-}
+/// Block manifests per height bucket directory under `blocks/`.
+const BUCKET: u64 = 4096;
+/// Largest manifest segment file read back.
+const MAX_SEGMENT: usize = 1 << 30;
 
 const LAYOUT: &[u8] = b"ops-node-policy-archive 2\n";
 
 pub struct ArtifactStore {
     root: PathBuf,
     storage: Arc<dyn Storage>,
+    /// Height buckets already made durable by this process.
+    buckets: Mutex<HashSet<u64>>,
     /// The exclusive state-directory lock: one writer of `facts-head` and of
     /// block evidence per directory.
     _lock: Box<dyn std::any::Any + Send + Sync>,
@@ -153,6 +159,7 @@ impl ArtifactStore {
         Ok(Self {
             root,
             storage,
+            buckets: Mutex::new(HashSet::new()),
             _lock: lock,
         })
     }
@@ -193,76 +200,67 @@ impl ArtifactStore {
             .transpose()
     }
 
-    /// Call before publishing the assembled block. ACK requires durable artifacts
-    /// and manifest. A retry is idempotent; an existing hash cannot be overwritten.
-    pub fn publish(&self, manifest: &BlockManifest) -> Result<(), String> {
-        self.validate(manifest)?;
-        let bytes = serde_json::to_vec(manifest).map_err(|_| "invalid execution manifest")?;
-        if bytes.len() > MAX_MANIFEST {
-            return Err("execution manifest too large".into());
-        }
-        self.publish_immutable(
-            &self.root.join("blocks"),
-            &hex::encode(manifest.block.hash),
-            &bytes,
-        )
-    }
-
-    /// Reserved for block self-import and trusted forensic replay. Historical user
-    /// RPC calls must choose current permissions instead of this archive.
-    pub fn load_for_block(&self, expected: &BlockDescriptor) -> Result<BlockManifest, String> {
-        let bytes = self.read_bounded(
-            &self.root.join("blocks").join(hex::encode(expected.hash)),
-            MAX_MANIFEST,
-        )?;
-        let manifest: BlockManifest = decode_strict(&bytes)?;
-        if &manifest.block != expected {
-            return Err("execution manifest block mismatch".into());
-        }
-        self.validate(&manifest)?;
-        Ok(manifest)
-    }
-
-    /// A manifest by block hash alone, for status lookups: decoded and checked
-    /// for format and block hash only (the network and the one needed entry
-    /// are the caller's to check). Replay uses `load_for_block`.
-    pub fn manifest_by_hash(&self, block: B256) -> Result<BlockManifest, String> {
-        let bytes = self.read_bounded(
-            &self.root.join("blocks").join(hex::encode(block)),
-            MAX_MANIFEST,
-        )?;
-        let manifest: BlockManifest = decode_strict(&bytes)?;
-        if manifest.format_version != 1 || manifest.block.hash != block {
-            return Err("execution manifest block mismatch".into());
-        }
-        Ok(manifest)
-    }
-
-    fn validate(&self, manifest: &BlockManifest) -> Result<(), String> {
-        if manifest.format_version != 1
-            || manifest.block.network.chain_id == 0
-            || !identifier(&manifest.block.network.deployment_id)
-            || manifest.block.hash.is_zero()
-            || manifest.facts_version == 0
-            || manifest.facts_digest.is_zero()
-            || manifest.identities.len() != manifest.block.transactions.len()
+    /// Publish a produced block's manifest before the block is returned: one
+    /// per-height segment file, published with a file `sync_all` and a
+    /// directory `sync_all` (a new height bucket adds one directory sync per
+    /// 4096 blocks). The record list it references must already be durable.
+    /// Idempotent per block: an existing manifest whose transactions carry the
+    /// same principals, organizations, signers and outcomes stays (another
+    /// build may differ only in lease, facts or identity lease times).
+    pub fn publish_manifest(&self, manifest: &BlockManifest) -> Result<Published, String> {
+        self.get(manifest.records)?;
+        let directory = self.bucket(manifest.number)?;
+        let name = manifest_name(manifest.number, manifest.hash);
+        if let Some(existing) = self
+            .storage
+            .read(&directory.join(&name), MAX_SEGMENT)
+            .map_err(|_| "invalid execution archive file".to_owned())?
         {
-            return Err("invalid execution manifest".into());
-        }
-        let mut unique = HashSet::new();
-        for (hash, identity) in manifest.block.transactions.iter().zip(&manifest.identities) {
-            if *hash != identity.transaction_hash || !unique.insert(*hash) {
-                return Err("execution manifest transaction mismatch".into());
+            let existing = read_entry(&existing, manifest.number, manifest.hash)?
+                .ok_or("invalid execution manifest")?;
+            if evidence(&existing)? != evidence(manifest)? {
+                return Err("conflicting execution manifest".into());
             }
-            self.get(identity.envelope)?;
-            if identity.outcome.denied
-                || (!identity.outcome.success && !identity.outcome.created.is_empty())
-            {
-                return Err("invalid included execution outcome".into());
-            }
+            self.storage.sync_dir(&directory).map_err(io_error)?;
+            return Ok(Published::Existing);
         }
-        self.get(manifest.checkpoint)?;
-        Ok(())
+        self.publish_immutable(&directory, &name, &write_segment(&[manifest])?)?;
+        Ok(Published::New)
+    }
+
+    /// The manifest of block (number, hash), if this node published it.
+    /// Reserved for self-import, trusted forensic replay and status lookups;
+    /// historical user RPC calls use current permissions instead.
+    pub fn manifest(&self, number: u64, hash: B256) -> Result<Option<BlockManifest>, String> {
+        let path = self
+            .root
+            .join("blocks")
+            .join(bucket_name(number))
+            .join(manifest_name(number, hash));
+        match self
+            .storage
+            .read(&path, MAX_SEGMENT)
+            .map_err(|_| "invalid execution archive file".to_owned())?
+        {
+            None => Ok(None),
+            Some(segment) => read_entry(&segment, number, hash),
+        }
+    }
+
+    /// The height bucket directory, made durable once per process.
+    fn bucket(&self, number: u64) -> Result<PathBuf, String> {
+        let directory = self.root.join("blocks").join(bucket_name(number));
+        let mut known = self
+            .buckets
+            .lock()
+            .map_err(|_| "execution archive unavailable")?;
+        if !known.contains(&(number / BUCKET)) {
+            self.storage
+                .ensure_private_dir(&directory)
+                .map_err(private_directory_error)?;
+            known.insert(number / BUCKET);
+        }
+        Ok(directory)
     }
 
     fn read_bounded(&self, path: &Path, limit: usize) -> Result<Vec<u8>, String> {
@@ -328,6 +326,45 @@ fn publish_immutable(
     }
     cleanup?;
     storage.sync_dir(directory).map_err(io_error)
+}
+
+fn bucket_name(number: u64) -> String {
+    format!("{:08x}", number / BUCKET)
+}
+
+fn manifest_name(number: u64, hash: B256) -> String {
+    format!("{number:016x}-{}", hex::encode(hash))
+}
+
+type Evidence = (
+    String,
+    String,
+    String,
+    String,
+    bool,
+    String,
+    Vec<crate::context::CreatedContract>,
+);
+
+/// Per transaction, in order: binding, principal, organization, signer and
+/// outcome. Two builds of one block must agree on all of it.
+fn evidence(manifest: &BlockManifest) -> Result<Vec<Evidence>, String> {
+    manifest
+        .entries
+        .iter()
+        .map(|entry| {
+            let identity = decode_strict::<crate::wire::Identity>(&entry.envelope.payload)?;
+            Ok((
+                identity.binding_hash,
+                identity.principal_id,
+                identity.org_id,
+                identity.signer,
+                entry.success,
+                entry.reason_code.clone(),
+                entry.created.clone(),
+            ))
+        })
+        .collect()
 }
 
 fn private_directory_error(error: io::Error) -> String {

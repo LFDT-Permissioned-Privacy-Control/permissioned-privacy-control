@@ -5299,6 +5299,7 @@ dependencies = [
  "subtle",
  "tokio",
  "tower",
+ "zstd",
 ]
 
 [[package]]

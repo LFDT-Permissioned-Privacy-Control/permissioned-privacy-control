@@ -103,8 +103,8 @@ impl BlockAssembler<OpsBlockExecutorFactory> for OpsBlockAssembler {
                 .map(|tx| *tx.tx_hash())
                 .collect(),
         };
-        handle
-            .persist(&self.runtime.archive, &descriptor)
+        self.runtime
+            .persist(&handle, &descriptor)
             .map_err(BlockExecutionError::msg)?;
         Ok(block)
     }

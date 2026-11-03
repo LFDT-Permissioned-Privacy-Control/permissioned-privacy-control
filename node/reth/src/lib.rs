@@ -5,6 +5,7 @@ pub mod archive;
 pub mod context;
 pub mod facts;
 pub mod identity;
+pub mod manifest;
 pub mod policy;
 pub mod runtime;
 #[cfg(feature = "reth-sdk")]

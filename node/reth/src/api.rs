@@ -286,13 +286,17 @@ impl PrivateApi {
                 // unknown hash is an error and discloses nothing.
                 let execution = self.backend.transaction_status(hash).await?;
                 let block = match execution.get("status").and_then(Value::as_str) {
-                    Some("included" | "reverted") => Some(
+                    Some("included" | "reverted") => Some((
+                        execution
+                            .get("block_number")
+                            .and_then(Value::as_u64)
+                            .ok_or("invalid execution status")?,
                         execution
                             .get("block_hash")
                             .and_then(Value::as_str)
                             .and_then(|block| block.parse::<B256>().ok())
                             .ok_or("invalid execution status")?,
-                    ),
+                    )),
                     _ => None,
                 };
                 let runtime = self.runtime.clone();

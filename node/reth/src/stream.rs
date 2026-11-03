@@ -64,6 +64,14 @@ impl AppliedFacts {
         self.lease.expires_at
     }
 
+    /// The heartbeat that renewed this generation's lease, decoded, if any.
+    pub(crate) fn lease_envelope(&self) -> Result<Option<crate::wire::SignedEnvelope>, String> {
+        self.heartbeat
+            .as_ref()
+            .map(|record| crate::wire::decode_envelope("heartbeat", &record.bytes))
+            .transpose()
+    }
+
     pub fn checkpoint(&self, store: &ArtifactStore) -> Result<ArtifactId, String> {
         let records = self
             .records
