@@ -1,7 +1,7 @@
 .PHONY: build build-prod test test-unit test-e2e test-privacy-bypass run dev-stack full-stack-dev run-binary clean clean-build \
 	e2e e2e-all e2e-go e2e-playwright e2e-privacy e2e-chaos e2e-soak e2e-doctor e2e-debug e2e-down e2e-clean \
 	demo-e2e demo-e2e-debug demo-e2e-down \
-	db-migrate db-status db-new-migration install-tern seed \
+	db-migrate db-migrate-audit db-status db-new-migration install-tern seed \
 	contracts-install contracts-build contracts-deploy \
 	stop restart logs status \
 	demo demo-record demo-process demo-all demo-setup demo-clean \
@@ -334,6 +334,12 @@ clean-build:
 # Run database migrations (via Go - uses embedded migrations)
 db-migrate:
 	go run ./cmd/migrate
+
+# Run the audit-database migrations against AUDIT_ADMIN_DATABASE_URL (run it
+# in a maintenance window, instances stopped, when a migration rewrites
+# access_logs)
+db-migrate-audit:
+	go run ./cmd/migrate -audit
 
 # Show migration status using tern CLI
 db-status:

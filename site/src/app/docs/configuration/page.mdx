@@ -151,6 +151,8 @@ COMMIT;
 
 Existing grants survive the transfer, including the `privacy_proxy_app` append-only allowlist on `access_logs`. Do the transfer when you switch: the proxy refuses to start, naming the table and the statement to run, only when a migration is actually blocked by the missing ownership — it does not re-check ownership on every boot, so a deployment can start fine today and fail on the next migration that touches the schema.
 
+**Upgrading an existing audit database: `access_logs.id` becomes 64-bit.** One audit-database migration widens the access-log id from a 32-bit to a 64-bit integer, which would otherwise run out after about two billion entries (days at high transaction rates). Stored entries, their ids and their hashes do not change and the integrity verifier is unaffected, but the migration rewrites the table and its indexes and blocks every read and write of the access log while it runs, needs free disk of about the table's size, and fails after ten seconds if it cannot get the table lock. On a large audit database, stop the proxy instances and run it in a maintenance window with `make db-migrate-audit` (the migration command, `go run ./cmd/migrate -audit`, against `AUDIT_ADMIN_DATABASE_URL`) before starting the new version, rather than letting the first instance run it at startup, where a liveness probe can stop it mid-rewrite. It needs ownership of `access_logs`; without it the proxy and the command refuse with the statement to run.
+
 **Resilience.** Set `AUDIT_BUFFER_DIR` (see above) so a transient audit-database outage does not block request handling: entries are written to a durable local buffer and sealed into the audit database by a background worker when it is reachable again.
 
 ---

@@ -1,0 +1,64 @@
+-- audit/003_access_logs_id_bigint.sql
+--
+-- ── WHAT ─────────────────────────────────────────────────────────
+-- Widens access_logs.id and its sequence access_logs_id_seq from integer to
+-- bigint. Row values, hashes, ids and their order are unchanged: the chain
+-- content formats the id in decimal (AccessLogChainContent), so every stored
+-- entry_hash still verifies, and every Go reader and writer already uses a
+-- 64-bit id.
+--
+-- ── WHY (ticket: RD-1410) ────────────────────────────────────────
+-- An integer id runs out at 2^31 - 1 rows. At two or more access-log records
+-- per transaction the target rate (about 10,500 records/s) exhausts it in about
+-- 57 hours; 1,000 records/s in about 25 days. After that every seal fails and
+-- the access-log chain stops.
+--
+-- ── AFFECTED ROWS ────────────────────────────────────────────────
+-- Every access_logs row is rewritten (same values). The sequence keeps its
+-- current value, owner and grants; its maximum follows the new type because it
+-- was declared NO MAXVALUE (002). Detection query (expect bigint / bigint /
+-- 9223372036854775807):
+--   SELECT (SELECT data_type FROM information_schema.columns
+--            WHERE table_name = 'access_logs' AND column_name = 'id'),
+--          data_type, max_value FROM pg_sequences WHERE sequencename = 'access_logs_id_seq';
+--
+-- ── OPERATIONAL IMPACT: MAINTENANCE WINDOW ON A LARGE TABLE ──────
+-- ALTER COLUMN ... TYPE rewrites the whole table and rebuilds all its indexes
+-- under an ACCESS EXCLUSIVE lock: while it runs, every read and write of
+-- access_logs waits (sealing, the synchronous logging path, admin log views,
+-- disclosure reads, the integrity verifier and checkpointing), and the rewrite
+-- needs free disk of about the table's size plus its indexes, and WAL of
+-- roughly the same. Its duration grows with the table. On a large existing
+-- deployment run it out of band before starting the new version
+-- (`migrate -audit`, make db-migrate-audit, with the instances stopped), not
+-- as part of server start, where a liveness probe can kill the
+-- process mid-rewrite (the transaction then rolls back and the next start
+-- repeats it). lock_timeout below makes it fail fast instead of queueing every
+-- access_logs query behind a lock it cannot get. The table is altered before
+-- the sequence: the reverse order can deadlock with a concurrent INSERT that
+-- holds the table and calls nextval. A session that prepared an access_logs
+-- statement before the change gets one "cached plan must not change result
+-- type" error on its next use of it: another reason to stop the instances
+-- for the change.
+--
+-- ── REQUIRED ROLE ────────────────────────────────────────────────
+-- ALTER TABLE and ALTER SEQUENCE need ownership of access_logs and
+-- access_logs_id_seq (privileges alone are not enough). The migration runner
+-- refuses up front, with the remedy, when AUDIT_ADMIN_DATABASE_URL's role does
+-- not own them.
+--
+-- ── AUTHORITATIVE-RECORD note ────────────────────────────────────
+-- Traceable record = this migration file (git) + PR review + tern
+-- schema_version_audit. Writes nothing to a hash-chained table; no chain row is
+-- inserted, updated or re-hashed.
+--
+-- ── EXPAND-ONLY / ROLE-SEPARATION status ─────────────────────────
+-- Expand-only: a type widening; no table, column, index, constraint or row is
+-- removed. It cannot be reversed once an id exceeds 2^31 - 1. Role separation:
+-- UNCHANGED (privacy_proxy_app keeps SELECT, INSERT on access_logs and USAGE,
+-- UPDATE on the sequence). Runs ONLY against the audit database.
+
+SET LOCAL lock_timeout = '10s';
+
+ALTER TABLE access_logs ALTER COLUMN id TYPE bigint;
+ALTER SEQUENCE access_logs_id_seq AS bigint;

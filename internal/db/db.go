@@ -310,13 +310,55 @@ func (d *DB) Migrate(ctx context.Context) error {
 // the main DB and break the main-DB retention worker — but under RD-1147 the
 // main DB no longer even has access_logs, so this simply must not point at main).
 func (d *DB) MigrateAuditOnly(ctx context.Context, auditFS fs.FS) error {
-	return d.migrateFS(ctx, auditFS, "schema_version_audit")
+	return d.migrateFS(ctx, auditFS, "schema_version_audit", checkAccessLogsOwnership)
+}
+
+// accessLogsBigintVersion is audit migration 003, which widens access_logs.id
+// and needs ownership of the table and its sequence.
+const accessLogsBigintVersion = 3
+
+// checkAccessLogsOwnership turns the bare "must be owner of table
+// access_logs" failure of audit migration 003 into an error carrying the fix,
+// before tern attempts it. Privileges are not enough to ALTER a table: the
+// connected role must own access_logs and access_logs_id_seq or be a member
+// of their owner.
+func checkAccessLogsOwnership(ctx context.Context, conn *pgx.Conn, current int32) error {
+	if current >= accessLogsBigintVersion {
+		return nil
+	}
+	rows, err := conn.Query(ctx, `
+		SELECT c.oid::regclass::text, quote_ident(pg_get_userbyid(c.relowner)), quote_ident(current_user),
+		       pg_has_role(current_user, c.relowner, 'USAGE')
+		  FROM pg_class c
+		 WHERE c.oid IN (to_regclass('access_logs'), to_regclass('access_logs_id_seq'))`)
+	if err != nil {
+		return fmt.Errorf("failed to inspect access_logs ownership: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var object, owner, currentUser string
+		var canActAsOwner bool
+		if err := rows.Scan(&object, &owner, &currentUser, &canActAsOwner); err != nil {
+			return fmt.Errorf("failed to inspect access_logs ownership: %w", err)
+		}
+		if !canActAsOwner {
+			return fmt.Errorf(
+				"cannot apply audit migration 003 (access_logs.id to bigint): %[1]s is owned by %[2]s but "+
+					"this connection is %[3]s, and widening it needs ownership. Point AUDIT_ADMIN_DATABASE_URL at "+
+					"the owner, or, as a superuser in the audit database: ALTER TABLE access_logs OWNER TO %[3]s; "+
+					"(its sequence follows). REASSIGN OWNED BY %[2]s TO %[3]s; moves the whole audit schema instead, "+
+					"but also everything else %[2]s owns in that database and the databases it owns. "+
+					"The migration rewrites the table: on a large deployment run it in a maintenance window, "+
+					"instances stopped, with `migrate -audit` (make db-migrate-audit).", object, owner, currentUser)
+		}
+	}
+	return rows.Err()
 }
 
 // migrateFS runs the pending migrations in fsys, tracking applied versions in
 // the given tern version table. Kept private; callers use Migrate /
 // MigrateAuditOnly which pin the FS + version table together.
-func (d *DB) migrateFS(ctx context.Context, fsys fs.FS, versionTable string) error {
+func (d *DB) migrateFS(ctx context.Context, fsys fs.FS, versionTable string, preflight ...func(context.Context, *pgx.Conn, int32) error) error {
 	pgxConn, err := d.connectPgxUTC(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to connect for migrations: %w", err)
@@ -330,6 +372,19 @@ func (d *DB) migrateFS(ctx context.Context, fsys fs.FS, versionTable string) err
 
 	if err := migrator.LoadMigrations(fsys); err != nil {
 		return fmt.Errorf("failed to load migrations: %w", err)
+	}
+	if len(preflight) > 0 {
+		current, err := migrator.GetCurrentVersion(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read migration version: %w", err)
+		}
+		if int(current) < len(migrator.Migrations) {
+			for _, check := range preflight {
+				if err := check(ctx, pgxConn, current); err != nil {
+					return err
+				}
+			}
+		}
 	}
 
 	if err := migrator.Migrate(ctx); err != nil {
