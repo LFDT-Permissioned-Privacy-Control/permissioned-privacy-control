@@ -2016,10 +2016,28 @@ components:
         execution:
           $ref: '#/components/schemas/privacy-proxy_internal_nodepolicy.ExecutionOutcome'
         reconciled:
+          description: 'Reconciled: the status is final and OPS bookkeeping for it
+            is committed.'
           type: boolean
         reconciliation_note:
+          description: |-
+            ReconciliationNote: why renewal stopped (for example max_age,
+            principal_banned, compliance_denied, nonce_conflict), nonce_consumed for
+            dropped, or effects_not_applied.
           type: string
         status:
+          description: |-
+            Status: pending (waiting for inclusion; OPS keeps it deliverable),
+            provisional (in a block that is not final yet), renewal_stopped (OPS will
+            not renew it; it may still settle), included or reverted (in a finalized
+            block; final), dropped (a finalized transaction used its nonce; final).
+          enum:
+          - pending
+          - provisional
+          - renewal_stopped
+          - included
+          - reverted
+          - dropped
           type: string
         transaction_hash:
           type: string
@@ -15480,12 +15498,15 @@ paths:
       description: 'Status for a transaction submitted by this named principal, with
         current organization membership and KYC required. Shared signing addresses
         do not share status access. pending, provisional (included in a block that
-        is not final yet) and renewal_stopped (OPS no longer renews its identity;
-        reconciliation_note names why, e.g. max_age, principal_banned, compliance_denied,
-        nonce_conflict) are nonterminal: a provisional transaction can return to pending
-        after a reorganization, and a renewal_stopped one can still be included. included
-        and reverted (in a finalized block) and dropped (a finalized transaction used
-        its nonce; it can never execute) are final; reconciled means OPS bookkeeping
+        is not final yet) and renewal_stopped (OPS will not renew its identity, but
+        it may still settle; reconciliation_note names why, e.g. max_age, principal_banned,
+        compliance_denied, nonce_conflict) are nonterminal: a provisional transaction
+        can return to pending after a reorganization, and a renewal_stopped one can
+        still be included while its last identity is valid. Wait for a final status
+        rather than treating renewal_stopped as a failure. included and reverted (in
+        a finalized block) and dropped (reported only once a finalized block used
+        the transaction''s nonce and the transaction itself was never included; an
+        expired identity alone is never final) are final; reconciled means OPS bookkeeping
         for the final status is committed, and reconciliation_note effects_not_applied
         means a deployment or visibility effect was refused. Final statuses are kept
         for the configured retention (RETENTION_NODE_SUBMISSIONS), after which the
@@ -16184,8 +16205,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
-          description: concurrency limit, signed-approval simulation budget, or upstream
-            rate limit
+          description: concurrency limit, signed-approval simulation budget, upstream
+            rate limit, or in Reth policy mode the pending transactions of the caller,
+            or of the caller's organization, at their limit (retry after Retry-After
+            seconds, once some are included)
+          headers:
+            Retry-After:
+              description: seconds before the same request may succeed (set at the
+                per-principal or per-organization pending-work limit)
+              schema:
+                type: integer
         "500":
           content:
             application/json:
@@ -16204,12 +16233,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
           description: execution service unavailable; in Reth policy mode also when
-            the node has not yet applied the policy facts the request needs (retry
-            after Retry-After seconds)
+            the node has not yet applied the policy facts the request needs, or when
+            the deployment's pending transactions are at the pending-work limit (retry
+            after Retry-After seconds); a transaction already recorded is never refused
+            for the limit
           headers:
             Retry-After:
               description: seconds before the same request may succeed (set when publication
-                of policy facts is pending)
+                of policy facts is pending or the pending-work limit is reached)
               schema:
                 type: integer
       security:
@@ -16297,8 +16328,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
-          description: concurrency limit, signed-approval simulation budget, or upstream
-            rate limit
+          description: concurrency limit, signed-approval simulation budget, upstream
+            rate limit, or in Reth policy mode the pending transactions of the caller,
+            or of the caller's organization, at their limit (retry after Retry-After
+            seconds, once some are included)
+          headers:
+            Retry-After:
+              description: seconds before the same request may succeed (set at the
+                per-principal or per-organization pending-work limit)
+              schema:
+                type: integer
         "500":
           content:
             application/json:
@@ -16317,12 +16356,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
           description: execution service unavailable; in Reth policy mode also when
-            the node has not yet applied the policy facts the request needs (retry
-            after Retry-After seconds)
+            the node has not yet applied the policy facts the request needs, or when
+            the deployment's pending transactions are at the pending-work limit (retry
+            after Retry-After seconds); a transaction already recorded is never refused
+            for the limit
           headers:
             Retry-After:
               description: seconds before the same request may succeed (set when publication
-                of policy facts is pending)
+                of policy facts is pending or the pending-work limit is reached)
               schema:
                 type: integer
       security:

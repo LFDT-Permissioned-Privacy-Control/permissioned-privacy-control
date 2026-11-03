@@ -178,7 +178,7 @@ func (f *keeperFixture) admitAs(tx signedTransfer, principal, org uuid.UUID, cla
 		a.ClaimOwner, a.ClaimTTL = uuid.New(), claim
 		a.ClaimBoot, _ = uuid.Parse(f.mock.BootID())
 	}
-	results, err := f.tracking.runtime.AdmitBatch(context.Background(), f.writer.incarnation(), 0, []db.TrackAdmission{a})
+	results, err := f.tracking.runtime.AdmitBatch(context.Background(), f.writer.incarnation(), db.TrackLimits{}, []db.TrackAdmission{a})
 	if err != nil || results[0].Outcome != want {
 		f.t.Fatalf("admit: %+v %v", results, err)
 	}
@@ -289,14 +289,25 @@ func TestIntentSavedButNeverSentIsDelivered(t *testing.T) {
 // clock as its floor, audited with reason node_restarted — and included with
 // no client action; a principal revoked meanwhile is not renewed, stops with
 // the reason (not final), and never executes (L8).
+//
+// With the batched status call (final A3 wire), the restarted node answers
+// null entries for the hashes it no longer holds: no evidence, re-polled,
+// never a transition.
 func TestRecoveryRenewsAtCurrentClockAfterRevocation(t *testing.T) {
-	for _, crash := range []bool{false, true} {
+	for _, variant := range []struct {
+		crash, batched bool
+	}{{false, false}, {true, false}, {false, true}, {true, true}} {
+		crash := variant.crash
 		name := "graceful"
 		if crash {
 			name = "crash"
 		}
+		if variant.batched {
+			name += "_batched"
+		}
 		t.Run(name, func(t *testing.T) {
 			f := newKeeperFixture(t, time.Hour)
+			f.batched.Store(variant.batched)
 			org := uuid.New()
 			kept, revoked := uuid.New(), uuid.New()
 			txKept, txRevoked := newSignedTransfer(t, 0), newSignedTransfer(t, 0)
@@ -377,8 +388,66 @@ func TestMaxAgeStopsRenewalButNotOutcomeDiscovery(t *testing.T) {
 // nonce a finalized competitor consumed, with no own receipt, at the
 // finalized block the node reported; lease expiry alone never drops, and the
 // binding is kept until then.
+//
+// The evidence comes from the private node's batched status call when it
+// offers it (final A3 wire: receipts and the sender's nonce at the node's own
+// finalized block, no public RPC), else from the public RPC.
 func TestFinalDroppedRequiresFinalizedNonceEvidence(t *testing.T) {
+	for _, fromNode := range []bool{false, true} {
+		name := "public_rpc"
+		if fromNode {
+			name = "node_evidence"
+		}
+		t.Run(name, func(t *testing.T) { finalDroppedRequiresEvidence(t, fromNode) })
+	}
+	// A null receipt (a failed lookup on the node) or a null entry is no
+	// evidence: never dropped, however often it is read.
+	t.Run("null_receipts_are_no_evidence", func(t *testing.T) {
+		f := newKeeperFixture(t, 0)
+		f.batched.Store(true)
+		f.k.chain = nil
+		f.r.node = nullReceipts{f.client}
+		key, _ := crypto.GenerateKey()
+		ours := signTransfer(t, key, 0)
+		f.admit(ours, uuid.New(), uuid.New(), 0)
+		f.tick()
+		f.mock.Evict(ours.hash)
+		if _, err := f.tracking.runtime.ApplyTransitions(context.Background(), f.writer.incarnation(), []db.TrackTransition{{Hash: hashBytes(t, ours.hash), From: db.TrackPending, To: db.TrackRenewalStopped, Reason: db.TrackReasonPrincipalBanned}}); err != nil {
+			t.Fatal(err)
+		}
+		f.r.rows = nil
+		competitor := signTransferValue(t, key, 0, 2)
+		f.admit(competitor, uuid.New(), uuid.New(), 0)
+		f.tick()
+		f.mock.ProduceBlock()
+		f.mock.ProduceBlock()
+		for i := 0; i < 4; i++ {
+			f.skew.Add(int64(time.Minute))
+			f.tick()
+		}
+		if row := f.row(ours); row.State != db.TrackRenewalStopped {
+			t.Fatalf("dropped without a receipt answer: %+v", row)
+		}
+	})
+}
+
+// nullReceipts is a node whose receipt lookups all fail (receipts null).
+type nullReceipts struct{ *nodepolicy.Client }
+
+func (n nullReceipts) TransactionEvidence(ctx context.Context, hashes, senders []string) (nodepolicy.TransactionStatusBatch, error) {
+	batch, err := n.Client.TransactionEvidence(ctx, hashes, senders)
+	for i := range batch.Receipts {
+		batch.Receipts[i] = nil
+	}
+	return batch, err
+}
+
+func finalDroppedRequiresEvidence(t *testing.T, fromNode bool) {
 	f := newKeeperFixture(t, 0)
+	if fromNode {
+		f.batched.Store(true)
+		f.k.chain = nil // no public RPC at all
+	}
 	key, _ := crypto.GenerateKey()
 	principal, org := uuid.New(), uuid.New()
 	ours := signTransfer(t, key, 0)
@@ -427,8 +496,18 @@ func TestFinalDroppedRequiresFinalizedNonceEvidence(t *testing.T) {
 	if err != nil || got.State != db.TrackDropped || got.Reason != db.TrackReasonNonceConsumed {
 		t.Fatalf("dropped on finalized evidence: %+v %v", got, err)
 	}
-	if dropped := f.events("ops.system.dropped"); len(dropped) != 1 {
+	dropped := f.events("ops.system.dropped")
+	if len(dropped) != 1 {
 		t.Fatalf("dropped not audited: %+v", dropped)
+	}
+	source := `"evidence":"public_rpc"`
+	if fromNode {
+		source = `"evidence":"private_node"`
+	}
+	for _, want := range []string{source, `"sender_finalized_nonce":1`, `"nonce":0`, `"finalized_block_hash":"0x`, `"evidence_first_seen":`} {
+		if !strings.Contains(string(dropped[0].Params), want) {
+			t.Fatalf("dropped audit event lacks its evidence %s: %s", want, dropped[0].Params)
+		}
 	}
 }
 
@@ -761,5 +840,141 @@ func TestFlappingBootIDNeverRenews(t *testing.T) {
 	}
 	if f.node.deliveries(tx.hash) != 1 {
 		t.Fatalf("a flapping boot id renewed: %d deliveries", f.node.deliveries(tx.hash))
+	}
+}
+
+// setLease moves a binding's lease (and optionally its age) on the database
+// clock.
+func (f *keeperFixture) setLease(tx signedTransfer, remaining, age time.Duration) {
+	f.t.Helper()
+	if _, err := f.tracking.runtime.Conn().Exec(`UPDATE node_tx_binding SET expires_at = date_trunc('second', clock_timestamp()) + make_interval(secs => $2), created_at = clock_timestamp() - make_interval(secs => $3) WHERE tx_hash = $1`,
+		hashBytes(f.t, tx.hash), remaining.Seconds(), age.Seconds()); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// G17 (plan §4.8.2): a delivered pending transaction is renewed only once its
+// lease is inside the renewal window (at most TTL/2 left), never earlier; a
+// provisional or final row is never renewed; and near the maximum age, where a
+// renewal could not extend the lease, the keeper waits for the stop instead of
+// re-authorizing for nothing.
+func TestRenewalOnlyInsideWindowAndNeverForProvisionalRows(t *testing.T) {
+	f := newKeeperFixture(t, time.Hour)
+	outside, inside, provisional, capped := newSignedTransfer(t, 0), newSignedTransfer(t, 0), newSignedTransfer(t, 0), newSignedTransfer(t, 0)
+	f.admit(provisional, uuid.New(), uuid.New(), 0)
+	f.tick()              // delivered (undelivered trigger)
+	f.mock.ProduceBlock() // included at the node…
+	f.tick()              // …provisional at OPS (finality an hour away)
+	if got := f.row(provisional); got.State != db.TrackProvisional {
+		t.Fatalf("not provisional: %+v", got)
+	}
+	for _, tx := range []signedTransfer{outside, inside, capped} {
+		f.admit(tx, uuid.New(), uuid.New(), 0)
+	}
+	f.tick() // delivered, still pending (no block)
+	f.flushAcks()
+	f.setLease(outside, 160*time.Second, time.Minute) // window opens at 150 s left
+	f.setLease(inside, 140*time.Second, time.Minute)  // inside the window
+	f.setLease(provisional, 20*time.Second, time.Minute)
+	// Nine and a half minutes old, lease capped at the maximum age: a renewal
+	// would end at the same instant.
+	f.setLease(capped, 30*time.Second, 570*time.Second)
+	f.r.rows = nil
+	f.tick()
+	f.tick()
+	renewals := f.events("ops.system.identity_renewal")
+	if len(renewals) != 1 || !strings.Contains(string(renewals[0].Params), strings.TrimPrefix(inside.hash, "0x")) {
+		t.Fatalf("renewals %d: want exactly the transaction inside the window", len(renewals))
+	}
+	if got := f.row(inside); got.Generation != 3 || time.Until(got.ExpiresAt) < 4*time.Minute {
+		t.Fatalf("renewed lease: %+v", got)
+	}
+	for _, tx := range []signedTransfer{outside, provisional, capped} {
+		if got := f.row(tx); got.Generation != 2 {
+			t.Fatalf("renewed outside the window, provisional or without gain: %s %+v", tx.hash, got)
+		}
+	}
+	// The capped one stops at the maximum age (the keeper waits for it).
+	f.setLease(capped, 0, 601*time.Second)
+	f.r.rows = nil
+	f.tick()
+	if got := f.row(capped); got.State != db.TrackRenewalStopped || got.Reason != db.TrackReasonMaxAge {
+		t.Fatalf("capped lease at the maximum age: %+v", got)
+	}
+}
+
+// G25 (plan §4.8.2, §4.8.7): renewals are spent within the budget, earliest
+// expiry first; the rest wait for the next tick and none is lost.
+func TestRenewalBudgetEarliestExpiryFirst(t *testing.T) {
+	f := newKeeperFixture(t, time.Hour)
+	f.k.budget = 2
+	var txs []signedTransfer
+	for i := 0; i < 6; i++ {
+		tx := newSignedTransfer(t, 0)
+		f.admit(tx, uuid.New(), uuid.New(), 0)
+		txs = append(txs, tx)
+	}
+	// Delivery of six undelivered rows is itself budgeted: 2 now, then 4/tick.
+	for i := 0; i < 4 && f.mock.Stats().Pooled < 6; i++ {
+		f.tick()
+	}
+	if f.mock.Stats().Pooled != 6 {
+		t.Fatalf("undelivered rows not all delivered within the budget: %d", f.mock.Stats().Pooled)
+	}
+	f.flushAcks()
+	before := len(f.events("ops.system.identity_renewal"))
+	// Remaining leases 140 s, 130 s, …, 90 s: all inside the window.
+	for i, tx := range txs {
+		f.setLease(tx, time.Duration(140-10*i)*time.Second, time.Minute)
+	}
+	f.r.rows = nil
+	f.k.tokens, f.k.tokensAt = 0, time.Time{} // a new term: one second's worth
+	f.tick()
+	first := f.events("ops.system.identity_renewal")[before:]
+	if len(first) > 2*f.k.budget || len(first) == 0 {
+		t.Fatalf("first tick renewed %d, budget %d/s over two seconds", len(first), f.k.budget)
+	}
+	// Earliest expiry first: the renewed ones are the latest-indexed (shortest leases).
+	for _, e := range first {
+		renewedLate := false
+		for _, tx := range txs[6-len(first):] {
+			renewedLate = renewedLate || strings.Contains(string(e.Params), strings.TrimPrefix(tx.hash, "0x"))
+		}
+		if !renewedLate {
+			t.Fatalf("renewed out of expiry order: %s", e.Params)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		f.tick()
+	}
+	if got := len(f.events("ops.system.identity_renewal")) - before; got != 6 {
+		t.Fatalf("renewals deferred by the budget were lost or repeated: %d of 6", got)
+	}
+}
+
+// The renewal budget holds its rate over slow ticks (a five-second tick
+// accrues five seconds' worth) and an idle keeper banks at most its burst.
+func TestRenewalBudgetAccrual(t *testing.T) {
+	k := &nodeKeeper{budget: 10}
+	at := time.Unix(1000, 0)
+	k.refill(at)
+	if got := k.spend(100); got != 10 {
+		t.Fatalf("a new term starts with one second's worth: %d", got)
+	}
+	at = at.Add(5 * time.Second)
+	k.refill(at)
+	if got := k.spend(100); got != 50 {
+		t.Fatalf("a five-second tick: %d renewals, want 50", got)
+	}
+	for i := 0; i < 30; i++ {
+		at = at.Add(time.Second)
+		k.refill(at)
+	}
+	if got := k.spend(1000); got != 20 {
+		t.Fatalf("idle for 30 one-second ticks banked %d, want the 2 s burst (20)", got)
+	}
+	k.refund(3)
+	if got := k.spend(1000); got != 3 {
+		t.Fatalf("refunded renewals: %d", got)
 	}
 }

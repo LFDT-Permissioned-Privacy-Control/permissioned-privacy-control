@@ -290,10 +290,21 @@ sequenceDiagram
   acknowledged by the node's current boot and no unexpired delivery claim for
   that boot holds it (an OPS crash between recording and sending, a failed
   send, a node restart), when the node's pool no longer holds it while its
-  identity is still registered (same-boot eviction), or when its lease is
-  within a quarter of the transaction identity lifetime of expiring. A reorg
-  back to pending keeps the delivery record of the boot that observed the
-  inclusion: that node process holds the identity until finality.
+  identity is still registered (same-boot eviction), or when its lease has at
+  most half of the transaction identity lifetime left and a renewal would
+  extend it (congestion). A reorg back to pending keeps the delivery record of
+  the boot that observed the inclusion: that node process holds the identity
+  until finality.
+- **Budget and limits.** Renewals of every trigger are spent within the
+  renewal budget, earliest expiry first; re-checks start only in the first two
+  seconds of a tick, each bounded on its own, so a slow checker defers
+  renewals instead of stalling reconciliation. Admission keeps the pending
+  work within what the budget can renew in time: a global limit (budget ×
+  lifetime / 4 minus a reorg's worth of blocks) and per-principal and
+  per-organization limits, all counted per state transition in the tracking
+  database (`pending_quota`, `pending_quota_principal`, `pending_quota_org`)
+  in the batch that changes the binding. Retries of a recorded transaction and reorgs back to pending are
+  never refused.
 - **Delivery claims and acknowledgements.** Recording an intent claims the row
   for the delivering instance and node boot for 20 seconds; the keeper honours
   any claim for the current boot, its own included, and a claim is void once
@@ -307,15 +318,19 @@ sequenceDiagram
   before the identity is sent. A failed send of a recorded generation is
   retried unchanged while the node keeps its boot.
 - **Final failure.** `dropped` is written only for a stopped binding whose
-  signer's nonce at the node-reported finalized block (read by that block's
-  hash, with the receipts, in one request) has passed its own nonce with no own
-  receipt, confirmed by a definitive private status answer, on two reads at
-  least 30 seconds apart. Lease expiry alone never
+  signer's nonce at the finalized block has passed its own nonce with no own
+  receipt, on two reads at least 30 seconds apart. A node with
+  `transaction_statuses_v1` answers both in the batched status call, at its own
+  finalized block; otherwise OPS reads them from the public RPC by the
+  node-reported finalized block's hash and confirms with a definitive private
+  status answer. A lookup the node could not answer is never evidence. Lease expiry alone never
   makes a transaction final, and a finalized own receipt beats a stop.
 - **Option A reconciliation.** Where the node advertises
   `transaction_statuses_v1`, the reconciler polls up to 256 transactions per
-  call; a change of the node's canonical epoch re-polls every provisional row.
-  Otherwise it polls one transaction per call, as before.
+  call and up to 16,384 per tick; a change of the node's canonical epoch
+  re-polls every provisional row, and an entry the node could not answer is
+  polled again. Otherwise it polls one transaction per call, up to 4,096 per
+  tick.
 
 ## What happens for an RPC call
 
@@ -408,7 +423,7 @@ flowchart TB
         Payload["node_tx_payload: raw transaction, insert-once,<br/>dropped by time bucket"]
         Status["node_tx_status: final status, daily partitions,<br/>dropped after RETENTION_NODE_SUBMISSIONS"]
         History["node_tx_identities: later generations, stops"]
-        Quota["pending_quota, tracking_meta (network, incarnation)"]
+        Quota["pending_quota (global, per principal, per organization), tracking_meta (network, incarnation)"]
     end
     subgraph AuditDB["Audit PostgreSQL, append-only"]
         AccessLogs["access_logs, hash-chained: requests and<br/>system decisions such as finalization"]

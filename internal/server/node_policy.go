@@ -563,10 +563,19 @@ func (b *nodeExecutionBridge) SubmitTransaction(ctx context.Context, identity []
 		return nodepolicy.Submission{}, nodepolicy.ErrNodeUnavailable
 	case db.AdmitOverLimit:
 		return nodepolicy.Submission{}, errPendingLimit
+	case db.AdmitPrincipalOverLimit:
+		return nodepolicy.Submission{}, errPrincipalPendingLimit
+	case db.AdmitOrgOverLimit:
+		return nodepolicy.Submission{}, errOrgPendingLimit
 	case db.AdmitFinal:
 		// Already final for this principal: the transaction has executed;
 		// answer as accepted without sending it again.
 		return nodepolicy.Submission{TransactionHash: i.BindingHash, ContextID: i.ContextID, Status: "accepted"}, nil
+	case db.AdmitInserted, db.AdmitResubmitted, db.AdmitRevived, db.AdmitKept:
+		// Recorded (or covered by the recorded envelope): send it.
+	default:
+		// Fail closed: nothing that was not recorded is ever sent.
+		return nodepolicy.Submission{}, nodepolicy.ErrNodeUnavailable
 	}
 	submitted, err := b.node.SubmitTransaction(ctx, identity, raw)
 	if err != nil {
@@ -650,6 +659,14 @@ func (b *nodeExecutionBridge) Network() nodepolicy.Network { return b.network }
 
 // errPendingLimit: the global pending-work limit is reached (plan §4.8.2).
 var errPendingLimit = errors.New("pending execution work limit reached")
+
+// errPrincipalPendingLimit: the submitting principal's own pending-work limit
+// is reached (plan §4.8.2, B4).
+var errPrincipalPendingLimit = errors.New("principal pending execution work limit reached")
+
+// errOrgPendingLimit: the organization's pending-work limit is reached (all
+// of its principals together, plan §4.8.2, B4).
+var errOrgPendingLimit = errors.New("organization pending execution work limit reached")
 
 // trackingAdmission is the tracking-database row of a signed transaction
 // identity. The envelope is stored by hash only.
@@ -765,6 +782,10 @@ func nodeErrorClass(err error) string {
 		return "facts_pending"
 	case errors.Is(err, errPendingLimit):
 		return "pending_limit"
+	case errors.Is(err, errPrincipalPendingLimit):
+		return "principal_pending_limit"
+	case errors.Is(err, errOrgPendingLimit):
+		return "org_pending_limit"
 	case errors.Is(err, nodepolicy.ErrFeedConflict):
 		return "feed_conflict"
 	case errors.Is(err, nodepolicy.ErrIdentity):
@@ -829,6 +850,12 @@ func (s *Server) initNodePolicy() error {
 		return err
 	}
 	txTTL, maxAge := c.TransactionLease()
+	renewal, err := c.RenewalPlan()
+	if err != nil {
+		return err
+	}
+	slog.Info("node policy lease keeper", "transaction_identity_ttl", renewal.TTL, "renewal_window_opens", renewal.WindowOpens, "renewal_margin", renewal.Margin, "max_age", renewal.MaxAge,
+		"renewal_budget_per_s", renewal.Budget, "renewable_limit", renewal.RenewLimit, "reorg_headroom", renewal.ReorgHeadroom, "pending_limit", renewal.AdmitLimit, "principal_pending_limit", renewal.PrincipalLimit, "org_pending_limit", renewal.OrgLimit)
 	s.tracking.payloadKeep = nodeTxPayloadKeepFor(maxAge)
 	client, err := newNodePolicyClient(c, network)
 	if err != nil {
@@ -855,6 +882,7 @@ func (s *Server) initNodePolicy() error {
 		return fmt.Errorf("node policy: %w", err)
 	}
 	tracking := newNodeTracking(s.tracking.runtime, s.tracking.meta.Incarnation, s.tracking.adopt(network))
+	tracking.limits = db.TrackLimits{Global: renewal.AdmitLimit, Principal: renewal.PrincipalLimit, Org: renewal.OrgLimit}
 	bridge.tracking = tracking
 	if s.retentionCleaner != nil {
 		s.retentionCleaner.AttachTracking(trackingRetention{admin: s.tracking.admin, main: s.db, network: network, keep: s.tracking.keep()}, s.config.RetentionNodeSubmissions)
@@ -919,7 +947,7 @@ func (s *Server) initNodePolicy() error {
 				o := bridge.cache.load()
 				return o != nil && o.err == nil && o.status.HasCapability(nodepolicy.CapabilityTransactionStatuses)
 			}
-			reconciler.keeper = &nodeKeeper{node: client, chain: chain, checker: rechecker, clock: s.db, signer: signer, network: network, ttl: txTTL, maxAge: maxAge, boot: bridge.observedBoot, now: time.Now}
+			reconciler.keeper = &nodeKeeper{node: client, chain: chain, checker: rechecker, clock: s.db, signer: signer, network: network, ttl: txTTL, maxAge: maxAge, budget: renewal.Budget, boot: bridge.observedBoot, now: time.Now}
 			go func() { defer close(reconcilerDone); runNodeReconciler(term, reconciler) }()
 			_ = publisher.Run(term, c.PublishInterval, report)
 			<-reconcilerDone

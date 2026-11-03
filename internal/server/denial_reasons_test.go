@@ -26,6 +26,9 @@ func TestWireReason_ClosedAllowlist(t *testing.T) {
 		ReasonRateLimited,
 		ReasonConcurrencyLimited,
 		ReasonUpstreamError,
+		ReasonPendingLimit,          // the deployment's pending work is full (the 503 says so anyway)
+		ReasonPrincipalPendingLimit, // the caller's own pending work is at its cap
+		ReasonOrgPendingLimit,       // the caller's organization's pending work is at its cap
 	}
 	// Must collapse: oracle-sensitive (cross-org reachability / existence) or
 	// not-yet-reviewed-for-exposure.

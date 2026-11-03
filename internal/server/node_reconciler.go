@@ -50,16 +50,27 @@ type systemAuditBuffer interface {
 const (
 	reconcileTick        = time.Second
 	reconcilePollWorkers = 16
-	reconcileMaxPolls    = 4096 // per tick
-	reconcileStatusWait  = 5 * time.Second
-	reconcileMaxBackoff  = 15 * time.Second
-	reconcileScanPage    = 1000
+	reconcileMaxPolls    = 4096 // per tick, one status call per transaction
+	// reconcileMaxBatchedPolls bounds a tick's polls with the batched status
+	// call (MaxStatusBatch per call, reconcileBatchCalls at once): above the
+	// pending work of the expected rate, so the pending-work limit is not
+	// reached merely because inclusions are observed late.
+	reconcileMaxBatchedPolls = 16384
+	reconcileStatusWait      = 5 * time.Second
+	reconcileMaxBackoff      = 15 * time.Second
+	reconcileScanPage        = 1000
 	// reconcileSettle: a row still pending this long after admission is
 	// polled with a growing interval (up to reconcileMaxBackoff).
 	reconcileSettle = 30 * time.Second
 	// reconcileRefreshAfter consecutive failures re-read the binding (a row
-	// released or rebound meanwhile leaves or is replaced in the schedule).
+	// released or rebound meanwhile leaves or is replaced in the schedule),
+	// at most reconcileMaxRefreshes per tick (a node outage fails every row).
 	reconcileRefreshAfter = 3
+	reconcileMaxRefreshes = 256
+	// reconcilePollDeadline: batched status calls are started only this long
+	// into a tick; rows not polled stay due for the next one, so a slow node
+	// never holds the keeper and the transitions up for long.
+	reconcilePollDeadline = 2 * time.Second
 )
 
 // systemEventNamespace derives deterministic correlation ids of system
@@ -223,7 +234,7 @@ type observation struct {
 // due reports whether a row is polled this tick. Provisional rows are polled
 // only once a finalized head at or above their block was seen, plus the
 // lowest one each tick to learn the head (finality-driven, G62).
-func (r *nodeReconciler) due(now time.Time) []*trackedRow {
+func (r *nodeReconciler) due(now time.Time, limit int) []*trackedRow {
 	var out []*trackedRow
 	var lowest *trackedRow
 	for _, t := range r.rows {
@@ -237,7 +248,7 @@ func (r *nodeReconciler) due(now time.Time) []*trackedRow {
 			continue
 		}
 		out = append(out, t)
-		if len(out) >= reconcileMaxPolls-1 { // one slot stays for the head probe
+		if len(out) >= limit-1 { // one slot stays for the head probe
 			break
 		}
 	}
@@ -248,8 +259,14 @@ func (r *nodeReconciler) due(now time.Time) []*trackedRow {
 }
 
 func (r *nodeReconciler) poll(ctx context.Context) []observation {
-	rows := r.due(r.now())
-	if client, ok := r.node.(batchedOutcomeClient); ok && r.batched != nil && r.batched() && len(rows) > 0 {
+	client, batched := r.node.(batchedOutcomeClient)
+	batched = batched && r.batched != nil && r.batched()
+	limit := reconcileMaxPolls
+	if batched {
+		limit = reconcileMaxBatchedPolls
+	}
+	rows := r.due(r.now(), limit)
+	if batched && len(rows) > 0 {
 		return r.pollBatched(ctx, client, rows)
 	}
 	out := make([]observation, len(rows))
@@ -299,9 +316,16 @@ func (r *nodeReconciler) pollBatched(ctx context.Context, client batchedOutcomeC
 		boot  string
 	}
 	var epochs []epochSeen
+	deadline := time.Now().Add(reconcilePollDeadline)
+	polled := len(rows)
 	for start := 0; start < len(rows); start += nodepolicy.MaxStatusBatch {
 		chunk := rows[start:min(start+nodepolicy.MaxStatusBatch, len(rows))]
 		slots <- struct{}{}
+		if time.Now().After(deadline) {
+			<-slots
+			polled = start // the rest stay due for the next tick
+			break
+		}
 		wg.Add(1)
 		go func(start int, chunk []*trackedRow) {
 			defer wg.Done()
@@ -353,7 +377,7 @@ func (r *nodeReconciler) pollBatched(ctx context.Context, client batchedOutcomeC
 		}
 		r.canonical, r.canonicalBoot, r.canonicalSeen = seen.epoch, seen.boot, true
 	}
-	return out
+	return out[:polled]
 }
 
 // apply turns one tick's observations into batched writes: provisional and
@@ -366,13 +390,15 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 	var finals []*observation
 	var failures []error
 	var evictChecks []*trackedRow
+	refreshes := 0
 	for i := range observations {
 		o := &observations[i]
 		t := o.tracked
 		if o.err != nil {
 			r.delay(t, now)
 			failures = append(failures, o.err)
-			if t.failures%reconcileRefreshAfter == 0 {
+			if t.failures%reconcileRefreshAfter == 0 && refreshes < reconcileMaxRefreshes {
+				refreshes++
 				r.refresh(ctx, t)
 			}
 			continue

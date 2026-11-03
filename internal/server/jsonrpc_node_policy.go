@@ -337,6 +337,20 @@ func (p *JSONRPCProcessor) nodeExecutionFailure(ctx context.Context, req *Proces
 		result.Error.RetryAfter = 1
 		return result
 	}
+	if errors.Is(err, errPrincipalPendingLimit) {
+		// This principal's own pending work is at its cap; others are still
+		// admitted. Retryable once some of its transactions are included.
+		result := p.nodeExecutionError(ctx, req, http.StatusTooManyRequests, "too many pending transactions for this principal; retry once some are included", ReasonPrincipalPendingLimit)
+		result.Error.RetryAfter = 1
+		return result
+	}
+	if errors.Is(err, errOrgPendingLimit) {
+		// The organization's pending work (all its principals) is at its cap;
+		// other organizations are still admitted.
+		result := p.nodeExecutionError(ctx, req, http.StatusTooManyRequests, "too many pending transactions for this organization; retry once some are included", ReasonOrgPendingLimit)
+		result.Error.RetryAfter = 1
+		return result
+	}
 	if errors.Is(err, nodepolicy.ErrNodeRejected) {
 		return p.nodeExecutionError(ctx, req, http.StatusForbidden, "request rejected by execution node", ReasonNodeRejected)
 	}

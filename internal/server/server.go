@@ -1453,11 +1453,12 @@ const MaxRequestBodySize = 1 << 20 // 1MB
 // @Failure      403 {object} apimodels.APIError "runtime-trace, standard-profile trace-access (debug_traceTransaction for a non-participant or a missing transaction) or compliance denial"
 // @Failure      404 {object} apimodels.APIError "method not allowed for the caller (denials are masked as method not found), or a strict-profile mined trace unavailable to the caller"
 // @Failure      413 {object} apimodels.APIError "request body too large"
-// @Failure      429 {object} apimodels.APIError "concurrency limit, signed-approval simulation budget, or upstream rate limit"
+// @Failure      429 {object} apimodels.APIError "concurrency limit, signed-approval simulation budget, upstream rate limit, or in Reth policy mode the pending transactions of the caller, or of the caller's organization, at their limit (retry after Retry-After seconds, once some are included)"
 // @Failure      500 {object} apimodels.APIError "trace-validation or compliance-check error"
 // @Failure      502 {object} apimodels.APIError "failed to forward to the upstream node"
-// @Failure      503 {object} apimodels.APIError "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs (retry after Retry-After seconds)"
-// @Header       503 {integer} Retry-After "seconds before the same request may succeed (set when publication of policy facts is pending)"
+// @Failure      503 {object} apimodels.APIError "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, or when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds); a transaction already recorded is never refused for the limit"
+// @Header       503 {integer} Retry-After "seconds before the same request may succeed (set when publication of policy facts is pending or the pending-work limit is reached)"
+// @Header       429 {integer} Retry-After "seconds before the same request may succeed (set at the per-principal or per-organization pending-work limit)"
 // @Security     BearerAuth
 // @Router       /rpc [post]
 // @Router       /rpc/{org_id} [post]

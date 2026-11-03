@@ -38,7 +38,7 @@ func newTrackingFixture(t *testing.T) *trackingFixture {
 // reset empties every tracking table between subtests.
 func (f *trackingFixture) reset() {
 	f.t.Helper()
-	_, err := f.exec.pool.conn.Exec(`TRUNCATE node_tx_binding, node_tx_payload, node_tx_status, node_tx_identities; UPDATE pending_quota SET used = 0`)
+	_, err := f.exec.pool.conn.Exec(`TRUNCATE node_tx_binding, node_tx_payload, node_tx_status, node_tx_identities, pending_quota_principal, pending_quota_org; UPDATE pending_quota SET used = 0`)
 	require.NoError(f.t, err)
 }
 
@@ -67,7 +67,7 @@ func (p principal) admit(hash []byte) TrackAdmission { return admission(hash, p.
 
 func (f *trackingFixture) admitOne(limit int64, a TrackAdmission) AdmitResult {
 	f.t.Helper()
-	results, err := f.exec.AdmitBatch(context.Background(), f.inc, limit, []TrackAdmission{a})
+	results, err := f.exec.AdmitBatch(context.Background(), f.inc, TrackLimits{Global: limit}, []TrackAdmission{a})
 	require.NoError(f.t, err)
 	return results[0]
 }
@@ -131,7 +131,7 @@ func TestPendingQuotaIsAtomicAcrossInstances(t *testing.T) {
 			go func(i int) {
 				defer wg.Done()
 				batch := []TrackAdmission{p.admit(randomBytes(32)), p.admit(randomBytes(32))}
-				results, err := pools[i%2].AdmitBatch(ctx, f.inc, limit, batch)
+				results, err := pools[i%2].AdmitBatch(ctx, f.inc, TrackLimits{Global: limit}, batch)
 				if err != nil {
 					t.Error(err)
 					return
@@ -246,7 +246,7 @@ func TestPendingQuotaIsAtomicAcrossInstances(t *testing.T) {
 		// A rolled-back batch (crash before commit) changes nothing.
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
-		_, err := f.exec.AdmitBatch(cancelled, f.inc, 0, []TrackAdmission{p.admit(randomBytes(32))})
+		_, err := f.exec.AdmitBatch(cancelled, f.inc, TrackLimits{}, []TrackAdmission{p.admit(randomBytes(32))})
 		require.Error(t, err)
 		require.EqualValues(t, 1, f.quotaConsistent())
 		// Transitions and finals retried after a lost acknowledgement are no-ops.
@@ -318,7 +318,7 @@ func TestBatchedIntentInsertDedupesConflictsWithinBatch(t *testing.T) {
 	p, q := newPrincipal(), newPrincipal()
 	h, other := randomBytes(32), randomBytes(32)
 	batch := []TrackAdmission{p.admit(h), q.admit(h), p.admit(h), p.admit(other)}
-	results, err := f.exec.AdmitBatch(context.Background(), f.inc, 0, batch)
+	results, err := f.exec.AdmitBatch(context.Background(), f.inc, TrackLimits{}, batch)
 	require.NoError(t, err)
 	require.Equal(t, AdmitInserted, results[0].Outcome)
 	require.Equal(t, AdmitConflict, results[1].Outcome)
@@ -383,7 +383,7 @@ func TestTombstoneRefusesOtherPrincipalUntilFinalizedNonce(t *testing.T) {
 		require.NoError(t, err)
 		done := make(chan AdmitResult, 1)
 		go func() {
-			r, err := f.exec.AdmitBatch(ctx, f.inc, 0, []TrackAdmission{p2.admit(h)})
+			r, err := f.exec.AdmitBatch(ctx, f.inc, TrackLimits{}, []TrackAdmission{p2.admit(h)})
 			if err != nil {
 				t.Error(err)
 				close(done)
@@ -525,7 +525,7 @@ func TestTrackingLifecycleRowMutations(t *testing.T) {
 			batch[i] = p.admit(hashes[i])
 		}
 		start := count()
-		_, err := f.exec.AdmitBatch(ctx, f.inc, 0, batch)
+		_, err := f.exec.AdmitBatch(ctx, f.inc, TrackLimits{}, batch)
 		require.NoError(t, err)
 		block := uint64(9)
 		acks := make([]TrackAck, n)
@@ -653,7 +653,7 @@ func TestIncarnationFencesOutstandingWorkAcrossRecreation(t *testing.T) {
 	exec, _, meta := openTracking(t, f.execURL, trackingTestNetwork)
 	require.NotEqual(t, old, meta.Incarnation)
 	block := uint64(3)
-	_, err = exec.AdmitBatch(ctx, old, 0, []TrackAdmission{p.admit(randomBytes(32))})
+	_, err = exec.AdmitBatch(ctx, old, TrackLimits{}, []TrackAdmission{p.admit(randomBytes(32))})
 	require.ErrorIs(t, err, ErrTrackingIncarnation)
 	_, err = exec.ApplyTransitions(ctx, old, []TrackTransition{{Hash: h, From: TrackPending, To: TrackProvisional, BlockNumber: &block}})
 	require.ErrorIs(t, err, ErrTrackingIncarnation)
@@ -664,7 +664,7 @@ func TestIncarnationFencesOutstandingWorkAcrossRecreation(t *testing.T) {
 	_, err = exec.ReleaseUndelivered(ctx, old, h, uuid.New())
 	require.ErrorIs(t, err, ErrTrackingIncarnation)
 	// Fresh work under the new incarnation proceeds.
-	results, err := exec.AdmitBatch(ctx, meta.Incarnation, 0, []TrackAdmission{p.admit(h)})
+	results, err := exec.AdmitBatch(ctx, meta.Incarnation, TrackLimits{}, []TrackAdmission{p.admit(h)})
 	require.NoError(t, err)
 	require.Equal(t, AdmitInserted, results[0].Outcome)
 	_, err = exec.LookupTracked(ctx, h)
@@ -699,12 +699,12 @@ func TestInflightUpdatesAreHOT(t *testing.T) {
 				hashes[i+k] = randomBytes(32)
 				admissions[k] = p.admit(hashes[i+k])
 			}
-			_, err := f.exec.AdmitBatch(ctx, f.inc, 0, admissions)
+			_, err := f.exec.AdmitBatch(ctx, f.inc, TrackLimits{}, admissions)
 			require.NoError(t, err)
 		}
 		// 1% resubmissions (a second, separate update of those rows).
 		for i := 0; i < perBlock; i += 100 {
-			_, err := f.exec.AdmitBatch(ctx, f.inc, 0, []TrackAdmission{p.admit(hashes[i])})
+			_, err := f.exec.AdmitBatch(ctx, f.inc, TrackLimits{}, []TrackAdmission{p.admit(hashes[i])})
 			require.NoError(t, err)
 		}
 		transitions := make([]TrackTransition, perBlock)
@@ -836,7 +836,7 @@ func TestAdmissionRefusalsAreIndividual(t *testing.T) {
 	bad := p.admit(randomBytes(32))
 	bad.Nonce = 1 << 63
 	good := p.admit(randomBytes(32))
-	results, err := f.exec.AdmitBatch(context.Background(), f.inc, 0, []TrackAdmission{bad, good})
+	results, err := f.exec.AdmitBatch(context.Background(), f.inc, TrackLimits{}, []TrackAdmission{bad, good})
 	require.NoError(t, err)
 	require.Equal(t, AdmitInvalid, results[0].Outcome)
 	require.Equal(t, AdmitInserted, results[1].Outcome)
@@ -845,4 +845,182 @@ func TestAdmissionRefusalsAreIndividual(t *testing.T) {
 	require.True(t, f.finalize(p, dropped, TrackDropped))
 	require.Equal(t, AdmitConflict, f.admitOne(0, p.admit(dropped)).Outcome, "a dropped transaction can never execute")
 	f.quotaConsistent()
+}
+
+// TestPendingQuotaPerPrincipalIsFair is the per-principal half of G63 (B4):
+// one principal flooding admissions is capped at its own limit while every
+// other principal is still admitted; Δ = 0 retries are never refused by either
+// limit; and pending_quota_principal.used equals count(pending) per principal
+// after every committed batch, for every transition.
+func TestPendingQuotaPerPrincipalIsFair(t *testing.T) {
+	f := newTrackingFixture(t)
+	ctx := context.Background()
+	limits := TrackLimits{Global: 10, Principal: 4}
+
+	t.Run("a flooding principal is capped; others are still admitted", func(t *testing.T) {
+		f.reset()
+		flood, quiet := newPrincipal(), newPrincipal()
+		// Several instances admit the flooding principal's batches at once.
+		var pools []*ExecDB
+		for i := 0; i < 3; i++ {
+			pool, err := NewWithoutMigrate(f.execURL)
+			require.NoError(t, err)
+			t.Cleanup(func() { pool.Close() })
+			pools = append(pools, NewExecHandle(pool))
+		}
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		counts := map[AdmitOutcome]int{}
+		for i := 0; i < 9; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				batch := []TrackAdmission{flood.admit(randomBytes(32)), flood.admit(randomBytes(32)), flood.admit(randomBytes(32))}
+				results, err := pools[i%3].AdmitBatch(ctx, f.inc, limits, batch)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				for _, r := range results {
+					counts[r.Outcome]++
+				}
+			}(i)
+		}
+		wg.Wait()
+		require.Equal(t, 4, counts[AdmitInserted], "the flooding principal holds exactly its own limit")
+		require.Equal(t, 23, counts[AdmitPrincipalOverLimit])
+		f.principalQuotaConsistent()
+		// The other principal is not blocked by the flood.
+		for i := 0; i < 4; i++ {
+			require.Equal(t, AdmitInserted, f.admitWith(limits, quiet.admit(randomBytes(32))).Outcome)
+		}
+		require.Equal(t, AdmitPrincipalOverLimit, f.admitWith(limits, quiet.admit(randomBytes(32))).Outcome)
+		// A third principal meets the global limit (8 of 10 used): two more fit.
+		third := newPrincipal()
+		require.Equal(t, AdmitInserted, f.admitWith(limits, third.admit(randomBytes(32))).Outcome)
+		require.Equal(t, AdmitInserted, f.admitWith(limits, third.admit(randomBytes(32))).Outcome)
+		require.Equal(t, AdmitOverLimit, f.admitWith(limits, third.admit(randomBytes(32))).Outcome)
+		require.EqualValues(t, 10, f.principalQuotaConsistent())
+	})
+
+	t.Run("retries of charged hashes are never refused; reorg back may exceed both", func(t *testing.T) {
+		f.reset()
+		p := newPrincipal()
+		var hashes [][]byte
+		for i := 0; i < 4; i++ {
+			h := randomBytes(32)
+			require.Equal(t, AdmitInserted, f.admitWith(limits, p.admit(h)).Outcome)
+			hashes = append(hashes, h)
+		}
+		require.Equal(t, AdmitResubmitted, f.admitWith(limits, p.admit(hashes[0])).Outcome, "a same-H retry at the cap is Δ 0")
+		require.True(t, f.transition(hashes[1], TrackPending, TrackProvisional, 0))
+		require.Equal(t, AdmitInserted, f.admitWith(limits, p.admit(randomBytes(32))).Outcome, "inclusion released the principal's slot")
+		require.True(t, f.transition(hashes[1], TrackProvisional, TrackPending, 0), "a reorg back is never refused")
+		require.EqualValues(t, 5, f.principalQuotaConsistent())
+		require.Equal(t, AdmitPrincipalOverLimit, f.admitWith(limits, p.admit(randomBytes(32))).Outcome)
+		// Revival is a new admission for the cap too.
+		require.True(t, f.transition(hashes[2], TrackPending, TrackRenewalStopped, 0))
+		require.Equal(t, AdmitPrincipalOverLimit, f.admitWith(limits, p.admit(hashes[2])).Outcome, "4 still pending: the revival needs a fifth slot")
+		require.True(t, f.finalize(p, hashes[3], TrackIncluded))
+		require.True(t, f.finalize(p, hashes[0], TrackIncluded))
+		require.Equal(t, AdmitRevived, f.admitWith(limits, p.admit(hashes[2])).Outcome)
+		released, err := f.exec.ReleaseUndelivered(ctx, f.inc, hashes[2], uuid.New())
+		require.NoError(t, err)
+		require.False(t, released, "a revival is not a fresh insert")
+		fresh := p.admit(randomBytes(32))
+		require.Equal(t, AdmitInserted, f.admitWith(limits, fresh).Outcome)
+		released, err = f.exec.ReleaseUndelivered(ctx, f.inc, fresh.Hash, fresh.ContextID)
+		require.NoError(t, err)
+		require.True(t, released)
+		f.principalQuotaConsistent()
+	})
+
+	t.Run("one batch mixing principals refuses only the excess", func(t *testing.T) {
+		f.reset()
+		p, q := newPrincipal(), newPrincipal()
+		var batch []TrackAdmission
+		for i := 0; i < 6; i++ {
+			batch = append(batch, p.admit(randomBytes(32)), q.admit(randomBytes(32)))
+		}
+		results, err := f.exec.AdmitBatch(ctx, f.inc, limits, batch)
+		require.NoError(t, err)
+		per := map[uuid.UUID]map[AdmitOutcome]int{p.id: {}, q.id: {}}
+		for i, r := range results {
+			per[batch[i].PrincipalID][r.Outcome]++
+		}
+		require.Equal(t, 4, per[p.id][AdmitInserted])
+		require.Equal(t, 4, per[q.id][AdmitInserted])
+		require.Equal(t, 2, per[p.id][AdmitPrincipalOverLimit])
+		require.Equal(t, 2, per[q.id][AdmitPrincipalOverLimit])
+		require.EqualValues(t, 8, f.principalQuotaConsistent())
+	})
+
+	t.Run("an organization's principals together are capped; other organizations are still admitted", func(t *testing.T) {
+		f.reset()
+		orgLimits := TrackLimits{Global: 10, Principal: 4, Org: 6}
+		org := uuid.New()
+		a, b := principal{id: uuid.New(), org: org, signer: randomBytes(20)}, principal{id: uuid.New(), org: org, signer: randomBytes(20)}
+		other := newPrincipal()
+		for i := 0; i < 4; i++ {
+			require.Equal(t, AdmitInserted, f.admitWith(orgLimits, a.admit(randomBytes(32))).Outcome)
+		}
+		require.Equal(t, AdmitInserted, f.admitWith(orgLimits, b.admit(randomBytes(32))).Outcome)
+		require.Equal(t, AdmitInserted, f.admitWith(orgLimits, b.admit(randomBytes(32))).Outcome)
+		require.Equal(t, AdmitOrgOverLimit, f.admitWith(orgLimits, b.admit(randomBytes(32))).Outcome, "the organization holds its own limit")
+		for i := 0; i < 4; i++ {
+			require.Equal(t, AdmitInserted, f.admitWith(orgLimits, other.admit(randomBytes(32))).Outcome, "another organization is not blocked")
+		}
+		require.Equal(t, AdmitPrincipalOverLimit, f.admitWith(orgLimits, other.admit(randomBytes(32))).Outcome)
+		require.EqualValues(t, 10, f.principalQuotaConsistent())
+	})
+}
+
+// A per-principal counter that drifted low (an older release kept admitting
+// after migration 004) is recounted under its lock when a −1 would take it
+// below zero; the batch still applies.
+func TestPrincipalQuotaDriftIsRecounted(t *testing.T) {
+	f := newTrackingFixture(t)
+	p := newPrincipal()
+	a, b := randomBytes(32), randomBytes(32)
+	require.Equal(t, AdmitInserted, f.admitOne(0, p.admit(a)).Outcome)
+	require.Equal(t, AdmitInserted, f.admitOne(0, p.admit(b)).Outcome)
+	_, err := f.exec.pool.conn.Exec(`UPDATE pending_quota_principal SET used = 0 WHERE principal_id = $1`, p.id.String())
+	require.NoError(t, err)
+	_, err = f.exec.pool.conn.Exec(`UPDATE pending_quota_org SET used = 0 WHERE org_id = $1`, p.org.String())
+	require.NoError(t, err)
+	require.True(t, f.finalize(p, a, TrackIncluded), "a drifted counter never blocks finality")
+	f.principalQuotaConsistent()
+	// Drift upwards (undetectable by the writers) is repaired by the
+	// maintenance pass, which also deletes counters at zero.
+	_, err = f.exec.pool.conn.Exec(`UPDATE pending_quota_principal SET used = 9 WHERE principal_id = $1`, p.id.String())
+	require.NoError(t, err)
+	idle := newPrincipal()
+	_, err = f.exec.pool.conn.Exec(`INSERT INTO pending_quota_principal (principal_id, used) VALUES ($1, 0)`, idle.id.String())
+	require.NoError(t, err)
+	_, err = f.admin.MaintainTracking(context.Background(), 1, 0, time.Hour)
+	require.NoError(t, err)
+	f.principalQuotaConsistent()
+	var zero int
+	require.NoError(t, f.exec.pool.conn.QueryRow(`SELECT (SELECT count(*) FROM pending_quota_principal WHERE used = 0) + (SELECT count(*) FROM pending_quota_org WHERE used = 0)`).Scan(&zero))
+	require.Zero(t, zero, "counters at zero are deleted")
+}
+
+func (f *trackingFixture) admitWith(limits TrackLimits, a TrackAdmission) AdmitResult {
+	f.t.Helper()
+	results, err := f.exec.AdmitBatch(context.Background(), f.inc, limits, []TrackAdmission{a})
+	require.NoError(f.t, err)
+	return results[0]
+}
+
+// principalQuotaConsistent asserts the global and every per-principal
+// invariant and returns the global count.
+func (f *trackingFixture) principalQuotaConsistent() int64 {
+	f.t.Helper()
+	used := f.quotaConsistent()
+	mismatched, err := f.exec.PendingQuotaMismatches(context.Background())
+	require.NoError(f.t, err)
+	require.Zero(f.t, mismatched, "the principal and organization shares must equal count(pending rows) per key")
+	return used
 }

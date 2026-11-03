@@ -197,7 +197,7 @@ type countingTracking struct {
 	admitted, released, flushed, transitions, finals atomic.Int64
 }
 
-func (c *countingTracking) AdmitBatch(ctx context.Context, inc uuid.UUID, limit int64, batch []db.TrackAdmission) ([]db.AdmitResult, error) {
+func (c *countingTracking) AdmitBatch(ctx context.Context, inc uuid.UUID, limit db.TrackLimits, batch []db.TrackAdmission) ([]db.AdmitResult, error) {
 	c.admitted.Add(int64(len(batch)))
 	return c.trackingStore.AdmitBatch(ctx, inc, limit, batch)
 }

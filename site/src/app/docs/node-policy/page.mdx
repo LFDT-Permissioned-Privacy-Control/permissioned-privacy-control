@@ -228,6 +228,13 @@ refused:
 |---|---|---|
 | 503, `Retry-After: 1`, reason `publication_pending` | Nothing was kept | Resend the same signed transaction |
 | 503, `Retry-After: 1`, "the transaction may still execute" | Recorded; delivery to the node failed | Check its status, or resend it unchanged (idempotent) |
+| 503, `Retry-After: 1`, reason `pending_limit` | Nothing was kept: the deployment's pending transactions are at the pending-work limit | Resend it unchanged after the delay |
+| 429, `Retry-After: 1`, reason `principal_pending_limit` | Nothing was kept: your own pending transactions are at the per-principal limit | Resend it once some of your transactions are included |
+| 429, `Retry-After: 1`, reason `org_pending_limit` | Nothing was kept: your organization's pending transactions are at the per-organization limit | Resend it once some of your organization's transactions are included |
+
+A transaction refused for one of these limits has already passed the
+compliance check: resend the same signed transaction, which reuses its
+travel-rule record; a newly signed transaction needs a record of its own.
 | 409, "nonce is already used or held by another pending transaction" | The node's pool refused its nonce. OPS stops renewing it; it can still settle if the competing transaction disappears | Check its status; replace it at the same nonce if needed |
 | 409, "conflicts with an earlier submission" | The signed transaction is bound to another submission | Do not retry |
 
@@ -237,7 +244,7 @@ The owner can follow a transaction at `GET /api/v1/me/transactions/{hash}/execut
 |---|---|---|
 | `pending` | Submitted; waiting for inclusion. OPS keeps it deliverable | no |
 | `provisional` | Included in a block that is not finalized yet; it can still return to `pending` after a reorganization | no |
-| `renewal_stopped` | OPS no longer renews it (see the reason). It can still be included while its last identity is valid, and is then reported as included | no |
+| `renewal_stopped` | OPS will not renew it (see the reason), but it may still settle: it can still be included while its last identity is valid, and is then reported as included | no |
 | `included` | Executed in a finalized block | yes |
 | `reverted` | Reverted in a finalized block | yes |
 | `dropped` | Can never execute: a finalized transaction used its nonce (reason `nonce_consumed`) | yes |
@@ -306,11 +313,78 @@ node no longer holds it:
 - the node restarted (OPS sees a new node boot id), whether gracefully or after
   a crash;
 - the node's pool lost it while its identity was still registered;
-- its identity is about to expire while it is still pending (within a quarter
-  of the transaction identity lifetime).
+- its identity has at most half of its lifetime left while the transaction is
+  still pending (congestion; see below).
 
 A transaction that a reorganization returns to pending keeps its identity on
 the node until finality and needs no renewal unless one of the above applies.
+
+A transaction usually reaches a block within seconds, long before its identity
+needs renewing, so in normal operation OPS renews almost nothing. Under
+congestion an identity is renewed once at most half of its lifetime is left
+(2.5 minutes at the default five-minute lifetime) and always before a quarter
+of it is left. Renewals are spent within a budget
+(`OPS_NODE_POLICY_RENEWAL_BUDGET` per second, 500 by default), earliest expiry
+first; recovery after a node restart uses the same budget. Near the maximum
+age, where a renewal could not extend the identity, OPS does not renew and
+stops at the maximum age instead.
+
+So that the budget can always renew what is pending in time, OPS limits how
+many transactions may wait for inclusion at once, across all instances:
+
+- **Pending-work limit.** Budget × lifetime / 4 transactions can be renewed in
+  time (37,500 at the defaults), minus the transactions a reorganization of
+  `OPS_NODE_POLICY_MAX_REORG_DEPTH` blocks (2 by default) could return to
+  pending: that depth times the most transactions a block can hold
+  (`OPS_NODE_POLICY_BLOCK_GAS_LIMIT` / 21,000; 200,000,000 gas by default).
+  At the defaults the limit is 18,454. A new transaction above it is answered
+  with 503, `Retry-After: 1` and the reason `pending_limit`.
+- **Per-principal and per-organization limits**
+  (`OPS_NODE_POLICY_PRINCIPAL_PENDING_LIMIT`,
+  `OPS_NODE_POLICY_ORG_PENDING_LIMIT`). By default each is the pending-work
+  limit minus the room everyone else keeps:
+  2 × `OPS_NODE_POLICY_EXPECTED_TPS` × `OPS_NODE_POLICY_INCLUSION_BOUND`
+  (2 × 2,000 × 1.5 s = 6,000), so 12,454 at the defaults. One principal, or
+  all principals of one organization together, can carry the expected rate
+  but can never take the others' room. Two organizations together can fill
+  the pending-work limit; lower the limits for a deployment with many
+  tenants. A new transaction above a limit is answered with 429,
+  `Retry-After: 1` and the reason `principal_pending_limit` or
+  `org_pending_limit`; other principals and organizations are still
+  admitted.
+
+Only transactions waiting for inclusion count. Included, stopped and final
+ones do not, and resending a transaction OPS already recorded is never refused
+for either limit. A reorganization can return transactions to pending above
+the limit; nothing admitted is dropped, and new transactions wait until the
+work drains.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OPS_NODE_POLICY_TRANSACTION_IDENTITY_TTL` | 300s | transaction identity lifetime (120 to 600 seconds) |
+| `OPS_NODE_POLICY_MAX_AGE` | 10m | how long after submission OPS renews (at least the lifetime, at most 60 minutes) |
+| `OPS_NODE_POLICY_RENEWAL_BUDGET` | 500 | renewals per second (1 to 2,000) |
+| `OPS_NODE_POLICY_MAX_REORG_DEPTH` | 2 | deepest reorganization the limit leaves room for (0 to 64 blocks) |
+| `OPS_NODE_POLICY_BLOCK_GAS_LIMIT` | 200000000 | the chain's block gas limit |
+| `OPS_NODE_POLICY_EXPECTED_TPS` | 2000 | the transaction rate the deployment must sustain (same meaning as the node's setting) |
+| `OPS_NODE_POLICY_INCLUSION_BOUND` | 1.5s | how long a transaction normally waits for its block (100 ms to 60 s) |
+| `OPS_NODE_POLICY_PRINCIPAL_PENDING_LIMIT` | derived | per-principal limit (1 to the pending-work limit) |
+| `OPS_NODE_POLICY_ORG_PENDING_LIMIT` | derived | per-organization limit (1 to the pending-work limit) |
+
+OPS refuses to start when the numbers do not fit: when the pending-work limit
+is not positive or is below the room the expected rate needs, or when the
+derived per-principal or per-organization limit is below what one tenant
+needs at the expected rate. A shorter identity lifetime needs a proportionally larger budget (at
+120 seconds, about 935 renewals per second at the other defaults). OPS logs
+the derived limits at startup. Up to 16 renewal re-checks run at once, so a
+budget is met only while one re-check takes less than 16 / budget seconds;
+OPS logs a warning when re-checks fall behind it. Size the node's pending
+capacity (`OPS_NODE_POLICY_PENDING_LIMIT` on the node) for at least budget ×
+lifetime / 4; the node adds the transactions waiting for finality itself.
+
+If renewals still fall behind (OPS overloaded, a slow re-check), an identity
+can lapse: the transaction stays `pending`, cannot execute and holds back the
+sender's later nonces until the renewal lands. Nothing is lost.
 
 Every renewal first runs the whole admission check again on current data: the
 principal (deleted, banned, KYC), the organization and the membership, the
@@ -335,8 +409,9 @@ window.
 
 Renewals are sent only to a ready node, on the connection pool for outcome
 checks (`OPS_NODE_POLICY_RECOVERY_CONNS`). After a two-minute node outage, the
-pending transactions are renewed and included without any client action; a
-principal revoked meanwhile is not renewed, and its transactions never execute.
+pending transactions are renewed within the budget and included without any
+client action; a principal revoked meanwhile is not renewed, and its
+transactions never execute.
 
 Each renewal is an automated re-authorization performed by OPS on behalf of the
 original principal. It is recorded in the audit access log before it takes
@@ -358,8 +433,11 @@ transaction, never registers an address another organization owns, and is
 recorded in the RBAC audit log. Any transaction that is unknown, not final, not
 a deployment or not that organization's answers the same 404.
 
-To decide `dropped` and to notice a
-transaction the node's pool lost, OPS also reads the node's public RPC
-(`NODE_URL`): point it at the same single node as the private endpoint, not at
-a load-balanced pool of nodes. OPS records `dropped` only after the same
-evidence was read twice, at least 30 seconds apart.
+To decide `dropped` and to notice a transaction the node's pool lost, OPS
+asks the private endpoint, which reports at its own finalized block whether a
+block holds the transaction and the sender's nonce. With a node that does not
+offer that answer, OPS reads the node's public RPC (`NODE_URL`) instead: then
+point it at the same single node as the private endpoint, not at a
+load-balanced pool of nodes. OPS records `dropped` only after the same
+evidence was read twice, at least 30 seconds apart; a lookup the node could
+not answer is never evidence.

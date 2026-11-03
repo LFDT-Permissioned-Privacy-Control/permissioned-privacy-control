@@ -75,8 +75,15 @@ const (
 	// deployment's publication, not any tenant's state.
 	ReasonPublicationPending = "publication_pending"
 	// ReasonPendingLimit: the execution path's global pending-work limit is
-	// reached; retry after Retry-After (RD-1410).
+	// reached (503); retry after Retry-After (RD-1410).
 	ReasonPendingLimit = "pending_limit"
+	// ReasonPrincipalPendingLimit: the caller's own pending transactions are
+	// at the per-principal cap (429); retry after Retry-After (RD-1410).
+	ReasonPrincipalPendingLimit = "principal_pending_limit"
+	// ReasonOrgPendingLimit: the pending transactions of the caller's
+	// organization (all its principals) are at the per-organization cap
+	// (429); retry after Retry-After (RD-1410).
+	ReasonOrgPendingLimit = "org_pending_limit"
 	// ReasonTransactionConflict: the signed transaction is already bound to an
 	// earlier submission it does not match (another principal, organisation,
 	// signer or visibility list), or can no longer execute (409). Collapsed on
@@ -131,7 +138,13 @@ func wireReason(code string) string {
 		ReasonUpstreamError,
 		ReasonNodeRejected,
 		ReasonExecutionUnavailable,
-		ReasonPublicationPending:
+		ReasonPublicationPending,
+		// Backpressure: the caller's own pending work, its organization's,
+		// or the deployment's as a whole (a load signal the 503 status
+		// already carries), never another identified tenant's state.
+		ReasonPendingLimit,
+		ReasonPrincipalPendingLimit,
+		ReasonOrgPendingLimit:
 		return code
 	default:
 		return ReasonWireGenericDenied

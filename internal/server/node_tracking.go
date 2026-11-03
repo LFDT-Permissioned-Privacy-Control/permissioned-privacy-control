@@ -16,7 +16,7 @@ import (
 // trackingStore is the execution-tracking database as the request path and
 // the reconciler use it (db.ExecDB).
 type trackingStore interface {
-	AdmitBatch(context.Context, uuid.UUID, int64, []db.TrackAdmission) ([]db.AdmitResult, error)
+	AdmitBatch(context.Context, uuid.UUID, db.TrackLimits, []db.TrackAdmission) ([]db.AdmitResult, error)
 	ReleaseUndelivered(context.Context, uuid.UUID, []byte, uuid.UUID) (bool, error)
 	FlushAcks(context.Context, uuid.UUID, []db.TrackAck) (map[string]bool, error)
 	ApplyTransitions(context.Context, uuid.UUID, []db.TrackTransition) ([]bool, error)
@@ -52,12 +52,6 @@ const (
 	adoptSpacing = time.Second
 )
 
-// trackingPendingLimit is the global pending-work limit L_admit (plan
-// §4.8.2). 0: counted, not enforced. Enforcement waits for the maximum-age
-// stop and a per-principal bound, without which one principal's never-included
-// transactions could hold the whole limit (B3a review).
-var trackingPendingLimit int64 = 0
-
 // errTrackingUnavailable: the intent could not be recorded; nothing was sent.
 var errTrackingUnavailable = errors.New("execution tracking unavailable")
 
@@ -68,7 +62,9 @@ var errTrackingUnavailable = errors.New("execution tracking unavailable")
 type nodeTracking struct {
 	store    trackingStore
 	instance uuid.UUID // the delivery-claim owner
-	limit    int64
+	// limits are the pending-work limits admissions are held to (plan
+	// §4.8.2): L_admit and the per-principal cap. Zero: counted only.
+	limits db.TrackLimits
 
 	inc       atomic.Pointer[uuid.UUID]
 	epoch     atomic.Uint64 // bumped on every adoption
@@ -107,7 +103,7 @@ type pendingAck struct {
 }
 
 func newNodeTracking(store trackingStore, inc uuid.UUID, adopt func(context.Context) (uuid.UUID, error)) *nodeTracking {
-	t := &nodeTracking{store: store, instance: uuid.New(), limit: trackingPendingLimit, adopt: adopt, queue: make(chan *admitRequest, 4*trackingMaxBatch), acks: map[string]pendingAck{}}
+	t := &nodeTracking{store: store, instance: uuid.New(), adopt: adopt, queue: make(chan *admitRequest, 4*trackingMaxBatch), acks: map[string]pendingAck{}}
 	t.inc.Store(&inc)
 	return t
 }
@@ -220,13 +216,13 @@ func (t *nodeTracking) commitBatch(ctx context.Context, batch []*admitRequest) {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	inc := t.incarnation()
-	results, err := t.store.AdmitBatch(writeCtx, inc, t.limit, admissions)
+	results, err := t.store.AdmitBatch(writeCtx, inc, t.limits, admissions)
 	if trackingRecreated(err) {
 		// Fresh admissions were written nowhere: re-run them under the
 		// adopted incarnation.
 		if next := t.adoptAfter(writeCtx, inc); next != inc {
 			inc = next
-			results, err = t.store.AdmitBatch(writeCtx, inc, t.limit, admissions)
+			results, err = t.store.AdmitBatch(writeCtx, inc, t.limits, admissions)
 		}
 	}
 	if err == nil {

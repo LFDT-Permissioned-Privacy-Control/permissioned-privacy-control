@@ -135,3 +135,103 @@ func hexBoot(id uuid.UUID) string {
 	b, _ := id.MarshalBinary()
 	return hex.EncodeToString(b)
 }
+
+// G25 (request path): admission is held to the pending-work limits before
+// anything is sent — a principal over its own cap gets 429, everyone over the
+// global limit 503, both with Retry-After — while a retry of a hash that is
+// already charged is never refused and is sent again.
+func TestPendingWorkLimitBackpressuresBeforeRenewalDebt(t *testing.T) {
+	bridge, node, tracking := newBridgeFixture(t)
+	bridge.tracking.limits = db.TrackLimits{Global: 3, Principal: 2}
+	org := uuid.NewString()
+	busy, other := uuid.NewString(), uuid.NewString()
+	var admitted []signedTransfer
+	for i := 0; i < 2; i++ {
+		tx := newSignedTransfer(t, 0)
+		if _, err := tx.submit(t, bridge, busy, org); err != nil {
+			t.Fatal(err)
+		}
+		admitted = append(admitted, tx)
+	}
+	calls := node.calls.Load()
+	over := newSignedTransfer(t, 0)
+	if _, err := over.submit(t, bridge, busy, org); !errors.Is(err, errPrincipalPendingLimit) {
+		t.Fatalf("a principal over its own cap: %v", err)
+	}
+	if node.calls.Load() != calls {
+		t.Fatal("a refused admission was sent")
+	}
+	if _, err := tracking.runtime.LookupTracked(context.Background(), hashBytes(t, over.hash)); err == nil {
+		t.Fatal("a refused admission was recorded")
+	}
+	if _, err := newSignedTransfer(t, 0).submit(t, bridge, other, org); err != nil {
+		t.Fatalf("another principal is blocked by the busy one: %v", err)
+	}
+	if _, err := newSignedTransfer(t, 0).submit(t, bridge, other, org); !errors.Is(err, errPendingLimit) {
+		t.Fatalf("over the global limit: %v", err)
+	}
+	if node.calls.Load() != calls+1 {
+		t.Fatal("a refused admission was sent")
+	}
+	// A retry of an already-charged hash is Δ 0 and never refused.
+	if _, err := admitted[0].submit(t, bridge, busy, org); err != nil {
+		t.Fatalf("a retry of a charged hash was refused: %v", err)
+	}
+	if node.calls.Load() != calls+2 {
+		t.Fatal("the retry was not sent")
+	}
+	used, pending, err := tracking.runtime.PendingQuota(context.Background())
+	if err != nil || used != 3 || pending != 3 {
+		t.Fatalf("quota %d/%d %v", used, pending, err)
+	}
+
+	// The answers on the RPC path.
+	for _, c := range []struct {
+		err    error
+		status int
+		reason string
+	}{
+		{errPendingLimit, http.StatusServiceUnavailable, ReasonPendingLimit},
+		{errPrincipalPendingLimit, http.StatusTooManyRequests, ReasonPrincipalPendingLimit},
+		{errOrgPendingLimit, http.StatusTooManyRequests, ReasonOrgPendingLimit},
+	} {
+		p, _, service, raw := nodeRPCFixture(t)
+		service.executionErr = c.err
+		got := p.Process(context.Background(), nodeRPCRequest(t, "eth_sendRawTransaction", []any{raw}))
+		if got.Error == nil || got.Error.StatusCode != c.status || got.Error.Reason != c.reason || got.Error.RetryAfter != 1 {
+			t.Fatalf("%v answered %+v", c.err, got.Error)
+		}
+		if wireReason(c.reason) != c.reason {
+			t.Fatalf("%s must reach a verbose caller: it describes the caller's own request", c.reason)
+		}
+	}
+}
+
+// outcomeTracking answers every admission with a fixed outcome.
+type outcomeTracking struct {
+	trackingStore
+	outcome db.AdmitOutcome
+}
+
+func (o outcomeTracking) AdmitBatch(_ context.Context, _ uuid.UUID, _ db.TrackLimits, batch []db.TrackAdmission) ([]db.AdmitResult, error) {
+	out := make([]db.AdmitResult, len(batch))
+	for i := range out {
+		out[i] = db.AdmitResult{Outcome: o.outcome}
+	}
+	return out, nil
+}
+
+// Every admission outcome that did not record the transaction is refused
+// before transport, including one this release does not know (fail closed).
+func TestUnrecordedAdmissionIsNeverSent(t *testing.T) {
+	for _, outcome := range []db.AdmitOutcome{db.AdmitOverLimit, db.AdmitPrincipalOverLimit, db.AdmitOrgOverLimit, db.AdmitIncomparable, db.AdmitOutcome(200)} {
+		bridge, node, tracking := newBridgeFixture(t)
+		bridge.tracking.store = outcomeTracking{trackingStore: tracking.runtime, outcome: outcome}
+		if _, err := newSignedTransfer(t, 0).submit(t, bridge, uuid.NewString(), uuid.NewString()); err == nil {
+			t.Fatalf("outcome %d accepted", outcome)
+		}
+		if node.calls.Load() != 0 {
+			t.Fatalf("outcome %d: an unrecorded transaction was sent", outcome)
+		}
+	}
+}

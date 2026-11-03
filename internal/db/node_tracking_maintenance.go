@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -38,7 +39,10 @@ type TrackingMaintenance struct {
 //     ago are detached (CONCURRENTLY, no exclusive lock on the parent) and
 //     dropped (G41); nothing inside the retention window is touched;
 //   - payload buckets whose most recent use ended at least payloadKeep ago
-//     are truncated: no identity created in them can still be valid.
+//     are truncated: no identity created in them can still be valid;
+//   - per-principal and per-organization pending counters that drifted from
+//     the bindings are recounted (logged as an error), and counters at zero
+//     are deleted.
 //
 // Every DDL statement runs with a lock timeout, so maintenance never queues
 // request-path work behind it for long; a timed-out step is retried next run.
@@ -95,7 +99,75 @@ func (e *ExecAdminDB) MaintainTracking(ctx context.Context, ahead int, retention
 	if err != nil {
 		errs = append(errs, err)
 	}
+	if err := maintainQuotaShares(ctx, conn); err != nil {
+		errs = append(errs, err)
+	}
 	return out, errors.Join(errs...)
+}
+
+// maintainQuotaShares repairs per-principal and per-organization pending
+// counters that differ from the bindings (read in one snapshot, so only real
+// drift is found), each recounted under its row lock and logged as an error,
+// and deletes counters at zero, so no principal or organization id outlives
+// its pending work. Writers lock a share row after its bindings and apply
+// their delta to it after this recount commits, so the recount stays exact.
+func maintainQuotaShares(ctx context.Context, conn *sql.Conn) error {
+	var errs []error
+	for _, share := range quotaShares {
+		rows, err := conn.QueryContext(ctx, `SELECT coalesce(q.k, b.k)::text FROM (SELECT `+share.key+` AS k, used FROM `+share.table+`) q
+ FULL JOIN (SELECT `+share.key+` AS k, count(*) AS pending FROM node_tx_binding WHERE state = 1 GROUP BY `+share.key+`) b ON b.k = q.k
+ WHERE coalesce(q.used, 0) <> coalesce(b.pending, 0) LIMIT 1000`)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		var keys []string
+		for rows.Next() {
+			var k string
+			if err := rows.Scan(&k); err != nil {
+				errs = append(errs, err)
+				break
+			}
+			keys = append(keys, k)
+		}
+		if err := rows.Err(); err != nil {
+			errs = append(errs, err)
+		}
+		rows.Close()
+		for _, k := range keys {
+			recounted, err := recountShare(ctx, conn, share.table, share.key, k)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			slog.Error("execution-tracking pending quota share had drifted; recounted", "table", share.table, "key", k, "pending", recounted)
+		}
+		// Rows are locked in key order, as writers lock them, and rows a
+		// writer holds are skipped (they are no longer zero, or are next time).
+		if _, err := conn.ExecContext(ctx, `DELETE FROM `+share.table+` WHERE `+share.key+` IN (SELECT `+share.key+` FROM `+share.table+` WHERE used = 0 ORDER BY `+share.key+` FOR UPDATE SKIP LOCKED) AND used = 0`); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func recountShare(ctx context.Context, conn *sql.Conn, table, key, k string) (int64, error) {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO `+table+` (`+key+`, used) VALUES ($1, 0) ON CONFLICT DO NOTHING`, k); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT 1 FROM `+table+` WHERE `+key+` = $1 FOR UPDATE`, k); err != nil {
+		return 0, err
+	}
+	var recounted int64
+	if err := tx.QueryRowContext(ctx, `UPDATE `+table+` SET used = (SELECT count(*) FROM node_tx_binding WHERE `+key+` = $1 AND state = 1) WHERE `+key+` = $1 RETURNING used`, k).Scan(&recounted); err != nil {
+		return 0, err
+	}
+	return recounted, tx.Commit()
 }
 
 func partitionName(table string, day time.Time) string {

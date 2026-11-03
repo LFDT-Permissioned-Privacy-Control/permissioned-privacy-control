@@ -11,6 +11,9 @@
 //     roles, NOLOGIN, and the admin schema grants (the audit 001 shape).
 //   - 002: tracking_meta, the network singleton with the random incarnation
 //     that fences asynchronous work across a recreation of this database.
+//   - 003: the per-transaction tracking schema (bindings, payload ring,
+//     final statuses, identity history, the global pending quota).
+//   - 004: the per-principal and per-organization pending quota shares.
 //
 // Applied versions are tracked in schema_version_exec. The app NEVER runs
 // CREATE DATABASE: infra provisions the empty database (a separate Postgres

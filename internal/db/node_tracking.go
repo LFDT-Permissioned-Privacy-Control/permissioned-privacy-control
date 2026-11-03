@@ -7,8 +7,10 @@ package db
 //   - locks the binding rows it changes in hash order (one global lock order
 //     for every multi-row writer);
 //   - computes the pending-quota delta as is_pending(after) − is_pending(before)
-//     from the locked before-state (§4.8.2), sums it, and updates the shared
-//     pending_quota row last, so its lock is held only until commit.
+//     from the locked before-state (§4.8.2), sums it per principal and in
+//     total, and updates the principals' pending_quota_principal rows (in
+//     principal order) and then the shared pending_quota row last, so the
+//     global lock is held only until commit.
 
 import (
 	"bytes"
@@ -17,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"time"
@@ -228,7 +231,21 @@ const (
 	// database clock step): the stored one is kept and nothing about this
 	// attempt is recorded; the caller re-reads the clock and signs again.
 	AdmitIncomparable
+	// AdmitPrincipalOverLimit: refused, the submitting principal's own
+	// pending-work limit is reached. Nothing was written.
+	AdmitPrincipalOverLimit
+	// AdmitOrgOverLimit: refused, the organization's pending-work limit is
+	// reached. Nothing was written.
+	AdmitOrgOverLimit
 )
+
+// TrackLimits bounds the work admissions may make renewable (plan §4.8.2):
+// Global is L_admit over every principal; Principal and Org are one
+// principal's and one organization's share. 0 disables a bound (the quota is
+// still counted).
+type TrackLimits struct {
+	Global, Principal, Org int64
+}
 
 // AdmitResult is the result of one admission of a batch.
 type AdmitResult struct {
@@ -283,13 +300,117 @@ func (e *ExecDB) trackTx(ctx context.Context, inc uuid.UUID, fn func(*sql.Tx) er
 // the database clock.
 const payloadBucketSQL = `SELECT (floor(extract(epoch FROM clock_timestamp()) / 900)::bigint % 16)::smallint`
 
-func addQuota(ctx context.Context, tx *sql.Tx, delta int64) (int64, error) {
-	var used int64
-	if delta == 0 {
-		return 0, nil
+// quotaDelta accumulates is_pending(after) − is_pending(before) per
+// principal and per organization for one batch (both are identity columns of
+// the binding, never updated).
+type quotaDelta struct {
+	principals, orgs map[uuid.UUID]int64
+}
+
+func newQuotaDelta() quotaDelta {
+	return quotaDelta{principals: map[uuid.UUID]int64{}, orgs: map[uuid.UUID]int64{}}
+}
+
+func (q quotaDelta) add(principal, org uuid.UUID, d int64) {
+	if d != 0 {
+		q.principals[principal] += d
+		q.orgs[org] += d
 	}
-	err := tx.QueryRowContext(ctx, `UPDATE pending_quota SET used = used + $1 RETURNING used`, delta).Scan(&used)
-	return used, err
+}
+
+// quotaShares are the per-key pending counters next to the global row, in
+// lock order (table and key column names are constants, never input).
+var quotaShares = []struct{ table, key string }{
+	{"pending_quota_principal", "principal_id"},
+	{"pending_quota_org", "org_id"},
+}
+
+// applyQuota applies a batch's quota deltas: the principals' rows (in key
+// order, one statement), the organizations' rows likewise, then the global
+// row last, so its lock is held only until commit. It returns the global
+// used count and each changed principal's and organization's (0 and nil when
+// nothing changed). Every writer takes binding rows first, so the lock order
+// is bindings → principal rows → organization rows → the global row.
+func applyQuota(ctx context.Context, tx *sql.Tx, deltas quotaDelta) (used int64, perPrincipal, perOrg map[uuid.UUID]int64, err error) {
+	var total int64
+	for _, d := range deltas.principals {
+		total += d
+	}
+	if perPrincipal, err = applyShare(ctx, tx, quotaShares[0].table, quotaShares[0].key, deltas.principals); err != nil {
+		return 0, nil, nil, err
+	}
+	if perOrg, err = applyShare(ctx, tx, quotaShares[1].table, quotaShares[1].key, deltas.orgs); err != nil {
+		return 0, nil, nil, err
+	}
+	if len(perPrincipal) == 0 && len(perOrg) == 0 {
+		return 0, nil, nil, nil
+	}
+	if total != 0 {
+		err = tx.QueryRowContext(ctx, `UPDATE pending_quota SET used = used + $1 RETURNING used`, total).Scan(&used)
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT used FROM pending_quota`).Scan(&used)
+	}
+	return used, perPrincipal, perOrg, err
+}
+
+// applyShare applies signed deltas to one per-key counter table in key order
+// and returns the new counts. A count that would go below zero means the
+// counters drifted (for example an instance of an older release kept
+// admitting after the counters were added): that key is recounted under its
+// row lock, which this transaction holds, so every other writer of its
+// bindings applies its delta after this transaction commits and the recount
+// (this transaction's own changes included) stays exact.
+func applyShare(ctx context.Context, tx *sql.Tx, table, key string, deltas map[uuid.UUID]int64) (map[uuid.UUID]int64, error) {
+	var keys []uuid.UUID
+	for k, d := range deltas {
+		if d != 0 {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	sort.Slice(keys, func(i, j int) bool { return bytes.Compare(keys[i][:], keys[j][:]) < 0 })
+	ids, ds := make([]string, len(keys)), make([]int64, len(keys))
+	for i, k := range keys {
+		ids[i], ds[i] = k.String(), deltas[k]
+	}
+	rows, err := tx.QueryContext(ctx, `INSERT INTO `+table+` AS q (`+key+`, used)
+ SELECT k, d FROM unnest($1::uuid[], $2::bigint[]) WITH ORDINALITY AS t(k, d, ord) ORDER BY t.ord
+ ON CONFLICT (`+key+`) DO UPDATE SET used = q.used + EXCLUDED.used
+ RETURNING `+key+`, used`, ids, ds)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]int64, len(keys))
+	var drifted []uuid.UUID
+	for rows.Next() {
+		var k uuid.UUID
+		var used int64
+		if err := rows.Scan(&k, &used); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if used < 0 {
+			drifted = append(drifted, k)
+		}
+		out[k] = used
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, k := range drifted {
+		var recounted int64
+		if err := tx.QueryRowContext(ctx, `UPDATE `+table+` SET used = (SELECT count(*) FROM node_tx_binding WHERE `+key+` = $1 AND state = 1) WHERE `+key+` = $1 RETURNING used`, k.String()).Scan(&recounted); err != nil {
+			return nil, err
+		}
+		out[k] = recounted
+		slog.Error("execution-tracking pending quota share had drifted below zero; recounted", "table", table, "key", k, "pending", recounted)
+	}
+	return out, nil
 }
 
 // AdmitBatch writes a batch of request-path intents in one transaction (one
@@ -297,10 +418,11 @@ func addQuota(ctx context.Context, tx *sql.Tx, delta int64) (int64, error) {
 // batch is written first, later ones as resubmissions of it. A different
 // principal, organisation, signer or visibility list for a bound hash is a
 // conflict, whether the binding is live, a tombstone or final (G13, G58).
-// With limit > 0, an admission that would make a binding pending (+1) is
-// refused once the pending quota exceeds limit; resubmissions (Δ 0) are never
-// refused (G63). Refused admissions write nothing.
-func (e *ExecDB) AdmitBatch(ctx context.Context, inc uuid.UUID, limit int64, batch []TrackAdmission) ([]AdmitResult, error) {
+// An admission that would make a binding pending (+1) is refused once its
+// principal's pending quota exceeds limits.Principal (AdmitPrincipalOverLimit)
+// or the global quota exceeds limits.Global (AdmitOverLimit); resubmissions
+// (Δ 0) are never refused (G63). Refused admissions write nothing.
+func (e *ExecDB) AdmitBatch(ctx context.Context, inc uuid.UUID, limits TrackLimits, batch []TrackAdmission) ([]AdmitResult, error) {
 	// An invalid admission is refused on its own; it never fails the
 	// requests batched with it.
 	refused := map[int]AdmitOutcome{}
@@ -338,7 +460,7 @@ func (e *ExecDB) AdmitBatch(ctx context.Context, inc uuid.UUID, limit int64, bat
 			if _, err := tx.ExecContext(ctx, `SAVEPOINT admit`); err != nil {
 				return err
 			}
-			written, retry, err := admitAttempt(ctx, tx, inc, limit, bucket, batch, rounds, refused)
+			written, retry, err := admitAttempt(ctx, tx, inc, limits, bucket, batch, rounds, refused)
 			if err != nil {
 				return err
 			}
@@ -391,7 +513,7 @@ type admitRow struct {
 // admitAttempt runs one attempt after SAVEPOINT. It returns retry=true after
 // adding refusals (already final, over limit); the caller rolls back to the
 // savepoint, which also releases this attempt's row and quota locks.
-func admitAttempt(ctx context.Context, tx *sql.Tx, inc uuid.UUID, limit int64, bucket int16, batch []TrackAdmission, rounds [][]int, refused map[int]AdmitOutcome) (map[int]admitRow, bool, error) {
+func admitAttempt(ctx context.Context, tx *sql.Tx, inc uuid.UUID, limits TrackLimits, bucket int16, batch []TrackAdmission, rounds [][]int, refused map[int]AdmitOutcome) (map[int]admitRow, bool, error) {
 	written := map[int]admitRow{}
 	var order []int // written intents, round by round
 	for _, round := range rounds {
@@ -447,7 +569,7 @@ func admitAttempt(ctx context.Context, tx *sql.Tx, inc uuid.UUID, limit int64, b
 			return nil, true, nil
 		}
 	}
-	var delta int64
+	deltas := newQuotaDelta()
 	var plus []int
 	var payloadHashes, payloadRaw [][]byte
 	var history []int
@@ -458,7 +580,7 @@ func admitAttempt(ctx context.Context, tx *sql.Tx, inc uuid.UUID, limit int64, b
 			before = row.prev.Int16
 		}
 		d := isPending(row.state) - isPending(before)
-		delta += d
+		deltas.add(batch[i].PrincipalID, batch[i].OrgID, d)
 		if d > 0 {
 			plus = append(plus, i)
 		}
@@ -494,16 +616,41 @@ func admitAttempt(ctx context.Context, tx *sql.Tx, inc uuid.UUID, limit int64, b
 			return nil, false, err
 		}
 	}
-	// The shared quota row last: its lock is held only until commit.
-	used, err := addQuota(ctx, tx, delta)
+	// The principals' and organizations' rows, then the shared quota row
+	// last: its lock is held only until commit.
+	used, perPrincipal, perOrg, err := applyQuota(ctx, tx, deltas)
 	if err != nil {
 		return nil, false, err
 	}
-	if limit > 0 && delta > 0 && used > limit {
-		excess := used - limit
-		if excess > int64(len(plus)) {
-			excess = int64(len(plus))
+	// Admissions are Δ ≥ 0 only, so a principal, an organization or the total
+	// over its limit is over because of this batch's +1 rows (or a reorg back
+	// that already pushed it over, which this batch must not add to): refuse
+	// the excess, latest first, and re-run without them.
+	refuseExcess := func(limit int64, counts map[uuid.UUID]int64, keyOf func(int) uuid.UUID, outcome AdmitOutcome) bool {
+		if limit <= 0 {
+			return false
 		}
+		byKey := map[uuid.UUID][]int{}
+		for _, i := range plus {
+			byKey[keyOf(i)] = append(byKey[keyOf(i)], i)
+		}
+		refusedAny := false
+		for k, rows := range byKey {
+			if excess := min(counts[k]-limit, int64(len(rows))); excess > 0 {
+				for _, i := range rows[int64(len(rows))-excess:] {
+					refused[i] = outcome
+				}
+				refusedAny = true
+			}
+		}
+		return refusedAny
+	}
+	if refuseExcess(limits.Principal, perPrincipal, func(i int) uuid.UUID { return batch[i].PrincipalID }, AdmitPrincipalOverLimit) ||
+		refuseExcess(limits.Org, perOrg, func(i int) uuid.UUID { return batch[i].OrgID }, AdmitOrgOverLimit) {
+		return nil, true, nil
+	}
+	if limits.Global > 0 && len(plus) > 0 && used > limits.Global {
+		excess := min(used-limits.Global, int64(len(plus)))
 		for _, i := range plus[int64(len(plus))-excess:] {
 			refused[i] = AdmitOverLimit
 		}
@@ -651,17 +798,23 @@ func (e *ExecDB) ReleaseUndelivered(ctx context.Context, inc uuid.UUID, hash []b
 	}
 	var released bool
 	err := e.trackTx(ctx, inc, func(tx *sql.Tx) error {
-		var n int64
-		if err := tx.QueryRowContext(ctx, `WITH target AS (
+		var principal, org uuid.UUID
+		err := tx.QueryRowContext(ctx, `WITH target AS (
    SELECT tx_hash FROM node_tx_binding
    WHERE tx_hash = $1 AND state = 1 AND generation = 1 AND context_id = $2 AND prev_state IS NULL AND delivered_generation IS NULL AND incarnation = $3
    FOR UPDATE)
- , gone AS (DELETE FROM node_tx_binding b USING target WHERE b.tx_hash = target.tx_hash RETURNING 1)
- SELECT count(*) FROM gone`, hash, contextID.String(), inc.String()).Scan(&n); err != nil {
+ DELETE FROM node_tx_binding b USING target WHERE b.tx_hash = target.tx_hash RETURNING b.principal_id, b.org_id`, hash, contextID.String(), inc.String()).Scan(&principal, &org)
+		if errors.Is(err, sql.ErrNoRows) {
+			released = false
+			return nil
+		}
+		if err != nil {
 			return err
 		}
-		released = n == 1
-		_, err := addQuota(ctx, tx, -n)
+		released = true
+		deltas := newQuotaDelta()
+		deltas.add(principal, org, -1)
+		_, _, _, err = applyQuota(ctx, tx, deltas)
 		return err
 	})
 	return released, err
@@ -830,7 +983,7 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 		if err != nil {
 			return err
 		}
-		var delta int64
+		deltas := newQuotaDelta()
 		var hs [][]byte
 		var tos, reasons []int64
 		var blocks []sql.NullInt64
@@ -843,7 +996,7 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 				continue
 			}
 			applied[i] = true
-			delta += isPending(t.To) - isPending(row.state)
+			deltas.add(row.principal, row.org, isPending(t.To)-isPending(row.state))
 			hs, tos, reasons = append(hs, t.Hash), append(tos, int64(t.To)), append(reasons, int64(t.Reason))
 			block := sql.NullInt64{}
 			if t.BlockNumber != nil {
@@ -891,7 +1044,7 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 				return err
 			}
 		}
-		_, err = addQuota(ctx, tx, delta)
+		_, _, _, err = applyQuota(ctx, tx, deltas)
 		return err
 	})
 	if err != nil {
@@ -993,7 +1146,7 @@ func (e *ExecDB) FinalizeBatch(ctx context.Context, inc uuid.UUID, finals []Trac
 		if err != nil {
 			return err
 		}
-		var delta int64
+		deltas := newQuotaDelta()
 		var hs [][]byte
 		var states, reasons []int64
 		var blocks []sql.NullInt64
@@ -1007,7 +1160,7 @@ func (e *ExecDB) FinalizeBatch(ctx context.Context, inc uuid.UUID, finals []Trac
 				continue
 			}
 			applied[i] = true
-			delta -= isPending(row.state)
+			deltas.add(row.principal, row.org, -isPending(row.state))
 			hs, states, reasons = append(hs, f.Hash), append(states, int64(f.State)), append(reasons, int64(f.Reason))
 			block := sql.NullInt64{}
 			if f.BlockNumber != nil {
@@ -1023,7 +1176,7 @@ func (e *ExecDB) FinalizeBatch(ctx context.Context, inc uuid.UUID, finals []Trac
  SELECT g.tx_hash, g.principal_id, g.org_id, v.st, v.r, v.blk FROM gone g JOIN unnest($1::bytea[], $2::smallint[], $3::smallint[], $4::bigint[]) AS v(h, st, r, blk) ON v.h = g.tx_hash`, hs, states, reasons, nullInts(blocks)); err != nil {
 			return err
 		}
-		_, err = addQuota(ctx, tx, delta)
+		_, _, _, err = applyQuota(ctx, tx, deltas)
 		return err
 	})
 	if err != nil {
@@ -1298,3 +1451,21 @@ func (e *ExecDB) PendingQuota(ctx context.Context) (used, pending int64, err err
 	err = e.pool.conn.QueryRowContext(ctx, `SELECT (SELECT used FROM pending_quota), (SELECT count(*) FROM node_tx_binding WHERE state = 1)`).Scan(&used, &pending)
 	return used, pending, err
 }
+
+// PendingQuotaMismatches counts principals and organizations whose share
+// counter differs from their count of pending bindings (0 after every
+// committed batch, G63), read in one snapshot.
+func (e *ExecDB) PendingQuotaMismatches(ctx context.Context) (int64, error) {
+	var n int64
+	err := e.pool.conn.QueryRowContext(ctx, quotaMismatchSQL).Scan(&n)
+	return n, err
+}
+
+// quotaMismatchSQL counts share counters that differ from the bindings.
+const quotaMismatchSQL = `SELECT
+ (SELECT count(*) FROM pending_quota_principal q
+   FULL JOIN (SELECT principal_id, count(*) AS pending FROM node_tx_binding WHERE state = 1 GROUP BY principal_id) b USING (principal_id)
+   WHERE coalesce(q.used, 0) <> coalesce(b.pending, 0))
++(SELECT count(*) FROM pending_quota_org q
+   FULL JOIN (SELECT org_id, count(*) AS pending FROM node_tx_binding WHERE state = 1 GROUP BY org_id) b USING (org_id)
+   WHERE coalesce(q.used, 0) <> coalesce(b.pending, 0))`

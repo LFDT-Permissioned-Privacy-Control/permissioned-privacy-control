@@ -34,7 +34,7 @@ func TestMyNodeTransactionStatusRequiresOriginalLivePrincipal(t *testing.T) {
 	transfer := newSignedTransfer(t, 0)
 	hash := transfer.hash
 	key := hashBytes(t, hash)
-	results, err := tracking.runtime.AdmitBatch(t.Context(), tracking.meta.Incarnation, 0, []db.TrackAdmission{{Hash: key, PrincipalID: uuid.MustParse(user.ID), OrgID: uuid.MustParse(f.orgID), Signer: hashBytes(t, transfer.signer), ContextID: uuid.New(), EnvelopeHash: key, ExpiresAt: time.Now().Add(time.Minute), MinVersion: 7, Raw: []byte("private-raw-transaction"), VisibleTo: []string{"private-recipient"}, VisibleSender: user.ExternalID}})
+	results, err := tracking.runtime.AdmitBatch(t.Context(), tracking.meta.Incarnation, db.TrackLimits{}, []db.TrackAdmission{{Hash: key, PrincipalID: uuid.MustParse(user.ID), OrgID: uuid.MustParse(f.orgID), Signer: hashBytes(t, transfer.signer), ContextID: uuid.New(), EnvelopeHash: key, ExpiresAt: time.Now().Add(time.Minute), MinVersion: 7, Raw: []byte("private-raw-transaction"), VisibleTo: []string{"private-recipient"}, VisibleSender: user.ExternalID}})
 	require.NoError(t, err)
 	require.Equal(t, db.AdmitInserted, results[0].Outcome)
 	router := gin.New()

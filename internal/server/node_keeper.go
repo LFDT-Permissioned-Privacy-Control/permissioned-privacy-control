@@ -13,22 +13,23 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"privacy-proxy/internal/config"
 	"privacy-proxy/internal/db"
 	"privacy-proxy/internal/loggate"
 	"privacy-proxy/internal/nodepolicy"
 )
 
-// The lease keeper (plan §4.8, P3): one per elected term, sharing the
+// The lease keeper (plan §4.8, P3 and P8): one per elected term, sharing the
 // reconciler's in-memory schedule. It renews pending bindings that the node
 // does not hold for its current boot — never delivered (an OPS crash between
 // the intent and transport, a failed send), lost by a node restart (a new
-// boot id), evicted from the pool, or whose lease is about to run out —
-// after a full admission re-check, signing at the database clock, auditing
-// the decision first, recording it, and only then delivering it on the
-// recovery lane. It stops renewing at the maximum age or on a refused
-// re-check (renewal_stopped, not final), and records dropped only on
-// finalized nonce evidence. Congestion renewal (the TTL/2…TTL−R window, the
-// budget and backpressure) is P8.
+// boot id), evicted from the pool — or whose lease has entered the renewal
+// window (at most TTL/2 left, plan §4.8.2), after a full admission re-check,
+// signing at the database clock, auditing the decision first, recording it,
+// and only then delivering it on the recovery lane. Renewals are spent within
+// the renewal budget, earliest expiry first. It stops renewing at the maximum
+// age or on a refused re-check (renewal_stopped, not final), and records
+// dropped only on finalized nonce evidence.
 
 // keeperNode delivers keeper identities on the recovery lane.
 type keeperNode interface {
@@ -41,11 +42,21 @@ type keeperClock interface {
 }
 
 const (
-	// keeperMaxPerTick bounds the bindings the keeper decides on per tick.
+	// keeperMaxPerTick bounds the bindings the keeper reads and decides on per
+	// tick (at least one budget burst, keeperBudgetBurst).
 	keeperMaxPerTick = 512
 	keeperWorkers    = 16
-	keeperSendWait   = 5 * time.Second
 	keeperMaxBackoff = 15 * time.Second
+	// keeperBudgetBurst: the renewal budget accrues for at least this long
+	// between ticks (and for the whole gap after a slower tick, so a slow tick
+	// loses no capacity); it is refilled every tick, so idle time banks
+	// nothing.
+	keeperBudgetBurst = 2 * time.Second
+	// keeperRecheckDeadline: re-checks are started only this long into a
+	// tick; the rest keep their budget for the next one, so a slow checker
+	// never holds up reconciliation for long (each re-check is bounded by
+	// keeperRecheckWait on its own).
+	keeperRecheckDeadline = 2 * time.Second
 	// keeperMinLease: a lease that short is not worth signing; the binding is
 	// at its maximum age.
 	keeperMinLease = 10 * time.Second
@@ -67,6 +78,13 @@ const (
 	// keeperRefreshInterval: stopped rows are re-read this often (a
 	// same-principal resubmission may have revived one).
 	keeperRefreshInterval = 10 * time.Second
+)
+
+// The keeper's cadence and per-step bounds are the ones startup validates
+// the renewal arithmetic against (config.DefaultKeeperTiming).
+var (
+	keeperSendWait    = config.DefaultKeeperTiming.Delivery
+	keeperRecheckWait = config.DefaultKeeperTiming.Recheck
 )
 
 // keeperResend is a recorded, audited generation whose delivery failed for a
@@ -92,7 +110,12 @@ type nodeKeeper struct {
 	signer  nodepolicy.Signer
 	ttl     time.Duration
 	maxAge  time.Duration
-	network nodepolicy.Network
+	// budget is the renewal budget (renewals per second, plan §4.8.2); 0:
+	// unbounded. tokens accrue at budget per second up to keeperBudgetBurst.
+	budget   int
+	tokens   float64
+	tokensAt time.Time
+	network  nodepolicy.Network
 	// boot is the node's current boot id from a fresh, ready status read, and
 	// the sequence of that read.
 	boot func() (uuid.UUID, bool, uint64)
@@ -110,9 +133,74 @@ type nodeKeeper struct {
 	auditPausedUntil time.Time
 }
 
-// margin is R = TTL/4 (plan §4.8.2): a lease this close to its end is
-// renewed.
+// margin is R = TTL/4 (plan §4.8.2): a renewal must land before a lease has
+// less than this left.
 func (k *nodeKeeper) margin() time.Duration { return k.ttl / 4 }
+
+// windowOpens is TTL/2: a pending lease with at most this much left may be
+// renewed; between it and the margin the budget spreads renewals by expiry.
+func (k *nodeKeeper) windowOpens() time.Duration { return k.ttl / 2 }
+
+// renewedExpiry is the expiry a renewal at now would sign: a full lease,
+// capped at the maximum age, never shorter than the stored one.
+func (k *nodeKeeper) renewedExpiry(row db.TrackedTransaction, now time.Time) time.Time {
+	expires := now.Add(k.ttl)
+	if cap := row.CreatedAt.Add(k.maxAge); cap.Before(expires) {
+		expires = cap
+	}
+	if row.ExpiresAt.After(expires) {
+		expires = row.ExpiresAt
+	}
+	return expires.Truncate(time.Second)
+}
+
+// extends reports whether a renewal at now would lengthen the lease at all
+// (by a second or more). Leases are capped at the maximum age, so a renewal
+// near it extends to the cap once and the next would gain nothing: the keeper
+// then waits for the stop instead of re-authorizing for nothing. Any smaller
+// threshold would let the lease lapse before the stop.
+func (k *nodeKeeper) extends(row db.TrackedTransaction, now time.Time) bool {
+	return k.renewedExpiry(row, now).Sub(row.ExpiresAt) >= time.Second
+}
+
+// refill accrues the budget for the time since the previous tick: the
+// budget rate holds over slow ticks, and an idle keeper banks at most
+// keeperBudgetBurst. Called once per tick.
+func (k *nodeKeeper) refill(now time.Time) {
+	if k.budget <= 0 {
+		return
+	}
+	if k.tokensAt.IsZero() {
+		k.tokens = float64(k.budget) // a new term starts with one second's worth
+	} else if elapsed := now.Sub(k.tokensAt); elapsed > 0 {
+		limit := float64(k.budget) * max(keeperBudgetBurst, elapsed).Seconds()
+		k.tokens = min(limit, k.tokens+float64(k.budget)*elapsed.Seconds())
+	}
+	k.tokensAt = now
+}
+
+// spend takes up to n renewals from the budget and returns how many may
+// proceed; refund returns unused ones.
+func (k *nodeKeeper) spend(n int) int {
+	if k.budget <= 0 {
+		return n
+	}
+	granted := min(n, int(k.tokens))
+	k.tokens -= float64(granted)
+	return granted
+}
+
+func (k *nodeKeeper) refund(n int) {
+	if k.budget > 0 {
+		k.tokens += float64(n)
+	}
+}
+
+// perTick is how many candidates a tick reads: the renewals the budget
+// allows now plus room for stops.
+func (k *nodeKeeper) perTick() int {
+	return keeperMaxPerTick + int(k.tokens)
+}
 
 // reset starts a term: a new claim owner, and every pending binding is
 // reconsidered once the node's boot is known (the takeover scan, G12).
@@ -130,6 +218,8 @@ type keeperJob struct {
 	refusal int16
 	record  uuid.UUID
 	err     error
+	// deferred: not re-checked this tick (the tick's re-check deadline).
+	deferred bool
 	// signed
 	wire     []byte
 	renewal  db.TrackRenewal
@@ -144,6 +234,8 @@ type keeperStop struct {
 	method     string
 	status     int
 	event      uuid.UUID
+	// extra are further hashed audit parameters (the evidence of dropped).
+	extra map[string]any
 }
 
 // tick runs one keeper pass after the reconciler's.
@@ -231,7 +323,7 @@ func (k *nodeKeeper) candidate(t *trackedRow, boot uuid.UUID, now time.Time) boo
 	if row.State != db.TrackPending || t.resend != nil || t.keepAt.After(now) {
 		return false
 	}
-	return t.flag != 0 || !row.CreatedAt.Add(k.maxAge).After(now) || row.ExpiresAt.Sub(now) <= k.margin() ||
+	return t.flag != 0 || !row.CreatedAt.Add(k.maxAge).After(now) || row.ExpiresAt.Sub(now) <= k.windowOpens() ||
 		(!row.DeliveredTo(boot) && !row.ClaimedFor(boot, now))
 }
 
@@ -246,26 +338,31 @@ func (k *nodeKeeper) trigger(t *trackedRow, row db.TrackedTransaction, boot uuid
 		}
 		return db.TrackReasonUndelivered
 	}
-	if row.ExpiresAt.Sub(row.DBNow) <= k.margin() {
+	if row.ExpiresAt.Sub(row.DBNow) <= k.windowOpens() && k.extends(row, row.DBNow) {
 		return db.TrackReasonLeaseExpiring
 	}
 	return 0
 }
 
 // nextCheck is when a fresh row that needs nothing now could need the keeper
-// (claim expiry, the renewal margin, the maximum age), at most
-// keeperIdleRecheck away; boot changes, evictions and reorgs reset it.
+// (claim expiry, the window opening while a renewal can still extend the
+// lease, the maximum age), at most keeperIdleRecheck and at least one tick
+// away; boot changes, evictions and reorgs reset it.
 func (k *nodeKeeper) nextCheck(row db.TrackedTransaction, now time.Time) time.Time {
 	at := row.DBNow.Add(keeperIdleRecheck)
-	for _, candidate := range []time.Time{row.ExpiresAt.Add(-k.margin()), row.CreatedAt.Add(k.maxAge)} {
+	candidates := []time.Time{row.CreatedAt.Add(k.maxAge)}
+	if opens := row.ExpiresAt.Add(-k.windowOpens()); opens.After(row.DBNow) || k.extends(row, row.DBNow) {
+		candidates = append(candidates, opens)
+	}
+	if row.ClaimExpires != nil {
+		candidates = append(candidates, *row.ClaimExpires)
+	}
+	for _, candidate := range candidates {
 		if candidate.Before(at) {
 			at = candidate
 		}
 	}
-	if row.ClaimExpires != nil && row.ClaimExpires.Before(at) {
-		at = *row.ClaimExpires
-	}
-	return now.Add(at.Sub(row.DBNow))
+	return now.Add(max(at.Sub(row.DBNow), reconcileTick))
 }
 
 func keeperBackoff(t *trackedRow, now time.Time) {
@@ -276,6 +373,7 @@ func keeperBackoff(t *trackedRow, now time.Time) {
 // renew decides on the candidate bindings: stop at the maximum age, or
 // re-check, sign, audit, record and deliver a new generation.
 func (k *nodeKeeper) renew(ctx, transport context.Context, r *nodeReconciler, boot uuid.UUID, ready bool, now time.Time) error {
+	k.refill(now)
 	var candidates []*trackedRow
 	for _, t := range r.rows {
 		if k.candidate(t, boot, now) {
@@ -287,8 +385,8 @@ func (k *nodeKeeper) renew(ctx, transport context.Context, r *nodeReconciler, bo
 	}
 	// Earliest expiry first (plan §4.8.7), within the per-tick bound.
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].row.ExpiresAt.Before(candidates[j].row.ExpiresAt) })
-	if len(candidates) > keeperMaxPerTick {
-		candidates = candidates[:keeperMaxPerTick]
+	if len(candidates) > k.perTick() {
+		candidates = candidates[:k.perTick()]
 	}
 	hashes := make([][]byte, len(candidates))
 	for i, t := range candidates {
@@ -339,6 +437,17 @@ func (k *nodeKeeper) renew(ctx, transport context.Context, r *nodeReconciler, bo
 			continue
 		}
 		jobs = append(jobs, &keeperJob{t: t, row: row, trigger: trigger, event: uuid.New()})
+	}
+	// The renewal budget (plan §4.8.2), earliest expiry first: the rest wait
+	// for the next tick. Stops above take no budget.
+	if granted := k.spend(len(jobs)); granted < len(jobs) {
+		for _, j := range jobs[granted:] {
+			j.t.keepAt = now.Add(reconcileTick)
+		}
+		if suppressed, ok := k.log.Allow("budget", time.Now(), failureLogEvery); ok {
+			slog.Info("lease keeper renewals deferred by the renewal budget", "deferred", len(jobs)-granted, "budget_per_s", k.budget, "suppressed", suppressed)
+		}
+		jobs = jobs[:granted]
 	}
 	var failures []error
 	if len(jobs) > 0 {
@@ -422,26 +531,39 @@ func (k *nodeKeeper) recheck(ctx context.Context, r *nodeReconciler, jobs []*kee
 	}
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, keeperWorkers)
+	deadline := time.Now().Add(keeperRecheckDeadline)
 	for _, j := range jobs {
 		j.raw, j.did = payloads[string(j.row.Hash)], dids[j.row.PrincipalID.String()]
 		if len(j.raw) == 0 {
 			j.err = fmt.Errorf("raw transaction of a pending binding is no longer retained")
 			continue
 		}
-		slots <- struct{}{}
+		slots <- struct{}{} // a slot first: waiting for one counts against the deadline
+		if time.Now().After(deadline) {
+			// Not started this tick: it keeps its budget for the next one.
+			<-slots
+			j.deferred = true
+			continue
+		}
 		wg.Add(1)
 		go func(j *keeperJob) {
 			defer wg.Done()
 			defer func() { <-slots }()
-			j.refusal, j.record, j.err = k.checker.Recheck(ctx, j.row, j.raw, j.did, j.event)
+			check, cancel := context.WithTimeout(ctx, keeperRecheckWait)
+			defer cancel()
+			j.refusal, j.record, j.err = k.checker.Recheck(check, j.row, j.raw, j.did, j.event)
 		}(j)
 	}
 	wg.Wait()
 	var ok []*keeperJob
 	var stops []*keeperStop
 	var failures []error
+	deferred := 0
 	for _, j := range jobs {
 		switch {
+		case j.deferred:
+			deferred++
+			j.t.keepAt = now.Add(reconcileTick)
 		case j.err != nil:
 			keeperBackoff(j.t, now)
 			failures = append(failures, j.err)
@@ -454,6 +576,14 @@ func (k *nodeKeeper) recheck(ctx context.Context, r *nodeReconciler, jobs []*kee
 	if len(failures) > 0 {
 		if suppressed, allowed := k.log.Allow("recheck", time.Now(), failureLogEvery); allowed {
 			slog.Warn("lease keeper re-check unavailable; retried", "failed", len(failures), "error", failures[0], "suppressed", suppressed)
+		}
+	}
+	if deferred > 0 {
+		k.refund(deferred)
+		// The keeper cannot spend its budget: renewals may fall behind their
+		// deadline (degraded mode, plan §4.8.2).
+		if suppressed, allowed := k.log.Allow("recheck-slow", time.Now(), failureLogEvery); allowed {
+			slog.Warn("lease keeper re-checks too slow for the renewal budget; renewals deferred", "deferred", deferred, "budget_per_s", k.budget, "suppressed", suppressed)
 		}
 	}
 	return ok, stops, nil
@@ -470,20 +600,21 @@ func (k *nodeKeeper) sign(ctx context.Context, jobs []*keeperJob, now time.Time)
 		for _, j := range jobs {
 			keeperBackoff(j.t, now)
 		}
+		k.refund(len(jobs)) // nothing was decided
 		return nil, nil, errors.Join(err, nodepolicy.ErrNodeUnavailable)
 	}
 	var signed []*keeperJob
 	var stops []*keeperStop
 	for _, j := range jobs {
 		row := j.row
-		expires := dbNow.Add(k.ttl)
-		if cap := row.CreatedAt.Add(k.maxAge); cap.Before(expires) {
-			expires = cap
+		expires := k.renewedExpiry(row, dbNow)
+		if j.trigger == db.TrackReasonLeaseExpiring && !k.extends(row, dbNow) {
+			// The issuing clock disagrees with the tracking database's: no
+			// gain, no decision; the row waits for the maximum age.
+			j.t.keepAt = k.nextCheck(row, now)
+			k.refund(1)
+			continue
 		}
-		if row.ExpiresAt.After(expires) {
-			expires = row.ExpiresAt
-		}
-		expires = expires.Truncate(time.Second)
 		if expires.Sub(dbNow) < keeperMinLease {
 			stops = append(stops, &keeperStop{t: j.t, row: row, generation: row.Generation, reason: db.TrackReasonMaxAge, method: "ops.system.renewal_stopped", status: 410, event: j.event})
 			continue
@@ -544,7 +675,11 @@ func (k *nodeKeeper) audit(ctx context.Context, r *nodeReconciler, jobs []*keepe
 		if s.event == uuid.Nil {
 			s.event = uuid.New()
 		}
-		event, err := k.event(r, s.row, dids, s.method, s.status, s.event, s.reason, map[string]any{"context_id": s.row.ContextID.String(), "generation": s.generation})
+		params := map[string]any{"context_id": s.row.ContextID.String(), "generation": s.generation}
+		for key, value := range s.extra {
+			params[key] = value
+		}
+		event, err := k.event(r, s.row, dids, s.method, s.status, s.event, s.reason, params)
 		if err != nil {
 			return err
 		}
@@ -754,27 +889,122 @@ func (k *nodeKeeper) resend(ctx, transport context.Context, r *nodeReconciler, b
 	return k.stop(ctx, r, stops, now)
 }
 
+// evidenceClient is the private node's batched status call with dropped
+// evidence (A3 wire: receipts and sender nonces at its finalized block).
+type evidenceClient interface {
+	TransactionEvidence(context.Context, []string, []string) (nodepolicy.TransactionStatusBatch, error)
+}
+
 // dropped records the final dropped status of stopped bindings whose nonce
-// the signer's finalized nonce has passed with no own receipt (plan §4.8.1):
-// the evidence is read at the finalized block the private node reported,
-// pinned by its hash, in one request, and the private status is re-read
-// right before the decision; finalized lease expiry alone is never enough.
+// the signer's finalized nonce has passed with no own receipt (plan §4.8.1).
+// A node that offers the batched status call answers both from its own
+// finalized block in one call; otherwise the evidence is read from the public
+// RPC at the finalized block the private node reported, pinned by its hash,
+// and the private status is re-read right before the decision. Either way the
+// same verdict must hold on two reads at least keeperDropInterval apart;
+// finalized lease expiry alone is never enough, and a missing answer (a null
+// entry or receipt, no finalized block) decides nothing.
 func (k *nodeKeeper) dropped(ctx, transport context.Context, r *nodeReconciler, now time.Time) error {
-	if k.chain == nil || r.head == 0 || r.headHash == "" {
-		return nil
+	if evidence, ok := r.node.(evidenceClient); ok && r.batched != nil && r.batched() {
+		return k.droppedFromNode(ctx, transport, r, evidence, now)
 	}
+	return k.droppedFromChain(ctx, transport, r, now)
+}
+
+// droppedDue lists stopped rows whose evidence is due, by signer.
+func (k *nodeKeeper) droppedDue(r *nodeReconciler, now time.Time, perSigner int) map[string][]*trackedRow {
 	bySigner := map[string][]*trackedRow{}
 	for _, t := range r.rows {
 		if (t.row.State == db.TrackRenewalStopped || t.row.State == db.TrackTombstone) && !t.dropAt.After(now) && len(t.row.Signer) == 20 {
 			signer := "0x" + hex.EncodeToString(t.row.Signer)
-			if len(bySigner[signer]) < maxChainBatch-2 {
+			if len(bySigner[signer]) < perSigner {
 				bySigner[signer] = append(bySigner[signer], t)
 			}
 		}
 	}
+	return bySigner
+}
+
+// observeDrop records one evidence verdict for a row and reports whether it
+// is now confirmed (the same verdict, keeperDropInterval apart).
+func observeDrop(t *trackedRow, consumed bool, now time.Time) bool {
+	if !consumed {
+		t.dropSeen = time.Time{}
+		return false
+	}
+	if t.dropSeen.IsZero() {
+		t.dropSeen = now
+		return false
+	}
+	return now.Sub(t.dropSeen) >= keeperDropInterval
+}
+
+func (k *nodeKeeper) droppedFromNode(ctx, transport context.Context, r *nodeReconciler, node evidenceClient, now time.Time) error {
 	var candidates []*trackedRow
+	var hashes, senders []string
+	senderIndex := map[string]int{}
+	for signer, rows := range k.droppedDue(r, now, nodepolicy.MaxStatusBatch) {
+		if len(hashes)+len(rows) > nodepolicy.MaxStatusBatch {
+			break // the rest next tick (dropAt unchanged)
+		}
+		senderIndex[signer] = len(senders)
+		senders = append(senders, signer)
+		for _, t := range rows {
+			candidates = append(candidates, t)
+			hashes = append(hashes, t.hashHex)
+		}
+	}
+	if len(candidates) == 0 || transport.Err() != nil {
+		return nil
+	}
+	read, cancel := context.WithTimeout(transport, keeperSendWait)
+	batch, err := node.TransactionEvidence(read, hashes, senders)
+	cancel()
+	for _, t := range candidates {
+		t.dropAt = now.Add(keeperDropInterval)
+	}
+	if err != nil {
+		return err
+	}
+	var confirmed []*trackedRow
+	var evidence []dropEvidence
+	for i, t := range candidates {
+		if entry := batch.Statuses[i]; entry != nil && (entry.Status.Execution.Status == "included" || entry.Status.Execution.Status == "reverted") {
+			t.dropSeen = time.Time{}
+			continue // the reconciler records the inclusion
+		}
+		receipt := batch.Receipts[i]
+		if batch.Finalized == nil || batch.SenderNonces == nil || receipt == nil {
+			continue // no evidence either way: no decision, no reset
+		}
+		nonce := batch.SenderNonces[senderIndex["0x"+hex.EncodeToString(t.row.Signer)]]
+		if observeDrop(t, !*receipt && nonce > t.row.Nonce, now) {
+			confirmed = append(confirmed, t)
+			evidence = append(evidence, dropEvidence{source: "private_node", block: batch.Finalized.Number, hash: batch.Finalized.Hash, nonce: nonce, firstSeen: t.dropSeen})
+		}
+	}
+	return k.finalizeDropped(ctx, r, confirmed, evidence, nil)
+}
+
+// dropEvidence is what a dropped decision rests on, recorded in its audit
+// event: the source, the finalized block the sender's nonce was read at, that
+// nonce, and when the same verdict was first read.
+type dropEvidence struct {
+	source    string
+	block     uint64
+	hash      string
+	nonce     uint64
+	firstSeen time.Time
+}
+
+func (k *nodeKeeper) droppedFromChain(ctx, transport context.Context, r *nodeReconciler, now time.Time) error {
+	if k.chain == nil || r.head == 0 || r.headHash == "" {
+		return nil
+	}
+	var candidates []*trackedRow
+	nonces := map[*trackedRow]uint64{}
 	var failures []error
-	for signer, rows := range bySigner {
+	for signer, rows := range k.droppedDue(r, now, maxChainBatch-2) {
 		if transport.Err() != nil {
 			break // the tick's budget is spent; the rest wait for the next tick
 		}
@@ -795,6 +1025,7 @@ func (k *nodeKeeper) dropped(ctx, transport context.Context, r *nodeReconciler, 
 		for _, t := range rows {
 			if nonce > t.row.Nonce && !receipts[t.hashHex] {
 				candidates = append(candidates, t)
+				nonces[t] = nonce
 			} else {
 				t.dropSeen = time.Time{}
 			}
@@ -805,10 +1036,9 @@ func (k *nodeKeeper) dropped(ctx, transport context.Context, r *nodeReconciler, 
 	}
 	// The private node must answer definitively that it holds no inclusion:
 	// a non-included status, or its refusal to know the hash (after a restart
-	// or release). No answer decides nothing. The same verdict must hold on
-	// two reads at least keeperDropInterval apart, so one lagging or
-	// inconsistent backend cannot make a final failure.
+	// or release). No answer decides nothing.
 	var confirmed []*trackedRow
+	var evidence []dropEvidence
 	for _, t := range candidates {
 		read, cancel := context.WithTimeout(transport, keeperSendWait)
 		status, err := r.node.TransactionStatus(read, t.hashHex)
@@ -820,21 +1050,25 @@ func (k *nodeKeeper) dropped(ctx, transport context.Context, r *nodeReconciler, 
 		case err != nil && !nodepolicy.NodeRefused(err):
 			continue // no definitive answer (unavailable, internal, limited): no decision
 		}
-		if t.dropSeen.IsZero() {
-			t.dropSeen = now
-			continue
+		if observeDrop(t, true, now) {
+			confirmed = append(confirmed, t)
+			evidence = append(evidence, dropEvidence{source: "public_rpc", block: r.head, hash: r.headHash, nonce: nonces[t], firstSeen: t.dropSeen})
 		}
-		if now.Sub(t.dropSeen) < keeperDropInterval {
-			continue
-		}
-		confirmed = append(confirmed, t)
 	}
+	return k.finalizeDropped(ctx, r, confirmed, evidence, failures)
+}
+
+// finalizeDropped audits and records confirmed dropped decisions (only for
+// bindings still stopped), each with its evidence in the audit event.
+func (k *nodeKeeper) finalizeDropped(ctx context.Context, r *nodeReconciler, confirmed []*trackedRow, evidence []dropEvidence, failures []error) error {
 	if len(confirmed) == 0 {
 		return errors.Join(failures...)
 	}
 	var stops []*keeperStop
-	for _, t := range confirmed {
-		stops = append(stops, &keeperStop{t: t, row: t.row, generation: t.row.Generation, reason: db.TrackReasonNonceConsumed, method: "ops.system.dropped", status: 410, event: uuid.New()})
+	for i, t := range confirmed {
+		e := evidence[i]
+		stops = append(stops, &keeperStop{t: t, row: t.row, generation: t.row.Generation, reason: db.TrackReasonNonceConsumed, method: "ops.system.dropped", status: 410, event: uuid.New(),
+			extra: map[string]any{"evidence": e.source, "finalized_block_number": e.block, "finalized_block_hash": e.hash, "sender_finalized_nonce": e.nonce, "nonce": t.row.Nonce, "evidence_first_seen": e.firstSeen.UTC().Format(time.RFC3339)}})
 	}
 	if err := k.audit(ctx, r, nil, stops); err != nil {
 		return errors.Join(append(failures, err)...)

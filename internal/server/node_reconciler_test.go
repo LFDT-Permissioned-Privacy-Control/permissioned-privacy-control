@@ -134,7 +134,7 @@ func (f *reconcileFixture) admit(t *testing.T, principal, org uuid.UUID, visible
 		tx.visibleSender = "did:test:sender-" + principal.String()
 		a.VisibleTo, a.VisibleSender = visibleTo, tx.visibleSender
 	}
-	results, err := f.tracking.runtime.AdmitBatch(context.Background(), f.writer.incarnation(), 0, []db.TrackAdmission{a})
+	results, err := f.tracking.runtime.AdmitBatch(context.Background(), f.writer.incarnation(), db.TrackLimits{}, []db.TrackAdmission{a})
 	if err != nil || results[0].Outcome != db.AdmitInserted {
 		t.Fatalf("admit: %+v %v", results, err)
 	}
@@ -534,7 +534,7 @@ func TestReconcilerAppliesOnlyTheCurrentBindingsVisibility(t *testing.T) {
 	second := first
 	second.context = uuid.New()
 	a := db.TrackAdmission{Hash: first.hash, PrincipalID: principal, OrgID: org, Signer: first.hash[:20], Nonce: 1, ContextID: second.context, EnvelopeHash: first.hash, ExpiresAt: time.Now().Add(time.Minute), MinVersion: 7, Raw: first.hash, VisibleTo: []string{"did:test:current-recipient"}, VisibleSender: first.visibleSender}
-	if results, err := f.tracking.runtime.AdmitBatch(ctx, f.writer.incarnation(), 0, []db.TrackAdmission{a}); err != nil || results[0].Outcome != db.AdmitInserted {
+	if results, err := f.tracking.runtime.AdmitBatch(ctx, f.writer.incarnation(), db.TrackLimits{}, []db.TrackAdmission{a}); err != nil || results[0].Outcome != db.AdmitInserted {
 		t.Fatalf("re-admission: %+v %v", results, err)
 	}
 	f.node.set(second.status("included", 4, 4))
@@ -560,5 +560,49 @@ func TestReconcilerAppliesOnlyTheCurrentBindingsVisibility(t *testing.T) {
 	}
 	if len(recipients) != 1 || recipients[0] != "did:test:current-recipient" {
 		t.Fatalf("visibility applied to %v, want only the current binding's recipient", recipients)
+	}
+}
+
+// countingBatched answers every batched status call with no entries and
+// counts the hashes polled; delay slows every call.
+type countingBatched struct {
+	mu     sync.Mutex
+	polled int
+	delay  time.Duration
+}
+
+func (c *countingBatched) TransactionStatus(context.Context, string) (nodepolicy.TransactionStatus, error) {
+	return nodepolicy.TransactionStatus{}, nodepolicy.ErrNodeUnavailable
+}
+
+func (c *countingBatched) TransactionStatuses(_ context.Context, hashes []string) (nodepolicy.TransactionStatusBatch, error) {
+	time.Sleep(c.delay)
+	c.mu.Lock()
+	c.polled += len(hashes)
+	c.mu.Unlock()
+	return nodepolicy.TransactionStatusBatch{BootID: strings.Repeat("ab", 16), Statuses: make([]*nodepolicy.BatchedStatus, len(hashes))}, nil
+}
+
+// With the batched status call a tick polls more pending transactions than
+// the single-call bound (B4): at the expected rate the pending work exceeds
+// 4,096 rows, and a row observed late still holds its pending-work quota.
+func TestBatchedReconcilerPollsBeyondTheSingleCallBound(t *testing.T) {
+	node := &countingBatched{}
+	r := &nodeReconciler{node: node, batched: func() bool { return true }, now: time.Now, rows: map[string]*trackedRow{}}
+	for i := 0; i < 6000; i++ {
+		hash := make([]byte, 32)
+		_, _ = rand.Read(hash)
+		r.rows[string(hash)] = &trackedRow{row: db.TrackedTransaction{Hash: hash, State: db.TrackPending}, hashHex: "0x" + hex.EncodeToString(hash)}
+	}
+	if got := len(r.poll(context.Background())); got != 6000 || node.polled != 6000 {
+		t.Fatalf("polled %d (%d answered) of 6000 pending rows in one tick", node.polled, got)
+	}
+	// A slow node: calls are started only for the first two seconds of a
+	// tick; the rest stay due for the next tick instead of stalling it.
+	node.delay, node.polled = 700*time.Millisecond, 0
+	started := time.Now()
+	got := len(r.poll(context.Background()))
+	if elapsed := time.Since(started); elapsed > reconcilePollDeadline+2*node.delay || got == 6000 || got != node.polled {
+		t.Fatalf("slow node: %d of 6000 polled in %s", got, elapsed)
 	}
 }
