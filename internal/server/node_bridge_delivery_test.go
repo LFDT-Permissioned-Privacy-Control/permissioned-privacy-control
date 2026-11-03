@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,6 +135,115 @@ func (c *conflictingService) BindingConflicts(context.Context, []byte, string, s
 func hexBoot(id uuid.UUID) string {
 	b, _ := id.MarshalBinary()
 	return hex.EncodeToString(b)
+}
+
+// steppingClock is an issuing clock whose fact version and time the test
+// moves (a database clock step back is the only way two envelopes of one
+// principal become incomparable, §4.8.3).
+type steppingClock struct {
+	mu      sync.Mutex
+	version uint64
+	at      int64
+	reads   int
+	// after, when set, replaces version/at from the given read on.
+	afterRead int
+	afterAt   int64
+}
+
+func (c *steppingClock) NodePolicyVersion(context.Context) (uint64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.version, nil
+}
+
+func (c *steppingClock) NodePolicyClock(context.Context) (uint64, time.Time, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reads++
+	if c.afterRead > 0 && c.reads >= c.afterRead {
+		c.at = c.afterAt
+	}
+	return c.version, time.Unix(c.at, 0), nil
+}
+
+func (c *steppingClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Unix(c.at, 0)
+}
+
+func (c *steppingClock) set(version uint64, at int64, afterRead int, afterAt int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.version, c.at, c.reads, c.afterRead, c.afterAt = version, at, 0, afterRead, afterAt
+}
+
+// The request-path half of G34 (B3b leftover): an attempt neither envelope
+// of which dominates the other (higher floor, earlier expiry after a database
+// clock step back) is signed again at the current clock, at most twice; a
+// re-signed envelope that dominates is recorded and sent once; one that stays
+// incomparable is refused as unavailable with nothing sent and the stored
+// generation unchanged.
+func TestRequestPathResignsIncomparableEnvelope(t *testing.T) {
+	for _, recovers := range []bool{true, false} {
+		name := "clock_recovers"
+		if !recovers {
+			name = "clock_stays_behind"
+		}
+		t.Run(name, func(t *testing.T) {
+			bridge, node, tracking := newBridgeFixture(t)
+			clock := &steppingClock{}
+			bridge.source, bridge.now = clock, clock.now
+			principal, org := uuid.NewString(), uuid.NewString()
+			tx := newSignedTransfer(t, 0)
+			request := NodeExecutionIdentityRequest{Scope: "transaction", PrincipalID: principal, OrgID: org, Signer: tx.signer, BindingHash: tx.hash}
+			clock.set(7, 1021, 0, 0)
+			first, err := bridge.PrepareIdentity(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := bridge.SubmitTransaction(context.Background(), first, tx.raw, NodeSubmissionMetadata{}); err != nil {
+				t.Fatal(err)
+			}
+			// The database clock steps back one second while the fact version
+			// rises (and the node applies it): (8, 1020+TTL) against the stored
+			// (7, 1021+TTL).
+			afterAt := int64(1020)
+			if recovers {
+				afterAt = 1022 // the re-sign reads a clock past the stored expiry
+			}
+			node.status.Version = 8
+			clock.set(8, 1020, 2, afterAt)
+			second, err := bridge.PrepareIdentity(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := node.calls.Load()
+			_, err = bridge.SubmitTransaction(context.Background(), second, tx.raw, NodeSubmissionMetadata{})
+			row, lookupErr := tracking.runtime.LookupTracked(context.Background(), hashBytes(t, tx.hash))
+			if lookupErr != nil {
+				t.Fatal(lookupErr)
+			}
+			if recovers {
+				if err != nil || node.calls.Load() != calls+1 {
+					t.Fatalf("re-signed attempt: err=%v sends=%d", err, node.calls.Load()-calls)
+				}
+				if row.Generation != 2 || row.MinVersion != 8 || row.ContextID.String() == identityContextID(first) || row.ContextID.String() == identityContextID(second) {
+					t.Fatalf("the re-signed envelope is not the current generation: %+v", row)
+				}
+				return
+			}
+			if !errors.Is(err, nodepolicy.ErrNodeUnavailable) || node.calls.Load() != calls {
+				t.Fatalf("an envelope that stays incomparable: err=%v sends=%d", err, node.calls.Load()-calls)
+			}
+			if clock.reads < 3 {
+				t.Fatalf("re-signed %d times, want 2", clock.reads-1)
+			}
+			if row.Generation != 1 || row.MinVersion != 7 || row.ContextID.String() != identityContextID(first) {
+				t.Fatalf("the stored generation changed: %+v", row)
+			}
+		})
+	}
 }
 
 // G25 (request path): admission is held to the pending-work limits before

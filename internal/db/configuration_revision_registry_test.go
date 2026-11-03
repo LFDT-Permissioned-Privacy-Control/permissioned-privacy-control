@@ -3,11 +3,13 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"privacy-proxy/internal/configuration"
+	"privacy-proxy/internal/nodepolicy"
 	"privacy-proxy/internal/rbac"
 )
 
@@ -153,4 +155,58 @@ func TestConfigurationRegistryAndGroupDeletionIsAtomic(t *testing.T) {
 	storedContract, err := d.GetContract(ctx, contract.ID)
 	require.NoError(t, err)
 	require.Nil(t, storedContract)
+}
+
+// G54 (plan §8, B3b note 13): an address OPS registered for the deploying
+// organization from finalized node evidence cannot be declared by another
+// organization's registry revision (the global address index refuses the
+// activation and the deployer's organization keeps it); an address with no
+// registration still activates independently; the deploying organization's own
+// registry may adopt the registered contract.
+func TestRegistryRefusesAddressDeployedByAnotherOrgsPrincipal(t *testing.T) {
+	d, other, author, reviewer, _ := configurationFixture(t)
+	ctx := t.Context()
+	allow := func(context.Context, *Tx, ConfigurationActivation) error { return nil }
+	deployerOrg := &rbac.Organization{ID: uuid.NewString(), Slug: "deployer-" + uuid.NewString(), Name: "Deploying organization"}
+	require.NoError(t, d.CreateOrganization(ctx, deployerOrg))
+	deployer := uuid.NewString()
+	require.NoError(t, d.CreateUser(ctx, &rbac.User{ID: deployer, ExternalID: "did:test:" + deployer}))
+	require.NoError(t, d.EnsureNodeTxEffectsFloor(ctx, effectsNetwork))
+	deployed := "0x" + strings.Repeat("d1", 20)
+	result, err := d.ApplyNodeTxEffects(ctx, effectsNetwork, NodeTxEffects{TransactionHash: lowerHex(randomBytes(32)), PrincipalID: deployer, OrgID: deployerOrg.ID, BlockNumber: 3,
+		Ownership: true, Created: []nodepolicy.CreatedContract{{Address: deployed, OrgID: deployerOrg.ID, PrincipalID: deployer}}})
+	require.NoError(t, err)
+	require.True(t, result.OwnershipApplied)
+	registered, err := d.GetContractByAddress(ctx, deployerOrg.ID, deployed)
+	require.NoError(t, err)
+	require.NotNil(t, registered, "finality evidence registered the deployment for its organization")
+
+	declare := func(scope configuration.Scope, id, address string) error {
+		contract := configuration.Contract{ID: id, Address: address, Name: "Declared " + address[:6], ABI: json.RawMessage(`[]`), ReadGrants: []configuration.ReadGrant{}}
+		revision, err := d.SubmitConfigurationRevision(ctx, registrySource(t, scope, 0, []configuration.Contract{contract}, map[configuration.Kind]string{}, []configuration.Deletion{}), author)
+		if err != nil {
+			return err
+		}
+		_, err = d.ActivateConfigurationRevisions(ctx, scope, []string{revision.ID}, reviewer, allow)
+		return err
+	}
+	require.Error(t, declare(other, uuid.NewString(), deployed), "another organization's registry cannot take a registered deployment")
+	owner, err := d.GetContractByAddress(ctx, deployerOrg.ID, deployed)
+	require.NoError(t, err)
+	require.NotNil(t, owner)
+	require.Equal(t, registered.ID, owner.ID, "the deploying organization keeps its contract")
+	foreign, err := d.GetContractByAddress(ctx, other.ID, deployed)
+	require.NoError(t, err)
+	require.Nil(t, foreign)
+
+	unregistered := "0x" + strings.Repeat("e2", 20)
+	require.NoError(t, declare(other, uuid.NewString(), unregistered), "an address without registration activates independently")
+
+	own := configuration.Scope{Kind: "organization", ID: deployerOrg.ID}
+	require.NoError(t, declare(own, registered.ID, deployed), "the deploying organization adopts its own registered contract")
+	adopted, err := d.GetContractByAddress(ctx, deployerOrg.ID, deployed)
+	require.NoError(t, err)
+	require.Equal(t, registered.ID, adopted.ID)
+	require.NotNil(t, adopted.DeployedByUserID)
+	require.Equal(t, deployer, *adopted.DeployedByUserID, "adoption keeps the chain evidence of the deployer")
 }
