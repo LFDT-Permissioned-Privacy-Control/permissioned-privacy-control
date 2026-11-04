@@ -199,6 +199,32 @@ func visibleWindowCommits(samples []ReconcileSample, start, end time.Time) (coun
 	return last.VisibleFinalized - first.VisibleFinalized, observations, true
 }
 
+// Window coverage is required before an empty/flat observed series can
+// establish a bounded backlog. One point or a long sampling hole is unknown,
+// even when all observed values happen to be zero.
+func windowCoverage(samples []Sample, start, end time.Time, maxGap time.Duration) (count int, adequate bool) {
+	if !end.After(start) || maxGap <= 0 {
+		return 0, false
+	}
+	var first, last time.Time
+	ordered := true
+	for _, sample := range samples {
+		if sample.At.Before(start) || !sample.At.Before(end) {
+			continue
+		}
+		if count == 0 {
+			first = sample.At
+		} else if !sample.At.After(last) || sample.At.Sub(last) > maxGap {
+			ordered = false
+		}
+		last = sample.At
+		count++
+	}
+	needed := int(math.Ceil(float64(end.Sub(start)) / float64(maxGap)))
+	adequate = ordered && count >= max(2, needed) && first.Sub(start) <= maxGap && end.Sub(last) <= maxGap
+	return count, adequate
+}
+
 // Read committed status counts before node finality. New finalizations or
 // intervening commits can only overstate backlog, not invent a drained tail.
 func conservativeBacklog(committed, finalized int64) (int64, bool) {

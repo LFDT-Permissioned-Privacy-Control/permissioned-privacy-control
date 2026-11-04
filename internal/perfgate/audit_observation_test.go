@@ -209,3 +209,50 @@ func TestWindowCommitsUseOnlyVisibilityReadsInsideWindow(t *testing.T) {
 		t.Fatal("one in-window snapshot established commit throughput")
 	}
 }
+
+func TestWindowCoverageRejectsSparseSamplesAndHoles(t *testing.T) {
+	start := time.Unix(1000, 0)
+	end := start.Add(time.Minute)
+	var dense []Sample
+	for second := 1; second < 60; second++ {
+		dense = append(dense, Sample{At: start.Add(time.Duration(second) * time.Second), Value: 0})
+	}
+	if count, ok := windowCoverage(dense, start, end, 2*time.Second); !ok || count != 59 {
+		t.Fatalf("dense coverage: %d %v", count, ok)
+	}
+	for _, tc := range []struct {
+		name    string
+		samples []Sample
+	}{
+		{"one zero point", dense[:1]},
+		{"fresh endpoint only", dense[58:]},
+		{"large middle hole despite enough points", append(append([]Sample{}, dense[:25]...), dense[35:]...)},
+		{"stale first point", dense[2:]},
+		{"stale last point", dense[:57]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := windowCoverage(tc.samples, start, end, 2*time.Second); ok {
+				t.Fatal("inadequate series established observed window")
+			}
+		})
+	}
+}
+
+func TestAuditWindowCoverageDoesNotRequireASequenceEstimate(t *testing.T) {
+	start := time.Unix(1000, 0)
+	p := Phases{Start: start.Add(-time.Minute), WindowStart: start, WindowEnd: start.Add(time.Minute)}
+	report := &Gate2Report{Series: map[string][]Sample{}}
+	for second := 1; second < 60; second++ {
+		report.Series["audit_pending_entries"] = append(report.Series["audit_pending_entries"], Sample{At: start.Add(time.Duration(second) * time.Second)})
+	}
+	summarizeAudit(report, nil, p)
+	if !report.Audit.BacklogWindowObserved || report.Audit.BacklogWindowSamples != 59 || !report.Audit.BacklogObserved {
+		t.Fatalf("direct observations lost without SQL sequence: %+v", report.Audit)
+	}
+	report.Series["audit_pending_entries"] = report.Series["audit_pending_entries"][58:]
+	report.Audit = AuditReport{}
+	summarizeAudit(report, nil, p)
+	if report.Audit.BacklogWindowObserved || report.Audit.BacklogWindowSamples != 1 {
+		t.Fatalf("one point claimed full audit window: %+v", report.Audit)
+	}
+}

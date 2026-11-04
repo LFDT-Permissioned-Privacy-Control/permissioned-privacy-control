@@ -103,6 +103,8 @@ type AuditReport struct {
 	ProjectedDrainSec             float64  `json:"projected_drain_seconds"`
 	BufferBytesAtEnd              int64    `json:"buffer_bytes_at_window_end"`
 	BacklogObserved               bool     `json:"backlog_observed"`
+	BacklogWindowSamples          int      `json:"backlog_window_samples"`
+	BacklogWindowObserved         bool     `json:"backlog_window_observed"`
 	DrainObserved                 bool     `json:"drain_observed"`
 	LifecycleComplete             bool     `json:"lifecycle_complete"`
 	DrainFromWindowEndSec         float64  `json:"drain_seconds_from_window_end"`
@@ -687,6 +689,17 @@ func stageTimings(records []RequestRecord, expected []string, stamps map[string]
 // seal time, so it cannot give the age). Records per answered request (k) is
 // measured from the drained total when the buffer drained, else assumed 1.
 func summarizeAudit(report *Gate2Report, records []RequestRecord, p Phases) {
+	a := &report.Audit
+	defer func() {
+		// Direct gauges remain useful even if a sequence-estimate query failed.
+		series := report.Series["audit_pending_entries"]
+		a.BacklogWindowSamples, a.BacklogWindowObserved = windowCoverage(series, p.WindowStart, p.WindowEnd, 2*time.Second)
+		if sample, ok := sampleAt(series, p.WindowEnd); ok && !sample.At.Before(p.WindowStart) && p.WindowEnd.Sub(sample.At) <= 2*time.Second {
+			a.BacklogObserved = true
+			a.BacklogAtWindowEnd = int64(sample.Value)
+			a.BacklogTrend = Trend(seriesBetween(series, p.WindowStart, p.WindowEnd))
+		}
+	}()
 	sealed := report.Series["audit_sealed_seq"]
 	first, ok0 := sampleAt(sealed, p.Start)
 	start, ok1 := sampleAt(sealed, p.WindowStart)
@@ -704,7 +717,6 @@ func summarizeAudit(report *Gate2Report, records []RequestRecord, p Phases) {
 	answeredBy := func(at time.Time) int {
 		return sort.Search(len(answered), func(i int) bool { return answered[i].After(at) })
 	}
-	a := &report.Audit
 	a.RecordsPerRequest, a.RecordsPerRequestMeasured = 1, false
 	if final := sealed[len(sealed)-1].Value; report.Audit.Drained && report.Audit.DrainObserved && report.Audit.LifecycleComplete && final > first.Value && len(answered) > 0 {
 		a.RecordsPerRequest, a.RecordsPerRequestMeasured = (final-first.Value)/float64(len(answered)), true
@@ -729,13 +741,7 @@ func summarizeAudit(report *Gate2Report, records []RequestRecord, p Phases) {
 	if b, ok := valueAt(report.Series["audit_buffer_bytes"], p.WindowEnd); ok {
 		a.BufferBytesAtEnd = int64(b)
 	}
-	// These direct observations supersede the estimates above. An older
-	// server without the gauges retains estimates, explicitly unobserved.
-	if pending, ok := valueAt(report.Series["audit_pending_entries"], p.WindowEnd); ok {
-		a.BacklogObserved = true
-		a.BacklogAtWindowEnd = int64(pending)
-		a.BacklogTrend = Trend(seriesBetween(report.Series["audit_pending_entries"], p.WindowStart, p.WindowEnd))
-	}
+
 }
 
 func reconcileReport(ctx context.Context, stack *Stack, report *Gate2Report, stamps map[string]Stamp, p Phases, offset time.Duration) *ReconcileReport {
@@ -748,13 +754,14 @@ func reconcileReport(ctx context.Context, stack *Stack, report *Gate2Report, sta
 	// submission's binding was committed before it was sent).
 	r.IntentsInWindow = int64(report.Window.CompletedInWindow)
 	// Actual committed-row visibility bounds, not final_at INSERT times.
-	r.FinalizedInWindow, r.BacklogWindowSamples, r.FinalizedInWindowObserved = visibleWindowCommits(report.ReconcileObservations, p.WindowStart, p.WindowEnd)
+	r.FinalizedInWindow, _, r.FinalizedInWindowObserved = visibleWindowCommits(report.ReconcileObservations, p.WindowStart, p.WindowEnd)
 	r.FinalizedInWindowLowerBound = r.FinalizedInWindowObserved
 	r.FinalizedPerSecond = float64(r.FinalizedInWindow) / windowSeconds
 	series := report.Series["unreconciled_finalized_backlog"]
+	r.BacklogWindowSamples, r.BacklogObserved = windowCoverage(series, p.WindowStart, p.WindowEnd, 2*time.Second)
 	r.BacklogTrend = Trend(seriesBetween(series, p.WindowStart, p.WindowEnd))
 	if sample, ok := sampleAt(series, p.WindowEnd); ok && p.WindowEnd.Sub(sample.At) <= 2*time.Second {
-		r.BacklogAtWindowEnd, r.BacklogObserved = int64(sample.Value), true
+		r.BacklogAtWindowEnd = int64(sample.Value)
 	}
 	r.BacklogBound = 5 * float64(r.IntentsInWindow) / windowSeconds
 	for _, s := range seriesBetween(series, p.WindowStart, p.WindowEnd) {
