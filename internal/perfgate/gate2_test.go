@@ -177,6 +177,12 @@ func TestGate2(t *testing.T) {
 	if os.Getenv("OPS_GATE2") != "1" {
 		t.Skip("set OPS_GATE2=1, OPS_GATE2_SERVER and OPS_GATE2_OUTPUT to run the gate-2 full-server runner")
 	}
+	// P7's approved execution floor is 12 GiB; retain the more conservative
+	// default unless an explicit, recorded diagnostic setting selects it.
+	minFreeGiB := envInt(t, "OPS_GATE2_MIN_FREE_GIB", 15)
+	if minFreeGiB < 12 {
+		t.Fatal("OPS_GATE2_MIN_FREE_GIB must be an integer of at least 12 (the approved P7 disk floor)")
+	}
 	output := os.Getenv("OPS_GATE2_OUTPUT")
 	if output == "" || os.Getenv("OPS_GATE2_SERVER") == "" {
 		t.Fatal("OPS_GATE2_SERVER and OPS_GATE2_OUTPUT are required")
@@ -235,7 +241,7 @@ func TestGate2(t *testing.T) {
 			ExtraEnv:    extraEnv(os.Getenv("OPS_GATE2_EXTRA_ENV")),
 			Q6:          q6FromEnv(t),
 			Dir:         dir,
-			MinFreeGiB:  15,
+			MinFreeGiB:  float64(minFreeGiB),
 			Log:         t.Logf,
 		}
 		if len(concurrencies) == 1 {
