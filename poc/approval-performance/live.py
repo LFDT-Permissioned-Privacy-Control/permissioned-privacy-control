@@ -281,6 +281,26 @@ class Client:
                 return record
             time.sleep(min(5.0, float(retry_after or 1)))
 
+    def submit_once(self, tx, route):
+        """One wire attempt for a saved-intent crash probe; never reconnect/retry."""
+        url, token = route(tx)
+        target = urllib.parse.urlparse(url)
+        conn = http.client.HTTPConnection(target.netloc, timeout=60)
+        started = now()
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_sendRawTransaction", "params": [tx["raw"]]})
+        try:
+            status, payload, _ = self.attempt(conn, target, token, body, {})
+        finally:
+            conn.close()
+        payload = payload if isinstance(payload, dict) else {"transport": "invalid_response"}
+        record = {"hash": tx["hash"], "signer": tx["signer"], "nonce": tx["nonce"], "one_shot": True,
+                  "attempts": [[round(started, 3), round(now() - started, 4), status, None, payload.get("transport")]]}
+        if status == 200 and not payload.get("error") and payload.get("result") == tx["hash"]:
+            record["accepted_at"] = now()
+        with self.lock:
+            self.records[tx["hash"]] = record
+        return record
+
     def open_loop(self, txs, rate, route, deadline):
         """Schedules txs at a fixed rate; returns futures. Each record keeps
         its scheduled time, so latency can include any wait for a worker."""
@@ -302,7 +322,8 @@ class Client:
 class Live:
     """One stack plus helpers shared by the scenarios."""
 
-    def __init__(self, args, result, ops_env=None, gas_limit=200_000_000, finality_lag=0, signers=8, per_signer=200, principals=1, reserve=0):
+    def __init__(self, args, result, ops_env=None, gas_limit=200_000_000, finality_lag=0, signers=8, per_signer=200, principals=1, reserve=0,
+                 transport_barriers=False):
         self.args, self.result = args, result
         os.environ.update(OPS_EVIDENCE_DIR=str(args.output), OPS_POC_KEEPALIVE="1", OPS_POC_GAS_LIMIT=str(gas_limit))
         os.environ.setdefault("OPS_RETH_BINARY", str(ROOT / ".tmp/approval-target/release/ops-reth-approvals"))
@@ -320,7 +341,7 @@ class Live:
         for address in self.keys:
             genesis["alloc"][address] = {"balance": hex(10**24)}
         (h.EVIDENCE / "genesis.json").write_text(json.dumps(genesis) + "\n")
-        self.stack = v2stack.V2Stack("live-" + args.scenario, ops_env=ops_env or {})
+        self.stack = v2stack.V2Stack("live-" + args.scenario, ops_env=ops_env or {}, transport_barriers=transport_barriers)
         try:
             self.setup(args, result, ops_env, gas_limit, finality_lag, principals, reserve)
         except BaseException:
@@ -948,16 +969,20 @@ def fact_churn(args, result, rate=150, seconds=60):
 
 
 def ops_failover(args, result, rate=100, seconds=100):
-    """L3 (kill the OPS leader under load; a second instance takes over) and
-    L11 (OPS killed between intent and transport; leader killed mid-recovery)."""
-    live = Live(args, result, signers=9, per_signer=rate * seconds // 8 + 1, reserve=1)
+    """L3 handoffs and L11 crashes at observed intent/renewal barriers.
+
+    The two probe requests are sent once, without client retry. Their saved
+    intents are checked separately from the ordinary client-accepted load.
+    """
+    live = Live(args, result, signers=11, per_signer=rate * seconds // 8 + 1, reserve=1, transport_barriers=True)
+    probe = None
+    barriers = live.stack.transport_barriers
     try:
         spare = live.add_principal(f"did:test:live-{args.scenario}-spare", live.reserved)
         probe = VersionProbe(live)
         b_url = live.stack.start_extra_ops("b")
         urls = {"a": live.stack.url, "b": b_url}
         alive = {"a": True, "b": True}
-        # Fact changes go through a surviving instance.
         toggle = membership_toggler(live, spare, base=lambda: urls["a" if alive["a"] else "b"])
         result.event("second OPS instance started", url=b_url)
 
@@ -967,84 +992,171 @@ def ops_failover(args, result, rate=100, seconds=100):
             return urls[name] + "/rpc/" + live.stack.org, live.owner[tx["signer"]].token
 
         def holder():
-            """The backend pid holding the publisher lease (None: nobody)."""
-            pid = live.stack.psql("SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND objid = 730075 AND granted LIMIT 1")
-            return int(pid) if pid else None
+            """Identify the real lease backend and its tagged OPS instance."""
+            rows = live.rows("SELECT l.pid, a.application_name FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid "
+                             "WHERE l.locktype='advisory' AND l.objid=730075 AND l.granted", "ops_approvals_demo")
+            if not rows:
+                return None
+            if len(rows) != 1 or rows[0][1] not in ("ops-live-a", "ops-live-b"):
+                raise RuntimeError("cannot map the publisher lease backend to an OPS instance: " + repr(rows))
+            return {"pid": int(rows[0][0]), "instance": rows[0][1].removeprefix("ops-live-")}
 
-        windows, published = [], []
+        def require_wait(predicate, limit, message, step=.1):
+            value = live.wait_until(predicate, limit, step)
+            if not value:
+                raise RuntimeError(message)
+            return value
 
-        kills = []
-        # Host → database clock, measured once: no slow call between a trigger and a kill.
+        def binding(tx_hash):
+            rows = live.rows("SELECT b.state,b.generation,b.principal_id,b.org_id,b.context_id,"
+                             "coalesce(b.delivered_generation,0),coalesce(b.delivered_boot::text,''),"
+                             "EXISTS(SELECT 1 FROM node_tx_payload p WHERE p.tx_hash=b.tx_hash AND p.bucket=b.payload_bucket),"
+                             "extract(epoch FROM b.created_at),extract(epoch FROM clock_timestamp()) "
+                             f"FROM node_tx_binding b WHERE b.tx_hash=decode('{tx_hash[2:]}','hex')")
+            if not rows:
+                return None
+            state, generation, principal, org, context, delivered, boot, payload, created, observed = rows[0]
+            return {"hash": tx_hash, "state": int(state), "generation": int(generation), "principal_id": principal,
+                    "org_id": org, "context_id": context, "delivered_generation": int(delivered), "delivered_boot": boot,
+                    "payload_present": payload == "t", "created_at": float(created), "observed_at": float(observed)}
+
+        windows, published, kills, saved_probes = [], [], [], []
         offset = live.db_now() - now()
 
-        def kill(name, restart_after=8, held_by=None):
+        def kill_leader(barrier, target_hash, expected_instance):
+            """Keep the killed instance down until the survivor delivers the target."""
+            previous = require_wait(holder, 10, "no publisher lease holder before kill")
+            name = previous["instance"]
+            if name != expected_instance:
+                raise RuntimeError("the lease changed before the held sender could be killed")
             alive[name] = False
-            held_by = held_by if held_by is not None else holder()
-            kills.append(now() + offset)
-            t0 = now()
+            killed = now()
+            kills.append({**previous, "at": killed + offset})
             if name == "a":
                 live.stack.stop_ops(signal.SIGKILL)
             else:
                 live.stack.stop_extra_ops("b", signal.SIGKILL)
-            result.event("OPS instance killed", instance=name)
-            # A different backend must hold it: the killed session may linger briefly.
-            live.wait_until(lambda: (lambda pid: pid if pid and pid != held_by else None)(holder()), 60, .1)
-            windows.append(round(now() - t0, 2))
-            result.event("lease held again", seconds=windows[-1])
-            # Fact publication from the new leader: a change through the survivor.
+            # None of the blocked old sender's requests may reach the node.
+            barrier.drop_held()
+            result.event("OPS leader killed at transport barrier", **previous, target=target_hash)
+            current = require_wait(lambda: (lambda h: h if h and h["pid"] != previous["pid"] and h["instance"] != name else None)(holder()),
+                                   60, "no different OPS instance took the publisher lease")
+            windows.append(round(now() - killed, 2))
+            result.event("lease held by survivor", **current, seconds=windows[-1])
             published.append(fact_change_latency(live, probe, toggle, "failover"))
-            result.event("fact change applied after failover", ms=published[-1])
-            time.sleep(restart_after)
+            survivor = current["instance"]
+            require_wait(lambda: next((r for r in barrier.snapshot() if r["hash"] == target_hash and r.get("accepted")
+                                        and r["instance"] == survivor and r["forwarded_at"] > killed), None),
+                         90, "survivor never delivered the barrier's target")
+            result.event("survivor delivered target before the old instance restarted", instance=survivor, target=target_hash)
             if name == "a":
                 live.stack.start_ops()
             else:
                 live.stack.start_extra_ops("b")
             alive[name] = True
-            result.event("OPS instance restarted", instance=name)
+            return previous, current, killed
 
-        txs = interleave([live.txs[s] for p in live.principals[:1] for s in p.signers])[:rate * seconds]
+        load_signers, probe_signers = live.principals[0].signers[:8], live.principals[0].signers[8:10]
+        txs = interleave([live.txs[s] for s in load_signers])[:rate * seconds]
         started = now()
-        load = live.load(txs, rate, route, now() + seconds + 120)
-        time.sleep(20)
-        kill("a")                       # A started first: it holds the lease
-        time.sleep(max(0, started + 45 - now()))
-        kill("b")                       # B took over: kill it too
-        time.sleep(max(0, started + 65 - now()))
-        # Node restart, then kill the leader while it renews (recovery). A clean
-        # stop (SIGTERM) keeps every block, so this checks failover alone, not
-        # blocks lost in a node crash (kill-under-load covers that).
-        line_count = len(live.ops_log_lines("execution node restarted"))
-        leader = holder()  # taken now, so nothing slow runs between the log line and the kill
+        load = live.load(txs, rate, route, now() + seconds + 180)
+        for at, signer in zip((20, 45), probe_signers):
+            time.sleep(max(0, started + at - now()))
+            leader = require_wait(holder, 10, "no leader for the saved-intent probe")
+            tx = live.txs[signer][0]
+            barrier = barriers.arm({tx["raw"]: tx["hash"]})
+            pending = live.client.pool.submit(live.client.submit_once, tx, live.route(urls[leader["instance"]]))
+            if not barrier.wait(lambda rs: any(r["held"] for r in rs), 20):
+                raise RuntimeError("saved-intent request did not reach the pre-forward barrier")
+            held = next(r for r in barrier.snapshot() if r["held"])
+            stored = binding(tx["hash"])
+            status = live.private("ops_transactionStatuses", [[tx["hash"]]])
+            node_entry = status.get("result", {}).get("statuses", [None])[0]
+            proof = (stored and stored["state"] == 1 and stored["generation"] == 1 and stored["delivered_generation"] == 0
+                     and stored["context_id"] == held["context_id"] and stored["principal_id"] == live.owner[signer].uid
+                     and stored["org_id"] == live.stack.org and stored["payload_present"] and node_entry == "not_found"
+                     and not any(r.get("forwarded_at") for r in barrier.snapshot()))
+            result.check("L11: intent and payload committed while its first transport is held before the node", bool(proof),
+                         binding=stored, held=held, node_status=node_entry, leader=leader)
+            if not proof:
+                raise RuntimeError("saved-intent barrier did not establish the required crash window")
+            previous, current, killed = kill_leader(barrier, tx["hash"], held["instance"])
+            record = pending.result(timeout=10)
+            saved_probes.append({"hash": tx["hash"], "signer": signer, "binding_before_kill": stored,
+                                 "killed": previous, "survivor": current, "killed_at": killed,
+                                 "client": record, "transport": barrier.snapshot()})
+
+        # Build an acknowledged pending backlog. A completed renewal, held
+        # transports and observed still-unrenewed bindings must prove the next
+        # kill is inside actual renewal; the count alone is not that evidence.
+        live.driver.pause()
+        acknowledged_sql = ("SELECT encode(tx_hash,'hex'),generation,context_id FROM node_tx_binding "
+                            "WHERE state=1 AND delivered_generation=generation ORDER BY created_at LIMIT 1024")
+        backlog = require_wait(lambda: (lambda rows: rows if len(rows) == 1024 else None)(live.rows(acknowledged_sql)),
+                               45, "not enough acknowledged pending intents for a split renewal batch", .5)
+        by_hash = {tx["hash"]: tx for group in live.txs.values() for tx in group}
+        targets = {"0x" + hx: int(generation) for hx, generation, _ in backlog}
+        barrier = barriers.arm({by_hash[h]["raw"]: h for h in targets}, allow=1)
         node_stop = now() + offset
         live.stack.node.stop(signal.SIGTERM)
         time.sleep(2)
         live.stack.node.start()
-        result.event("node restarted (recovery burst)")
-        recovering = live.wait_until(lambda: len(live.ops_log_lines("execution node restarted")) > line_count or None, 30, .02)
-        kill("a", restart_after=5, held_by=leader)
-        mid_kill = kills[-1]
+        new_boot = require_wait(live.boot, 15, "restarted node has no boot id")
+        result.event("node restarted with a paused inclusion backlog", pending=len(targets), boot_id=new_boot)
+        if not barrier.wait(lambda rs: any(r.get("accepted") and r.get("boot_id") == new_boot for r in rs)
+                            and any(r["held"] for r in rs), 30):
+            raise RuntimeError("no completed and blocked recovery transports before the kill")
+        held = next(r for r in barrier.snapshot() if r["held"])
+        stored = binding(held["hash"])
+        values = ",".join(f"(decode('{h[2:]}','hex'),{generation})" for h, generation in targets.items())
+        unrenewed = int(live.stack.psql_exec("WITH targets(hash,generation) AS (VALUES " + values + ") "
+                                            "SELECT count(*) FROM targets t JOIN node_tx_binding b ON b.tx_hash=t.hash "
+                                            "WHERE b.generation=t.generation"))
+        before = live.system_rows_between(node_stop, now() + offset + 1, [40, 41])
+        proof = (stored and stored["context_id"] == held["context_id"] and stored["generation"] > targets[held["hash"]]
+                 and before > 0 and unrenewed > 0)
+        result.check("L11: recovery has a completed transport, a saved blocked generation and unrenewed work before the leader kill",
+                     bool(proof), binding=stored, held=held, system_generations_before=before, unrenewed=unrenewed,
+                     transport=barrier.snapshot())
+        if not proof:
+            raise RuntimeError("recovery barrier did not establish an interruption during renewal")
+        previous, current, killed = kill_leader(barrier, held["hash"], held["instance"])
+        after = require_wait(lambda: live.system_rows_between(killed + offset, now() + offset + 1, [40, 41]) or None,
+                             60, "survivor issued no generation after the mid-renewal kill")
+        result.check("L11: survivor continued renewal after the interrupted batch", before > 0 and after > 0,
+                     before_kill=before, after_kill=after, killed=previous, survivor=current)
+        result.evidence("mid_recovery_transport", barrier.snapshot())
+        live.driver.resume()
         sent = load.join()
         probe.close()
-        result.check("L3: the lease is taken over within a bounded window after each leader kill", all(w <= 15 for w in windows), windows_s=windows)
+        probe = None
+        result.check("L3: the lease is taken over within a bounded window after each leader kill",
+                     all(w <= 15 for w in windows), windows_s=windows, kills=kills)
         result.check("L3: fact publication continues on each new leader (a change applied within 100 ms)",
                      all(v is not None and v <= 100 for v in published), latencies_ms=published)
-        accepted, included, tracking = live.outcome_checks(sent, "failover", settle=240)
-        history = live.renewals()
-        result.evidence("identity_history", history)
-        # Without a test hook a kill between an intent's save and its transport
-        # cannot be confirmed: the survivor renews every pending intent with no
-        # recorded delivery (reason undelivered), a superset that also holds the
-        # killed instance's unflushed acknowledgements. Counted per OPS kill,
-        # between that kill and the node stop (no node restart in between).
-        after_kills = [live.system_rows_between(k, node_stop, [40]) for k in kills[:2]]
-        result.check("L11: after each OPS kill the survivor redelivered the intents with no recorded delivery, and every accepted transaction was included",
-                     len(included) == len(accepted) and all(n > 0 for n in after_kills), undelivered_renewals_after_each_kill=after_kills,
-                     note="superset of saved-but-unsent intents; that exact case is not isolated without a test hook", history=history)
-        before = live.system_rows_between(node_stop, mid_kill, [40, 41])
-        after = live.system_rows_between(mid_kill, mid_kill + 600, [40, 41])
-        result.check("L11: the leader was killed during the recovery renewals (renewals both before and after the kill)",
-                     bool(recovering) and before > 0 and after > 0, before_kill=before, after_kill=after)
+        live.outcome_checks(sent, "failover", settle=240)
+        saved_hashes = [p["hash"] for p in saved_probes]
+        tracking = live.all_settled(saved_hashes, 120)
+        receipts = live.receipts(saved_hashes)
+        rows = live.final_rows_per_hash()
+        bad, unanswered = live.identities_of_included([(p["hash"], p["signer"]) for p in saved_probes])
+        for p in saved_probes:
+            first = next((r for r in p["transport"] if r.get("accepted")), None)
+            correct = (len(p["client"]["attempts"]) == 1 and not p["client"].get("accepted_at")
+                       and tracking.get(p["hash"], ("", 0))[:2] == ("final", 10)
+                       and is_included(receipts.get(p["hash"])) and rows.get(p["hash"]) == 1
+                       and first and first["instance"] == p["survivor"]["instance"]
+                       and all(not r.get("forwarded_at") for r in p["transport"] if r["held"]))
+            result.check("L11: survivor executes the saved intent once with one client attempt and no original held-request forwarding",
+                         bool(correct and not bad and not unanswered), hash=p["hash"], client=p["client"],
+                         tracking=tracking.get(p["hash"]), receipt=receipts.get(p["hash"]), first_node_forward=first)
+        result.evidence("saved_intent_probes", saved_probes)
+        result.evidence("identity_history", live.renewals())
     finally:
+        if probe:
+            probe.close()
+        for barrier in barriers.barriers:
+            barrier.drop_held()
         live.close()
 
 
