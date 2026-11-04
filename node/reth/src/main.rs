@@ -10,7 +10,7 @@ use ops_reth_policy::{
     },
     archive::{ArtifactStore, Retention},
     context::ExecutionBinding,
-    runtime::PolicyRuntime,
+    runtime::{PolicyRuntime, TransactionStatus},
     sdk::{OpsExecutorBuilder, ProviderChain},
     simulation,
     transaction::PolicyTx,
@@ -50,7 +50,7 @@ use std::{
 type BackendFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send>>;
 type SubmitFn =
     Arc<dyn Fn(Identity, Bytes, Address) -> BackendFuture<PoolSubmission> + Send + Sync>;
-type StatusFn = Arc<dyn Fn(B256) -> BackendFuture<Value> + Send + Sync>;
+type StatusFn = Arc<dyn Fn(B256) -> Result<TransactionStatus, String> + Send + Sync>;
 type PooledFn = Arc<dyn Fn(&[B256]) -> Vec<bool> + Send + Sync>;
 type SimulateFn =
     Arc<dyn Fn(Identity, SimulationRequest, Bytes) -> BackendFuture<Value> + Send + Sync>;
@@ -90,8 +90,8 @@ impl ExecutionBackend for Backend {
     ) -> Result<PoolSubmission, String> {
         (self.submit)(identity, raw, signer).await
     }
-    async fn transaction_status(&self, hash: B256) -> Result<Value, String> {
-        (self.status)(hash).await
+    fn transaction_status(&self, hash: B256) -> Result<Value, String> {
+        serde_json::to_value((self.status)(hash)?).map_err(|_| "invalid execution status".into())
     }
     async fn simulate(
         &self,
@@ -402,18 +402,10 @@ fn main() -> eyre::Result<()> {
         let eth_submit = handle.node.rpc_registry.eth_api().clone();
         let eth_simulate = eth_submit.clone();
         let status_runtime = runtime.clone();
-        let status: StatusFn = Arc::new(move |hash| {
-            let runtime = status_runtime.clone();
-            Box::pin(async move {
-                // From the node's canonical chain (index lookups, never the
-                // block's other receipts) and the block's evidence; finality
-                // never above what Reth has written.
-                let status = tokio::task::spawn_blocking(move || runtime.status(hash, now()))
-                    .await
-                    .map_err(|_| "status lookup failed")??;
-                serde_json::to_value(status).map_err(|_| "invalid execution status".into())
-            })
-        });
+        // On the status lane's blocking threads: from the node's canonical
+        // chain (index lookups, never the block's other receipts) and the
+        // block's evidence; finality never above what Reth has written.
+        let status: StatusFn = Arc::new(move |hash| status_runtime.status(hash, now()));
         let submit: SubmitFn = Arc::new(move |identity: Identity, raw: Bytes, signer| {
             let eth = eth_submit.clone();
             Box::pin(async move {
@@ -609,6 +601,37 @@ fn main() -> eyre::Result<()> {
 mod tests {
     use super::*;
     use reth_ethereum::cli::{chainspec::EthereumChainSpecParser, interface::Cli};
+
+    #[test]
+    fn backend_status_is_the_execution_object() {
+        let backend = |status: StatusFn| Backend {
+            submit: Arc::new(|_, _, _| Box::pin(async { Err("unused".into()) })),
+            simulate: Arc::new(|_, _, _| Box::pin(async { Err("unused".into()) })),
+            status,
+            pooled: Arc::new(|hashes: &[B256]| vec![false; hashes.len()]),
+        };
+        let pending = backend(Arc::new(|_| {
+            Ok(TransactionStatus {
+                status: "pending".into(),
+                facts_version: 7,
+                block_hash: None,
+                block_number: None,
+                reason_code: String::new(),
+                created: Vec::new(),
+                finalized: false,
+                finalized_block_hash: None,
+                finalized_block_number: None,
+            })
+        }));
+        let value = pending.transaction_status(B256::ZERO).unwrap();
+        assert_eq!(value["status"], "pending", "{value}");
+        assert_eq!(value["facts_version"], 7, "{value}");
+        let failing = backend(Arc::new(|_| Err("lookup failed".into())));
+        assert_eq!(
+            failing.transaction_status(B256::ZERO).unwrap_err(),
+            "lookup failed"
+        );
+    }
 
     #[test]
     fn already_known_pool_error_is_an_already_pooled_transaction() {

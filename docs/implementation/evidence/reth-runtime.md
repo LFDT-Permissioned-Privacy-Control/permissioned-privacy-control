@@ -617,6 +617,7 @@ model, and the `main.rs` unit tests:
 | The finalized block is fixed before any transaction is looked up: a block finalized meanwhile decides nothing and the nonces are read at the earlier one | `the_finalized_block_is_fixed_before_any_transaction_is_looked_up` |
 | A canonical block without local evidence gives `null` | `included_without_local_evidence_is_null` |
 | After a restart one call loads at most 16 uncached blocks; the next answers the rest | `a_call_loads_a_bounded_number_of_uncached_blocks` |
+| The single `ops_transactionStatus` shares the batched call's lane: eight concurrent single calls run four at a time (all eight ran at once before, independent review finding 4), and a batched call waits behind them | `single_status_calls_share_the_bounded_status_lane` |
 | Without a chain or a pool view the call fails | `batched_status_fails_closed_without_chain_or_pool_view` |
 | Not served on the control listener; answers while every admission worker is held | `batched_status_is_served_only_on_the_execution_listener_off_the_admission_pool` |
 | Startup refuses pruning of the transaction index, receipts or bodies | `pruning_of_transaction_data_is_refused_at_startup` |

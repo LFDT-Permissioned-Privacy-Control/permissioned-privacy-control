@@ -178,7 +178,7 @@ impl ExecutionBackend for Pool {
     ) -> Result<PoolSubmission, String> {
         Err("unused".into())
     }
-    async fn transaction_status(&self, hash: B256) -> Result<Value, String> {
+    fn transaction_status(&self, hash: B256) -> Result<Value, String> {
         Ok(serde_json::to_value(self.runtime.status(hash, AT)?).unwrap())
     }
     async fn simulate(
@@ -825,4 +825,135 @@ async fn batched_status_is_served_only_on_the_execution_listener_off_the_admissi
 
 fn seal_value() -> Value {
     serde_json::from_slice(&seal("identity", &identity(UNKNOWN, "ctx-x"))).unwrap()
+}
+
+/// A backend whose single status answers block on a gate, counting how many
+/// run at once (finding 4: the single call had no bound).
+struct Held {
+    runtime: Arc<PolicyRuntime>,
+    gate: Arc<common::Gate>,
+    entered: std::sync::atomic::AtomicUsize,
+    active: std::sync::atomic::AtomicUsize,
+    most: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl ExecutionBackend for Held {
+    fn capabilities(&self) -> Vec<String> {
+        common::golden::Backend.capabilities()
+    }
+    async fn submit(
+        &self,
+        _identity: Identity,
+        _raw: Bytes,
+        _signer: Address,
+    ) -> Result<PoolSubmission, String> {
+        Err("unused".into())
+    }
+    fn transaction_status(&self, hash: B256) -> Result<Value, String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.entered.fetch_add(1, SeqCst);
+        let now = self.active.fetch_add(1, SeqCst) + 1;
+        self.most.fetch_max(now, SeqCst);
+        self.gate.pass();
+        self.active.fetch_sub(1, SeqCst);
+        Ok(serde_json::to_value(self.runtime.status(hash, AT)?).unwrap())
+    }
+    async fn simulate(
+        &self,
+        _identity: Identity,
+        _request: SimulationRequest,
+        _exact: Bytes,
+    ) -> Result<Value, String> {
+        Err("unused".into())
+    }
+    fn pooled(&self, hashes: &[B256]) -> Result<Vec<bool>, String> {
+        Ok(vec![false; hashes.len()])
+    }
+}
+
+/// Opens the gate when the test ends, also on a failed assertion, so no
+/// blocking thread stays parked.
+struct OpenOnDrop(Arc<common::Gate>);
+
+impl Drop for OpenOnDrop {
+    fn drop(&mut self) {
+        self.0.open();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn single_status_calls_share_the_bounded_status_lane() {
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::time::Duration;
+    let node = node();
+    let held = Arc::new(Held {
+        runtime: node.runtime.clone(),
+        gate: common::Gate::new(),
+        entered: Default::default(),
+        active: Default::default(),
+        most: Default::default(),
+    });
+    let _open = OpenOnDrop(held.gate.clone());
+    let api = Arc::new(
+        PrivateApi::new(
+            node.runtime.clone(),
+            held.clone(),
+            "private-test-token".into(),
+            Arc::new(|| AT),
+        )
+        .unwrap(),
+    );
+    let single = |api: Arc<PrivateApi>| {
+        tokio::spawn(async move { call(&api, "ops_transactionStatus", json!([hex(P)])).await })
+    };
+    let calls: Vec<_> = (0..8).map(|_| single(api.clone())).collect();
+    let mut reached = false;
+    for _ in 0..2_000 {
+        if held.active.load(SeqCst) >= 4 {
+            reached = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(reached, "four status jobs never started");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        (held.most.load(SeqCst), held.entered.load(SeqCst)),
+        (4, 4),
+        "single status calls ran beside each other without a bound"
+    );
+    // Cancelled requests (a client gone, the 30 s bound): the jobs already
+    // running keep their places until they finish, so nothing else starts.
+    for call in &calls {
+        call.abort();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        held.entered.load(SeqCst),
+        4,
+        "a queued call ran after its cancel"
+    );
+    // The batched call shares the lane: it waits for those jobs.
+    let batch = tokio::spawn({
+        let api = api.clone();
+        async move { answer(&api, &[A]).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !batch.is_finished(),
+        "the batched call ran beside four status jobs"
+    );
+    held.gate.open();
+    let answered = tokio::time::timeout(Duration::from_secs(5), batch)
+        .await
+        .expect("the batched call ran once the lane was free")
+        .unwrap();
+    assert_eq!(answered["statuses"][0]["execution"]["status"], "included");
+    let result = call(&api, "ops_transactionStatus", json!([hex(P)])).await;
+    assert_eq!(
+        result["result"]["execution"]["status"], "pending",
+        "{result}"
+    );
+    assert!(held.most.load(SeqCst) <= 4);
 }

@@ -254,8 +254,9 @@ treated as canonical.
 Malformed parameters (more than 256 hashes or senders, none, or not lowercase
 `0x` hex of the right length), or a node without a chain or pool view yet,
 fail the whole call with the generic error. The call is served only on the
-main listener and runs on its own bounded lane (four calls at once), never on
-the admission workers.
+main listener and runs on the status lane (four status jobs at once, shared
+with the single `ops_transactionStatus`, which loads a block's evidence the
+same way), never on the admission workers.
 
 The local example uses `--dev.finality-depth 1`; Reth's default is 64. These are
 the dev miner's forkchoice decisions, not an external consensus guarantee. The

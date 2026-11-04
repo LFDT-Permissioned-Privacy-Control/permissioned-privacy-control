@@ -65,8 +65,9 @@ pub const MAX_FACT_WAIT: Duration = Duration::from_secs(5);
 /// so waiters alone can never fill the listener and block the publication
 /// they wait for.
 pub const DEFAULT_FACT_WAITERS: usize = 32;
-/// Batched status calls worked on at once; more wait (holding only their
-/// connection).
+/// Status calls (single and batched together) worked on at once; more wait
+/// (holding only their connection). Loading a block's evidence verifies
+/// every identity in it.
 const STATUS_JOBS: usize = 4;
 
 /// What the transaction pool did with a submitted transaction.
@@ -120,7 +121,9 @@ pub trait ExecutionBackend: Send + Sync {
         raw: Bytes,
         signer: Address,
     ) -> Result<PoolSubmission, String>;
-    async fn transaction_status(&self, _hash: B256) -> Result<Value, String> {
+    /// The execution status of `hash`. Blocking: called on the status lane's
+    /// blocking threads, at most `STATUS_JOBS` at once with the batched call.
+    fn transaction_status(&self, _hash: B256) -> Result<Value, String> {
         Err("transaction status is unavailable".into())
     }
     /// Whether the transaction pool holds each hash, in order (cheap, in
@@ -149,8 +152,8 @@ pub struct PrivateApi {
     /// Bounds concurrent waiters; beyond it a lagging request gets `-32012`
     /// at once.
     waiters: Arc<Semaphore>,
-    /// Bounds concurrent batched status jobs (recovery and reconciliation
-    /// traffic), apart from the admission pool.
+    /// Bounds concurrent status jobs, single and batched (recovery and
+    /// reconciliation traffic), apart from the admission pool.
     status_jobs: Arc<Semaphore>,
 }
 
@@ -490,32 +493,42 @@ impl PrivateApi {
                 // this authenticated service listener. The identity comes from
                 // the including block's manifest, or else the live registry; an
                 // unknown hash is an error and discloses nothing.
-                let execution = self.backend.transaction_status(hash).await?;
-                let block = match execution.get("status").and_then(Value::as_str) {
-                    Some("included" | "reverted") => Some((
-                        execution
-                            .get("block_number")
-                            .and_then(Value::as_u64)
-                            .ok_or("invalid execution status")?,
-                        execution
-                            .get("block_hash")
-                            .and_then(Value::as_str)
-                            .and_then(|block| block.parse::<B256>().ok())
-                            .ok_or("invalid execution status")?,
-                    )),
-                    _ => None,
-                };
-                let runtime = self.runtime.clone();
-                // Status has its own blocking lane: archive reads never hold
-                // the admission pool's permits. A block named as the
-                // inclusion block counts for the canonical epoch.
-                let identity = tokio::task::spawn_blocking(move || {
+                // The status lane, shared with the batched call: archive reads
+                // never hold the admission pool's permits, and at most
+                // `STATUS_JOBS` status jobs load block evidence at once. The
+                // permit travels with the job, so a cancelled request cannot
+                // let more run. A block named as the inclusion block counts
+                // for the canonical epoch.
+                let permit = self
+                    .status_jobs
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| "status lookup unavailable")?;
+                let (runtime, backend) = (self.runtime.clone(), self.backend.clone());
+                let (execution, identity) = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    let execution = backend.transaction_status(hash)?;
+                    let block = match execution.get("status").and_then(Value::as_str) {
+                        Some("included" | "reverted") => Some((
+                            execution
+                                .get("block_number")
+                                .and_then(Value::as_u64)
+                                .ok_or("invalid execution status")?,
+                            execution
+                                .get("block_hash")
+                                .and_then(Value::as_str)
+                                .and_then(|block| block.parse::<B256>().ok())
+                                .ok_or("invalid execution status")?,
+                        )),
+                        _ => None,
+                    };
                     let identity = runtime.status_identity(hash, block)?;
                     // A block that left the chain meanwhile is never named.
                     if !runtime.note_reported(block.as_slice())?.1.is_empty() {
                         return Err("canonical chain changed during the lookup".to_owned());
                     }
-                    Ok(identity)
+                    Ok((execution, identity))
                 })
                 .await
                 .map_err(|_| "status lookup failed")??;
@@ -532,7 +545,7 @@ impl PrivateApi {
                 // Optional: senders whose nonce after the finalized block is
                 // wanted, with each hash's receipt presence (dropped evidence).
                 let senders = request.params.get(1).map(status_senders).transpose()?;
-                // A bounded lane of its own: never the admission pool's
+                // The status lane, shared with the single call: never the admission pool's
                 // permits. The permit travels with the job, so a cancelled
                 // request cannot let more jobs run than the bound.
                 let permit = self
