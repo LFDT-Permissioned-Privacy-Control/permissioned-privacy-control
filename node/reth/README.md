@@ -131,11 +131,21 @@ It is separate from public Reth JSON-RPC. IPC is disabled, and the node refuses
 to start with a public RPC module that replays, traces, validates or builds
 blocks through the guarded executor (`debug`, `trace`, `ots`, `flashbots`, `mev`,
 `testing`, or `all`), with `--rpc.forwarder` (it would send guarded
-transactions to a node without policy and hide local pool rejections) or with
+transactions to a node without policy and hide local pool rejections), with
+`--auth-ipc` (the engine API must stay JWT-authenticated), with
 `--debug.reorg-frequency`, or with a `--db.sync-mode` other than `durable`
 (finality is reported only for blocks Reth has written, which must survive a
-host crash). Public `eth_simulateV1` builds no blocks (its block limit is
-forced to 0). `eth_call`, `eth_estimateGas`, and `debug_traceCall` are available through
+host crash). On public HTTP and WS, the methods of the remaining modules that
+would replay blocks through the guarded executor or build blocks are refused
+by name, alone or in a batch, with error `-32601` ("method not available on
+the guarded node") before any work: `eth_callMany`, `eth_getBlockAccessList`,
+`eth_getBlockAccessListByBlockHash`, `eth_getBlockAccessListByBlockNumber`,
+`eth_getBlockAccessListRaw`, `eth_simulateV1` and
+`reth_getBlockExecutionOutcome`. Every other public method of the modules the
+node allows was reviewed for the pinned Reth, and the node refuses to start when
+a public transport would serve a method outside that review (after a Reth
+upgrade, re-review and extend the list in `src/public_rpc.rs`). Public
+`eth_simulateV1` also builds no blocks (its block limit is forced to 0). `eth_call`, `eth_estimateGas`, and `debug_traceCall` are available through
 signed private simulations; public calls cannot inherit an OPS principal.
 Nonempty state/code/storage and block overrides are rejected for every simulation
 mode. An authenticated call never authorizes replacing customer bytecode with a

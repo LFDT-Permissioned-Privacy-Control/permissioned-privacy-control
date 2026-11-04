@@ -492,6 +492,40 @@ connection), and the timeout answer carried `Retry-After: 1`. The body test
 failed against the first version of this change, which answered before the
 body arrived.
 
+## Public RPC guard (2026-11-03)
+
+The independent review (finding 1) found public methods of the `eth` module
+that re-execute a block through the guarded executor, so an anonymous caller
+could make the node re-verify a block's whole evidence in a loop. Every public
+method of the modules the node still serves was checked in the pinned Reth for
+a path into the block executor or block building; seven have one and are
+refused by name, alone or in a batch, with `-32601` before any work:
+`eth_callMany` (with a `transactionIndex`), the four `eth_getBlockAccessList`
+forms, `eth_simulateV1` (also off through its block limit) and
+`reth_getBlockExecutionOutcome` (up to 128 blocks). The other 98 methods the
+pinned Reth registers for the allowed modules (`eth`, `net`, `web3`, `txpool`,
+`admin`, `rpc`, `reth`, `miner`, on HTTP and WS, listed from a node started
+with all of them) are the reviewed list; the node refuses to start when a
+public transport would serve any other method, so a Reth upgrade that adds one
+fails closed, and the refused methods are also removed from every transport.
+The node also refuses to start with `--auth-ipc`, which serves the engine API
+without JWT.
+
+| Behaviour | Test |
+|---|---|
+| Reth's own public server with the guard, HTTP and WS on separate servers and on one port: each refused method is answered `-32601` and its handler never runs, alone and inside a batch mixed with ordinary methods; the ordinary ones run | `refused_methods_never_run_over_http`, `refused_methods_never_run_over_ws` |
+| A refused method sent as a notification, alone, in a batch of notifications or beside a call, never runs (jsonrpsee 0.26 never runs a notification anyway; the test pins that) | `refused_notifications_never_run` |
+| An unreviewed public method refuses startup; otherwise the refused methods are removed from every transport | `startup_guard_refuses_unreviewed_methods_and_removes_refused_ones`, `reviewed_and_refused_methods_are_disjoint` |
+| `--auth-ipc` is refused at startup | `unsafe_public_rpc_is_refused_at_startup` |
+
+With the guard switched off, both server tests fail (the handlers ran), and
+the startup test fails for `--auth-ipc`. `smoke.py` starts the node with
+`--http.api eth,net,web3,reth` and every allowed module on WS (so the startup
+guard checks the whole reviewed list), sends each refused method to the live
+node, alone and in a batch with `eth_getBlockByNumber`, and checks the fixed
+error, while block reads, receipts and the public `eth_call` refusal stay as
+before.
+
 ## Bounded fact wait and self-import (2026-11-03)
 
 | Behaviour | Test |

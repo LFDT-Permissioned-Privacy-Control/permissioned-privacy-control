@@ -144,7 +144,8 @@ fn pool_submission(result: Result<B256, EthApiError>) -> Result<PoolSubmission, 
 /// Public RPC modules that replay, simulate or build blocks through the guarded
 /// executor: historical debug/trace and Otterscan replay (forensic replay is
 /// authenticated), bundle simulation and block validation, and test block
-/// building. `all` includes them.
+/// building. `all` includes them. The few such methods of the modules the node
+/// still serves are refused by name at runtime (`public_rpc`).
 const REFUSED_RPC_MODULES: [RethRpcModule; 6] = [
     RethRpcModule::Debug,
     RethRpcModule::Trace,
@@ -175,6 +176,11 @@ fn refuse_unsafe_rpc(rpc: &RpcServerArgs) -> eyre::Result<()> {
         eyre::bail!(
             "--rpc.forwarder is not supported: it sends guarded transactions to a node without policy and hides local pool rejections"
         );
+    }
+    // The engine API over IPC needs no JWT, and it includes methods that
+    // replay blocks through the guarded executor.
+    if rpc.auth_ipc {
+        eyre::bail!("--auth-ipc is not supported: the engine API must stay JWT-authenticated");
     }
     Ok(())
 }
@@ -220,7 +226,8 @@ fn settle_nonce_rejection(
 
 /// Settings the guarded node forces on public RPC. A public `pending` query or
 /// `eth_simulateV1` would build candidate blocks through the guarded executor
-/// and publish their manifests; OPS needs neither.
+/// and publish their manifests; OPS needs neither. IPC stays off: Reth applies
+/// no RPC middleware to it (the refused methods are still removed from it).
 fn force_rpc_settings(rpc: &mut RpcServerArgs) -> eyre::Result<()> {
     rpc.ipcdisable = true;
     rpc.rpc_pending_block = "none".parse().map_err(eyre::Report::msg)?;
@@ -347,7 +354,9 @@ fn main() -> eyre::Result<()> {
             EthereumEngineValidatorBuilder::default(),
             engine_builder,
             validator_builder,
-            tower::layer::util::Identity::new(),
+            // Public HTTP and WS: methods that replay blocks through the
+            // guarded executor are refused before any work.
+            ops_reth_policy::public_rpc::RefuseReplayLayer,
             tower::layer::util::Identity::new(),
         );
         let handle = builder
@@ -356,6 +365,12 @@ fn main() -> eyre::Result<()> {
                 EthereumNode::components().executor(OpsExecutorBuilder(runtime.clone())),
             )
             .with_add_ons(addons)
+            // Every public method served must be reviewed for the guarded
+            // node, so a Reth upgrade that adds one fails closed here.
+            .extend_rpc_modules(|ctx| {
+                ops_reth_policy::public_rpc::guard_configured(ctx.modules)
+                    .map_err(eyre::Report::msg)
+            })
             .launch_with_debug_capabilities()
             .await?;
         // The node's own canonical chain drives finality: status, and identity
@@ -659,6 +674,7 @@ mod tests {
             &["--http", "--http.api", "flashbots"],
             &["--http", "--http.api", "all"],
             &["--rpc.forwarder", "http://127.0.0.1:8545"],
+            &["--auth-ipc"],
         ] {
             assert!(
                 refuse_unsafe_rpc(&rpc(arguments)).is_err(),

@@ -347,9 +347,13 @@ return to pending and OPS renews them the same way.
 
 The guarded node refuses to start with a public RPC module that replays,
 traces, validates or builds blocks (`debug`, `trace`, `ots`, `flashbots`, `mev`,
-`testing`, or `all`), with `--rpc.forwarder`, with `--debug.reorg-frequency`, or
-with a `--db.sync-mode` other than `durable`; public `eth_simulateV1` returns an
-error. Use OPS's
+`testing`, or `all`), with `--rpc.forwarder`, with `--auth-ipc`, with
+`--debug.reorg-frequency`, or with a `--db.sync-mode` other than `durable`.
+Public methods that would re-execute blocks or build them answer error
+`-32601`: `eth_callMany`, `eth_getBlockAccessList` and its `ByBlockHash`,
+`ByBlockNumber` and `Raw` forms, `eth_simulateV1` and
+`reth_getBlockExecutionOutcome`. The node also refuses to start if an enabled
+public module would serve a method its release was not reviewed for. Use OPS's
 signed simulations for calls, estimates and traces.
 
 On the guarded Reth node, public `pending` block queries return no block, and
