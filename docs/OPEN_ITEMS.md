@@ -448,6 +448,14 @@ needs facts the node has not applied yet is handed to the node's bounded wait
 `Retry-After: 1` (reason `publication_pending`) instead of an immediate
 refusal; a node without that capability is refused the same way at once.
 
+The 2026-11-04 integrated live run observed zero refusals across 9,000
+requests during fact churn, but missed the added-p99 and publication-p95
+latency limits. Three node SIGKILLs recovered all 9,000 accepted transactions;
+OPS failover preserved all 10,000, while the intended L11 saved-intent and
+mid-renewal crash windows were not exercised. These remaining validation
+limits and the passing congestion checks are recorded in the
+[integrated live evidence](implementation/evidence/reth-runtime.md#integrated-live-recovery-validation-2026-11-04).
+
 **Resolved on the OPS side (delivery and recovery):** OPS keeps a pending
 transaction deliverable itself. The elected instance's lease keeper renews a
 pending transaction that the node no longer holds — never delivered, lost by a

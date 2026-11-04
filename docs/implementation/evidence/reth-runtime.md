@@ -714,5 +714,51 @@ unpersisted blocks left transactions provisional after a node crash, and
 fact churn caused refusals for an unaffected principal. The definitive
 `not_found` status and OPS redelivery fix are covered above and in
 `node_crash_redelivery_test.go`; `node_policy_churn_test.go` covers notification
-publication, bounded waiting and clock/cache races. Live results for the
-combined fixes are recorded separately when measured.
+publication, bounded waiting and clock/cache races. Integrated live results
+follow below.
+
+
+## Integrated live recovery validation (2026-11-04)
+
+`poc/approval-performance/live.py` ran against PostgreSQL, Redis, OPS and the
+real guarded node on the shared workstation on AC power. Each scenario used
+fresh databases and node directories, public development accounts, and
+canonical receipts, private execution manifests and tracking rows as its
+checks. OPS was built from `bd3c4a7b`; node source was `76eb7a6e`. The later
+`f3b59166` change makes the Go congestion simulation's clock deterministic;
+it changes test code only.
+
+| Scenario | Result |
+|---|---|
+| SIGKILL under load (L1) | PASS: 9,000/9,000 accepted transactions included and finalized after three crashes, each under its own principal's identity, with no duplicate finalization. |
+| Graceful restart (L6) | PASS: 6,000/6,000 included and finalized under their own identities. |
+| Two-minute node outage (L7/L8/L10) | PASS: all 40 allowed transactions renewed, audited and included without client action; all 20 transactions of the principal banned during downtime stopped, were audited and never executed. Recovery-burst fact changes applied in 44.57 / 36.65 ms. |
+| OPS downtime beyond fact TTL (L4) | PASS: node became unready after 27.9 s, executed no transactions while facts were stale, then included and finalized all 20 accepted transactions after OPS returned. |
+| Reorg (L12) | PASS: the provisional deployment returned to pending, re-executed on the canonical chain and finalized once; ownership was registered once, for the deploying organization, after finality. |
+| Fact churn (L5/L10) | FAIL overall on latency. All 18,000 transactions included and finalized; the 9,000 requests during churn had zero refusals; revocation was enforced immediately. |
+| OPS failover (L3/L11) | FAIL overall on L11 coverage. All 10,000 transactions included and finalized; lease handoff took 0.93 / 0.25 / 0.36 s and publication after each handoff took 57.41 / 61.74 / 57.77 ms. |
+| Congestion (L9) | PASS: 1,200/1,200 included, peak pending 464 against a limit of 564, no observed lease gaps, 639 renewals within the 20/s budget. |
+| Overload and inclusion stall (L13) | PASS: backpressure held at 564; 554 transactions stopped at maximum age without observed early lease gaps or excess renewal debt. A finalized competitor consumed one stopped transaction's nonce: only that transaction became dropped, while the other 553 retained stopped bindings. |
+
+During churn, added request p99 was **306.2 ms** (baseline 129.9 ms, churn
+436.1 ms), above the 250 ms limit. The mutation-start to observed-node-apply
+p95 was **307.01 ms**, above 100 ms. That measurement includes API work and
+concurrent version changes. Separately, 94 observed database versions all
+reached the node; first-database-observation to node-observation p95 was
+163.3 ms. Database polling was every 50 ms and node polling every 5 ms, so
+this is polling evidence rather than exact commit-to-apply timing.
+
+The failover run did not establish the intended L11 crash windows: no
+undelivered generation was observed after the first two OPS kills, and the
+recovery kill happened before any renewal generation was recorded (0 before,
+111 after). The preserved transactions validate the exercised handoffs;
+interruption between saved intent and transport, and interruption during
+renewal, still need deterministic live coverage. The churn and failover
+reports remain failed.
+
+The complete database package and the congestion simulation passed race
+rechecks after correcting fixture isolation and the simulation clock. The
+other packages in the broad Go race run passed, with no detected races.
+API drift and repeat-generation checks, both SDK type builds, all 12 SDK
+tests and 28 Python harness tests passed. Five changed documentation pages
+parsed as MDX.
