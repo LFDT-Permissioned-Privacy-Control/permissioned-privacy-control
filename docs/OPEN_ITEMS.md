@@ -412,14 +412,23 @@ compressed execution manifest per block (one file and one directory sync)
 instead of per-transaction evidence objects; a snapshot or delta writes three
 files (the record, a list of record ids and the head pointer) and a heartbeat
 writes nothing. The earlier 2026-09-17
-private-node load run measured **9.6–11.1 mined transactions/s**. A full-stack
-run on 2026-11-03, through OPS using the V1 harness at 5,000 offered requests/s
-for 60 seconds, measured V2 best **1,788.1 committed TPS** (median 1,778.0),
-versus same-day V1 best 2,094.3 (median 1,984.5), on the shared Apple M2 Max.
-The V2 best run's queue-to-commit p95 was 3.095 seconds. These contended
-workstation measurements establish a development baseline; the original
-1,962 TPS and 2.84-second p95 targets remain unmet. They are not a production
-capacity claim. See the [measurement and bottleneck evidence](implementation/evidence/reth-runtime.md#end-to-end-throughput-through-ops-2026-11-03).
+private-node load run measured **9.6–11.1 mined transactions/s**. The completed
+2026-11-04 full-stack matrix, through OPS using the V1 harness at 5,000
+offered requests/s for 60 seconds, measured V2 best/median **1,952.30 /
+1,945.02 committed TPS**, versus same-day V1 **2,378.47 / 2,374.60** on the
+shared Apple M2 Max: 82.08% best-to-best and 81.91% median-to-median. Default V2
+queue-to-commit p95 ranged from 2.942 to 2.992 seconds. All V2 runs missed the
+original 1,962 TPS, same-day V1 best and 2.84-second p95 criteria; V1 passed
+the absolute-TPS/p95 criteria. A gate-off control and a V2 pending-limit
+sensitivity were also recorded. Logged hashes without a receipt at their
+single verification lookup leave receipt-delivery coverage incomplete; this
+diagnostic is not an extra numeric gate or proof of permanent loss. These
+local measurements are not a production capacity claim. Partial OPS-only
+mock-node measurements also remain below the 5,000 requests/s target;
+the full load and sensitivity matrix is unqualified. The completed request
+rates, interrupted case and observation limits are in the
+[mock-node evidence](implementation/evidence/reth-runtime.md#ops-through-a-mock-node-partial-2026-11-04). Exact builds,
+results and limitations are in the [measurement evidence](implementation/evidence/reth-runtime.md#end-to-end-throughput-through-ops-2026-11-04).
 
 Guarded nodes no longer re-check the signed evidence of finalized blocks they
 re-execute (trusted finalized history). That changes a detective control and
@@ -448,12 +457,21 @@ needs facts the node has not applied yet is handed to the node's bounded wait
 `Retry-After: 1` (reason `publication_pending`) instead of an immediate
 refusal; a node without that capability is refused the same way at once.
 
-The 2026-11-04 integrated live run observed zero refusals across 9,000
-requests during fact churn, but missed the added-p99 and publication-p95
-latency limits. Three node SIGKILLs recovered all 9,000 accepted transactions;
-OPS failover preserved all 10,000, while the intended L11 saved-intent and
-mid-renewal crash windows were not exercised. These remaining validation
-limits and the passing congestion checks are recorded in the
+The 2026-11-04 integrated live runs recovered all 9,000 accepted transactions
+across three node SIGKILLs. The subsequent deterministic L11 failover run
+passed 13/13 checks: barriers proved committed intents before first
+transport, and a saved blocked renewal after another transport had completed;
+survivors included and finalized all 10,000 transactions under their own
+identities without duplicate finalization. Three predeclared plain churn
+repetitions each settled all 18,000 accepted transactions, with zero refusals
+for unaffected load and enforced revocation. One missed both latency limits
+(added p99 257.1 ms, mutation-to-observed-apply p95 181.90 ms); two passed
+(−186.1 / −221.2 ms added p99 and 55.76 / 57.13 ms apply p95). The original
+250 ms / 100 ms limits remain unchanged; stable latency is not established.
+Separate diagnostics found durable filesystem work dominating sampled apply
+stacks, but did not conclusively identify the failed tail's physical cause or
+justify a production change. The raw evidence, earlier failed observations
+and passing congestion checks are recorded in the
 [integrated live evidence](implementation/evidence/reth-runtime.md#integrated-live-recovery-validation-2026-11-04).
 
 **Resolved on the OPS side (delivery and recovery):** OPS keeps a pending

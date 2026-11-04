@@ -718,11 +718,126 @@ publication, bounded waiting and clock/cache races. Integrated live results
 follow below.
 
 
+## End-to-end throughput through OPS (2026-11-04)
+
+Eight further local runs used the same V1 `transactions.py` harness: three
+alternating V1/V2 pairs, a V1 gate-off control, and one V2 pending-limit
+sensitivity. Each offered 5,000 requests/s for 60 seconds, with ten accounts,
+`--retain=100000`, `MAX_CONCURRENT_REQUESTS=5000`, a 1-second Engine driver
+interval and a 0.8-second build window. V1 recorded two verification workers;
+V2 used its default. Identity was locally mocked; OPS linking and RBAC were
+real, with V1 preflight and V2 policy enforcement in the node. Jobs were
+sequential on the shared Mac. Recorded free disk ranged from 13.44 to
+15.62 GiB and one-minute load averages from 3.62 to 21.43; this is local
+evidence, not a production capacity claim.
+
+| Case | Committed TPS | Receipt queue-to-commit p95 | Maximum observed receipt latency | Logged hashes without a receipt at verification |
+|---|---:|---:|---:|---:|
+| V1 run 1 | 2,378.47 | 2.676 s | 3.521 s | 2,103 / 146,880 |
+| V2 run 1 | 1,952.30 | 2.955 s | 23.522 s | 1,610 / 122,300 |
+| V1 run 2 | 2,374.60 | 2.698 s | 3.725 s | 2,040 / 148,740 |
+| V2 run 2 | 1,945.02 | 2.942 s | 22.039 s | 2,041 / 122,860 |
+| V1 run 3 | 2,371.90 | 2.689 s | 3.289 s | 2,052 / 148,860 |
+| V2 run 3 | 1,813.68 | 2.992 s | 22.459 s | 2,159 / 113,180 |
+| V1 gate off | 2,929.30 | 2.384 s | 2.991 s | 1,047 / 180,209 |
+| V2 pending-limit sensitivity | 1,935.25 | 2.901 s | 23.276 s | 2,070 / 119,660 |
+
+V2 best/median was **1,952.30 / 1,945.02 TPS**, against V1
+**2,378.47 / 2,374.60 TPS**: 82.08% best-to-best and 81.91%
+median-to-median. V2 best was 9.70 TPS below the original 1,962 target and
+426.17 TPS below the same-day V1 best; all V2 runs exceeded the original
+2.84-second p95 limit. V1 passed the absolute-TPS and p95 criteria. The
+sensitivity set both `OPS_NODE_POLICY_PRINCIPAL_PENDING_LIMIT` and
+`OPS_NODE_POLICY_ORG_PENDING_LIMIT` to 18,454; that single run did not meet
+either numeric target. No throughput improvement is established by it.
+
+Committed TPS counts independently verified successful receipts whose blocks
+were observed inside the 60-second sending window, divided by 60. Later
+receipts do not increase it. The generator's `completed` state and all eight
+zero process exits establish runner completion, not numeric acceptance.
+Receipt coverage is a separate diagnostic, not an additional formal Gate-1
+criterion: after generator completion, log export and a further 3 seconds,
+each unique logged hash was queried once by 16 workers. A missing receipt
+means absent at that hash's lookup, not permanent loss, an accepted-only
+correctness failure, or a common settled cutoff. All observed receipts
+succeeded; missing hashes are excluded from the latency percentiles. The
+receipt-delivery proof remains incomplete for those hashes.
+
+The V2 default runs recorded 847 / 260 / 272 HTTP 503 responses; the
+sensitivity recorded 305. V1 and gate-off runs recorded none. These and the
+other `/rpc` HTTP status counts are attempt counters covering initialization
+and post-send traffic as well as load, not unique intent outcomes; HTTP 200
+does not by itself prove JSON-RPC success.
+
+Runtime provenance (SHA-256):
+
+| Artifact | Source | SHA-256 |
+|---|---|---|
+| V1 OPS | `9979b12c586272345eef6c99a08d8bc984a3e075` | `0d4fa8d86ecd9348b97a97507298843892daa9ad71431a51349255426a0a02c0` |
+| V1 node release | retained signed-approval node | `98dc65edcd79f06ec520e4e197ae5bcb6045b46d3e6d5177179894aa7a06e97f` |
+| V2 OPS | `d3a80066c6865fb1f751bd55c20775d46e2159ee` | `df7f2647a56f38f989b6bc54a8a055ed3eb068a2b50f17b4431d6989561ff458` |
+| V2 node | `76eb7a6ee2119580cab6565e07dc9e9c1ca8bbbe` | `b2a2c104d9031b00e802775f43f99c6a22dbc56a94939e509407dd6864ce484a` |
+| Shared Gasstorm load generator | recorded generator build | `852492618d2cb9b1c096e50af7bf87283749f0ed0c189a68fb3715085657022e` |
+
+Raw reports are in `.tmp/codex-final-20261104/gate1/{v1-1,v2-1,v1-2,v2-2,v1-3,v2-3,vanilla,v2-sensitivity}/transactions-report.json`
+in the integration worktree, with per-case provenance and evaluation JSON
+alongside those directories. `.tmp/codex-final-20261104/final-builds.json`
+records the builds; `gate1-artifact-archive.json` records original checksums
+for losslessly compressed raw logs and receipt files. No source optimization
+is claimed from these measurements.
+
+
+## OPS through a mock node (partial, 2026-11-04)
+
+The real OPS server, PostgreSQL and Redis were measured with only the node
+mocked: legacy JSON-RPC for the baseline and the private protocol for V2. These request-throughput results exclude real EVM
+execution and are separate from the end-to-end committed TPS above. Each
+case used a fresh stack, a 31-second warm-up, a 60-second measurement window,
+a 1 ms mock delay and a 1-second finality lag. Two complete alternating
+closed-loop sweeps produced:
+
+| Concurrency | Legacy baseline requests/s, runs 1 / 2 | V2 requests/s, runs 1 / 2 |
+|---:|---:|---:|
+| 32 | 1,026.75 / 1,070.12 | 698.10 / 658.90 |
+| 128 | 1,756.65 / 1,496.20 | 1,125.72 / 1,156.18 |
+| 256 | 1,431.37 / 1,509.97 | 1,243.72 / 1,319.30 |
+
+These twelve cases had valid measurement windows, zero rejections and zero
+runner transport errors. Two additional third-sweep legacy-baseline cases completed at
+1,073.25 / 1,663.23 requests/s (32 / 128 concurrency); the third legacy-baseline case was
+interrupted and is invalid. The third V2 sweep, open-loop ladder,
+sensitivity matrix and RD-1112 processor reruns were not performed. This is
+partial evidence; no complete performance qualification is established.
+
+V2 met the observed audit and reconciliation backlog criteria in three of
+its six completed cases. Run 1 at concurrency 128 had a positive audit
+backlog trend; both concurrency-256 runs had a positive reconciliation
+backlog trend. The legacy baseline lacks the required direct audit-buffer observations, so
+its audit boundedness is unknown. Actual finalized-outcome commit-lag p99
+was not measured in either tree; an INSERT timestamp is not a commit
+measurement. V2 committed-row visibility rates are sampled lower bounds,
+with observer query costs retained in the raw reports. No observed V2
+request rate reached the 5,000/s OPS-only target.
+
+Runner source was `21133c39df87428cfda0373013b39004a0be2a25`, SHA-256
+`555293e4d4592b4e6b44c1a2122277932551ffe78069920edb86718277a9f638`.
+The OPS server binaries match the table above; the real node binaries were
+not used in these cases. Each concurrency used a fresh
+runner process and the same 4,000/s pre-signed inventory budget in both
+trees, instead of the 12,000/s default. That budget only sizes unused
+headroom before timing; it does not pace requests, and exhaustion
+invalidates a case. The disk floor remained 12 GiB. Earlier diagnostic
+sweeps, including a disk-guard abort below that floor, remain separate and
+are excluded from this table. Reports, per-case exits and provenance are in
+`.tmp/codex-final-20261104/gate2-isolated/`; the frozen small-artifact
+summary is `analysis/gate2-summary.json` under the same evidence base.
+
+
 ## Integrated live recovery validation (2026-11-04)
 
-`poc/approval-performance/live.py` ran against PostgreSQL, Redis, OPS and the
-real guarded node on the shared workstation on AC power. Each scenario used
-fresh databases and node directories, public development accounts, and
+The initial `poc/approval-performance/live.py` run used PostgreSQL, Redis,
+OPS and the real guarded node on the shared workstation on AC power. Each
+scenario used fresh databases and node directories, public development accounts, and
 canonical receipts, private execution manifests and tracking rows as its
 checks. OPS was built from `bd3c4a7b`; node source was `76eb7a6e`. The later
 `f3b59166` change makes the Go congestion simulation's clock deterministic;
@@ -752,9 +867,81 @@ The failover run did not establish the intended L11 crash windows: no
 undelivered generation was observed after the first two OPS kills, and the
 recovery kill happened before any renewal generation was recorded (0 before,
 111 after). The preserved transactions validate the exercised handoffs;
-interruption between saved intent and transport, and interruption during
-renewal, still need deterministic live coverage. The churn and failover
-reports remain failed.
+those runs did not prove interruption between saved intent and transport or
+interruption during renewal. The churn and failover reports remain failed;
+the subsequent L11 proof and churn repetitions below do not overwrite those
+observations.
+
+### Deterministic saved-intent and mid-recovery crash windows
+
+A subsequent real-stack failover run passed **13/13 checks** using harness
+source `1c3fe5b8641d023f58b2de9ada4928cdae5f8ec9`. A transport barrier held
+each of two one-shot submissions before the node while a separate database
+read verified its committed intent and payload, generation 1 and delivered
+generation 0; the node reported `not_found`. The sending OPS instance was
+then killed. Each client made one attempt and lost its response; the survivor
+provided the first node forwarding, with no forwarding from the killed
+sender, and each transaction was included and finalized once.
+
+The third kill interrupted recovery after a node restart. Before killing the
+leader, the harness observed one completed transport to the new boot, a
+saved generation 2 held before transport with only generation 1 recorded as
+delivered to the old boot, and 34 transactions without a system renewal.
+The survivor continued the interrupted renewal batch: the harness counted 1,000 system generations before the kill and 1,780
+afterward. Thus the run
+exercised both saved-before-transport and partially completed recovery
+windows, rather than inferring them from kill timing alone.
+
+All 10,000 transactions were included and finalized under their own
+principal's identity, with no duplicate finalization. Lease takeovers took
+0.50 / 1.09 / 0.82 seconds; fact changes after takeover applied in
+54.05 / 50.79 / 51.42 ms. The report is
+`.tmp/codex-final-20261104/live/l11-attempt-1/result.json`, with its harness
+and binary manifest in `live/l11-attempt-1-builds.json` under the same base.
+It used OPS built from `bd3c4a7bc4a0b2229beba6b443ed42210c22a999` and the
+node source above; its OPS/node binary hashes match the V2 hashes recorded
+for the later Gate-1 runs.
+
+### Three plain churn repetitions and separate diagnostics
+
+Three predeclared normal-binary repetitions used the same V2 OPS/node hashes
+without a proxy, tracing overlay or external sampler. The first used harness
+source `36e341dda64eae883b72afbe33c6174cc9210f00`; the later two used
+`50f09f27a96ab0ef55af0f767359f6e41d86dd17`, with the fact-churn scenario
+unchanged. All three outcomes are retained:
+
+| Repetition | Baseline / churn request p99 | Added p99 (limit 250 ms) | Mutation-start → observed-node-apply p95 (limit 100 ms) | Result |
+|---|---:|---:|---:|---|
+| 1 | 66.1 / 323.2 ms | 257.1 ms | 181.90 ms | FAIL both latency limits |
+| 2 | 252.7 / 66.6 ms | −186.1 ms | 55.76 ms | PASS |
+| 3 | 289.5 / 68.3 ms | −221.2 ms | 57.13 ms | PASS |
+
+Each repetition included and finalized all 18,000 accepted transactions under
+their own principal's identity, with no duplicate finalization. Each had zero
+refusals for the 9,000 unaffected requests during churn and enforced the
+membership revocation. Two passes do not erase the first failure: the
+original latency limits remain unchanged and stable latency is not
+established. Reports and the predeclared manifest are under
+`.tmp/codex-final-20261104/live/churn-repeat-{1,2,3}/` and
+`live/churn-repetitions-manifest.json`; `live/churn-repetitions-summary.json`
+retains all three results.
+
+Separate direct-HTTP tracing reproduced a slow apply path before the first
+response byte (128.78 ms p95), while status requests and response-body reads
+remained fast. A later owned-node sampling diagnostic passed the latency
+checks; 218 of 257 sampled `accept_facts` stacks ended in `fcntl` beneath
+durable filesystem operations, with no sampled mutex-wait leaf. The record,
+list and head require six distinct file/directory durability barriers in a
+warm publication. A standalone counterbalanced experiment retaining all six
+barriers saved only 1.27 ms paired median by overlapping record/list writes,
+so no production change followed. The evidence identifies filesystem work on
+the observed apply path; it does not conclusively establish the physical
+cause of the failed run's tail. These diagnostics are not qualification runs.
+Raw tracing and stack evidence is in `live/diagnostic-churn-direct-1/` and
+`live/diagnostic-churn-node-sample-1/` under the same private evidence base.
+The storage experiment's manifest and raw samples are in
+`.tmp/worktrees/lfdt-v2-final-latency/.tmp/latency-diagnostic/io-ab-1/` in the
+main workspace.
 
 The complete database package and the congestion simulation passed race
 rechecks after correcting fixture isolation and the simulation clock. The
@@ -762,3 +949,7 @@ other packages in the broad Go race run passed, with no detected races.
 API drift and repeat-generation checks, both SDK type builds, all 12 SDK
 tests and 28 Python harness tests passed. Five changed documentation pages
 parsed as MDX.
+
+The subsequent harness changes passed `go test -race ./internal/perfgate`,
+`go vet ./internal/perfgate` and all 36 Python harness tests. These checks
+do not run the opt-in performance workloads.
