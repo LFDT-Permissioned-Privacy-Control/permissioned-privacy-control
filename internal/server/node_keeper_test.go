@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -466,17 +467,13 @@ func finalDroppedRequiresEvidence(t *testing.T, fromNode bool) {
 	f.mock.ProduceBlock()
 	f.mock.ProduceBlock()
 	f.tick()
-	// Its lease has expired (on the database clock) and is past the
-	// finalized head: still no nonce evidence, so still not final.
-	if _, err := f.tracking.runtime.Conn().Exec(`UPDATE node_tx_binding SET expires_at = clock_timestamp() - interval '1 hour' WHERE tx_hash = $1`, hashBytes(t, ours.hash)); err != nil {
-		t.Fatal(err)
-	}
+	// Its identity is still valid at the finalized block: no evidence yet.
 	f.skew.Add(int64(time.Hour))
 	f.tick()
 	f.skew.Add(int64(time.Minute))
 	f.tick()
 	if row := f.row(ours); row.State != db.TrackRenewalStopped {
-		t.Fatalf("dropped without nonce evidence (lease expiry alone): %+v", row)
+		t.Fatalf("dropped while its identity is valid and its nonce free: %+v", row)
 	}
 	// A competitor at the same nonce is finalized: now the nonce is consumed.
 	competitor := signTransferValue(t, key, 0, 2)
@@ -976,5 +973,316 @@ func TestRenewalBudgetAccrual(t *testing.T) {
 	k.refund(3)
 	if got := k.spend(1000); got != 3 {
 		t.Fatalf("refunded renewals: %d", got)
+	}
+}
+
+// A stopped transaction whose every recorded identity has expired by a
+// finalized block that does not hold it can never execute (the node checks
+// the identity at the block's timestamp, and OPS never renews a stopped
+// binding): it becomes dropped with finalized_lease_expiry on two evidence
+// reads, so stopped rows do not live for ever (independent review, finding
+// 2). Not while the finalized block is earlier than the longest lease.
+func TestStoppedTransactionDropsAfterFinalizedLeaseExpiry(t *testing.T) {
+	for _, fromNode := range []bool{false, true} {
+		name := "public_rpc"
+		if fromNode {
+			name = "node_evidence"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newKeeperFixture(t, 0)
+			if fromNode {
+				f.batched.Store(true)
+				f.k.chain = nil
+			}
+			key, _ := crypto.GenerateKey()
+			principal, org := uuid.New(), uuid.New()
+			ours := signTransfer(t, key, 5) // a nonce gap: never includable
+			f.admit(ours, principal, org, 0)
+			f.tick()
+			f.flushAcks()
+			if _, err := f.tracking.runtime.ApplyTransitions(context.Background(), f.writer.incarnation(), []db.TrackTransition{{Hash: hashBytes(t, ours.hash), From: db.TrackPending, To: db.TrackRenewalStopped, Reason: db.TrackReasonMaxAge}}); err != nil {
+				t.Fatal(err)
+			}
+			f.r.rows = nil
+			other := newSignedTransfer(t, 0) // another sender, to finalize blocks
+			f.admit(other, uuid.New(), org, 0)
+			f.tick()
+			f.mock.ProduceBlock()
+			f.mock.ProduceBlock()
+			for i := 0; i < 3; i++ {
+				f.skew.Add(int64(time.Minute))
+				f.tick()
+			}
+			if row := f.row(ours); row.State != db.TrackRenewalStopped {
+				t.Fatalf("dropped while a finalized block is before its lease expiry: %+v", row)
+			}
+			// Every recorded identity has expired; a later block is finalized.
+			if _, err := f.tracking.runtime.Conn().Exec(`UPDATE node_tx_binding SET expires_at = clock_timestamp() - interval '1 hour', max_expires_at = clock_timestamp() - interval '1 hour' WHERE tx_hash = $1`, hashBytes(t, ours.hash)); err != nil {
+				t.Fatal(err)
+			}
+			// The tracking database is younger than the longest identity
+			// lifetime: an identity of an earlier incarnation (lost with
+			// it) may still be valid, so nothing is decided yet.
+			f.r.rows = nil
+			for i := 0; i < 2; i++ {
+				f.skew.Add(int64(time.Minute))
+				f.tick()
+			}
+			if row := f.row(ours); row.State != db.TrackRenewalStopped {
+				t.Fatalf("dropped within the longest identity lifetime of the tracking incarnation: %+v", row)
+			}
+			if _, err := f.tracking.runtime.Conn().Exec(`UPDATE tracking_meta SET created_at = clock_timestamp() - interval '1 hour'`); err != nil {
+				t.Fatal(err)
+			}
+			f.r.rows, f.k.expiredAfter = nil, time.Time{}
+			f.tick() // the first read past its longest lease
+			if row := f.row(ours); row.State != db.TrackRenewalStopped {
+				t.Fatalf("dropped on a single evidence read: %+v", row)
+			}
+			f.skew.Add(int64(time.Minute))
+			f.tick()
+			got := f.row(ours)
+			if got.State != db.TrackDropped || got.Reason != db.TrackReasonFinalizedLeaseExpiry {
+				t.Fatalf("not dropped after its last identity expired at a finalized block: %+v", got)
+			}
+			dropped := f.events("ops.system.dropped")
+			if len(dropped) != 1 || dropped[0].DenialReason != "finalized_lease_expiry" {
+				t.Fatalf("dropped audit %+v", dropped)
+			}
+			for _, want := range []string{`"max_expires_at":`, `"finalized_block_timestamp":`, `"receipt":false`, `"finalized_block_hash":"0x`} {
+				if !strings.Contains(string(dropped[0].Params), want) {
+					t.Fatalf("dropped audit event lacks %s: %s", want, dropped[0].Params)
+				}
+			}
+			// The quota and shares are released, and the hash is never
+			// admitted again while its status is kept.
+			if used, pending, err := f.tracking.runtime.PendingQuota(context.Background()); err != nil || used != pending {
+				t.Fatalf("quota %d/%d %v", used, pending, err)
+			}
+			if n, err := f.tracking.runtime.PendingQuotaMismatches(context.Background()); err != nil || n != 0 {
+				t.Fatalf("share mismatches %d %v", n, err)
+			}
+			f.admitAs(ours, principal, org, 0, db.AdmitConflict)
+		})
+	}
+}
+
+// foreignEvidence reports a hash as executed (included, finalized) under
+// another principal: a resubmission of a transaction that already executed.
+type foreignEvidence struct {
+	*nodepolicy.Client
+	hash string
+}
+
+func (n foreignEvidence) TransactionEvidence(ctx context.Context, hashes, senders []string) (nodepolicy.TransactionStatusBatch, error) {
+	batch, err := n.Client.TransactionEvidence(ctx, hashes, senders)
+	if err != nil || batch.Finalized == nil {
+		return batch, err
+	}
+	for i, h := range hashes {
+		if h == n.hash {
+			number, blockHash := batch.Finalized.Number, batch.Finalized.Hash
+			batch.Statuses[i] = &nodepolicy.BatchedStatus{Status: nodepolicy.TransactionStatus{TransactionHash: h, PrincipalID: uuid.NewString(), OrgID: uuid.NewString(), ContextID: uuid.NewString(), BootID: batch.BootID,
+				Execution: nodepolicy.ExecutionOutcome{Status: "included", FactsVersion: 9, BlockHash: &blockHash, BlockNumber: &number, Finalized: true, FinalizedBlockHash: &blockHash, FinalizedBlockNumber: &number, Created: []nodepolicy.CreatedContract{}}}}
+			t := true
+			batch.Receipts[i] = &t
+		}
+	}
+	return batch, nil
+}
+
+// A stopped binding whose hash executed, finalized, under another submission
+// (a shared signer resubmitting an executed transaction after its status was
+// pruned) can never execute for this one: dropped, nonce_consumed (finding
+// 2), instead of being polled for ever.
+func TestStoppedResubmissionOfAnExecutedTransactionIsDropped(t *testing.T) {
+	f := newKeeperFixture(t, 0)
+	f.batched.Store(true)
+	f.k.chain = nil
+	key, _ := crypto.GenerateKey()
+	ours := signTransfer(t, key, 3)
+	f.r.node = foreignEvidence{Client: f.client, hash: ours.hash}
+	f.admit(ours, uuid.New(), uuid.New(), 0)
+	f.tick()
+	if _, err := f.tracking.runtime.ApplyTransitions(context.Background(), f.writer.incarnation(), []db.TrackTransition{{Hash: hashBytes(t, ours.hash), From: db.TrackPending, To: db.TrackRenewalStopped, Reason: db.TrackReasonMaxAge}}); err != nil {
+		t.Fatal(err)
+	}
+	f.r.rows = nil
+	other := newSignedTransfer(t, 0)
+	f.admit(other, uuid.New(), uuid.New(), 0)
+	f.tick()
+	f.mock.ProduceBlock()
+	f.mock.ProduceBlock()
+	for i := 0; i < 3; i++ {
+		f.skew.Add(int64(time.Minute))
+		f.tick()
+	}
+	got := f.row(ours)
+	if got.State != db.TrackDropped || got.Reason != db.TrackReasonNonceConsumed {
+		t.Fatalf("a stopped resubmission of an executed transaction: %+v", got)
+	}
+	if dropped := f.events("ops.system.dropped"); len(dropped) != 1 || !strings.Contains(string(dropped[0].Params), `"executed_by_another_submission":true`) {
+		t.Fatalf("dropped audit %+v", dropped)
+	}
+}
+
+// Stopped rows wait on a slow lane: a tick polls every due pending or
+// provisional row first, and stopped rows only with the room left, so one
+// principal's stopped rows never crowd out other tenants' polls (finding 2).
+func TestStoppedRowsArePolledOnASlowLane(t *testing.T) {
+	r := &nodeReconciler{now: time.Now, rows: map[string]*trackedRow{}}
+	add := func(state int16) *trackedRow {
+		hash := make([]byte, 32)
+		_, _ = rand.Read(hash)
+		row := &trackedRow{row: db.TrackedTransaction{Hash: hash, State: state}, hashHex: "0x" + hex.EncodeToString(hash)}
+		r.rows[string(hash)] = row
+		return row
+	}
+	for i := 0; i < 100; i++ {
+		add(db.TrackRenewalStopped)
+	}
+	var pending []*trackedRow
+	for i := 0; i < 10; i++ {
+		pending = append(pending, add(db.TrackPending))
+	}
+	due := r.due(time.Now(), 20)
+	polled := map[*trackedRow]bool{}
+	stopped := 0
+	for _, t := range due {
+		polled[t] = true
+		if t.row.State == db.TrackRenewalStopped {
+			stopped++
+		}
+	}
+	for _, row := range pending {
+		if !polled[row] {
+			t.Fatal("a pending row was crowded out by stopped rows")
+		}
+	}
+	if len(due) != 19 || stopped != 9 {
+		t.Fatalf("due %d rows (%d stopped), want 10 pending + 9 stopped", len(due), stopped)
+	}
+	// A stopped row's interval grows on the slow lane, also when the node no
+	// longer knows it.
+	now := time.Now()
+	row := add(db.TrackRenewalStopped)
+	r.apply(context.Background(), []observation{{tracked: row, err: nodepolicy.ErrNodeRejected}})
+	first := row.nextPoll.Sub(now)
+	r.apply(context.Background(), []observation{{tracked: row, err: nodepolicy.ErrNodeRejected}})
+	if first < reconcileStoppedPoll-time.Second || row.nextPoll.Sub(now) <= first {
+		t.Fatalf("slow lane %s then %s", first, row.nextPoll.Sub(now))
+	}
+}
+
+// A dropped decision is re-judged on a fresh read before it is audited: a
+// schedule entry whose longest lease is stale (renewed since it was read)
+// appends no ops.system.dropped event for a final the database would refuse,
+// and its evidence is read twice again (code review of finding 2).
+func TestDroppedIsRejudgedOnAFreshReadBeforeItIsAudited(t *testing.T) {
+	f := newKeeperFixture(t, 0)
+	f.batched.Store(true)
+	f.k.chain = nil
+	key, _ := crypto.GenerateKey()
+	ours := signTransfer(t, key, 5)
+	f.admit(ours, uuid.New(), uuid.New(), 0)
+	f.tick()
+	if _, err := f.tracking.runtime.ApplyTransitions(context.Background(), f.writer.incarnation(), []db.TrackTransition{{Hash: hashBytes(t, ours.hash), From: db.TrackPending, To: db.TrackRenewalStopped, Reason: db.TrackReasonMaxAge}}); err != nil {
+		t.Fatal(err)
+	}
+	f.r.rows = nil
+	f.k.expiredAfter, f.k.expiredAfterInc = time.Unix(1, 0), f.writer.incarnation() // an incarnation older than any identity
+	other := newSignedTransfer(t, 0)
+	f.admit(other, uuid.New(), uuid.New(), 0)
+	f.tick()
+	f.mock.ProduceBlock()
+	f.mock.ProduceBlock()
+	f.tick()
+	scheduled := f.r.rows[string(hashBytes(t, ours.hash))]
+	if scheduled == nil || scheduled.row.State != db.TrackRenewalStopped {
+		t.Fatalf("not scheduled as stopped: %+v", scheduled)
+	}
+	// The schedule believes every identity expired an hour ago; the
+	// database knows a lease valid for minutes.
+	scheduled.row.MaxExpiresAt = time.Now().Add(-time.Hour)
+	scheduled.refreshAt = time.Now().Add(24 * time.Hour)
+	for i := 0; i < 3; i++ {
+		f.skew.Add(int64(time.Minute))
+		f.tick()
+	}
+	if dropped := f.events("ops.system.dropped"); len(dropped) != 0 {
+		t.Fatalf("dropped audited for a final the database refuses: %+v", dropped)
+	}
+	if row := f.row(ours); row.State != db.TrackRenewalStopped {
+		t.Fatalf("dropped while an identity is valid: %+v", row)
+	}
+}
+
+// fakeChain answers the public-RPC evidence: every hash has a receipt (the
+// transaction is included) at a finalized block of now.
+type fakeChain struct{}
+
+func (fakeChain) DroppedEvidence(_ context.Context, _ uint64, _, _ string, hashes []string) (chainEvidence, error) {
+	receipts := map[string]bool{}
+	for _, h := range hashes {
+		receipts[h] = true
+	}
+	return chainEvidence{Nonce: 9, Timestamp: time.Now(), Receipts: receipts}, nil
+}
+
+func (fakeChain) Known(_ context.Context, hashes []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, h := range hashes {
+		out[h] = true
+	}
+	return out, nil
+}
+
+// foreignStatus answers the private status of one hash as included and
+// finalized under another principal.
+type foreignStatus struct {
+	*nodepolicy.Client
+	hash string
+}
+
+func (n foreignStatus) TransactionStatus(ctx context.Context, hash string) (nodepolicy.TransactionStatus, error) {
+	if hash != n.hash {
+		return n.Client.TransactionStatus(ctx, hash)
+	}
+	number, blockHash := uint64(1), "0x"+strings.Repeat("ab", 32)
+	return nodepolicy.TransactionStatus{TransactionHash: hash, PrincipalID: uuid.NewString(), OrgID: uuid.NewString(), ContextID: uuid.NewString(), BootID: strings.Repeat("ab", 16),
+		Execution: nodepolicy.ExecutionOutcome{Status: "included", FactsVersion: 9, BlockHash: &blockHash, BlockNumber: &number, Finalized: true, FinalizedBlockHash: &blockHash, FinalizedBlockNumber: &number, Created: []nodepolicy.CreatedContract{}}}, nil
+}
+
+// The executed-under-another-submission exit also works with the public-RPC
+// evidence (security review of finding 2): otherwise such a stopped row
+// would hold its owner's cap slot for ever.
+func TestStoppedResubmissionIsDroppedWithPublicEvidence(t *testing.T) {
+	f := newKeeperFixture(t, 0)
+	key, _ := crypto.GenerateKey()
+	ours := signTransfer(t, key, 3)
+	f.admit(ours, uuid.New(), uuid.New(), 0)
+	f.tick()
+	if _, err := f.tracking.runtime.ApplyTransitions(context.Background(), f.writer.incarnation(), []db.TrackTransition{{Hash: hashBytes(t, ours.hash), From: db.TrackPending, To: db.TrackRenewalStopped, Reason: db.TrackReasonMaxAge}}); err != nil {
+		t.Fatal(err)
+	}
+	f.r.rows = nil
+	other := newSignedTransfer(t, 0) // learns a finalized head
+	f.admit(other, uuid.New(), uuid.New(), 0)
+	f.tick()
+	f.mock.ProduceBlock()
+	f.mock.ProduceBlock()
+	f.tick()
+	f.k.chain = fakeChain{}
+	f.r.node = foreignStatus{Client: f.client, hash: ours.hash}
+	for i := 0; i < 3; i++ {
+		f.skew.Add(int64(time.Minute))
+		f.tick()
+	}
+	got := f.row(ours)
+	if got.State != db.TrackDropped || got.Reason != db.TrackReasonNonceConsumed {
+		t.Fatalf("a stopped resubmission of an executed transaction (public evidence): %+v", got)
+	}
+	if dropped := f.events("ops.system.dropped"); len(dropped) != 1 || !strings.Contains(string(dropped[0].Params), `"executed_by_another_submission":true`) {
+		t.Fatalf("dropped audit %+v", dropped)
 	}
 }

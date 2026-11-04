@@ -54,18 +54,18 @@ func TestNodeChainReaderReadsCanonicalEvidence(t *testing.T) {
 		t.Fatalf("known %v %v", known, err)
 	}
 	block := node.ProduceBlock()
-	nonce, receipts, err := chain.DroppedEvidence(ctx, block.Number, block.Hash, signer, []string{h0, h1})
-	if err != nil || nonce != 1 || !receipts[h0] || receipts[h1] {
-		t.Fatalf("evidence %d %v %v", nonce, receipts, err)
+	evidence, err := chain.DroppedEvidence(ctx, block.Number, block.Hash, signer, []string{h0, h1})
+	if err != nil || evidence.Nonce != 1 || !evidence.Receipts[h0] || evidence.Receipts[h1] || evidence.Timestamp.Unix() != block.Time.Unix() {
+		t.Fatalf("evidence %+v %v", evidence, err)
 	}
-	if _, _, err := chain.DroppedEvidence(ctx, block.Number, "0x"+strings.Repeat("ab", 32), signer, []string{h1}); err == nil {
+	if _, err := chain.DroppedEvidence(ctx, block.Number, "0x"+strings.Repeat("ab", 32), signer, []string{h1}); err == nil {
 		t.Fatal("evidence accepted from a chain without the finalized block's hash")
 	}
-	if _, _, err := chain.DroppedEvidence(ctx, 99, block.Hash, signer, []string{h1}); err == nil {
+	if _, err := chain.DroppedEvidence(ctx, 99, block.Hash, signer, []string{h1}); err == nil {
 		t.Fatal("a missing block read as evidence")
 	}
 	down := rpcChain{forward: proxy.New("http://127.0.0.1:1").ForwardContext}
-	if _, _, err := down.DroppedEvidence(ctx, block.Number, block.Hash, signer, []string{h0}); err == nil {
+	if _, err := down.DroppedEvidence(ctx, block.Number, block.Hash, signer, []string{h0}); err == nil {
 		t.Fatal("an unreachable node read as no receipt")
 	}
 	many := make([]string, maxChainBatch+3)

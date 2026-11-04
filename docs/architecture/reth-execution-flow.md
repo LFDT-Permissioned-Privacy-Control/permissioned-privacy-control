@@ -325,14 +325,29 @@ sequenceDiagram
   appended to the durable audit buffer before it is recorded, and recorded
   before the identity is sent. A failed send of a recorded generation is
   retried unchanged while the node keeps its boot.
-- **Final failure.** `dropped` is written only for a stopped binding whose
-  signer's nonce at the finalized block has passed its own nonce with no own
-  receipt, on two reads at least 30 seconds apart. A node with
-  `transaction_statuses_v1` answers both in the batched status call, at its own
-  finalized block; otherwise OPS reads them from the public RPC by the
+- **Final failure.** `dropped` is written only for a stopped binding that can
+  no longer execute, on two reads at least 30 seconds apart: its signer's nonce
+  at the finalized block has passed its own nonce with no own receipt
+  (`nonce_consumed`); its hash is final under another submission
+  (`nonce_consumed`); or the finalized block's timestamp is at or past the
+  longest lease of any identity recorded for it (`max_expires_at`), and past
+  the tracking incarnation's creation plus the longest lifetime the node
+  accepts (an identity issued before a tracking-database loss), and no
+  canonical block holds it (`finalized_lease_expiry`: the node validates an
+  identity at the block timestamp, timestamps increase, and stopped bindings
+  get no new identity). The decision is re-judged on a fresh read before it is
+  audited, and the final is fenced under the row lock by the generation and,
+  for a lease expiry, by `max_expires_at`; a dropped hash is refused to every
+  principal while its status row is kept. After that a
+  `finalized_lease_expiry` hash, whose nonce is still free, is a fresh
+  admission again (the shared-signer residual of a tracking-database loss). A node with
+  `transaction_statuses_v1` answers in the batched status call, at its own
+  finalized block; otherwise OPS reads the evidence from the public RPC by the
   node-reported finalized block's hash and confirms with a definitive private
-  status answer. A lookup the node could not answer is never evidence. Lease expiry alone never
-  makes a transaction final, and a finalized own receipt beats a stop.
+  status answer. A lookup the node could not answer is never evidence, and a
+  finalized own receipt beats a stop. Stopped bindings count toward their
+  principal's and organization's limits until final, and are polled on a slow
+  lane after every pending and provisional row.
 - **Option A reconciliation.** Where the node advertises
   `transaction_statuses_v1`, the reconciler polls up to 256 transactions per
   call and up to 16,384 per tick; a change of the node's canonical epoch

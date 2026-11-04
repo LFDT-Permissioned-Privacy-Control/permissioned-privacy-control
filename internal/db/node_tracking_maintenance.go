@@ -115,7 +115,7 @@ func maintainQuotaShares(ctx context.Context, conn *sql.Conn) error {
 	var errs []error
 	for _, share := range quotaShares {
 		rows, err := conn.QueryContext(ctx, `SELECT coalesce(q.k, b.k)::text FROM (SELECT `+share.key+` AS k, used FROM `+share.table+`) q
- FULL JOIN (SELECT `+share.key+` AS k, count(*) AS pending FROM node_tx_binding WHERE state = 1 GROUP BY `+share.key+`) b ON b.k = q.k
+ FULL JOIN (SELECT `+share.key+` AS k, count(*) AS pending FROM node_tx_binding WHERE `+heldStatesSQL+` GROUP BY `+share.key+`) b ON b.k = q.k
  WHERE coalesce(q.used, 0) <> coalesce(b.pending, 0) LIMIT 1000`)
 		if err != nil {
 			errs = append(errs, err)
@@ -164,7 +164,7 @@ func recountShare(ctx context.Context, conn *sql.Conn, table, key, k string) (in
 		return 0, err
 	}
 	var recounted int64
-	if err := tx.QueryRowContext(ctx, `UPDATE `+table+` SET used = (SELECT count(*) FROM node_tx_binding WHERE `+key+` = $1 AND state = 1) WHERE `+key+` = $1 RETURNING used`, k).Scan(&recounted); err != nil {
+	if err := tx.QueryRowContext(ctx, `UPDATE `+table+` SET used = (SELECT count(*) FROM node_tx_binding WHERE `+key+` = $1 AND `+heldStatesSQL+`) WHERE `+key+` = $1 RETURNING used`, k).Scan(&recounted); err != nil {
 		return 0, err
 	}
 	return recounted, tx.Commit()

@@ -77,12 +77,13 @@ const (
 	// ReasonPendingLimit: the execution path's global pending-work limit is
 	// reached (503); retry after Retry-After (RD-1410).
 	ReasonPendingLimit = "pending_limit"
-	// ReasonPrincipalPendingLimit: the caller's own pending transactions are
-	// at the per-principal cap (429); retry after Retry-After (RD-1410).
+	// ReasonPrincipalPendingLimit: the caller's own pending and
+	// renewal_stopped (not yet final) transactions are at the per-principal
+	// cap (429); retry after Retry-After (RD-1410).
 	ReasonPrincipalPendingLimit = "principal_pending_limit"
-	// ReasonOrgPendingLimit: the pending transactions of the caller's
-	// organization (all its principals) are at the per-organization cap
-	// (429); retry after Retry-After (RD-1410).
+	// ReasonOrgPendingLimit: the pending and renewal_stopped transactions of
+	// the caller's organization (all its principals) are at the
+	// per-organization cap (429); retry after Retry-After (RD-1410).
 	ReasonOrgPendingLimit = "org_pending_limit"
 	// ReasonTransactionConflict: the signed transaction is already bound to an
 	// earlier submission it does not match (another principal, organisation,

@@ -1,25 +1,28 @@
 -- exec/004_pending_quota_shares.sql
 --
 -- ── WHAT ─────────────────────────────────────────────────────────
--- pending_quota_principal and pending_quota_org: the count of renewable
--- (pending) bindings per submitting principal and per organization, next to
--- the global pending_quota row, so admission can bound one principal's and
--- one organization's pending work as well as the total.
+-- pending_quota_principal and pending_quota_org: the count of bindings each
+-- submitting principal and each organization holds — pending, or
+-- renewal_stopped and not yet final — next to the global pending_quota row
+-- (pending only), so admission can bound one principal's and one
+-- organization's work as well as the total renewable work.
 --
 -- ── WHY (ticket: RD-1410; plan §4.8.2) ───────────────────────────
 -- The global pending-work limit protects the lease keeper's renewal budget,
 -- but on its own one principal (or a few principals of one organization)
 -- could hold the whole limit, for example with transactions that never get
 -- included before their maximum age, and every other tenant would be refused.
--- Every writer applies the same per-row delta as the global quota,
--- is_pending(after) − is_pending(before), grouped by the binding's principal
--- and organization (identity columns that are never updated), in the same
--- transaction: after the binding rows, principals then organizations, and
--- the global row last.
+-- Stopped bindings count too (independent review, finding 2), so no principal
+-- accumulates them without bound until they are final. Every writer applies
+-- the per-row delta is_held(after) − is_held(before) (held: state 1 or 3),
+-- grouped by the binding's principal and organization (identity columns that
+-- are never updated), in the same transaction as the global row's
+-- is_pending delta: after the binding rows, principals then organizations,
+-- and the global row last.
 --
 -- ── AFFECTED ROWS ────────────────────────────────────────────────
--- One row per principal and per organization with pending bindings, seeded
--- here from node_tx_binding (state 1) while the global quota row is locked,
+-- One row per principal and per organization with held bindings, seeded
+-- here from node_tx_binding (state 1 or 3) while the global quota row is locked,
 -- so no admission or transition can change the counts during the seed.
 -- Stop every OPS instance of an earlier release before this migration runs:
 -- an earlier release updates only the global row. OPS recounts a share that
@@ -28,18 +31,18 @@
 --   SELECT
 --    (SELECT count(*) FROM pending_quota_principal q
 --      FULL JOIN (SELECT principal_id, count(*) AS pending FROM node_tx_binding
---                 WHERE state = 1 GROUP BY principal_id) b USING (principal_id)
+--                 WHERE state IN (1, 3) GROUP BY principal_id) b USING (principal_id)
 --      WHERE coalesce(q.used, 0) <> coalesce(b.pending, 0))
 --   +(SELECT count(*) FROM pending_quota_org q
 --      FULL JOIN (SELECT org_id, count(*) AS pending FROM node_tx_binding
---                 WHERE state = 1 GROUP BY org_id) b USING (org_id)
+--                 WHERE state IN (1, 3) GROUP BY org_id) b USING (org_id)
 --      WHERE coalesce(q.used, 0) <> coalesce(b.pending, 0));
 --
 -- ── AUTHORITATIVE-RECORD note ────────────────────────────────────
 -- Operational, lossable state; not evidence. Traceable record = this file
 -- (git) + PR review + tern schema_version_exec. No audit-table write. Rows
 -- whose count is 0 are deleted by the maintenance pass (owner role), so no
--- principal or organization id is kept after its last pending transaction.
+-- principal or organization id is kept after its last held transaction.
 --
 -- ── EXPAND-ONLY / ROLE-SEPARATION status ─────────────────────────
 -- Expand-only: COMPLIANT (CREATE TABLE + seed INSERT + GRANT). The runtime
@@ -66,11 +69,11 @@ CREATE TABLE IF NOT EXISTS pending_quota_org (
 ) WITH (fillfactor = 50, autovacuum_vacuum_scale_factor = 0, autovacuum_vacuum_threshold = 1000, autovacuum_vacuum_cost_delay = 0);
 
 INSERT INTO pending_quota_principal (principal_id, used)
-SELECT principal_id, count(*) FROM node_tx_binding WHERE state = 1 GROUP BY principal_id
+SELECT principal_id, count(*) FROM node_tx_binding WHERE state IN (1, 3) GROUP BY principal_id
 ON CONFLICT (principal_id) DO UPDATE SET used = EXCLUDED.used;
 
 INSERT INTO pending_quota_org (org_id, used)
-SELECT org_id, count(*) FROM node_tx_binding WHERE state = 1 GROUP BY org_id
+SELECT org_id, count(*) FROM node_tx_binding WHERE state IN (1, 3) GROUP BY org_id
 ON CONFLICT (org_id) DO UPDATE SET used = EXCLUDED.used;
 
 GRANT SELECT, INSERT, UPDATE ON pending_quota_principal TO privacy_proxy_app;

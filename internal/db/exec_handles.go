@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -34,6 +35,8 @@ var ErrTrackingUninitialised = errors.New("execution-tracking database is not in
 type TrackingMeta struct {
 	Network     nodepolicy.Network
 	Incarnation uuid.UUID
+	// CreatedAt: when this incarnation was initialised (database clock).
+	CreatedAt time.Time
 }
 
 // ExecDB is the runtime handle of the execution-tracking database.
@@ -117,7 +120,7 @@ func (e *ExecAdminDB) EnsureTrackingMeta(ctx context.Context, network nodepolicy
 func readTrackingMeta(ctx context.Context, conn *sql.DB) (TrackingMeta, error) {
 	var chainID int64
 	var meta TrackingMeta
-	err := conn.QueryRowContext(ctx, `SELECT chain_id, deployment_id, incarnation FROM tracking_meta`).Scan(&chainID, &meta.Network.DeploymentID, &meta.Incarnation)
+	err := conn.QueryRowContext(ctx, `SELECT chain_id, deployment_id, incarnation, created_at FROM tracking_meta`).Scan(&chainID, &meta.Network.DeploymentID, &meta.Incarnation, &meta.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) || isUndefinedTable(err) {
 		return TrackingMeta{}, ErrTrackingUninitialised
 	}

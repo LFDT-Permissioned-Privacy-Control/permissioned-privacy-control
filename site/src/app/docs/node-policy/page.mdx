@@ -247,7 +247,7 @@ The owner can follow a transaction at `GET /api/v1/me/transactions/{hash}/execut
 | `renewal_stopped` | OPS will not renew it (see the reason), but it may still settle: it can still be included while its last identity is valid, and is then reported as included | no |
 | `included` | Executed in a finalized block | yes |
 | `reverted` | Reverted in a finalized block | yes |
-| `dropped` | Can never execute: a finalized transaction used its nonce (reason `nonce_consumed`) | yes |
+| `dropped` | Will not execute: a finalized transaction used its nonce (reason `nonce_consumed`), or OPS had stopped renewing it and every identity issued for it expired before a finalized block that does not include it (reason `finalized_lease_expiry`; its nonce is still free) | yes |
 
 A `renewal_stopped` transaction carries one reason: `max_age` (pending longer
 than `OPS_NODE_POLICY_MAX_AGE`), `principal_banned`, `kyc_missing`,
@@ -257,9 +257,19 @@ than `OPS_NODE_POLICY_MAX_AGE`), `principal_banned`, `kyc_missing`,
 `replaced_in_pool` (the node's pool refused its nonce), or `node_rejected` (the
 node kept refusing a renewed identity). Resending the same
 signed transaction as the same principal is a new submission with every check.
-OPS reports `dropped` only once a finalized block has used the transaction's
-nonce and the transaction itself was never included; an expired identity alone
-never makes a transaction final.
+A stopped transaction does not stay stopped for ever. OPS reports it `dropped`
+once it will not execute as submitted: when a finalized block has used its nonce and the
+transaction itself was never included (`nonce_consumed`, also when the same
+signed transaction already executed for another submission), or when a
+finalized block that does not include it is past the expiry of every identity
+OPS issued for it (`finalized_lease_expiry`; the node checks the identity at
+each block's time, and OPS never renews a stopped transaction). A dropped
+transaction is not accepted again while its status is kept
+(`RETENTION_NODE_SUBMISSIONS`). After `finalized_lease_expiry` its nonce is
+still free, and once the status has expired the same signed transaction could
+be submitted again (also by another principal sharing the signing key): send a
+replacement at the same nonce — the retry itself, or a no-op — so the original
+can never execute.
 
 Final statuses are kept for `RETENTION_NODE_SUBMISSIONS` (7 days by default)
 and then the lookup answers 404. Ownership of deployed contracts and
@@ -414,9 +424,13 @@ many transactions may wait for inclusion at once, across all instances:
   `org_pending_limit`; other principals and organizations are still
   admitted.
 
-Only transactions waiting for inclusion count. Included, stopped and final
-ones do not, and resending a transaction OPS already recorded is never refused
-for either limit. A reorganization can return transactions to pending above
+The pending-work limit counts only transactions waiting for inclusion. The
+per-principal and per-organization limits also count the principal's or
+organization's `renewal_stopped` transactions until they are final, so one
+tenant cannot accumulate stopped transactions without bound; resending a
+stopped transaction is not refused by them, only by the pending-work limit.
+Included and final transactions count for none, and resending a transaction
+OPS already recorded is never refused for any limit. A reorganization can return transactions to pending above
 the limit; nothing admitted is dropped, and new transactions wait until the
 work drains.
 

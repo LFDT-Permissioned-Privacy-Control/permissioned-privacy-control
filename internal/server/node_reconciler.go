@@ -81,6 +81,11 @@ const (
 	// while the answers stay invalid; the rows answered with it proceed.
 	reconcileQuarantine    = 30 * time.Second
 	reconcileQuarantineMax = 10 * time.Minute
+	// reconcileStoppedPoll and reconcileStoppedMax: renewal_stopped rows are
+	// polled on a slow lane (they only wait for a late inclusion or a final),
+	// after every pending and provisional row that is due.
+	reconcileStoppedPoll = 5 * time.Second
+	reconcileStoppedMax  = time.Minute
 	// discoverFullScanPages bounds one tick's share of a full scan; the next
 	// tick resumes it.
 	discoverFullScanPages = 20
@@ -361,6 +366,7 @@ func (r *nodeReconciler) discoverHandedOver(ctx context.Context) error {
 			t := r.schedule(row)
 			if t.row.State != row.State && !t.row.Final() {
 				t.row, t.keepAt, t.flag, t.dropSeen = row, time.Time{}, 0, time.Time{}
+				t.backoff, t.nextPoll = 0, time.Time{} // revived: off the slow lane
 			}
 		}
 	}
@@ -380,7 +386,7 @@ type observation struct {
 // only once a finalized head at or above their block was seen, plus the
 // lowest one each tick to learn the head (finality-driven, G62).
 func (r *nodeReconciler) due(now time.Time, limit int) []*trackedRow {
-	var out []*trackedRow
+	var out, stopped []*trackedRow
 	var lowest *trackedRow
 	for _, t := range r.rows {
 		if t.nextPoll.After(now) {
@@ -392,10 +398,20 @@ func (r *nodeReconciler) due(now time.Time, limit int) []*trackedRow {
 			}
 			continue
 		}
+		if t.row.State == db.TrackRenewalStopped {
+			// The slow lane: polled only with the room the others leave.
+			if len(stopped) < limit {
+				stopped = append(stopped, t)
+			}
+			continue
+		}
 		out = append(out, t)
 		if len(out) >= limit-1 { // one slot stays for the head probe
 			break
 		}
+	}
+	if room := limit - 1 - len(out); room > 0 {
+		out = append(out, stopped[:min(room, len(stopped))]...)
 	}
 	if lowest != nil {
 		out = append(out, lowest)
@@ -567,6 +583,13 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 			switch {
 			case errors.Is(o.err, nodepolicy.ErrInvalidStatus):
 				r.quarantine(t, now)
+			case t.row.State == db.TrackRenewalStopped:
+				// A stopped row the node no longer knows (its lease ended) is
+				// the common case: slow lane, re-read by the keeper's
+				// refreshStopped, not by the refresh budget.
+				r.slowLane(t, now)
+				t.failures++
+				continue
 			default:
 				r.delay(t, now)
 			}
@@ -577,7 +600,10 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 			}
 			continue
 		}
-		t.backoff, t.failures, t.nextPoll, t.forcePoll, t.quarantine = 0, 0, now.Add(reconcileTick), false, 0
+		if t.row.State != db.TrackRenewalStopped {
+			t.backoff = 0 // a stopped row keeps its slow-lane interval
+		}
+		t.failures, t.nextPoll, t.forcePoll, t.quarantine = 0, now.Add(reconcileTick), false, 0
 		outcome := o.status.Execution
 		if outcome.FinalizedBlockNumber != nil && *outcome.FinalizedBlockNumber > r.head && outcome.FinalizedBlockHash != nil {
 			r.head, r.headHash = *outcome.FinalizedBlockNumber, *outcome.FinalizedBlockHash
@@ -595,17 +621,17 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 					executed = unknownContext // never the current context
 				}
 				transitions = append(transitions, db.TrackTransition{Hash: t.row.Hash, From: t.row.State, To: db.TrackProvisional, BlockNumber: &block, Boot: answered, ContextID: executed})
-			case db.TrackTombstone:
-				// Revived since it was read: re-read, transition next tick.
-				r.refresh(ctx, t)
 			}
 		case t.row.State == db.TrackProvisional:
 			// The including block left the canonical chain before finality.
 			transitions = append(transitions, db.TrackTransition{Hash: t.row.Hash, From: db.TrackProvisional, To: db.TrackPending})
 		default:
 			// pending, denied or expired at the node: nothing changed here.
-			// A row that stays so is polled ever less often.
-			if outcome.Status != "pending" || now.Sub(t.row.CreatedAt) > reconcileSettle {
+			// A row that stays so is polled ever less often; a stopped row
+			// on the slow lane.
+			if t.row.State == db.TrackRenewalStopped {
+				r.slowLane(t, now)
+			} else if outcome.Status != "pending" || now.Sub(t.row.CreatedAt) > reconcileSettle {
 				t.backoff = min(max(2*t.backoff, 2*time.Second), reconcileMaxBackoff)
 				t.nextPoll = now.Add(t.backoff)
 			}
@@ -702,6 +728,9 @@ func (r *nodeReconciler) refresh(ctx context.Context, t *trackedRow) {
 			r.rows[string(row.Hash)] = &trackedRow{row: row, hashHex: t.hashHex}
 			return
 		}
+		if t.row.State == db.TrackRenewalStopped && row.State != db.TrackRenewalStopped {
+			t.backoff, t.nextPoll = 0, time.Time{} // revived: off the slow lane
+		}
 		t.row = row
 	case err == nil || errors.Is(err, sql.ErrNoRows):
 		delete(r.rows, string(t.row.Hash))
@@ -712,6 +741,13 @@ func (r *nodeReconciler) refresh(ctx context.Context, t *trackedRow) {
 func (r *nodeReconciler) delay(t *trackedRow, now time.Time) {
 	t.failures++
 	t.backoff = min(max(2*t.backoff, time.Second), reconcileMaxBackoff)
+	t.nextPoll = now.Add(t.backoff)
+}
+
+// slowLane schedules a stopped row's next poll with a growing interval from
+// reconcileStoppedPoll up to reconcileStoppedMax.
+func (r *nodeReconciler) slowLane(t *trackedRow, now time.Time) {
+	t.backoff = min(max(2*t.backoff, reconcileStoppedPoll), reconcileStoppedMax)
 	t.nextPoll = now.Add(t.backoff)
 }
 

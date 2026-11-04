@@ -190,14 +190,13 @@ func TestPendingQuotaIsAtomicAcrossInstances(t *testing.T) {
 		h := randomBytes(32)
 		require.Equal(t, AdmitInserted, f.admitOne(1, p.admit(h)).Outcome)
 		require.True(t, f.transition(h, TrackPending, TrackRenewalStopped, 0))
-		require.True(t, f.transition(h, TrackRenewalStopped, TrackTombstone, 0))
-		require.EqualValues(t, 0, f.quotaConsistent(), "stops and tombstones carry no quota")
+		require.EqualValues(t, 0, f.principalQuotaConsistent(), "stops carry no global quota")
 		require.Equal(t, AdmitInserted, f.admitOne(1, p.admit(randomBytes(32))).Outcome)
 		require.Equal(t, AdmitOverLimit, f.admitOne(1, p.admit(h)).Outcome, "a revival is refused over the limit")
 		got, err := f.state(h)
 		require.NoError(t, err)
-		require.Equal(t, TrackTombstone, got.State, "a refused revival writes nothing")
-		f.quotaConsistent()
+		require.Equal(t, TrackRenewalStopped, got.State, "a refused revival writes nothing")
+		f.principalQuotaConsistent()
 	})
 
 	t.Run("every final transition from every state", func(t *testing.T) {
@@ -213,7 +212,7 @@ func TestPendingQuotaIsAtomicAcrossInstances(t *testing.T) {
 			{"direct finalized-nonce dropped from pending", nil, TrackDropped},
 			{"provisional to included", []int16{TrackProvisional}, TrackIncluded},
 			{"renewal_stopped to included", []int16{TrackRenewalStopped}, TrackIncluded},
-			{"tombstone to dropped", []int16{TrackRenewalStopped, TrackTombstone}, TrackDropped},
+			{"renewal_stopped to dropped", []int16{TrackRenewalStopped}, TrackDropped},
 		}
 		for _, c := range cases {
 			h := randomBytes(32)
@@ -336,29 +335,29 @@ func TestBatchedIntentInsertDedupesConflictsWithinBatch(t *testing.T) {
 	require.Equal(t, 1, history, "generations ≥ 2 are recorded in history (G38)")
 }
 
-// TestTombstoneRefusesOtherPrincipalUntilFinalizedNonce is G58: the single
-// binding row refuses another principal while live, as a tombstone and after
-// finality; the same principal may revive a tombstone, and a stale tombstone
-// transition after that revival is a no-op by generation.
-func TestTombstoneRefusesOtherPrincipalUntilFinalizedNonce(t *testing.T) {
+// TestStoppedBindingRefusesOtherPrincipalUntilFinal is G58 on the states the
+// system reaches (independent review, finding 6): the single binding row
+// refuses another principal while pending, while renewal_stopped and after a
+// final; the same principal may revive a stopped binding; and a decision
+// taken on an earlier generation is a no-op by generation alone, while the
+// state still matches.
+func TestStoppedBindingRefusesOtherPrincipalUntilFinal(t *testing.T) {
 	f := newTrackingFixture(t)
 	ctx := context.Background()
 	p1, p2 := newPrincipal(), newPrincipal()
 	p2.signer = p1.signer // a shared signer
 	p2.org = p1.org
 
-	t.Run("live, tombstoned and final bindings refuse another principal", func(t *testing.T) {
+	t.Run("live, stopped and final bindings refuse another principal", func(t *testing.T) {
 		f.reset()
 		h := randomBytes(32)
 		require.Equal(t, AdmitInserted, f.admitOne(0, p1.admit(h)).Outcome)
 		require.Equal(t, AdmitConflict, f.admitOne(0, p2.admit(h)).Outcome)
 		require.True(t, f.transition(h, TrackPending, TrackRenewalStopped, 0))
-		require.Equal(t, AdmitConflict, f.admitOne(0, p2.admit(h)).Outcome)
-		require.True(t, f.transition(h, TrackRenewalStopped, TrackTombstone, 0))
-		require.Equal(t, AdmitConflict, f.admitOne(0, p2.admit(h)).Outcome, "a tombstone keeps the binding")
+		require.Equal(t, AdmitConflict, f.admitOne(0, p2.admit(h)).Outcome, "a stopped binding keeps the hash bound")
 		require.True(t, f.finalize(p1, h, TrackDropped))
 		require.Equal(t, AdmitConflict, f.admitOne(0, p2.admit(h)).Outcome, "a final hash is never rebound")
-		require.Equal(t, AdmitConflict, f.admitOne(0, p1.admit(h)).Outcome, "a dropped transaction can never execute, not even for its owner")
+		require.Equal(t, AdmitConflict, f.admitOne(0, p1.admit(h)).Outcome, "a dropped transaction is never admitted again, not even for its owner")
 		included := randomBytes(32)
 		require.Equal(t, AdmitInserted, f.admitOne(0, p1.admit(included)).Outcome)
 		require.True(t, f.finalize(p1, included, TrackIncluded))
@@ -371,15 +370,15 @@ func TestTombstoneRefusesOtherPrincipalUntilFinalizedNonce(t *testing.T) {
 		f.quotaConsistent()
 	})
 
-	t.Run("an admission paused across tombstoning is refused on the single row", func(t *testing.T) {
+	t.Run("an admission paused across the final is refused on the single row", func(t *testing.T) {
 		f.reset()
 		h := randomBytes(32)
 		require.Equal(t, AdmitInserted, f.admitOne(0, p1.admit(h)).Outcome)
 		require.True(t, f.transition(h, TrackPending, TrackRenewalStopped, 0))
-		// Hold the row lock as the tombstone transition does, then race P2.
+		// Hold the row lock as the dropped final does, then race P2.
 		tx, err := f.exec.pool.conn.BeginTx(ctx, nil)
 		require.NoError(t, err)
-		_, err = tx.Exec(`UPDATE node_tx_binding SET state = 4 WHERE tx_hash = $1`, h)
+		_, err = tx.Exec(`SELECT 1 FROM node_tx_binding WHERE tx_hash = $1 FOR UPDATE`, h)
 		require.NoError(t, err)
 		done := make(chan AdmitResult, 1)
 		go func() {
@@ -392,23 +391,39 @@ func TestTombstoneRefusesOtherPrincipalUntilFinalizedNonce(t *testing.T) {
 			done <- r[0]
 		}()
 		time.Sleep(200 * time.Millisecond)
+		_, err = tx.Exec(`WITH gone AS (DELETE FROM node_tx_binding WHERE tx_hash = $1 RETURNING tx_hash, principal_id, org_id)
+ INSERT INTO node_tx_status (tx_hash, principal_id, org_id, state) SELECT tx_hash, principal_id, org_id, 12 FROM gone`, h)
+		require.NoError(t, err)
 		require.NoError(t, tx.Commit())
 		require.Equal(t, AdmitConflict, (<-done).Outcome)
 	})
 
-	t.Run("a same-principal revival beats a stale tombstone transition", func(t *testing.T) {
+	t.Run("a stop decided on an earlier generation is a no-op by generation", func(t *testing.T) {
 		f.reset()
 		h := randomBytes(32)
 		require.Equal(t, AdmitInserted, f.admitOne(0, p1.admit(h)).Outcome)
-		require.True(t, f.transition(h, TrackPending, TrackRenewalStopped, 1))
-		require.True(t, f.transition(h, TrackRenewalStopped, TrackTombstone, 1))
+		// A client resubmission makes generation 2 while the keeper's stop
+		// for generation 1 is in flight: same state (pending), other
+		// generation.
+		resent := p1.admit(h)
+		resent.ExpiresAt = resent.ExpiresAt.Add(time.Minute)
+		require.Equal(t, AdmitResubmitted, f.admitOne(0, resent).Outcome)
+		require.False(t, f.transition(h, TrackPending, TrackRenewalStopped, 1), "a stop for generation 1 does not apply to generation 2")
+		require.True(t, f.transition(h, TrackPending, TrackRenewalStopped, 2))
+		// The same principal revives it (generation 3) and it stops again.
 		revived := f.admitOne(0, p1.admit(h))
 		require.Equal(t, AdmitRevived, revived.Outcome)
 		require.Equal(t, TrackPending, revived.State)
-		require.False(t, f.transition(h, TrackRenewalStopped, TrackTombstone, 1), "a stale transition for generation 1 is a no-op")
+		require.True(t, f.transition(h, TrackPending, TrackRenewalStopped, 3))
+		// A dropped decision taken on the stopped generation 2 is stale.
+		block := uint64(10)
+		applied, err := f.exec.FinalizeBatch(ctx, f.inc, []TrackFinal{{Hash: h, State: TrackDropped, Reason: TrackReasonFinalizedLeaseExpiry, BlockNumber: &block, PrincipalID: p1.id, OrgID: p1.org, RequireStopped: true, Generation: 2}})
+		require.NoError(t, err)
+		require.False(t, applied[0], "a final decided on generation 2 does not apply to the stopped generation 3")
 		got, err := f.state(h)
 		require.NoError(t, err)
-		require.Equal(t, TrackPending, got.State)
+		require.Equal(t, TrackRenewalStopped, got.State)
+		require.EqualValues(t, 3, got.Generation)
 		raw, err := f.exec.TrackedPayload(ctx, h)
 		require.NoError(t, err, "a revival re-inserts the payload")
 		require.NotEmpty(t, raw)
@@ -609,14 +624,14 @@ func dbName(dsn string) string {
 
 // TestBindingNeverDeletedWhileExecutable is G31: a binding row leaves only by
 // a final transition (or the -32012 release of a never-delivered fresh
-// insert); a tombstone stays until the finalized nonce passes (a dropped
-// final); status rows leave only by retention.
+// insert); a stopped binding stays until a dropped final (finalized nonce or
+// finalized lease-expiry evidence); status rows leave only by retention.
 func TestBindingNeverDeletedWhileExecutable(t *testing.T) {
 	f := newTrackingFixture(t)
 	p := newPrincipal()
 	h := randomBytes(32)
 	require.Equal(t, AdmitInserted, f.admitOne(0, p.admit(h)).Outcome)
-	for _, step := range []struct{ from, to int16 }{{TrackPending, TrackProvisional}, {TrackProvisional, TrackPending}, {TrackPending, TrackRenewalStopped}, {TrackRenewalStopped, TrackTombstone}} {
+	for _, step := range []struct{ from, to int16 }{{TrackPending, TrackProvisional}, {TrackProvisional, TrackPending}, {TrackPending, TrackRenewalStopped}} {
 		require.True(t, f.transition(h, step.from, step.to, 0))
 		got, err := f.state(h)
 		require.NoError(t, err, "binding must survive %d → %d", step.from, step.to)
@@ -628,7 +643,7 @@ func TestBindingNeverDeletedWhileExecutable(t *testing.T) {
 	require.NoError(t, err)
 	got, err := f.state(h)
 	require.NoError(t, err, "retention never removes an in-flight binding")
-	require.Equal(t, TrackTombstone, got.State)
+	require.Equal(t, TrackRenewalStopped, got.State)
 }
 
 // TestIncarnationFencesOutstandingWorkAcrossRecreation is G59 (storage half):
@@ -920,12 +935,13 @@ func TestPendingQuotaPerPrincipalIsFair(t *testing.T) {
 		require.True(t, f.transition(hashes[1], TrackProvisional, TrackPending, 0), "a reorg back is never refused")
 		require.EqualValues(t, 5, f.principalQuotaConsistent())
 		require.Equal(t, AdmitPrincipalOverLimit, f.admitWith(limits, p.admit(randomBytes(32))).Outcome)
-		// Revival is a new admission for the cap too.
+		// A stopped row keeps holding its slot in the cap (finding 2), so its
+		// revival adds none.
 		require.True(t, f.transition(hashes[2], TrackPending, TrackRenewalStopped, 0))
-		require.Equal(t, AdmitPrincipalOverLimit, f.admitWith(limits, p.admit(hashes[2])).Outcome, "4 still pending: the revival needs a fifth slot")
+		require.Equal(t, AdmitPrincipalOverLimit, f.admitWith(limits, p.admit(randomBytes(32))).Outcome, "the stopped row still holds its slot")
+		require.Equal(t, AdmitRevived, f.admitWith(limits, p.admit(hashes[2])).Outcome, "a revival adds no row to its share")
 		require.True(t, f.finalize(p, hashes[3], TrackIncluded))
 		require.True(t, f.finalize(p, hashes[0], TrackIncluded))
-		require.Equal(t, AdmitRevived, f.admitWith(limits, p.admit(hashes[2])).Outcome)
 		released, err := f.exec.ReleaseUndelivered(ctx, f.inc, hashes[2], uuid.New())
 		require.NoError(t, err)
 		require.False(t, released, "a revival is not a fresh insert")
@@ -1021,6 +1037,76 @@ func (f *trackingFixture) principalQuotaConsistent() int64 {
 	used := f.quotaConsistent()
 	mismatched, err := f.exec.PendingQuotaMismatches(context.Background())
 	require.NoError(f.t, err)
-	require.Zero(f.t, mismatched, "the principal and organization shares must equal count(pending rows) per key")
+	require.Zero(f.t, mismatched, "the principal and organization shares must equal count(pending or stopped rows) per key")
 	return used
+}
+
+// Stopped bindings count toward the per-principal and per-organization caps
+// (not the global one, which bounds renewable work), so one principal cannot
+// accumulate stopped rows without bound or crowd others out; a revival is a
+// new admission for the global limit only (independent review, finding 2).
+func TestStoppedBindingsCountTowardTheirOwnersCaps(t *testing.T) {
+	f := newTrackingFixture(t)
+	p, other := newPrincipal(), newPrincipal()
+	limits := TrackLimits{Principal: 2}
+	var stopped [][]byte
+	for i := 0; i < 2; i++ {
+		h := randomBytes(32)
+		require.Equal(t, AdmitInserted, f.admitWith(limits, p.admit(h)).Outcome)
+		require.True(t, f.transition(h, TrackPending, TrackRenewalStopped, 0))
+		stopped = append(stopped, h)
+	}
+	require.EqualValues(t, 0, f.principalQuotaConsistent(), "stopped rows are not renewable work")
+	require.Equal(t, AdmitPrincipalOverLimit, f.admitWith(limits, p.admit(randomBytes(32))).Outcome, "its stopped rows hold its cap")
+	require.Equal(t, AdmitInserted, f.admitWith(limits, other.admit(randomBytes(32))).Outcome, "another principal is unaffected")
+	require.Equal(t, AdmitRevived, f.admitWith(limits, p.admit(stopped[0])).Outcome, "a revival adds no row to the principal's share")
+	f.principalQuotaConsistent()
+	// A final releases the share.
+	require.True(t, f.finalize(p, stopped[1], TrackDropped))
+	require.Equal(t, AdmitInserted, f.admitWith(limits, p.admit(randomBytes(32))).Outcome)
+	f.principalQuotaConsistent()
+	// A revival at the global limit is refused (Δglobal +1, Δshare 0).
+	f.reset()
+	q := newPrincipal()
+	h := randomBytes(32)
+	global := TrackLimits{Global: 2}
+	require.Equal(t, AdmitInserted, f.admitWith(global, q.admit(h)).Outcome)
+	require.True(t, f.transition(h, TrackPending, TrackRenewalStopped, 0))
+	require.Equal(t, AdmitInserted, f.admitWith(global, q.admit(randomBytes(32))).Outcome)
+	require.Equal(t, AdmitInserted, f.admitWith(global, q.admit(randomBytes(32))).Outcome)
+	require.EqualValues(t, 2, f.principalQuotaConsistent())
+	require.Equal(t, AdmitOverLimit, f.admitWith(global, q.admit(h)).Outcome, "a revival is refused at the global limit")
+	f.principalQuotaConsistent()
+}
+
+// The lease-expiry fence uses the longest identity ever recorded for the
+// binding, not its current envelope: a revival signed with a shorter lease
+// (a database clock step, a shorter lifetime on another instance) leaves the
+// node holding the longer one (independent review, finding 2).
+func TestLeaseExpiryFenceUsesTheLongestRecordedIdentity(t *testing.T) {
+	f := newTrackingFixture(t)
+	ctx := context.Background()
+	p := newPrincipal()
+	h := randomBytes(32)
+	long := p.admit(h)
+	long.ExpiresAt = time.Now().Add(10 * time.Minute).Truncate(time.Second)
+	require.Equal(t, AdmitInserted, f.admitOne(0, long).Outcome)
+	require.True(t, f.transition(h, TrackPending, TrackRenewalStopped, 0))
+	short := p.admit(h)
+	short.ExpiresAt = time.Now().Add(2 * time.Minute).Truncate(time.Second)
+	require.Equal(t, AdmitRevived, f.admitOne(0, short).Outcome)
+	require.True(t, f.transition(h, TrackPending, TrackRenewalStopped, 2))
+	got, err := f.state(h)
+	require.NoError(t, err)
+	require.True(t, got.ExpiresAt.Equal(short.ExpiresAt))
+	require.True(t, got.MaxExpiresAt.Equal(long.ExpiresAt), "max %s, want %s", got.MaxExpiresAt, long.ExpiresAt)
+	block := uint64(10)
+	final := func(by time.Time) bool {
+		applied, err := f.exec.FinalizeBatch(ctx, f.inc, []TrackFinal{{Hash: h, State: TrackDropped, Reason: TrackReasonFinalizedLeaseExpiry, BlockNumber: &block, PrincipalID: p.id, OrgID: p.org, RequireStopped: true, Generation: 2, ExpiresBy: &by}})
+		require.NoError(t, err)
+		return applied[0]
+	}
+	require.False(t, final(short.ExpiresAt.Add(time.Minute)), "a finalized block past the current lease but before the longest one decides nothing")
+	require.True(t, final(long.ExpiresAt))
+	f.principalQuotaConsistent()
 }
