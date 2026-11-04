@@ -287,3 +287,38 @@ func TestAuditMigration003RefusesNonOwnerWithTheFix(t *testing.T) {
 		t.Fatalf("after the member's run access_logs.id is %s", got)
 	}
 }
+
+// audit/004 on a database that already holds buffer sequences: the first
+// range drawn starts above the highest one, whatever range it is in.
+func TestBufferRangeSequenceStartsAboveStoredSequences(t *testing.T) {
+	if testing.Short() {
+		t.Skip("database test")
+	}
+	ctx := context.Background()
+	admin, err := db.NewWithoutMigrate(freshDatabaseURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	if err := db.MigrateAuditFSToForTest(ctx, admin, migrationsaudit.FS, 3); err != nil {
+		t.Fatal(err)
+	}
+	chain := audit.NewHashChain("")
+	stored := uint64(1)<<db.BufferRangeShift + 3 // a row already in range 1
+	if err := sealRecords(t, admin, chain, stored-1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.MigrateAuditOnly(ctx, migrationsaudit.FS); err != nil {
+		t.Fatal(err)
+	}
+	n, err := admin.ReserveAccessLogBufferRange(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n<<db.BufferRangeShift <= stored {
+		t.Fatalf("first range %d starts at %d, at or below the stored sequence %d", n, n<<db.BufferRangeShift, stored)
+	}
+	if n != 2 {
+		t.Fatalf("first range %d, want 2 (the one after the stored sequence's range)", n)
+	}
+}

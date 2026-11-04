@@ -2221,6 +2221,11 @@ components:
       type: object
     privacy-proxy_internal_apimodels.ReadinessResponse:
       properties:
+        reason:
+          description: |-
+            Reason is set when the instance is not ready because its audit
+            sealing stopped (audit_sealing_stopped).
+          type: string
         status:
           type: string
       type: object
@@ -16088,8 +16093,12 @@ paths:
       - System
   /ready:
     get:
-      description: Returns 503 until the configured execution node has fresh policy
-        facts matching the database. No private policy or identity data is returned.
+      description: 'Returns 503 until the configured execution node has fresh policy
+        facts matching the database, and, with the async audit buffer, while audit
+        sealing has stopped (the audit chain was refused, or no record reached the
+        audit database for five minutes while records waited); callers on the networks
+        the management API accepts then also get `reason: audit_sealing_stopped`.
+        No private policy or identity data is returned.'
       responses:
         "200":
           content:
@@ -16107,8 +16116,12 @@ paths:
       tags:
       - Health
     head:
-      description: Returns 503 until the configured execution node has fresh policy
-        facts matching the database. No private policy or identity data is returned.
+      description: 'Returns 503 until the configured execution node has fresh policy
+        facts matching the database, and, with the async audit buffer, while audit
+        sealing has stopped (the audit chain was refused, or no record reached the
+        audit database for five minutes while records waited); callers on the networks
+        the management API accepts then also get `reason: audit_sealing_stopped`.
+        No private policy or identity data is returned.'
       responses:
         "200":
           content:

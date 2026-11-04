@@ -443,7 +443,7 @@ func (b *nodeExecutionBridge) executionStatus(ctx context.Context) (uint64, node
 
 // handleReady reports whether execution can use current authoritative facts.
 // @Summary Execution readiness
-// @Description Returns 503 until the configured execution node has fresh policy facts matching the database. No private policy or identity data is returned.
+// @Description Returns 503 until the configured execution node has fresh policy facts matching the database, and, with the async audit buffer, while audit sealing has stopped (the audit chain was refused, or no record reached the audit database for five minutes while records waited); callers on the networks the management API accepts then also get `reason: audit_sealing_stopped`. No private policy or identity data is returned.
 // @Tags Health
 // @Produce json
 // @Success 200 {object} apimodels.ReadinessResponse
@@ -452,12 +452,20 @@ func (b *nodeExecutionBridge) executionStatus(ctx context.Context) (uint64, node
 // @Router /ready [head]
 func (s *Server) handleReady(c *gin.Context) {
 	status := s.executionStatus(c.Request.Context())
-	code, text := http.StatusOK, "ready"
+	response, code := apimodels.ReadinessResponse{Status: "ready"}, http.StatusOK
 	if !status.Ready {
-		code, text = http.StatusServiceUnavailable, "not_ready"
+		response.Status, code = "not_ready", http.StatusServiceUnavailable
+	}
+	if s.auditSealingStopped() {
+		response, code = apimodels.ReadinessResponse{Status: "not_ready"}, http.StatusServiceUnavailable
+		// The reason tells when audit records stop reaching the audit
+		// database: only callers on the management networks learn it.
+		if s.internalPeer(c.Request) {
+			response.Reason = ReasonAuditSealingStopped
+		}
 	}
 	c.Header("Cache-Control", "no-store")
-	c.JSON(code, apimodels.ReadinessResponse{Status: text})
+	c.JSON(code, response)
 }
 
 func (s *Server) executionStatus(ctx context.Context) apimodels.ExecutionStatus {

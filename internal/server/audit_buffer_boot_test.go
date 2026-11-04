@@ -12,12 +12,12 @@ import (
 	"privacy-proxy/internal/rbac"
 )
 
-// G66 at boot (RD-1410): the server seeds the async audit buffer from the
-// chain's sealed high-water before the request path exists. A recreated,
-// empty AUDIT_BUFFER_DIR while the audit database already holds buffer
-// sequences up to N gets its first new sequence above N, and that event is
-// sealed rather than skipped and deleted as "already sealed".
-func TestServerSeedsTheAuditBufferFromTheSealedChain(t *testing.T) {
+// G66 at boot (RD-1410, review findings 1 and 2): the server seeds the async
+// audit buffer with an allocation range of its own, drawn from the audit
+// database before the request path exists. Its first entry is numbered above
+// every buffer sequence the database already holds (here legacy ones, numbered
+// per chain), and that event is sealed onto the existing chain.
+func TestServerSeedsTheAuditBufferWithItsOwnRange(t *testing.T) {
 	// Building a whole server arms the process-wide method registries; restore
 	// them so later tests in this package can still register namespaces.
 	defer rbac.SnapshotMethodRegistriesForTest()()
@@ -48,19 +48,20 @@ func TestServerSeedsTheAuditBufferFromTheSealedChain(t *testing.T) {
 		t.Fatalf("boot: %v", err)
 	}
 	defer s.Stop()
-	if got := s.auditBuffer.AllocatedThrough(); got != 3 {
-		t.Fatalf("buffer seeded at %d, want the sealed high-water 3", got)
+	base := s.auditBuffer.AllocatedThrough()
+	if base < 1<<40 || base%(1<<40) != 0 {
+		t.Fatalf("buffer seeded at %d, want the start of an allocation range", base)
 	}
 	data, _ := json.Marshal(db.AccessLogRecord{ExternalID: "did:test:boot", Method: "net_version", StatusCode: 200})
 	seq, err := s.auditBuffer.Append(data)
-	if err != nil || seq != 4 {
-		t.Fatalf("first append after boot: %d %v, want 4", seq, err)
+	if err != nil || seq != base+1 {
+		t.Fatalf("first append after boot: %d %v, want %d", seq, err, base+1)
 	}
 	// The server's own sealer (running since boot) seals it.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		hw, err := auditDB.GetMaxAccessLogBufferSeq(ctx, "access_logs")
-		if err == nil && hw == 4 {
+		hw, err := auditDB.MaxAccessLogBufferSeqBetween(ctx, base+1, base+1)
+		if err == nil && hw == seq {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -71,5 +72,8 @@ func TestServerSeedsTheAuditBufferFromTheSealedChain(t *testing.T) {
 	res, err := audit.NewVerifier(database.Conn(), database).Verify(ctx, audit.ChainAccessLogs)
 	if err != nil || !res.OK || res.ScannedRows != 4 {
 		t.Fatalf("chain after boot: %+v %v", res, err)
+	}
+	if st := s.auditSealer.State(); st.Stopped {
+		t.Fatalf("sealer state %+v", st)
 	}
 }

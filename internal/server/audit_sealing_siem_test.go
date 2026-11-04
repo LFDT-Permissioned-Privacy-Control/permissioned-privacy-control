@@ -47,7 +47,7 @@ type ambiguousStore struct {
 	singleCommitsThenFails int
 }
 
-func (s *ambiguousStore) SealBufferedAccessLogs(ctx context.Context, chain db.BatchAuditChain, records []db.BufferedAccessLog, name string) ([]db.SealedAccessLog, error) {
+func (s *ambiguousStore) SealBufferedAccessLogs(ctx context.Context, chain db.AccessLogChain, records []db.BufferedAccessLog, name string) ([]db.SealedAccessLog, error) {
 	if s.batchFailsWithoutWrite > 0 {
 		s.batchFailsWithoutWrite--
 		return nil, errors.New("connection reset before the batch was written")
@@ -60,7 +60,7 @@ func (s *ambiguousStore) SealBufferedAccessLogs(ctx context.Context, chain db.Ba
 	return sealed, err
 }
 
-func (s *ambiguousStore) SealBufferedAccessLog(ctx context.Context, chain db.RBACAuditChain, rec db.AccessLogRecord, seq uint64, name string) (string, error) {
+func (s *ambiguousStore) SealBufferedAccessLog(ctx context.Context, chain db.AccessLogChain, rec db.AccessLogRecord, seq uint64, name string) (string, error) {
 	hash, err := s.AuditDB.SealBufferedAccessLog(ctx, chain, rec, seq, name)
 	if err == nil && s.singleCommitsThenFails > 0 {
 		s.singleCommitsThenFails--
@@ -89,24 +89,16 @@ func newSealingHarness(t *testing.T) *sealingHarness {
 // (re)started server would.
 func (h *sealingHarness) open(batch bool) (*buffer.Buffer, *sealer.Sealer, *accessLogSealing) {
 	h.t.Helper()
-	buf, err := buffer.Open(h.dir, buffer.RequireSeed())
+	buf, s, sealing, err := openAccessLogSealing(context.Background(), h.store, h.dir, h.name, h.capture, func(cfg *sealer.Config) {
+		cfg.Batch = 16
+		if !batch {
+			cfg.SealBatch = nil
+		}
+	})
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	h.t.Cleanup(func() { h.close(buf) })
-	head, err := h.store.GetLatestAccessLogHashForChain(context.Background(), h.name)
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	sealing := &accessLogSealing{auditDB: h.store, chain: audit.NewHashChain(head), name: h.name, siem: h.capture}
-	cfg := sealer.Config{Batch: 16, Settle: sealing.settle}
-	if batch {
-		cfg.SealBatch = sealing.sealBatch
-	}
-	s := sealer.New(buf, sealing.seal, sealing.highWater, cfg)
-	if err := s.Seed(context.Background()); err != nil {
-		h.t.Fatal(err)
-	}
 	return buf, s, sealing
 }
 
@@ -257,8 +249,14 @@ func TestSettleNeverForwardsAnotherWritersRow(t *testing.T) {
 	h := newSealingHarness(t)
 	buf, _, sealing := h.open(true)
 	h.append(buf, 1)
+	own, err := buf.Drain(0, 1)
+	if err != nil || len(own) != 1 {
+		t.Fatalf("own entry %v %v", own, err)
+	}
+	// Only a restored audit database hands this range out twice; another
+	// writer then holds this buffer's sequence.
 	foreign := db.AccessLogRecord{ExternalID: "did:test:someone-else", Method: "eth_call", StatusCode: 200, CorrelationID: "foreign"}
-	if _, err := h.store.AuditDB.SealBufferedAccessLog(context.Background(), sealing.chain, foreign, 1, h.name); err != nil {
+	if _, err := h.store.AuditDB.SealBufferedAccessLog(context.Background(), sealing.chain, foreign, own[0].Seq, h.name); err != nil {
 		t.Fatal(err)
 	}
 	h.close(buf)

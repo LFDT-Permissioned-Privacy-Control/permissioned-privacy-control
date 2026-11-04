@@ -907,38 +907,27 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 	}
 
 	// RD-1112: async access-log auditing. When AUDIT_BUFFER_DIR is set, the hot
-	// path appends each entry to a durable Pebble buffer and a single background
-	// sealer drains it into the access_logs chain off the request path — removing
-	// the per-request chain mutex + 2 PG round-trips that capped throughput. A
-	// single-writer sealer means no chain fork. Empty dir = synchronous legacy path.
+	// path appends each entry to a durable Pebble buffer and a background
+	// sealer drains it into the access_logs chain off the request path —
+	// removing the per-request chain mutex + 2 PG round-trips that capped
+	// throughput. Empty dir = synchronous legacy path.
 	if cfg.AuditBufferDir != "" {
-		// RequireSeed: no append is accepted until the buffer's sequence floor
-		// is the chain's sealed high-water (seeded below, before the request
-		// path exists), so a drained or recreated buffer never reuses a
-		// sequence the chain already sealed (RD-1410).
-		auditBuf, bufErr := buffer.Open(cfg.AuditBufferDir, buffer.RequireSeed())
-		if bufErr != nil {
-			return nil, fmt.Errorf("async audit buffer init (AUDIT_BUFFER_DIR=%q): %w", cfg.AuditBufferDir, bufErr)
-		}
-		s.auditBuffer = auditBuf
-
-		sealing := &accessLogSealing{auditDB: auditDB, chain: hashChain, name: cfg.AuditChainName}
+		// RD-1410: the buffer accepts no append until it holds this run's
+		// allocation range, drawn from the audit database before the request
+		// path exists, so no two runs or instances ever share a sequence.
+		var siem siemSender
 		if siemForwarder != nil {
-			sealing.siem = siemForwarder
+			siem = siemForwarder
 		}
-		// A tick drains the whole backlog in multi-row batch writes; a failed
-		// batch is sealed record by record, stopping at the failing one.
-		// Settle forwards rows whose seal outcome the sealer could not observe.
-		s.auditSealer = sealer.New(auditBuf, sealing.seal, sealing.highWater, sealer.Config{SealBatch: sealing.sealBatch, Settle: sealing.settle})
 		seedCtx, cancelSeed := context.WithTimeout(context.Background(), 15*time.Second)
-		seedErr := s.auditSealer.Seed(seedCtx)
+		auditBuf, auditSealer, _, sealErr := openAccessLogSealing(seedCtx, auditDB, cfg.AuditBufferDir, cfg.AuditChainName, siem, nil)
 		cancelSeed()
-		if seedErr != nil {
-			_ = auditBuf.Close()
-			s.auditBuffer, s.auditSealer = nil, nil
+		if sealErr != nil {
 			s.Stop()
-			return nil, fmt.Errorf("async audit buffer: read the sealed chain high-water from the audit database: %w", seedErr)
+			return nil, sealErr
 		}
+		s.auditBuffer, s.auditSealer = auditBuf, auditSealer
+		registerAuditSealingMetrics(m.Registry, auditSealer)
 		sealerCtx, sealerCancel := context.WithCancel(context.Background())
 		s.auditSealerCancel = sealerCancel
 		go s.auditSealer.Run(sealerCtx)
@@ -2082,6 +2071,47 @@ func (s *Server) deprecationMiddleware(oldPath, newPath string) gin.HandlerFunc 
 	}
 }
 
+// internalPeerIP reports whether ip is on a network the management API
+// accepts: localhost, the private and Tailscale ranges below, and
+// TRUSTED_INTERNAL_CIDRS.
+func (s *Server) internalPeerIP(ip net.IP) bool {
+	// Allowed private networks:
+	// - 127.0.0.1/32: Localhost IPv4
+	// - ::1/128: Localhost IPv6
+	// - 172.16.0.0/12: Docker bridge networks (RFC1918)
+	// - 192.168.0.0/16: Docker custom networks / WiFi (RFC1918)
+	// - 100.64.0.0/10: Tailscale / CGNAT
+	allowedCIDRs := []string{
+		"127.0.0.1/32",
+		"::1/128",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"10.0.0.0/8",
+		"100.64.0.0/10",
+	}
+	// Append custom CIDRs from TRUSTED_INTERNAL_CIDRS env var
+	if s.config != nil {
+		allowedCIDRs = append(allowedCIDRs, s.config.TrustedInternalCIDRs...)
+	}
+	for _, cidr := range allowedCIDRs {
+		_, subnet, _ := net.ParseCIDR(cidr)
+		if subnet != nil && subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// internalPeer is internalPeerIP for the raw TCP peer of r.
+func (s *Server) internalPeer(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && s.internalPeerIP(ip)
+}
+
 // localhostOnlyMiddleware restricts admin API access to requests arriving over the local
 // network — localhost, Docker bridge networks, LAN, or Tailscale.
 //
@@ -2115,35 +2145,7 @@ func (s *Server) localhostOnlyMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Allowed private networks:
-		// - 127.0.0.1/32: Localhost IPv4
-		// - ::1/128: Localhost IPv6
-		// - 172.16.0.0/12: Docker bridge networks (RFC1918)
-		// - 192.168.0.0/16: Docker custom networks / WiFi (RFC1918)
-		// - 100.64.0.0/10: Tailscale / CGNAT
-		allowedCIDRs := []string{
-			"127.0.0.1/32",
-			"::1/128",
-			"172.16.0.0/12",
-			"192.168.0.0/16",
-			"10.0.0.0/8",
-			"100.64.0.0/10",
-		}
-		// Append custom CIDRs from TRUSTED_INTERNAL_CIDRS env var
-		if s.config != nil {
-			allowedCIDRs = append(allowedCIDRs, s.config.TrustedInternalCIDRs...)
-		}
-
-		isAllowed := false
-		for _, cidr := range allowedCIDRs {
-			_, subnet, _ := net.ParseCIDR(cidr)
-			if subnet != nil && subnet.Contains(ip) {
-				isAllowed = true
-				break
-			}
-		}
-
-		if !isAllowed {
+		if !s.internalPeerIP(ip) {
 			c.JSON(http.StatusForbidden, gin.H{
 				"error": "management API is only accessible from localhost, private networks, or Tailscale",
 			})

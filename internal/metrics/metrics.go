@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"time"
+
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -281,4 +283,47 @@ func New(version string) *Metrics {
 // Use in tests where you don't care about metrics values.
 func NewNoop() *Metrics {
 	return New("test")
+}
+
+// AuditSealingState is what the audit sealing gauges read at scrape time.
+type AuditSealingState struct {
+	Stopped      bool
+	Reason       string
+	Backlog      uint64
+	LastProgress time.Time
+}
+
+// AuditSealingReasons are the values of the reason label of
+// audit_sealing_stopped.
+var AuditSealingReasons = []string{"chain_refused", "stalled"}
+
+// RegisterAuditSealing registers the async audit buffer's sealing gauges on
+// reg (RD-1410): audit_sealing_stopped{reason} is 1 for the reason sealing
+// stopped (the instance then reports not ready), the backlog of this run's
+// unsealed entries, and the time of the sealer's last progress.
+func RegisterAuditSealing(reg prometheus.Registerer, state func() AuditSealingState) {
+	for _, reason := range AuditSealingReasons {
+		reason := reason
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Namespace:   namespace,
+			Name:        "audit_sealing_stopped",
+			Help:        "1 when audit sealing has stopped for this reason (chain_refused: rows in this instance's own sequence space it never wrote; stalled: no sealing progress for 5 minutes while entries wait). The instance reports not ready meanwhile.",
+			ConstLabels: prometheus.Labels{"reason": reason},
+		}, func() float64 {
+			if st := state(); st.Stopped && st.Reason == reason {
+				return 1
+			}
+			return 0
+		}))
+	}
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "audit_sealing_backlog_entries",
+		Help:      "Approximate number of this run's audit buffer entries not sealed into the audit database yet (failed appends count too, so it may stay above zero).",
+	}, func() float64 { return float64(state().Backlog) }))
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "audit_sealing_last_progress_timestamp_seconds",
+		Help:      "Unix time of the audit sealer's last tick that met no failure.",
+	}, func() float64 { return float64(state().LastProgress.UnixNano()) / 1e9 }))
 }

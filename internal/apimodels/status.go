@@ -15,6 +15,9 @@ type StatusResponse struct {
 
 type ReadinessResponse struct {
 	Status string `json:"status"`
+	// Reason is set when the instance is not ready because its audit
+	// sealing stopped (audit_sealing_stopped).
+	Reason string `json:"reason,omitempty"`
 }
 
 type ExecutionStatus struct {

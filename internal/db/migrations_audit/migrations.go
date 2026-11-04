@@ -14,8 +14,11 @@
 //     audit_chain_reanchor), and the runtime role's APPEND-ONLY grants — the
 //     seal: SELECT+INSERT on access_logs, NO UPDATE/DELETE.
 //   - 003: access_logs.id and its sequence widened to bigint (RD-1410); a table
-//     rewrite that needs ownership of access_logs (run it with `migrate -audit`
-//     in a maintenance window on a large deployment).
+//     rewrite that needs ownership of access_logs (run it with `privacy-proxy
+//     migrate -audit` in a maintenance window on a large deployment).
+//   - 004: access_logs_buffer_range_seq, from which every start of an
+//     instance with an async buffer draws its allocation range (RD-1410), and
+//     the (chain_name, id) index the sealer reads its chain head with.
 //
 // Applied versions are tracked in a SEPARATE tern version table
 // (schema_version_audit) so the sequence is independent of the main schema.

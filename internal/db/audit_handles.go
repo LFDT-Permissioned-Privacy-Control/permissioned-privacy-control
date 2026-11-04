@@ -116,16 +116,28 @@ func (a *AuditDB) GetLatestAccessLogHashForChain(ctx context.Context, chainName 
 	return a.pool.GetLatestAccessLogHashForChain(ctx, chainName)
 }
 
-func (a *AuditDB) SealBufferedAccessLog(ctx context.Context, chain RBACAuditChain, rec AccessLogRecord, bufferSeq uint64, chainName string) (string, error) {
+func (a *AuditDB) SealBufferedAccessLog(ctx context.Context, chain AccessLogChain, rec AccessLogRecord, bufferSeq uint64, chainName string) (string, error) {
 	return a.pool.SealBufferedAccessLog(ctx, chain, rec, bufferSeq, chainName)
 }
 
-func (a *AuditDB) SealBufferedAccessLogs(ctx context.Context, chain BatchAuditChain, records []BufferedAccessLog, chainName string) ([]SealedAccessLog, error) {
+func (a *AuditDB) SealBufferedAccessLogs(ctx context.Context, chain AccessLogChain, records []BufferedAccessLog, chainName string) ([]SealedAccessLog, error) {
 	return a.pool.SealBufferedAccessLogs(ctx, chain, records, chainName)
 }
 
 func (a *AuditDB) SealedAccessLogsBySeq(ctx context.Context, chainName string, seqs []uint64) ([]SealedAccessLogRow, error) {
 	return a.pool.SealedAccessLogsBySeq(ctx, chainName, seqs)
+}
+
+func (a *AuditDB) ReserveAccessLogBufferRange(ctx context.Context) (uint64, error) {
+	return a.pool.ReserveAccessLogBufferRange(ctx)
+}
+
+func (a *AuditDB) MaxAccessLogBufferSeqBetween(ctx context.Context, lo, hi uint64) (uint64, error) {
+	return a.pool.MaxAccessLogBufferSeqBetween(ctx, lo, hi)
+}
+
+func (a *AuditDB) MaxChainAccessLogBufferSeqBelow(ctx context.Context, chainName string, limit uint64) (uint64, error) {
+	return a.pool.MaxChainAccessLogBufferSeqBelow(ctx, chainName, limit)
 }
 
 func (a *AuditDB) GetMaxAccessLogBufferSeq(ctx context.Context, chainName string) (uint64, error) {
