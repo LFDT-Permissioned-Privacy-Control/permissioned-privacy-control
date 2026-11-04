@@ -188,7 +188,12 @@ transaction: after a clean shutdown Reth restores the pool from its backup. An `
 status describes the current lease and is not final: a
 previously pinned candidate can still settle, so OPS continues receipt polling.
 Once the expired lease has been reclaimed, a status request for the not-included
-transaction returns an error. Rule denials describe the current
+transaction returns error `-32014` ("transaction not found", capability
+`transaction_not_found_v1`): the lookup succeeded, no canonical block holds the
+transaction and the node holds no identity for it, as after a crash that lost
+the transaction's unwritten block. It is not final: the node cannot execute
+the transaction until OPS delivers it again. Any other failure stays the
+generic error, which is no evidence. Rule denials describe the current
 candidate and are not final pool eviction: Reth can retry an already admitted
 transaction when later facts change. Included creation metadata is returned only
 when a canonical receipt matches the exact archived block, and includes nested
@@ -220,12 +225,14 @@ order. An entry is the `ops_transactionStatus` result without `boot_id`, plus
 `pooled`: the node's pool holds the transaction, never `true` once it is
 included, so a pending transaction that is not pooled was evicted. The
 finalized block is read before any transaction is looked up, and every entry's
-finality is decided against it. An entry is `null` when the node has no answer
-for the hash in this call: no canonical block and no registered identity, a
-canonical block without local evidence, a failed lookup, or a block beyond the
-call's budget of 16 blocks whose evidence is not cached yet (loading one
-verifies every identity in it; the next call finds more cached). A `null` is
-never evidence that the transaction is gone. `canonical_epoch` starts at 0 at
+finality is decided against it. An entry is the string `"not_found"` when the
+lookup succeeded, no canonical block holds the hash and the node holds no
+identity for it (the single call's `-32014`). An entry is `null` when the node
+has no answer for the hash in this call: a canonical block without local
+evidence, a failed lookup, or a block beyond the call's budget of 16 blocks
+whose evidence is not cached yet (loading one verifies every identity in it;
+the next call finds more cached). Neither is evidence that the transaction is
+gone for good. `canonical_epoch` starts at 0 at
 every process start and changes whenever a block that a status answer of the
 same process named as a transaction's inclusion block has left the canonical
 chain before becoming final; the first answer that sees the loss reports it

@@ -154,7 +154,8 @@ try:
         if name == 'create':
             assert status['execution']['created'] == [{'address': receipt['contractAddress'], 'org_id': 'org_acme', 'principal_id': 'fixture_principal'}], status
     assert receipts['create']['contractAddress']
-    # Batched status: request order, an unknown hash as null, the finalized
+    # Batched status: request order, an unknown hash as "not_found" (the
+    # lookup succeeded, nothing holds it, no identity), the finalized
     # head (final and written) with its header's timestamp; with senders, each
     # hash's receipt presence and the sender's nonce at exactly that block.
     assert 'transaction_statuses_v1' in result('ops_policyStatus', [], True)['capabilities']
@@ -163,7 +164,10 @@ try:
     plain = result('ops_transactionStatuses', [hashes], True)
     assert set(plain) == {'boot_id', 'finalized', 'canonical_epoch', 'statuses'} and plain['boot_id'] == ack['boot_id'], plain
     batch = result('ops_transactionStatuses', [hashes, [signed['sender'].lower()]], True)
-    assert batch['statuses'][1] is None and batch['canonical_epoch'] == 0 and batch['receipts'] == [True, False, True], batch
+    assert batch['statuses'][1] == 'not_found' and batch['canonical_epoch'] == 0 and batch['receipts'] == [True, False, True], batch
+    assert 'transaction_not_found_v1' in result('ops_policyStatus', [], True)['capabilities']
+    missing = rpc('ops_transactionStatus', [unknown], True)
+    assert missing.get('error') == {'code': -32014, 'message': 'transaction not found'}, missing
     final = batch['finalized']
     final_header = result('eth_getBlockByHash', [final['hash'], False])
     assert int(final_header['number'], 16) == final['number'] and int(final_header['timestamp'], 16) == final['timestamp'], (batch, final_header)
@@ -209,7 +213,7 @@ try:
     # identity for (the denied one, restored to the pool) has no status.
     batch = result('ops_transactionStatuses', [[signed['create']['hash'], signed['denied']['hash']]], True)
     assert batch['boot_id'] == status['boot_id'] != ack['boot_id'], batch
-    assert batch['statuses'][0]['execution']['status'] == 'included' and batch['statuses'][1] is None, batch
+    assert batch['statuses'][0]['execution']['status'] == 'included' and batch['statuses'][1] == 'not_found', batch
     summary = {'ok': True, 'workdir': str(work), 'created': receipts['create']['contractAddress'], 'blocks': {name: receipt['blockNumber'] for name, receipt in receipts.items()}, 'checks': ['signed-facts', 'scoped-call-estimate-trace', 'public-isolation', 'state-and-block-override-rejection', 'signed-pool-submission', 'real-block-self-import', 'create', 'canonical-creation-status', 'chain-finality-evidence', 'candidate-preview-active-gate', 'candidate-live-read-isolation', 'current-revocation', 'scoped-admin-diagnostics', 'restart-recovery', 'public-simulate-builds-nothing', 'included-resend-accepted', 'control-listener', 'batched-status', 'public-replay-methods-refused']}
     (work / 'result.json').write_text(json.dumps(summary, indent=2)); print(json.dumps(summary))
 except Exception:

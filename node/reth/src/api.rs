@@ -4,7 +4,7 @@
 use crate::{
     context::ExecutionBinding,
     identity::{Admission, IdentityRegistry},
-    runtime::{MAX_STATUS_BATCH, PolicyRuntime, StatusBatch},
+    runtime::{BatchedAnswer, MAX_STATUS_BATCH, PolicyRuntime, StatusBatch, TRANSACTION_NOT_FOUND},
     wire::{Identity, MAX_ENVELOPE_BYTES, SimulationRequest, decode_strict, parse_simulation},
 };
 use alloy_consensus::{Transaction, TxEnvelope, transaction::SignerRecoverable};
@@ -421,6 +421,11 @@ impl PrivateApi {
             ),
             Err(Failure::Message(error)) if error.starts_with("resynchronisation required") => {
                 rpc_error(id, -32011, "policy resynchronisation required")
+            }
+            // Only the status call: a definitive canonical miss
+            // (`transaction_not_found_v1`).
+            Err(Failure::Message(error)) if error == TRANSACTION_NOT_FOUND => {
+                rpc_error(id, -32014, TRANSACTION_NOT_FOUND)
             }
             Err(Failure::Message(_)) => rpc_error(id, -32000, "private execution request rejected"),
         }
@@ -921,8 +926,9 @@ fn status_batch_json(batch: &StatusBatch, evidence: bool, boot_id: &str) -> Valu
         .statuses
         .iter()
         .map(|entry| match entry {
-            None => Value::Null,
-            Some(entry) => json!({
+            BatchedAnswer::Unknown => Value::Null,
+            BatchedAnswer::NotFound => json!("not_found"),
+            BatchedAnswer::Status(entry) => json!({
                 "transaction_hash": format!("{:#x}", entry.hash),
                 "principal_id": entry.identity.principal_id,
                 "org_id": entry.identity.org_id,

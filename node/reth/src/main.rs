@@ -74,6 +74,7 @@ impl ExecutionBackend for Backend {
             "scoped_diagnostics_v1",
             "finalized_status_v1",
             "transaction_statuses_v1",
+            "transaction_not_found_v1",
         ]
         .into_iter()
         .map(str::to_owned)
