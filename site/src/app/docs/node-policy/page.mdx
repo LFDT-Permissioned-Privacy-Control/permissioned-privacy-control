@@ -204,7 +204,11 @@ applied those facts yet, a node that supports it waits for them (up to its
 fact wait, one second by default) and only then refuses; OPS passes such
 requests on for up to one second after it first sees the node behind, at most
 16 at a time per instance (each waiting request holds a transaction
-connection), and refuses the rest itself. A request refused because publication is
+connection). Further requests wait in OPS, holding no node connection, until
+the publication in flight reaches the node, within the same second, and are
+refused only if it does not. A fact change is normally applied on the node
+well within that second, so requests not affected by the change are not
+refused while it is published. A request refused because publication is
 pending is answered with 503, `Retry-After: 1` and, for callers with verbose
 errors, the reason `publication_pending`: retry it unchanged. A request is
 also refused with 503 when the node does not answer a readiness check, when its
@@ -247,7 +251,7 @@ The owner can follow a transaction at `GET /api/v1/me/transactions/{hash}/execut
 | `renewal_stopped` | OPS will not renew it (see the reason), but it may still settle: it can still be included while its last identity is valid, and is then reported as included | no |
 | `included` | Executed in a finalized block | yes |
 | `reverted` | Reverted in a finalized block | yes |
-| `dropped` | Can never execute: a finalized transaction used its nonce (reason `nonce_consumed`) | yes |
+| `dropped` | A finalized transaction consumed its nonce, so it can never execute again (reason `nonce_consumed`) | yes |
 
 A `renewal_stopped` transaction carries one reason: `max_age` (pending longer
 than `OPS_NODE_POLICY_MAX_AGE`), `principal_banned`, `kyc_missing`,
@@ -257,9 +261,15 @@ than `OPS_NODE_POLICY_MAX_AGE`), `principal_banned`, `kyc_missing`,
 `replaced_in_pool` (the node's pool refused its nonce), or `node_rejected` (the
 node kept refusing a renewed identity). Resending the same
 signed transaction as the same principal is a new submission with every check.
-OPS reports `dropped` only once a finalized block has used the transaction's
-nonce and the transaction itself was never included; an expired identity alone
-never makes a transaction final.
+Lease expiry alone never makes a transaction final. If its nonce remains unused,
+OPS keeps its immutable binding as `renewal_stopped`, independently of status
+retention, and refuses another principal sharing its signer. The same principal
+can submit the same signed transaction again after every admission check.
+Stopped bindings count toward that principal's and organization's limits and
+are polled after pending and provisional work. OPS reports `dropped` only after
+finalized evidence proves the nonce was consumed, including execution of the
+same transaction under another submission. To make an abandoned transaction
+permanently unexecutable, finalize a replacement at the same nonce.
 
 Final statuses are kept for `RETENTION_NODE_SUBMISSIONS` (7 days by default)
 and then the lookup answers 404. Ownership of deployed contracts and
@@ -267,7 +277,9 @@ and then the lookup answers 404. Ownership of deployed contracts and
 created address another organization already owns is not registered again;
 the status then carries the note `effects_not_applied`. Every finalization is
 recorded in the access log as `ops.system.finalized` on behalf of the principal
-before it takes effect, and a refused effect as `ops.system.effects_refused`.
+before it takes effect, and a refused effect as `ops.system.effects_refused`,
+also before it takes effect; a transaction that finalizes again after an
+interruption keeps its `effects_not_applied` note.
 
 When several OPS instances share one database, exactly one of them publishes
 facts and reconciles submissions at a time. Each instance campaigns for a
@@ -425,9 +437,13 @@ many transactions may wait for inclusion at once, across all instances:
   `org_pending_limit`; other principals and organizations are still
   admitted.
 
-Only transactions waiting for inclusion count. Included, stopped and final
-ones do not, and resending a transaction OPS already recorded is never refused
-for either limit. A reorganization can return transactions to pending above
+The pending-work limit counts only transactions waiting for inclusion. The
+per-principal and per-organization limits also count the principal's or
+organization's `renewal_stopped` transactions until they are final, so one
+tenant cannot accumulate stopped transactions without bound; resending a
+stopped transaction is not refused by them, only by the pending-work limit.
+Included and final transactions count for none, and resending a transaction
+OPS already recorded is never refused for any limit. A reorganization can return transactions to pending above
 the limit; nothing admitted is dropped, and new transactions wait until the
 work drains.
 
@@ -479,6 +495,18 @@ that is already pending within one transaction identity lifetime (five minutes
 by default); a shorter `OPS_NODE_POLICY_TRANSACTION_IDENTITY_TTL` narrows that
 window.
 
+A node crash can lose its newest blocks before they are written. A
+transaction OPS had seen in such a block is reported again as `pending` once
+the node answers that no block holds it and it holds no identity for it (node
+capability `transaction_not_found_v1`), and OPS redelivers it like any other
+transaction the node no longer holds, so the sender's later transactions are
+not held back (within `OPS_NODE_POLICY_MAX_AGE`: an older one stops renewing as
+usual). An unanswered status lookup is never taken as that answer. This
+assumes the default topology, one block-producing node that OPS asks; a
+validator that is still catching up with its peers can report a miss for a
+block it will receive, which costs one extra renewal, never a second
+execution.
+
 Renewals are sent only to a ready node, on the connection pool for outcome
 checks (`OPS_NODE_POLICY_RECOVERY_CONNS`). After a two-minute node outage, the
 pending transactions are renewed within the budget and included without any
@@ -502,7 +530,8 @@ evidence with `POST /api/v1/admin/orgs/{org_id}/execution/ownership-recovery`
 (`{"transactionHash": "0x…"}`), within the node's evidence retention
 (`OPS_NODE_POLICY_MANIFEST_RETENTION` on the node). It applies at most once per
 transaction, never registers an address another organization owns, and is
-recorded in the RBAC audit log. Any transaction that is unknown, not final, not
+recorded in the RBAC audit log in the same database transaction as the change:
+if the record cannot be written, nothing is registered and the request fails. Any transaction that is unknown, not final, not
 a deployment or not that organization's answers the same 404.
 
 To decide `dropped` and to notice a transaction the node's pool lost, OPS
@@ -512,4 +541,7 @@ offer that answer, OPS reads the node's public RPC (`NODE_URL`) instead: then
 point it at the same single node as the private endpoint, not at a
 load-balanced pool of nodes. OPS records `dropped` only after the same
 evidence was read twice, at least 30 seconds apart; a lookup the node could
-not answer is never evidence.
+not answer is never evidence. If the node answers one transaction's status
+in a form OPS cannot accept, OPS logs an error, asks about that transaction
+ever less often (up to every ten minutes, until the node answers it validly or
+restarts) and goes on with every other transaction.

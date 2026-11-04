@@ -196,7 +196,7 @@ func newCongestionSim(t *testing.T) *congestionSim {
 	s.checker = &fakeRechecker{refuse: map[uuid.UUID]int16{}, fail: map[uuid.UUID]error{}, checked: map[uuid.UUID]int{}}
 	s.signer = nodepolicy.Signer{KeyID: "ops-a", PrivateKey: ed25519.NewKeyFromSeed(make([]byte, 32))}
 	s.r = newNodeReconciler(s.writer, &plainEffects{}, s.client, s.audit, keeperNetwork)
-	s.r.batched = func() bool { return true }
+	s.r.batched, s.r.notFound = func() bool { return true }, func() bool { return true }
 	s.r.now = s.clock.now
 	s.r.keeper = &nodeKeeper{node: s.client, checker: s.checker, clock: simIssuing{clock: s.clock, version: 9}, signer: s.signer, network: keeperNetwork,
 		ttl: plan.TTL, maxAge: plan.MaxAge, budget: plan.Budget, now: s.clock.now,
@@ -451,9 +451,11 @@ func TestCongestionRenewalSimulation(t *testing.T) {
 	// L13: a burst above the limit (40/s against 5/s): backpressure at the
 	// pending-work limit and never beyond it. Then a full inclusion stall:
 	// renewals keep every pending identity live within the budget, renewal
-	// stops at the maximum age (not final), the limit frees up, and dropped
-	// is recorded only for a transaction whose nonce a finalized competitor
-	// used.
+	// stops at the maximum age (not final), the limit frees up, and once
+	// blocks are finalized again every stopped transaction becomes final:
+	// dropped with nonce_consumed where a finalized competitor used its
+	// nonce; lease expiry alone keeps an immutable non-final binding past its
+	// last identity's expiry (no stopped row is kept for ever, finding 2).
 	var stoppedAfter int
 	for second := 0; second < 30; second++ {
 		for i := 0; i < 40; i++ {
@@ -482,9 +484,9 @@ func TestCongestionRenewalSimulation(t *testing.T) {
 	stallRenewals := s.renewals
 	t.Logf("L13: refused %v, max pending %d of %d, %d renewals during a %d s stall, %d stopped at the maximum age (%d pending-tick observations at the cap before the stop), %d admitted after", s.refused, s.maxUsed, s.plan.AdmitLimit, stallRenewals-l9Renewals, s.ticks-stallStart, stoppedAfter, s.capped, accepted)
 
-	// Dropped only on finalized nonce evidence: one stopped transaction's
-	// nonce is used by a competitor sent outside OPS; another stopped one
-	// (another sender) has no competitor.
+	// Dropped on finalized evidence: one stopped transaction's nonce is used
+	// by a competitor sent outside OPS; another stopped one (another sender)
+	// has no competitor, but its identity has expired.
 	var target, other db.TrackedTransaction
 	rows, err := s.tracking.runtime.Conn().Query(`SELECT DISTINCT ON (signer) tx_hash, signer FROM node_tx_binding WHERE state = 3 AND reason = 8 ORDER BY signer, nonce`)
 	if err != nil {
@@ -520,10 +522,17 @@ func TestCongestionRenewalSimulation(t *testing.T) {
 	if got := s.state(target.Hash); got.State != db.TrackDropped || got.Reason != db.TrackReasonNonceConsumed {
 		t.Fatalf("a stopped transaction whose nonce a finalized competitor used: %+v", got)
 	}
-	if got := s.state(other.Hash); got.State != db.TrackRenewalStopped {
-		t.Fatalf("a stopped transaction without nonce evidence became %s", db.TrackStateName(got.State))
+	if got := s.state(other.Hash); got.State != db.TrackDropped || got.Reason != db.TrackReasonFinalizedLeaseExpiry {
+		t.Fatalf("a stopped transaction whose identity expired before a finalized block: %+v", got)
 	}
-	t.Logf("dropped: 1 on finalized nonce evidence; %d ticks simulated", s.ticks)
+	if left := s.count(`state = 3`); left != 0 {
+		t.Fatalf("%d stopped transactions left after their identities expired at a finalized block", left)
+	}
+	var expired int
+	if err := s.tracking.runtime.Conn().QueryRow(`SELECT count(*) FROM node_tx_status WHERE state = $1 AND reason = $2`, db.TrackDropped, db.TrackReasonFinalizedLeaseExpiry).Scan(&expired); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("dropped: 1 on finalized nonce evidence, %d on finalized lease expiry, 0 stopped left; %d ticks simulated", expired, s.ticks)
 }
 
 func (s *congestionSim) includedFor(principal uuid.UUID) int {

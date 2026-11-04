@@ -217,6 +217,14 @@ func TestBatchedTransactionStatusesAreStrict(t *testing.T) {
 				t.Fatal(err)
 			}
 			batch, err := c.TransactionStatuses(context.Background(), hashes)
+			if test == "reordered" {
+				// An entry for another hash is that position's invalid answer,
+				// never another transaction's outcome; the call stands.
+				if err != nil || batch.Statuses[0] == nil || !errors.Is(batch.Statuses[0].Err, ErrInvalidStatus) {
+					t.Fatalf("misplaced entry: %+v %v", batch, err)
+				}
+				return
+			}
 			if test != "ok" {
 				if !errors.Is(err, ErrNodeResponse) {
 					t.Fatalf("invalid batch accepted: %+v %v", batch, err)

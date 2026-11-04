@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -71,7 +72,37 @@ const (
 	// into a tick; rows not polled stay due for the next one, so a slow node
 	// never holds the keeper and the transitions up for long.
 	reconcilePollDeadline = 2 * time.Second
+	// discoverStallAfter: a discovery horizon held this long by a
+	// transaction in progress is alerted, and bindings are then also found by
+	// a full scan, at most this often, until it moves again.
+	discoverStallAfter = 10 * time.Second
+	// reconcileQuarantine: a row whose status the node answered invalidly is
+	// polled again after this long, doubling up to reconcileQuarantineMax
+	// while the answers stay invalid; the rows answered with it proceed.
+	reconcileQuarantine    = 30 * time.Second
+	reconcileQuarantineMax = 10 * time.Minute
+	// reconcileStoppedPoll and reconcileStoppedMax: renewal_stopped rows are
+	// polled on a slow lane (they only wait for a late inclusion or a final),
+	// after every pending and provisional row that is due.
+	reconcileStoppedPoll = 5 * time.Second
+	reconcileStoppedMax  = time.Minute
+	// discoverFullScanPages bounds one tick's share of a full scan; the next
+	// tick resumes it.
+	discoverFullScanPages = 20
 )
+
+// Alert kinds (counted in node_tracking_alerts_total).
+const (
+	alertInvalidStatus    = "invalid_status"
+	alertProtocolMismatch = "protocol_mismatch"
+	alertDiscoveryStalled = "discovery_stalled"
+	alertHorizonFallback  = "horizon_fallback"
+)
+
+// errForeignOutcome: the node's outcome for the hash belongs to another
+// principal or organization (for example a shared signer's resubmission of a
+// transaction that already executed): never recorded against this binding.
+var errForeignOutcome = errors.New("node outcome belongs to another submission")
 
 // systemEventNamespace derives deterministic correlation ids of system
 // events, so a decision audited twice (a crash between the append and its
@@ -84,9 +115,13 @@ type trackedRow struct {
 	nextPoll time.Time
 	backoff  time.Duration
 	failures int // consecutive failed polls or finals
+	// quarantine: the current interval of a row the node keeps answering
+	// invalidly (0: not quarantined).
+	quarantine time.Duration
 	// audited: the finality event of this binding was appended; a retried
-	// finalization in the same term is not audited again.
-	audited bool
+	// finalization in the same term is not audited again. refusalAudited:
+	// likewise for its effects_refused event.
+	audited, refusalAudited bool
 
 	// Lease keeper state (in memory, per term): not a keeper candidate before
 	// keepAt; flag is a trigger the reconciler observed (evicted); resend is a
@@ -117,6 +152,15 @@ type nodeReconciler struct {
 	rows    map[string]*trackedRow
 	cursor  uint64 // admit_xid discovered below
 	scanned bool
+	// horizon and horizonAt: the last discovery horizon and since when it has
+	// not moved while a transaction held it; fullScanAt: when the last full
+	// scan started; rescan: a full scan is due (handed-over admissions were
+	// lost); full: the resume point of a full scan in progress.
+	horizon    uint64
+	horizonAt  time.Time
+	fullScanAt time.Time
+	rescan     bool
+	full       *scanResume
 	// head and headHash: the highest effective finalized block the node
 	// reported (final and written).
 	head     uint64
@@ -126,9 +170,19 @@ type nodeReconciler struct {
 	canonical     uint64
 	canonicalBoot string
 	canonicalSeen bool
-	// batched reports whether the node advertises the batched status call.
-	batched func() bool
-	keeper  *nodeKeeper
+	// batched reports whether the node advertises the batched status call;
+	// notFound whether it advertises the definitive canonical miss (N7).
+	batched  func() bool
+	notFound func() bool
+	keeper   *nodeKeeper
+	// alert counts an anomaly by kind (nil: not counted).
+	alert func(kind string)
+}
+
+func (r *nodeReconciler) raise(kind string) {
+	if r.alert != nil {
+		r.alert(kind)
+	}
 }
 
 func newNodeReconciler(tracking *nodeTracking, main nodeEffectsStore, node nodeOutcomeClient, audit systemAuditBuffer, network nodepolicy.Network) *nodeReconciler {
@@ -155,7 +209,11 @@ func runNodeReconciler(ctx context.Context, r *nodeReconciler) {
 // reset drops the schedule: the next tick rescans the tracking database.
 func (r *nodeReconciler) reset() {
 	r.rows, r.cursor, r.scanned, r.head, r.headHash, r.canonicalSeen = map[string]*trackedRow{}, 0, false, 0, "", false
+	r.horizon, r.horizonAt, r.fullScanAt, r.rescan, r.full = 0, time.Time{}, time.Time{}, false, nil
 	r.inc, r.epoch = r.tracking.incarnation(), r.tracking.epoch.Load()
+	// The term's first pass scans every binding, so handed-over hashes from
+	// before it (or from another incarnation) are not needed.
+	r.tracking.drainAdmitted()
 	if r.keeper != nil {
 		r.keeper.reset()
 	}
@@ -166,11 +224,14 @@ func (r *nodeReconciler) tick(ctx context.Context) error {
 	if r.rows == nil || r.epoch != r.tracking.epoch.Load() {
 		r.reset()
 	}
-	if err := r.discover(ctx); err != nil {
-		return r.recreated(ctx, err)
+	// A discovery failure never stops the rows already scheduled from being
+	// polled, transitioned and released (finding 3).
+	discoverErr := r.discover(ctx)
+	if trackingRecreated(discoverErr) {
+		return r.recreated(ctx, discoverErr)
 	}
 	observations := r.poll(ctx)
-	err := r.apply(ctx, observations)
+	err := errors.Join(discoverErr, r.apply(ctx, observations))
 	if r.keeper != nil && !trackingRecreated(err) {
 		err = errors.Join(err, r.keeper.tick(ctx, r))
 	}
@@ -186,39 +247,131 @@ func (r *nodeReconciler) recreated(ctx context.Context, err error) error {
 	return err
 }
 
-// discover adds bindings admitted since the last pass: every row whose
-// inserting transaction ended below the snapshot horizon (none is skipped,
-// whatever order concurrent batches committed in).
+// discover adds bindings admitted since the last pass (independent review,
+// finding 3, for what may hold it up):
+//   - this instance's own admissions, handed over in memory, at once;
+//   - every row whose inserting transaction ended below this database's
+//     discovery horizon (none is skipped, whatever order concurrent batches
+//     committed in); only this database's transactions hold the horizon;
+//   - every binding by a full scan at the start of a term, after lost
+//     hand-overs, and while a transaction of this database holds the horizon
+//     longer than discoverStallAfter (alerted), so even then other instances'
+//     admissions are discovered and their quota released. A full scan reads
+//     at most discoverFullScanPages pages per tick and resumes.
 func (r *nodeReconciler) discover(ctx context.Context) error {
-	horizon, err := r.tracking.store.TrackingHorizon(ctx)
+	handErr := r.discoverHandedOver(ctx)
+	read, err := r.tracking.store.TrackingHorizon(ctx)
 	if err != nil {
-		return err
+		return errors.Join(handErr, err)
 	}
-	if horizon <= r.cursor && r.scanned {
-		return nil
-	}
-	var after []byte
-	from := r.cursor
-	for {
-		page, err := r.tracking.store.ListTracked(ctx, from, horizon, after, reconcileScanPage)
-		if err != nil {
-			return err
+	if read.ClusterWide {
+		r.raise(alertHorizonFallback)
+		if suppressed, ok := r.log.Allow("horizon-fallback", time.Now(), failureLogEvery); ok {
+			slog.Warn("execution-tracking discovery uses the cluster-wide horizon (pg_stat_activity or pg_prepared_xacts is not readable): other databases' long transactions can delay discovery", "suppressed", suppressed)
 		}
-		for _, row := range page {
-			key := string(row.Hash)
-			// A hash released and admitted again is a new binding (possibly
-			// another principal's): it replaces the scheduled one.
-			if known, ok := r.rows[key]; !ok || known.row.AdmitXid != row.AdmitXid {
-				r.rows[key] = &trackedRow{row: row, hashHex: "0x" + hex.EncodeToString(row.Hash)}
+	}
+	horizon, next := read.Horizon, read.Next
+	now := r.now()
+	if horizon != r.horizon || horizon >= next || r.horizonAt.IsZero() {
+		r.horizon, r.horizonAt = horizon, now
+	}
+	stalled := horizon < next && now.Sub(r.horizonAt) >= discoverStallAfter
+	if r.full == nil && (!r.scanned || r.rescan || (stalled && !now.Before(r.fullScanAt.Add(discoverStallAfter)))) {
+		if stalled {
+			r.raise(alertDiscoveryStalled)
+			if suppressed, ok := r.log.Allow("discovery-stalled", time.Now(), failureLogEvery); ok {
+				slog.Error("execution-tracking discovery horizon held by a long transaction in the execution-tracking database: discovering by full scan until it ends", "held_for", now.Sub(r.horizonAt).Truncate(time.Second), "suppressed", suppressed)
 			}
 		}
+		r.full, r.fullScanAt, r.rescan = &scanResume{cursor: horizon}, now, false
+	}
+	if r.full != nil {
+		done, err := r.scan(ctx, r.full, math.MaxInt64, discoverFullScanPages)
+		if err != nil {
+			return errors.Join(handErr, err)
+		}
+		if !done {
+			return handErr
+		}
+		// Every binding visible when the scan started is scheduled; the
+		// cursor resumes from the horizon read then.
+		if !r.scanned || r.full.cursor > r.cursor {
+			r.cursor = r.full.cursor
+		}
+		r.full, r.scanned = nil, true
+	}
+	if horizon <= r.cursor {
+		return handErr
+	}
+	if _, err := r.scan(ctx, &scanResume{from: r.cursor}, horizon, 0); err != nil {
+		return errors.Join(handErr, err)
+	}
+	r.cursor = horizon
+	return handErr
+}
+
+// scanResume is a keyset position in admit_xid order; cursor is, for a full
+// scan, the horizon read when it started.
+type scanResume struct {
+	from   uint64
+	after  []byte
+	cursor uint64
+}
+
+// scan schedules bindings admitted in [at.from, to) by admit_xid from the
+// resume point, at most pages pages (0: all); it reports whether it reached
+// the end and otherwise leaves the resume point at the next page.
+func (r *nodeReconciler) scan(ctx context.Context, at *scanResume, to uint64, pages int) (bool, error) {
+	for n := 0; pages == 0 || n < pages; n++ {
+		page, err := r.tracking.store.ListTracked(ctx, at.from, to, at.after, reconcileScanPage)
+		if err != nil {
+			return false, err
+		}
+		for _, row := range page {
+			r.schedule(row)
+		}
 		if len(page) < reconcileScanPage {
-			break
+			return true, nil
 		}
 		last := page[len(page)-1]
-		from, after = last.AdmitXid, last.Hash
+		at.from, at.after = last.AdmitXid, last.Hash
 	}
-	r.cursor, r.scanned = horizon, true
+	return false, nil
+}
+
+// schedule adds a binding read from the database. A hash released and
+// admitted again is a new binding (possibly another principal's): it
+// replaces the scheduled one.
+func (r *nodeReconciler) schedule(row db.TrackedTransaction) *trackedRow {
+	key := string(row.Hash)
+	if known, ok := r.rows[key]; ok && known.row.AdmitXid == row.AdmitXid {
+		return known
+	}
+	t := &trackedRow{row: row, hashHex: "0x" + hex.EncodeToString(row.Hash)}
+	r.rows[key] = t
+	return t
+}
+
+// discoverHandedOver schedules this instance's own admissions from a fresh
+// read; a revived binding already scheduled is refreshed (as refreshStopped
+// does). Lost hand-overs make the next pass rescan.
+func (r *nodeReconciler) discoverHandedOver(ctx context.Context) error {
+	hashes, lost := r.tracking.drainAdmitted()
+	r.rescan = r.rescan || lost
+	for start := 0; start < len(hashes); start += reconcileScanPage {
+		rows, err := r.tracking.store.TrackedBatch(ctx, hashes[start:min(start+reconcileScanPage, len(hashes))])
+		if err != nil {
+			r.rescan = true
+			return err
+		}
+		for _, row := range rows {
+			t := r.schedule(row)
+			if t.row.State != row.State && !t.row.Final() {
+				t.row, t.keepAt, t.flag, t.dropSeen = row, time.Time{}, 0, time.Time{}
+				t.backoff, t.nextPoll = 0, time.Time{} // revived: off the slow lane
+			}
+		}
+	}
 	return nil
 }
 
@@ -229,13 +382,17 @@ type observation struct {
 	// pooled: the batched answer's pool flag for a not-included transaction
 	// (nil: unknown, the single call does not report it).
 	pooled *bool
+	// notFound: the node's definitive canonical miss (N7), from a node that
+	// advertises it; boot is the answering boot when known (batched).
+	notFound bool
+	boot     string
 }
 
 // due reports whether a row is polled this tick. Provisional rows are polled
 // only once a finalized head at or above their block was seen, plus the
 // lowest one each tick to learn the head (finality-driven, G62).
 func (r *nodeReconciler) due(now time.Time, limit int) []*trackedRow {
-	var out []*trackedRow
+	var out, stopped []*trackedRow
 	var lowest *trackedRow
 	for _, t := range r.rows {
 		if t.nextPoll.After(now) {
@@ -247,10 +404,20 @@ func (r *nodeReconciler) due(now time.Time, limit int) []*trackedRow {
 			}
 			continue
 		}
+		if t.row.State == db.TrackRenewalStopped {
+			// The slow lane: polled only with the room the others leave.
+			if len(stopped) < limit {
+				stopped = append(stopped, t)
+			}
+			continue
+		}
 		out = append(out, t)
 		if len(out) >= limit-1 { // one slot stays for the head probe
 			break
 		}
+	}
+	if room := limit - 1 - len(out); room > 0 {
+		out = append(out, stopped[:min(room, len(stopped))]...)
 	}
 	if lowest != nil {
 		out = append(out, lowest)
@@ -281,13 +448,20 @@ func (r *nodeReconciler) poll(ctx context.Context) []observation {
 			request, cancel := context.WithTimeout(ctx, reconcileStatusWait)
 			defer cancel()
 			status, err := r.node.TransactionStatus(request, t.hashHex)
-			if err == nil && (status.TransactionHash != t.hashHex || status.PrincipalID != t.row.PrincipalID.String() || status.OrgID != t.row.OrgID.String()) {
-				// Another identity's outcome for this hash is never recorded
-				// against this binding.
-				err = nodepolicy.ErrNodeResponse
+			if err != nil && nodepolicy.NodeNotFound(err) && r.notFound != nil && r.notFound() {
+				out[i] = observation{tracked: t, notFound: true}
+				return
 			}
 			if err == nil {
 				err = status.Validate()
+			}
+			if err == nil && status.TransactionHash != t.hashHex {
+				err = nodepolicy.ErrInvalidStatus
+			}
+			if err == nil && (status.PrincipalID != t.row.PrincipalID.String() || status.OrgID != t.row.OrgID.String()) {
+				// Another identity's outcome for this hash is never recorded
+				// against this binding.
+				err = errForeignOutcome
 			}
 			out[i] = observation{tracked: t, status: status, err: err}
 		}(i, t)
@@ -344,6 +518,22 @@ func (r *nodeReconciler) pollBatched(ctx context.Context, client batchedOutcomeC
 				if f := batch.Finalized; f != nil && f.Number > r.head {
 					r.head, r.headHash = f.Number, f.Hash
 				}
+				// Every answered entry invalid (two or more): the node and
+				// OPS disagree on the protocol, not about one transaction.
+				answered, invalid := 0, 0
+				notFound := r.notFound != nil && r.notFound()
+				for _, entry := range batch.Statuses {
+					if entry != nil {
+						answered++
+						if entry.Err != nil || (entry.NotFound && !notFound) {
+							invalid++
+						}
+					}
+				}
+				if answered >= 2 && invalid == answered {
+					err = nodepolicy.ErrNodeResponse
+					r.raise(alertProtocolMismatch)
+				}
 			}
 			for i, t := range chunk {
 				o := observation{tracked: t, err: err}
@@ -352,8 +542,14 @@ func (r *nodeReconciler) pollBatched(ctx context.Context, client batchedOutcomeC
 					switch {
 					case entry == nil:
 						o.err = nodepolicy.ErrNodeRejected // unknown to the node
+					case entry.Err != nil:
+						o.err = entry.Err // this hash alone: quarantined
+					case entry.NotFound && (r.notFound == nil || !r.notFound()):
+						o.err = nodepolicy.ErrInvalidStatus // a form the node does not advertise
+					case entry.NotFound:
+						o.notFound, o.boot = true, batch.BootID
 					case entry.Status.PrincipalID != t.row.PrincipalID.String() || entry.Status.OrgID != t.row.OrgID.String():
-						o.err = nodepolicy.ErrNodeResponse
+						o.err = errForeignOutcome
 					default:
 						pooled := entry.Pooled
 						o.status, o.pooled = entry.Status, &pooled
@@ -366,12 +562,16 @@ func (r *nodeReconciler) pollBatched(ctx context.Context, client batchedOutcomeC
 	wg.Wait()
 	// The epoch counts within one node process: a different value, or a new
 	// boot (a restart may have truncated unwritten blocks), re-polls every
-	// provisional row once and is adopted.
+	// provisional row once and is adopted. A new boot (an upgraded node, say)
+	// also ends every quarantine.
 	for _, seen := range epochs {
 		if r.canonicalSeen && (seen.epoch != r.canonical || seen.boot != r.canonicalBoot) {
 			for _, t := range r.rows {
 				if t.row.State == db.TrackProvisional {
 					t.nextPoll, t.forcePoll = time.Time{}, true
+				}
+				if seen.boot != r.canonicalBoot && t.quarantine > 0 {
+					t.nextPoll, t.quarantine = time.Time{}, 0
 				}
 			}
 		}
@@ -394,8 +594,26 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 	for i := range observations {
 		o := &observations[i]
 		t := o.tracked
+		if o.notFound {
+			if tr, ok := r.definitiveMiss(t, o, now); ok {
+				transitions = append(transitions, tr)
+			}
+			continue
+		}
 		if o.err != nil {
-			r.delay(t, now)
+			switch {
+			case errors.Is(o.err, nodepolicy.ErrInvalidStatus):
+				r.quarantine(t, now)
+			case t.row.State == db.TrackRenewalStopped:
+				// A stopped row the node no longer knows (its lease ended) is
+				// the common case: slow lane, re-read by the keeper's
+				// refreshStopped, not by the refresh budget.
+				r.slowLane(t, now)
+				t.failures++
+				continue
+			default:
+				r.delay(t, now)
+			}
 			failures = append(failures, o.err)
 			if t.failures%reconcileRefreshAfter == 0 && refreshes < reconcileMaxRefreshes {
 				refreshes++
@@ -403,7 +621,10 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 			}
 			continue
 		}
-		t.backoff, t.failures, t.nextPoll, t.forcePoll = 0, 0, now.Add(reconcileTick), false
+		if t.row.State != db.TrackRenewalStopped {
+			t.backoff = 0 // a stopped row keeps its slow-lane interval
+		}
+		t.failures, t.nextPoll, t.forcePoll, t.quarantine = 0, now.Add(reconcileTick), false, 0
 		outcome := o.status.Execution
 		if outcome.FinalizedBlockNumber != nil && *outcome.FinalizedBlockNumber > r.head && outcome.FinalizedBlockHash != nil {
 			r.head, r.headHash = *outcome.FinalizedBlockNumber, *outcome.FinalizedBlockHash
@@ -421,17 +642,17 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 					executed = unknownContext // never the current context
 				}
 				transitions = append(transitions, db.TrackTransition{Hash: t.row.Hash, From: t.row.State, To: db.TrackProvisional, BlockNumber: &block, Boot: answered, ContextID: executed})
-			case db.TrackTombstone:
-				// Revived since it was read: re-read, transition next tick.
-				r.refresh(ctx, t)
 			}
 		case t.row.State == db.TrackProvisional:
 			// The including block left the canonical chain before finality.
 			transitions = append(transitions, db.TrackTransition{Hash: t.row.Hash, From: db.TrackProvisional, To: db.TrackPending})
 		default:
 			// pending, denied or expired at the node: nothing changed here.
-			// A row that stays so is polled ever less often.
-			if outcome.Status != "pending" || now.Sub(t.row.CreatedAt) > reconcileSettle {
+			// A row that stays so is polled ever less often; a stopped row
+			// on the slow lane.
+			if t.row.State == db.TrackRenewalStopped {
+				r.slowLane(t, now)
+			} else if outcome.Status != "pending" || now.Sub(t.row.CreatedAt) > reconcileSettle {
 				t.backoff = min(max(2*t.backoff, 2*time.Second), reconcileMaxBackoff)
 				t.nextPoll = now.Add(t.backoff)
 			}
@@ -471,6 +692,12 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 				if transitions[i].To == db.TrackPending {
 					t.keepAt = time.Time{} // reorged out: the keeper reconsiders it
 				}
+				if transitions[i].Undelivered {
+					// The keeper reconsiders it now; its fresh read decides
+					// whether a delivery claim still holds it.
+					t.row.DeliveredGeneration, t.row.DeliveredBoot = nil, uuid.Nil
+					t.row.ClaimOwner, t.row.ClaimBoot, t.row.ClaimExpires = uuid.Nil, uuid.Nil, nil
+				}
 			} else {
 				r.refresh(ctx, t)
 			}
@@ -482,6 +709,38 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// definitiveMiss handles the node's definitive canonical miss for a row (N7):
+// no canonical block holds it and the node holds no identity for it, so it
+// cannot execute now (typically its block was lost by a node crash). A
+// provisional row goes back to pending, undelivered, and the keeper renews
+// and redelivers the same signed transaction (quota as a reorg back: +1,
+// allowed over the limit); a pending row delivered to the answering boot was
+// lost by it and is renewed as evicted. It is never final and never dropped
+// evidence; a null answer is no evidence at all.
+func (r *nodeReconciler) definitiveMiss(t *trackedRow, o *observation, now time.Time) (db.TrackTransition, bool) {
+	t.failures, t.quarantine, t.forcePoll = 0, 0, false
+	switch t.row.State {
+	case db.TrackProvisional:
+		t.backoff, t.nextPoll = 0, now.Add(reconcileTick)
+		// After a restart (another boot answered) the keeper renews it as
+		// node_restarted anyway; the same boot losing it clears the delivery
+		// record, so it is renewed as undelivered.
+		boot, err := uuid.Parse(o.boot)
+		sameBoot := err != nil || t.row.DeliveredBoot == uuid.Nil || boot == t.row.DeliveredBoot
+		return db.TrackTransition{Hash: t.row.Hash, From: db.TrackProvisional, To: db.TrackPending, Undelivered: sameBoot}, true
+	case db.TrackPending:
+		t.backoff = min(max(2*t.backoff, 2*time.Second), reconcileMaxBackoff)
+		t.nextPoll = now.Add(t.backoff)
+		if boot, err := uuid.Parse(o.boot); err == nil && t.row.DeliveredTo(boot) && now.Sub(t.row.CreatedAt) > keeperEvictAfter && !t.evictAt.After(now) {
+			t.evictAt = now.Add(keeperEvictAfter)
+			r.markEvicted(t)
+		}
+	case db.TrackRenewalStopped:
+		r.slowLane(t, now)
+	}
+	return db.TrackTransition{}, false
 }
 
 // markEvicted flags a pending row the node's pool no longer holds: the keeper
@@ -528,6 +787,9 @@ func (r *nodeReconciler) refresh(ctx context.Context, t *trackedRow) {
 			r.rows[string(row.Hash)] = &trackedRow{row: row, hashHex: t.hashHex}
 			return
 		}
+		if t.row.State == db.TrackRenewalStopped && row.State != db.TrackRenewalStopped {
+			t.backoff, t.nextPoll = 0, time.Time{} // revived: off the slow lane
+		}
 		t.row = row
 	case err == nil || errors.Is(err, sql.ErrNoRows):
 		delete(r.rows, string(t.row.Hash))
@@ -541,6 +803,28 @@ func (r *nodeReconciler) delay(t *trackedRow, now time.Time) {
 	t.nextPoll = now.Add(t.backoff)
 }
 
+// slowLane schedules a stopped row's next poll with a growing interval from
+// reconcileStoppedPoll up to reconcileStoppedMax.
+func (r *nodeReconciler) slowLane(t *trackedRow, now time.Time) {
+	t.backoff = min(max(2*t.backoff, reconcileStoppedPoll), reconcileStoppedMax)
+	t.nextPoll = now.Add(t.backoff)
+}
+
+// quarantine holds back a row whose status the node answered invalidly (a
+// protocol violation for that transaction, independent review finding 1): it
+// is polled ever less often, alerted and counted, and every other row goes on
+// as before. It leaves the quarantine at its first valid answer; a restart
+// clears it.
+func (r *nodeReconciler) quarantine(t *trackedRow, now time.Time) {
+	t.failures++
+	t.quarantine = min(max(2*t.quarantine, reconcileQuarantine), reconcileQuarantineMax)
+	t.nextPoll = now.Add(t.quarantine)
+	r.raise(alertInvalidStatus)
+	if suppressed, ok := r.log.Allow("invalid-status", time.Now(), failureLogEvery); ok {
+		slog.Error("execution node answered an invalid status for a transaction: it is polled less often until answered validly; other transactions are unaffected", "tx", t.hashHex, "next_poll_in", t.quarantine, "suppressed", suppressed)
+	}
+}
+
 // finalize records a tick's final outcomes (plan §4.8.6, §4.11):
 //  1. one ops.system.finalized audit event per binding is appended to the
 //     durable audit buffer (one fsync'd batch) — fail closed: without a
@@ -550,8 +834,11 @@ func (r *nodeReconciler) delay(t *trackedRow, now time.Time) {
 //  2. transactions with side effects apply them in the main database from a
 //     fresh read of the binding, exactly once by marker; a permanent refusal
 //     (below the replay floor, an address another organisation owns) is
-//     audited as ops.system.effects_refused, alerted, and finalized with a
-//     reason; other errors retry with a growing interval;
+//     audited as ops.system.effects_refused before it commits — an address
+//     refusal inside the effects transaction, a floor refusal (nothing
+//     applied) before the tracking finalize — alerted, and finalized with a
+//     reason (the marker keeps an address refusal, so a retry after the
+//     effects committed keeps it); other errors retry with a growing interval;
 //  3. one tracking finality batch deletes the bindings — only the bindings
 //     that were read (same admission) — and inserts the status rows.
 //
@@ -630,21 +917,44 @@ func (r *nodeReconciler) finalize(ctx context.Context, finals []*observation) er
 		}
 	}
 	var refusals [][]byte
+	var refused []*trackedRow
 	finalsToWrite := make([]db.TrackFinal, 0, len(batch))
 	for _, item := range batch {
 		if item.effect != nil {
+			t := item.o.tracked
+			// An address refusal commits with the ownership bit: its event is
+			// appended inside the effects transaction, before the commit.
+			item.effect.BeforeCommit = func(result db.NodeTxEffectsResult) error {
+				if result.OwnershipConflicts == 0 || t.refusalAudited {
+					return nil
+				}
+				event, err := r.systemEvent(item.o, item.final, dids, "ops.system.effects_refused", 403, db.TrackReasonName(db.TrackReasonOwnershipConflict))
+				if err != nil {
+					return err
+				}
+				// Bounded: the effects transaction holds the organization's
+				// configuration scope while it waits. A late success only
+				// over-reports (the decision is retried).
+				if err := r.appendWithin([][]byte{event}, effectsAuditWait); err != nil {
+					return fmt.Errorf("%w: %v", errSystemAuditUnavailable, err)
+				}
+				t.refusalAudited = true
+				return nil
+			}
 			reason, err := r.applyEffects(ctx, *item.effect)
 			if err != nil {
-				r.delay(item.o.tracked, now)
+				r.delay(t, now)
 				failures = append(failures, err)
 				continue // retried later; the binding stays
 			}
-			if reason != db.TrackReasonNone && reason != db.TrackReasonOrganizationDeleted {
+			if reason == db.TrackReasonEffectsBelowFloor && !t.refusalAudited {
+				// Nothing was applied: the refusal commits with the final
+				// status, so it is audited before the finality batch.
 				event, err := r.systemEvent(item.o, item.final, dids, "ops.system.effects_refused", 403, db.TrackReasonName(reason))
 				if err != nil {
 					return err
 				}
-				refusals = append(refusals, event)
+				refusals, refused = append(refusals, event), append(refused, t)
 			}
 			item.final.Reason = reason
 		}
@@ -653,6 +963,9 @@ func (r *nodeReconciler) finalize(ctx context.Context, finals []*observation) er
 	if len(refusals) > 0 {
 		if _, err := r.audit.AppendBatch(refusals); err != nil {
 			return fmt.Errorf("%w: %v", errSystemAuditUnavailable, err)
+		}
+		for _, t := range refused {
+			t.refusalAudited = true
 		}
 	}
 	if len(finalsToWrite) == 0 {
@@ -677,6 +990,30 @@ func (r *nodeReconciler) finalize(ctx context.Context, finals []*observation) er
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// effectsAuditWait bounds the audit append made inside an effects
+// transaction.
+const effectsAuditWait = 5 * time.Second
+
+// errAuditTimeout: the durable audit buffer did not answer in time.
+var errAuditTimeout = errors.New("durable audit buffer did not answer in time")
+
+// appendWithin appends events, waiting at most wait for the buffer.
+func (r *nodeReconciler) appendWithin(events [][]byte, wait time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.audit.AppendBatch(events)
+		done <- err
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return errAuditTimeout
+	}
 }
 
 // errSystemAuditUnavailable: a system decision could not be audited first,

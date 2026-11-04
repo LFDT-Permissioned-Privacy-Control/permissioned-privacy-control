@@ -7,10 +7,12 @@ package db
 //   - locks the binding rows it changes in hash order (one global lock order
 //     for every multi-row writer);
 //   - computes the pending-quota delta as is_pending(after) − is_pending(before)
-//     from the locked before-state (§4.8.2), sums it per principal and in
-//     total, and updates the principals' pending_quota_principal rows (in
-//     principal order) and then the shared pending_quota row last, so the
-//     global lock is held only until commit.
+//     from the locked before-state (§4.8.2) for the global row, and
+//     is_held(after) − is_held(before) (pending or renewal_stopped: the
+//     bindings a principal holds) for the per-principal and per-organization
+//     shares, and updates the principals' rows, then the organizations', then
+//     the shared pending_quota row last, so the global lock is held only until
+//     commit.
 
 import (
 	"bytes"
@@ -32,7 +34,6 @@ const (
 	TrackPending        int16 = 1
 	TrackProvisional    int16 = 2
 	TrackRenewalStopped int16 = 3
-	TrackTombstone      int16 = 4
 	TrackIncluded       int16 = 10
 	TrackReverted       int16 = 11
 	TrackDropped        int16 = 12
@@ -87,7 +88,7 @@ func TrackStateName(state int16) string {
 		return "pending"
 	case TrackProvisional:
 		return "provisional"
-	case TrackRenewalStopped, TrackTombstone:
+	case TrackRenewalStopped:
 		return "renewal_stopped"
 	case TrackIncluded:
 		return "included"
@@ -159,6 +160,19 @@ func isPending(state int16) int64 {
 	return 0
 }
 
+// isHeld: the binding counts toward its principal's and organization's
+// share — pending, or renewal_stopped and not yet final (independent review,
+// finding 2: stopped rows are bounded per owner, never unbounded).
+func isHeld(state int16) int64 {
+	if state == TrackPending || state == TrackRenewalStopped {
+		return 1
+	}
+	return 0
+}
+
+// heldStatesSQL is isHeld as a predicate on node_tx_binding.
+const heldStatesSQL = `state IN (1, 3)`
+
 // ErrTrackingIncarnation: the tracking database's incarnation differs from
 // the one the work was issued under (the database was recreated). The work has
 // no effect; the caller re-reads tracking_meta and adopts the new one.
@@ -207,11 +221,12 @@ const (
 	// envelope dominates the stored one (§4.8.3): it is the new generation
 	// (quota unchanged).
 	AdmitResubmitted
-	// AdmitRevived: the same principal's renewal_stopped or tombstone binding
-	// became pending again, a fresh admission.
+	// AdmitRevived: the same principal's renewal_stopped binding became
+	// pending again, a fresh admission.
 	AdmitRevived
 	// AdmitConflict: H is bound to another principal, organisation, signer or
-	// visibility list, live, tombstoned or final. Nothing was written.
+	// visibility list, live, stopped or final, or is dropped. Nothing was
+	// written.
 	AdmitConflict
 	// AdmitFinal: H already has a final status for this principal. Nothing was
 	// written.
@@ -224,8 +239,8 @@ const (
 	// AdmitKept: the same principal's in-flight binding holds an envelope that
 	// dominates or equals this one (it was signed earlier, or is the same):
 	// the stored generation stays current and meets this attempt's floor.
-	// Sending this envelope is safe (the node answers a dominated attempt as
-	// success), but its delivery acknowledges nothing.
+	// The caller may send this envelope only if it meets the returned stored
+	// MinVersion too; otherwise it must re-read the clock and sign again.
 	AdmitKept
 	// AdmitIncomparable: neither envelope dominates the other (only after a
 	// database clock step): the stored one is kept and nothing about this
@@ -255,6 +270,9 @@ type AdmitResult struct {
 	// ContextID is the binding's current context after the write (the
 	// winner): this admission's own when it was written.
 	ContextID uuid.UUID
+	// MinVersion is the winner's fact floor, including when the stored
+	// identity dominates this attempt and survives it.
+	MinVersion uint64
 }
 
 // Written reports whether the admission's identity was recorded.
@@ -300,19 +318,23 @@ func (e *ExecDB) trackTx(ctx context.Context, inc uuid.UUID, fn func(*sql.Tx) er
 // the database clock.
 const payloadBucketSQL = `SELECT (floor(extract(epoch FROM clock_timestamp()) / 900)::bigint % 16)::smallint`
 
-// quotaDelta accumulates is_pending(after) − is_pending(before) per
-// principal and per organization for one batch (both are identity columns of
-// the binding, never updated).
+// quotaDelta accumulates one batch's quota changes: the global
+// is_pending(after) − is_pending(before), and is_held(after) − is_held(before)
+// per principal and per organization (both identity columns of the binding,
+// never updated).
 type quotaDelta struct {
+	global           *int64
 	principals, orgs map[uuid.UUID]int64
 }
 
 func newQuotaDelta() quotaDelta {
-	return quotaDelta{principals: map[uuid.UUID]int64{}, orgs: map[uuid.UUID]int64{}}
+	return quotaDelta{global: new(int64), principals: map[uuid.UUID]int64{}, orgs: map[uuid.UUID]int64{}}
 }
 
-func (q quotaDelta) add(principal, org uuid.UUID, d int64) {
-	if d != 0 {
+// move records one binding's change of state (0: no row).
+func (q quotaDelta) move(principal, org uuid.UUID, before, after int16) {
+	*q.global += isPending(after) - isPending(before)
+	if d := isHeld(after) - isHeld(before); d != 0 {
 		q.principals[principal] += d
 		q.orgs[org] += d
 	}
@@ -328,27 +350,18 @@ var quotaShares = []struct{ table, key string }{
 // applyQuota applies a batch's quota deltas: the principals' rows (in key
 // order, one statement), the organizations' rows likewise, then the global
 // row last, so its lock is held only until commit. It returns the global
-// used count and each changed principal's and organization's (0 and nil when
-// nothing changed). Every writer takes binding rows first, so the lock order
-// is bindings → principal rows → organization rows → the global row.
+// used count (0 when it did not change) and each changed principal's and
+// organization's. Every writer takes binding rows first, so the lock order is
+// bindings → principal rows → organization rows → the global row.
 func applyQuota(ctx context.Context, tx *sql.Tx, deltas quotaDelta) (used int64, perPrincipal, perOrg map[uuid.UUID]int64, err error) {
-	var total int64
-	for _, d := range deltas.principals {
-		total += d
-	}
 	if perPrincipal, err = applyShare(ctx, tx, quotaShares[0].table, quotaShares[0].key, deltas.principals); err != nil {
 		return 0, nil, nil, err
 	}
 	if perOrg, err = applyShare(ctx, tx, quotaShares[1].table, quotaShares[1].key, deltas.orgs); err != nil {
 		return 0, nil, nil, err
 	}
-	if len(perPrincipal) == 0 && len(perOrg) == 0 {
-		return 0, nil, nil, nil
-	}
-	if total != 0 {
-		err = tx.QueryRowContext(ctx, `UPDATE pending_quota SET used = used + $1 RETURNING used`, total).Scan(&used)
-	} else {
-		err = tx.QueryRowContext(ctx, `SELECT used FROM pending_quota`).Scan(&used)
+	if *deltas.global != 0 {
+		err = tx.QueryRowContext(ctx, `UPDATE pending_quota SET used = used + $1 RETURNING used`, *deltas.global).Scan(&used)
 	}
 	return used, perPrincipal, perOrg, err
 }
@@ -404,7 +417,7 @@ func applyShare(ctx context.Context, tx *sql.Tx, table, key string, deltas map[u
 	}
 	for _, k := range drifted {
 		var recounted int64
-		if err := tx.QueryRowContext(ctx, `UPDATE `+table+` SET used = (SELECT count(*) FROM node_tx_binding WHERE `+key+` = $1 AND state = 1) WHERE `+key+` = $1 RETURNING used`, k.String()).Scan(&recounted); err != nil {
+		if err := tx.QueryRowContext(ctx, `UPDATE `+table+` SET used = (SELECT count(*) FROM node_tx_binding WHERE `+key+` = $1 AND `+heldStatesSQL+`) WHERE `+key+` = $1 RETURNING used`, k.String()).Scan(&recounted); err != nil {
 			return nil, err
 		}
 		out[k] = recounted
@@ -417,11 +430,13 @@ func applyShare(ctx context.Context, tx *sql.Tx, table, key string, deltas map[u
 // commit for the whole batch, plan §6.1). Per hash, the first intent of the
 // batch is written first, later ones as resubmissions of it. A different
 // principal, organisation, signer or visibility list for a bound hash is a
-// conflict, whether the binding is live, a tombstone or final (G13, G58).
-// An admission that would make a binding pending (+1) is refused once its
-// principal's pending quota exceeds limits.Principal (AdmitPrincipalOverLimit)
-// or the global quota exceeds limits.Global (AdmitOverLimit); resubmissions
-// (Δ 0) are never refused (G63). Refused admissions write nothing.
+// conflict, whether the binding is live, stopped or final (G13, G58).
+// A new binding is refused once its principal's or organization's share
+// (pending and stopped bindings) exceeds limits.Principal or limits.Org
+// (AdmitPrincipalOverLimit, AdmitOrgOverLimit); an admission that makes a
+// binding pending (a new one or a revival) is refused once the global quota
+// exceeds limits.Global (AdmitOverLimit); resubmissions (no change) are never
+// refused (G63). Refused admissions write nothing.
 func (e *ExecDB) AdmitBatch(ctx context.Context, inc uuid.UUID, limits TrackLimits, batch []TrackAdmission) ([]AdmitResult, error) {
 	// An invalid admission is refused on its own; it never fails the
 	// requests batched with it.
@@ -477,7 +492,7 @@ func (e *ExecDB) AdmitBatch(ctx context.Context, inc uuid.UUID, limits TrackLimi
 					continue
 				}
 				row := written[i]
-				results[i] = AdmitResult{Outcome: AdmitResubmitted, Generation: row.generation, State: row.state, ContextID: row.context}
+				results[i] = AdmitResult{Outcome: AdmitResubmitted, Generation: row.generation, State: row.state, ContextID: row.context, MinVersion: row.minVersion}
 				switch {
 				case !row.prev.Valid:
 					results[i].Outcome = AdmitInserted
@@ -485,7 +500,7 @@ func (e *ExecDB) AdmitBatch(ctx context.Context, inc uuid.UUID, limits TrackLimi
 					results[i].Outcome = AdmitIncomparable
 				case !row.replaced:
 					results[i].Outcome = AdmitKept
-				case row.prev.Int16 == TrackRenewalStopped || row.prev.Int16 == TrackTombstone:
+				case row.prev.Int16 == TrackRenewalStopped:
 					results[i].Outcome = AdmitRevived
 				}
 			}
@@ -504,6 +519,7 @@ type admitRow struct {
 	state      int16
 	generation int32
 	context    uuid.UUID
+	minVersion uint64
 	// replaced: this admission's envelope is now the binding's (inserted,
 	// revived or dominating); incomparable: kept because neither envelope
 	// dominates the other.
@@ -570,7 +586,7 @@ func admitAttempt(ctx context.Context, tx *sql.Tx, inc uuid.UUID, limits TrackLi
 		}
 	}
 	deltas := newQuotaDelta()
-	var plus []int
+	var plus, held []int // admissions that add pending work, and that add a held row
 	var payloadHashes, payloadRaw [][]byte
 	var history []int
 	for _, i := range order {
@@ -579,12 +595,14 @@ func admitAttempt(ctx context.Context, tx *sql.Tx, inc uuid.UUID, limits TrackLi
 		if row.prev.Valid {
 			before = row.prev.Int16
 		}
-		d := isPending(row.state) - isPending(before)
-		deltas.add(batch[i].PrincipalID, batch[i].OrgID, d)
-		if d > 0 {
+		deltas.move(batch[i].PrincipalID, batch[i].OrgID, before, row.state)
+		if isPending(row.state) > isPending(before) {
 			plus = append(plus, i)
 		}
-		if row.replaced && (!row.prev.Valid || before == TrackRenewalStopped || before == TrackTombstone) {
+		if isHeld(row.state) > isHeld(before) {
+			held = append(held, i)
+		}
+		if row.replaced && (!row.prev.Valid || before == TrackRenewalStopped) {
 			payloadHashes = append(payloadHashes, batch[i].Hash)
 			payloadRaw = append(payloadRaw, batch[i].Raw)
 		}
@@ -607,7 +625,7 @@ func admitAttempt(ctx context.Context, tx *sql.Tx, inc uuid.UUID, limits TrackLi
 			a, row := batch[i], written[i]
 			hashes[k], generations[k], contexts[k], envelopes[k], expiries[k], versions[k] = a.Hash, int64(row.generation), a.ContextID.String(), a.EnvelopeHash, a.ExpiresAt, int64(a.MinVersion)
 			reasons[k] = int64(TrackReasonResubmitted)
-			if row.replaced && row.prev.Valid && (row.prev.Int16 == TrackRenewalStopped || row.prev.Int16 == TrackTombstone) {
+			if row.replaced && row.prev.Valid && row.prev.Int16 == TrackRenewalStopped {
 				reasons[k] = int64(TrackReasonRevived)
 			}
 		}
@@ -625,13 +643,15 @@ func admitAttempt(ctx context.Context, tx *sql.Tx, inc uuid.UUID, limits TrackLi
 	// Admissions are Δ ≥ 0 only, so a principal, an organization or the total
 	// over its limit is over because of this batch's +1 rows (or a reorg back
 	// that already pushed it over, which this batch must not add to): refuse
-	// the excess, latest first, and re-run without them.
+	// the excess, latest first, and re-run without them. A share counts the
+	// rows its owner holds (held: new bindings), the total the pending work
+	// (plus: new bindings and revivals).
 	refuseExcess := func(limit int64, counts map[uuid.UUID]int64, keyOf func(int) uuid.UUID, outcome AdmitOutcome) bool {
 		if limit <= 0 {
 			return false
 		}
 		byKey := map[uuid.UUID][]int{}
-		for _, i := range plus {
+		for _, i := range held {
 			byKey[keyOf(i)] = append(byKey[keyOf(i)], i)
 		}
 		refusedAny := false
@@ -696,12 +716,14 @@ func upsertRound(ctx context.Context, tx *sql.Tx, inc uuid.UUID, bucket int16, b
 		}
 	}
 	// A same-principal conflict either replaces the stored envelope (a
-	// revival of a stopped or tombstoned binding, or an envelope that
-	// dominates it: floor and expiry both at least the stored ones, not both
-	// equal; §4.8.3) or keeps it unchanged. Every SET expression reads the
-	// stored row (b.*), so "replace" is evaluated once against it.
-	rows, err := tx.QueryContext(ctx, `INSERT INTO node_tx_binding AS b (tx_hash, principal_id, org_id, signer, nonce, state, generation, context_id, envelope_hash, expires_at, min_version, incarnation, issued_contexts, visible_to, visible_sender, claim_owner, claim_boot, claim_expires, payload_bucket)
- SELECT t.h, t.p, t.o, t.s, t.n, 1, 1, t.c, t.e, t.x, t.m, $13, ARRAY[t.c], ARRAY(SELECT jsonb_array_elements_text(t.v::jsonb)), t.vs, t.co, t.cb,
+	// revival of a stopped binding, or an envelope that dominates it: floor
+	// and expiry both at least the stored ones, not both equal; §4.8.3) or
+	// keeps it unchanged. Every SET expression reads the stored row (b.*), so
+	// "replace" is evaluated once against it. max_expires_at keeps the longest
+	// lease of any identity recorded for the binding (a revival may sign a
+	// shorter one while the node keeps the longer).
+	rows, err := tx.QueryContext(ctx, `INSERT INTO node_tx_binding AS b (tx_hash, principal_id, org_id, signer, nonce, state, generation, context_id, envelope_hash, expires_at, max_expires_at, min_version, incarnation, issued_contexts, visible_to, visible_sender, claim_owner, claim_boot, claim_expires, payload_bucket)
+ SELECT t.h, t.p, t.o, t.s, t.n, 1, 1, t.c, t.e, t.x, t.x, t.m, $13, ARRAY[t.c], ARRAY(SELECT jsonb_array_elements_text(t.v::jsonb)), t.vs, t.co, t.cb,
         CASE WHEN t.co IS NULL THEN NULL ELSE clock_timestamp() + t.ttl * interval '1 millisecond' END, $14
  FROM unnest($1::bytea[], $2::uuid[], $3::uuid[], $4::bytea[], $5::bigint[], $6::uuid[], $7::bytea[], $8::timestamptz[], $9::bigint[], $10::text[], $11::text[], $12::uuid[], $15::bigint[], $16::uuid[])
       WITH ORDINALITY AS t(h, p, o, s, n, c, e, x, m, v, vs, co, ttl, cb, ord)
@@ -712,6 +734,7 @@ func upsertRound(ctx context.Context, tx *sql.Tx, inc uuid.UUID, bucket int16, b
    context_id = CASE WHEN `+replaceSQL+` THEN EXCLUDED.context_id ELSE b.context_id END,
    envelope_hash = CASE WHEN `+replaceSQL+` THEN EXCLUDED.envelope_hash ELSE b.envelope_hash END,
    expires_at = CASE WHEN `+replaceSQL+` THEN EXCLUDED.expires_at ELSE b.expires_at END,
+   max_expires_at = greatest(b.max_expires_at, EXCLUDED.expires_at),
    min_version = CASE WHEN `+replaceSQL+` THEN EXCLUDED.min_version ELSE b.min_version END,
    issued_contexts = CASE WHEN EXCLUDED.context_id = ANY(b.issued_contexts)
                                OR NOT (`+replaceSQL+` OR (b.min_version >= EXCLUDED.min_version AND b.expires_at >= EXCLUDED.expires_at)) THEN b.issued_contexts
@@ -719,12 +742,12 @@ func upsertRound(ctx context.Context, tx *sql.Tx, inc uuid.UUID, bucket int16, b
    claim_owner = CASE WHEN `+replaceSQL+` THEN EXCLUDED.claim_owner ELSE b.claim_owner END,
    claim_boot = CASE WHEN `+replaceSQL+` THEN EXCLUDED.claim_boot ELSE b.claim_boot END,
    claim_expires = CASE WHEN `+replaceSQL+` THEN EXCLUDED.claim_expires ELSE b.claim_expires END,
-   state = CASE WHEN b.state IN (3, 4) THEN 1 ELSE b.state END,
-   reason = CASE WHEN b.state IN (3, 4) THEN 0 ELSE b.reason END,
-   created_at = CASE WHEN b.state IN (3, 4) THEN clock_timestamp() ELSE b.created_at END,
-   payload_bucket = CASE WHEN b.state IN (3, 4) THEN EXCLUDED.payload_bucket ELSE b.payload_bucket END,
-   delivered_generation = CASE WHEN b.state IN (3, 4) THEN NULL ELSE b.delivered_generation END,
-   delivered_boot = CASE WHEN b.state IN (3, 4) THEN NULL ELSE b.delivered_boot END
+   state = CASE WHEN b.state = 3 THEN 1 ELSE b.state END,
+   reason = CASE WHEN b.state = 3 THEN 0 ELSE b.reason END,
+   created_at = CASE WHEN b.state = 3 THEN clock_timestamp() ELSE b.created_at END,
+   payload_bucket = CASE WHEN b.state = 3 THEN EXCLUDED.payload_bucket ELSE b.payload_bucket END,
+   delivered_generation = CASE WHEN b.state = 3 THEN NULL ELSE b.delivered_generation END,
+   delivered_boot = CASE WHEN b.state = 3 THEN NULL ELSE b.delivered_boot END
  WHERE b.principal_id = EXCLUDED.principal_id AND b.org_id = EXCLUDED.org_id AND b.signer = EXCLUDED.signer
    AND b.visible_to = EXCLUDED.visible_to AND b.visible_sender IS NOT DISTINCT FROM EXCLUDED.visible_sender
    AND b.incarnation = EXCLUDED.incarnation
@@ -748,6 +771,7 @@ func upsertRound(ctx context.Context, tx *sql.Tx, inc uuid.UUID, bucket int16, b
 			return nil, err
 		}
 		a := byHash[string(hash)]
+		row.minVersion = uint64(minVersion)
 		row.replaced = row.context == a.ContextID
 		// Kept: the stored envelope covers the attempt (equal or dominating),
 		// or neither covers the other (incomparable: re-sign).
@@ -758,8 +782,8 @@ func upsertRound(ctx context.Context, tx *sql.Tx, inc uuid.UUID, bucket int16, b
 }
 
 // replaceSQL: a same-principal admission replaces the stored envelope when it
-// revives a stopped or tombstoned binding, or dominates the stored envelope.
-const replaceSQL = `(b.state IN (3, 4) OR (EXCLUDED.min_version >= b.min_version AND EXCLUDED.expires_at >= b.expires_at AND (EXCLUDED.min_version, EXCLUDED.expires_at) <> (b.min_version, b.expires_at)))`
+// revives a stopped binding, or dominates the stored envelope.
+const replaceSQL = `(b.state = 3 OR (EXCLUDED.min_version >= b.min_version AND EXCLUDED.expires_at >= b.expires_at AND (EXCLUDED.min_version, EXCLUDED.expires_at) <> (b.min_version, b.expires_at)))`
 
 type finalStatus struct {
 	principal uuid.UUID
@@ -813,7 +837,7 @@ func (e *ExecDB) ReleaseUndelivered(ctx context.Context, inc uuid.UUID, hash []b
 		}
 		released = true
 		deltas := newQuotaDelta()
-		deltas.add(principal, org, -1)
+		deltas.move(principal, org, TrackPending, 0)
 		_, _, _, err = applyQuota(ctx, tx, deltas)
 		return err
 	})
@@ -904,7 +928,7 @@ func (e *ExecDB) RenewBatch(ctx context.Context, inc uuid.UUID, renewals []Track
 		if _, err := tx.ExecContext(ctx, `WITH v AS (SELECT * FROM unnest($1::bytea[], $2::uuid[], $3::bytea[], $4::timestamptz[], $5::bigint[], $6::uuid[], $7::uuid[], $8::bigint[], $9::smallint[], $10::text[])
               AS v(h, c, e, x, m, co, cb, ttl, r, tr)),
  renewed AS (UPDATE node_tx_binding b SET
-   generation = b.generation + 1, context_id = v.c, envelope_hash = v.e, expires_at = v.x, min_version = v.m,
+   generation = b.generation + 1, context_id = v.c, envelope_hash = v.e, expires_at = v.x, max_expires_at = greatest(b.max_expires_at, v.x), min_version = v.m,
    issued_contexts = (b.issued_contexts || v.c)[greatest(1, cardinality(b.issued_contexts) - 14):],
    claim_owner = v.co, claim_boot = v.cb, claim_expires = clock_timestamp() + v.ttl * interval '1 millisecond'
    FROM v WHERE b.tx_hash = v.h
@@ -937,6 +961,10 @@ type TrackTransition struct {
 	// lease ran out or the pool lost the transaction.
 	Boot      uuid.UUID
 	ContextID uuid.UUID
+	// Undelivered (provisional → pending only): the node answered a
+	// definitive canonical miss (a block lost by a crash, N7): the delivery
+	// record is cleared, so the lease keeper redelivers the transaction.
+	Undelivered bool
 }
 
 func allowedTransition(from, to int16) bool {
@@ -945,7 +973,7 @@ func allowedTransition(from, to int16) bool {
 		return true
 	case from == TrackProvisional && to == TrackPending: // reorged out
 		return true
-	case from == TrackRenewalStopped && (to == TrackProvisional || to == TrackTombstone): // late inclusion; finalized lease expiry
+	case from == TrackRenewalStopped && to == TrackProvisional: // late inclusion
 		return true
 	}
 	return false
@@ -962,7 +990,7 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 	byHash := map[string]int{}
 	var hashes [][]byte
 	for i, t := range transitions {
-		if len(t.Hash) != 32 || !allowedTransition(t.From, t.To) || (t.BlockNumber != nil && *t.BlockNumber > 1<<63-1) {
+		if len(t.Hash) != 32 || !allowedTransition(t.From, t.To) || (t.BlockNumber != nil && *t.BlockNumber > 1<<63-1) || (t.Undelivered && (t.From != TrackProvisional || t.To != TrackPending)) {
 			return nil, fmt.Errorf("invalid tracking transition")
 		}
 		if _, dup := byHash[string(t.Hash)]; dup {
@@ -988,6 +1016,7 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 		var tos, reasons []int64
 		var blocks []sql.NullInt64
 		var boots, executed []sql.NullString
+		var undelivered []bool
 		var stopped []int
 		for hash, row := range locked {
 			i := byHash[hash]
@@ -996,7 +1025,7 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 				continue
 			}
 			applied[i] = true
-			deltas.add(row.principal, row.org, isPending(t.To)-isPending(row.state))
+			deltas.move(row.principal, row.org, row.state, t.To)
 			hs, tos, reasons = append(hs, t.Hash), append(tos, int64(t.To)), append(reasons, int64(t.Reason))
 			block := sql.NullInt64{}
 			if t.BlockNumber != nil {
@@ -1013,7 +1042,8 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 				ctx = sql.NullString{String: t.ContextID.String(), Valid: true}
 			}
 			executed = append(executed, ctx)
-			if t.To == TrackRenewalStopped || t.To == TrackTombstone {
+			undelivered = append(undelivered, t.Undelivered)
+			if t.To == TrackRenewalStopped {
 				stopped = append(stopped, i)
 			}
 		}
@@ -1028,10 +1058,10 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
    state = v.st,
    reason = v.r,
    block_number = CASE WHEN v.st = 2 THEN v.blk WHEN v.st = 1 THEN NULL ELSE b.block_number END,
-   delivered_generation = CASE WHEN v.st = 2 AND (v.ctx IS NULL OR v.ctx = b.context_id) THEN b.generation ELSE b.delivered_generation END,
-   delivered_boot = CASE WHEN v.st = 2 AND (v.ctx IS NULL OR v.ctx = b.context_id) THEN coalesce(v.boot, b.delivered_boot) ELSE b.delivered_boot END
- FROM unnest($1::bytea[], $2::smallint[], $3::smallint[], $4::bigint[], $5::uuid[], $6::uuid[]) AS v(h, st, r, blk, boot, ctx)
- WHERE b.tx_hash = v.h`, hs, tos, reasons, nullInts(blocks), boots, executed); err != nil {
+   delivered_generation = CASE WHEN v.st = 2 AND (v.ctx IS NULL OR v.ctx = b.context_id) THEN b.generation WHEN v.und THEN NULL ELSE b.delivered_generation END,
+   delivered_boot = CASE WHEN v.st = 2 AND (v.ctx IS NULL OR v.ctx = b.context_id) THEN coalesce(v.boot, b.delivered_boot) WHEN v.und THEN NULL ELSE b.delivered_boot END
+ FROM unnest($1::bytea[], $2::smallint[], $3::smallint[], $4::bigint[], $5::uuid[], $6::uuid[], $7::bool[]) AS v(h, st, r, blk, boot, ctx, und)
+ WHERE b.tx_hash = v.h`, hs, tos, reasons, nullInts(blocks), boots, executed, undelivered); err != nil {
 			return err
 		}
 		if len(stopped) > 0 {
@@ -1059,12 +1089,13 @@ type lockedBinding struct {
 	context        uuid.UUID
 	principal, org uuid.UUID
 	admitXid       uint64
+	maxExpiresAt   time.Time
 }
 
 // lockBindings locks the bindings of hashes in hash order (the global lock
 // order) and returns their current state.
 func lockBindings(ctx context.Context, tx *sql.Tx, inc uuid.UUID, hashes [][]byte) (map[string]lockedBinding, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT tx_hash, state, generation, context_id, principal_id, org_id, admit_xid::text FROM node_tx_binding WHERE tx_hash = ANY($1) AND incarnation = $2 ORDER BY tx_hash FOR UPDATE`, hashes, inc.String())
+	rows, err := tx.QueryContext(ctx, `SELECT tx_hash, state, generation, context_id, principal_id, org_id, admit_xid::text, max_expires_at FROM node_tx_binding WHERE tx_hash = ANY($1) AND incarnation = $2 ORDER BY tx_hash FOR UPDATE`, hashes, inc.String())
 	if err != nil {
 		return nil, err
 	}
@@ -1074,7 +1105,7 @@ func lockBindings(ctx context.Context, tx *sql.Tx, inc uuid.UUID, hashes [][]byt
 		var hash []byte
 		var row lockedBinding
 		var xid string
-		if err := rows.Scan(&hash, &row.state, &row.generation, &row.context, &row.principal, &row.org, &xid); err != nil {
+		if err := rows.Scan(&hash, &row.state, &row.generation, &row.context, &row.principal, &row.org, &xid, &row.maxExpiresAt); err != nil {
 			return nil, err
 		}
 		if row.admitXid, err = strconv.ParseUint(xid, 10, 64); err != nil {
@@ -1109,15 +1140,23 @@ type TrackFinal struct {
 	// AdmitXid, when set, must be the binding's: a binding released and
 	// admitted again since it was read is a different binding.
 	AdmitXid uint64
-	// RequireStopped: apply only to a binding that is renewal_stopped or a
-	// tombstone (dropped on finalized nonce evidence; a binding revived
-	// meanwhile is pending again and is left alone).
+	// RequireStopped: apply only to a binding that is renewal_stopped
+	// (dropped on finalized evidence; a binding revived meanwhile is pending
+	// again and is left alone).
 	RequireStopped bool
+	// Generation, when set, must be the binding's: a decision taken on an
+	// earlier generation (revived and stopped again since) is stale.
+	Generation int32
+	// ExpiresBy, when set, requires every identity recorded for the binding
+	// to have expired by then (max_expires_at ≤ ExpiresBy): the timestamp of
+	// the finalized block a lease-expiry dropped rests on.
+	ExpiresBy *time.Time
 }
 
 // FinalizeBatch finalizes bindings in one transaction: delete the binding,
 // insert the insert-once status row, and release the quota of rows that were
-// still pending (pending → final is −1; every other state carries none). A
+// still pending (pending → final is −1 globally) and the owners' shares of
+// pending and stopped rows. A
 // final status beats any recorded non-final state; it is not fenced by
 // generation or context, because a finalized inclusion makes every generation
 // obsolete (K19). Returns which finals applied.
@@ -1125,7 +1164,7 @@ func (e *ExecDB) FinalizeBatch(ctx context.Context, inc uuid.UUID, finals []Trac
 	byHash := map[string]int{}
 	var hashes [][]byte
 	for i, f := range finals {
-		if len(f.Hash) != 32 || f.State < TrackIncluded || f.State > TrackDropped || (f.BlockNumber != nil && *f.BlockNumber > 1<<63-1) {
+		if len(f.Hash) != 32 || f.State < TrackIncluded || f.State > TrackDropped || (f.BlockNumber != nil && *f.BlockNumber > 1<<63-1) || (f.State == TrackDropped && f.Reason == TrackReasonFinalizedLeaseExpiry) {
 			return nil, fmt.Errorf("invalid tracking final")
 		}
 		if _, dup := byHash[string(f.Hash)]; dup {
@@ -1156,11 +1195,14 @@ func (e *ExecDB) FinalizeBatch(ctx context.Context, inc uuid.UUID, finals []Trac
 			if row.principal != f.PrincipalID || row.org != f.OrgID || (f.AdmitXid != 0 && row.admitXid != f.AdmitXid) {
 				continue
 			}
-			if f.RequireStopped && row.state != TrackRenewalStopped && row.state != TrackTombstone {
+			if f.RequireStopped && row.state != TrackRenewalStopped {
+				continue
+			}
+			if (f.Generation != 0 && row.generation != f.Generation) || (f.ExpiresBy != nil && row.maxExpiresAt.After(*f.ExpiresBy)) {
 				continue
 			}
 			applied[i] = true
-			deltas.add(row.principal, row.org, -isPending(row.state))
+			deltas.move(row.principal, row.org, row.state, 0)
 			hs, states, reasons = append(hs, f.Hash), append(states, int64(f.State)), append(reasons, int64(f.Reason))
 			block := sql.NullInt64{}
 			if f.BlockNumber != nil {
@@ -1259,10 +1301,13 @@ type TrackedTransaction struct {
 	// In-flight rows only: the binding's signer and nonce, its current
 	// envelope's floor and expiry, the delivery and claim state, and the
 	// database clock when it was read.
-	Signer              []byte
-	Nonce               uint64
-	MinVersion          uint64
-	ExpiresAt           time.Time
+	Signer     []byte
+	Nonce      uint64
+	MinVersion uint64
+	ExpiresAt  time.Time
+	// MaxExpiresAt: the longest lease of any identity recorded for the
+	// binding (at least ExpiresAt).
+	MaxExpiresAt        time.Time
 	DeliveredGeneration *int32
 	DeliveredBoot       uuid.UUID // Nil: not recorded
 	ClaimOwner          uuid.UUID
@@ -1288,7 +1333,7 @@ func (t TrackedTransaction) ClaimedFor(boot uuid.UUID, now time.Time) bool {
 }
 
 const trackedColumns = `tx_hash, principal_id, org_id, state, reason, generation, context_id, issued_contexts, block_number, visible_to, visible_sender, created_at, admit_xid::text,
- signer, nonce, min_version, expires_at, delivered_generation, delivered_boot, claim_owner, claim_boot, claim_expires, clock_timestamp()`
+ signer, nonce, min_version, expires_at, max_expires_at, delivered_generation, delivered_boot, claim_owner, claim_boot, claim_expires, clock_timestamp()`
 
 func scanTracked(row interface{ Scan(...any) error }) (TrackedTransaction, error) {
 	var t TrackedTransaction
@@ -1301,7 +1346,7 @@ func scanTracked(row interface{ Scan(...any) error }) (TrackedTransaction, error
 	var deliveredBoot, claimOwner, claimBoot uuid.NullUUID
 	var claimExpires sql.NullTime
 	if err := row.Scan(&t.Hash, &t.PrincipalID, &t.OrgID, &t.State, &t.Reason, &t.Generation, &t.ContextID, ScanTextArray(&issued), &block, ScanTextArray(&t.VisibleTo), &sender, &t.CreatedAt, &xid,
-		&t.Signer, &nonce, &minVersion, &t.ExpiresAt, &delivered, &deliveredBoot, &claimOwner, &claimBoot, &claimExpires, &t.DBNow); err != nil {
+		&t.Signer, &nonce, &minVersion, &t.ExpiresAt, &t.MaxExpiresAt, &delivered, &deliveredBoot, &claimOwner, &claimBoot, &claimExpires, &t.DBNow); err != nil {
 		return t, err
 	}
 	t.Nonce, t.MinVersion = uint64(nonce), uint64(minVersion)
@@ -1398,15 +1443,61 @@ func (e *ExecDB) TrackedPayloads(ctx context.Context, hashes [][]byte) (map[stri
 	return out, rows.Err()
 }
 
-// TrackingHorizon is the snapshot xmin: every transaction below it has ended,
-// so bindings with admit_xid below it are all visible now.
-func (e *ExecDB) TrackingHorizon(ctx context.Context) (uint64, error) {
-	var xmin string
-	if err := e.pool.conn.QueryRowContext(ctx, `SELECT pg_snapshot_xmin(pg_current_snapshot())::text`).Scan(&xmin); err != nil {
-		return 0, err
-	}
-	return strconv.ParseUint(xmin, 10, 64)
+// DiscoveryHorizon is the discovery horizon of this database: every
+// transaction of this database with an id below Horizon has ended, so
+// bindings with admit_xid below it are all visible now. Only this database's
+// transactions insert bindings, so the transactions of other databases on the
+// same server are excluded (independent review, finding 3): the cluster-wide
+// snapshot xmin would wait for the oldest write transaction anywhere on the
+// server. An in-progress id is excluded only when it is attributed to another
+// database — pg_stat_activity shows it on a backend of another database
+// (visible to an unprivileged role; a backend never changes database), or
+// pg_prepared_xacts shows it prepared in another database — and any other id
+// holds the horizon. Ids not in the snapshot's in-progress list are at or
+// above its xmax (newer transactions too). The 32-bit backend ids are compared
+// with the 64-bit ids modulo 2^32 (in-progress ids are within 2^31 of each
+// other). Next is the snapshot's xmax: Horizon < Next means a transaction of
+// this database (or an unattributed one) is in progress. ClusterWide: those
+// views could not be read (revoked), so Horizon is the cluster-wide xmin.
+type DiscoveryHorizon struct {
+	Horizon, Next uint64
+	ClusterWide   bool
 }
+
+// TrackingHorizon reads the discovery horizon (see DiscoveryHorizon).
+func (e *ExecDB) TrackingHorizon(ctx context.Context) (DiscoveryHorizon, error) {
+	var h, n string
+	err := e.pool.conn.QueryRowContext(ctx, trackingHorizonSQL).Scan(&h, &n)
+	out := DiscoveryHorizon{}
+	if isInsufficientPrivilege(err) {
+		// Still correct, but held by every database's transactions.
+		out.ClusterWide = true
+		err = e.pool.conn.QueryRowContext(ctx, `SELECT pg_snapshot_xmin(s)::text, pg_snapshot_xmax(s)::text FROM pg_current_snapshot() AS s`).Scan(&h, &n)
+	}
+	if err != nil {
+		return DiscoveryHorizon{}, err
+	}
+	if out.Horizon, err = strconv.ParseUint(h, 10, 64); err != nil {
+		return DiscoveryHorizon{}, err
+	}
+	if out.Next, err = strconv.ParseUint(n, 10, 64); err != nil {
+		return DiscoveryHorizon{}, err
+	}
+	return out, nil
+}
+
+const trackingHorizonSQL = `WITH s AS (SELECT pg_current_snapshot() AS snap),
+ other AS (
+   SELECT backend_xid::text::bigint AS x FROM pg_stat_activity
+    WHERE backend_xid IS NOT NULL AND datid IS NOT NULL
+      AND datid <> (SELECT oid FROM pg_database WHERE datname = current_database())
+   UNION ALL
+   SELECT transaction::text::bigint FROM pg_prepared_xacts WHERE database <> current_database())
+ SELECT least(pg_snapshot_xmax(snap),
+              (SELECT min(x) FROM pg_snapshot_xip(snap) AS x
+                WHERE (x::text::numeric % 4294967296)::bigint NOT IN (SELECT x FROM other)))::text,
+        pg_snapshot_xmax(snap)::text
+ FROM s`
 
 // ListTracked pages through bindings admitted in [fromXid, toXid) in admit_xid
 // order, at most limit rows after (afterXid, afterHash) of the previous page.
@@ -1453,8 +1544,8 @@ func (e *ExecDB) PendingQuota(ctx context.Context) (used, pending int64, err err
 }
 
 // PendingQuotaMismatches counts principals and organizations whose share
-// counter differs from their count of pending bindings (0 after every
-// committed batch, G63), read in one snapshot.
+// counter differs from their count of held (pending or stopped) bindings (0
+// after every committed batch, G63), read in one snapshot.
 func (e *ExecDB) PendingQuotaMismatches(ctx context.Context) (int64, error) {
 	var n int64
 	err := e.pool.conn.QueryRowContext(ctx, quotaMismatchSQL).Scan(&n)
@@ -1464,8 +1555,8 @@ func (e *ExecDB) PendingQuotaMismatches(ctx context.Context) (int64, error) {
 // quotaMismatchSQL counts share counters that differ from the bindings.
 const quotaMismatchSQL = `SELECT
  (SELECT count(*) FROM pending_quota_principal q
-   FULL JOIN (SELECT principal_id, count(*) AS pending FROM node_tx_binding WHERE state = 1 GROUP BY principal_id) b USING (principal_id)
+   FULL JOIN (SELECT principal_id, count(*) AS pending FROM node_tx_binding WHERE ` + heldStatesSQL + ` GROUP BY principal_id) b USING (principal_id)
    WHERE coalesce(q.used, 0) <> coalesce(b.pending, 0))
 +(SELECT count(*) FROM pending_quota_org q
-   FULL JOIN (SELECT org_id, count(*) AS pending FROM node_tx_binding WHERE state = 1 GROUP BY org_id) b USING (org_id)
+   FULL JOIN (SELECT org_id, count(*) AS pending FROM node_tx_binding WHERE ` + heldStatesSQL + ` GROUP BY org_id) b USING (org_id)
    WHERE coalesce(q.used, 0) <> coalesce(b.pending, 0))`

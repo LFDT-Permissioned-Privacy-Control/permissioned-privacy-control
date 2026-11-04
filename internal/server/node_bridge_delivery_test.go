@@ -104,6 +104,43 @@ func TestBridgeDeliveryOutcomes(t *testing.T) {
 	})
 }
 
+// A delayed lower-floor attempt must not install its old identity into an
+// empty registry after a restart, even though a newer binding dominates it.
+func TestDominatedAttemptCannotBypassTheStoredFloorAfterRestart(t *testing.T) {
+	bridge, node, tracking := newBridgeFixture(t)
+	clock := &steppingClock{}
+	bridge.source, bridge.now = clock, clock.now
+	clock.set(7, 1020, 0, 0)
+	tx := newSignedTransfer(t, 0)
+	request := NodeExecutionIdentityRequest{Scope: "transaction", PrincipalID: uuid.NewString(), OrgID: uuid.NewString(), Signer: tx.signer, BindingHash: tx.hash}
+	old, err := bridge.PrepareIdentity(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.set(8, 1021, 0, 0)
+	node.status.Version = 8
+	bridge.observe(context.Background())
+	winner, err := bridge.PrepareIdentity(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bridge.SubmitTransaction(context.Background(), winner, tx.raw, NodeSubmissionMetadata{}); err != nil {
+		t.Fatal(err)
+	}
+	// The restart retained older facts, and the winning identity is gone.
+	node.status.Version = 7
+	node.status.BootID = hexBoot(uuid.New())
+	bridge.observe(context.Background())
+	calls := node.calls.Load()
+	if _, err := bridge.SubmitTransaction(context.Background(), old, tx.raw, NodeSubmissionMetadata{}); err == nil || node.calls.Load() != calls {
+		t.Fatalf("lower-floor identity reached restarted node: error=%v sends=%d", err, node.calls.Load()-calls)
+	}
+	row, err := tracking.runtime.LookupTracked(context.Background(), hashBytes(t, tx.hash))
+	if err != nil || row.MinVersion != 8 {
+		t.Fatalf("winning floor: %+v error=%v", row, err)
+	}
+}
+
 // G13 + the conflict answer: a hash bound to another principal is refused
 // before the compliance step with one opaque 409, whatever the cause.
 func TestRebindingConflictIsAnOpaque409BeforeCompliance(t *testing.T) {

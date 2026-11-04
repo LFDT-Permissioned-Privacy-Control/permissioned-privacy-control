@@ -86,6 +86,21 @@ func NodeRefused(err error) bool {
 	return errors.As(err, &rejected) && rejected.Code == -32000
 }
 
+// NodeNotFound reports the node's definitive canonical miss for a status
+// call (-32014, capability transaction_not_found_v1): its inclusion lookup
+// succeeded, no canonical block holds the hash and it holds no identity for
+// it. Not final, not dropped evidence: the transaction is not delivered to
+// this node process.
+func NodeNotFound(err error) bool {
+	var rejected *RejectedError
+	return errors.As(err, &rejected) && rejected.Code == -32014
+}
+
+// CapabilityTransactionNotFound: the node answers a definitive canonical miss
+// ("not_found" in a batched answer, -32014 for the single call). Optional:
+// without it OPS never takes a miss as evidence.
+const CapabilityTransactionNotFound = "transaction_not_found_v1"
+
 // CapabilityFactWait is advertised by a node that, instead of refusing at
 // once, waits a bounded time for an identity's minimum fact version and then
 // answers -32012 (RD-1411 §5.3). Optional: OPS refuses lag itself without it.
@@ -93,7 +108,7 @@ const CapabilityFactWait = "fact_wait_v1"
 
 // OptionalCapabilities are capabilities OPS uses when a node offers them.
 func OptionalCapabilities() []string {
-	return []string{CapabilityFactWait, CapabilityTransactionStatuses}
+	return []string{CapabilityFactWait, CapabilityTransactionStatuses, CapabilityTransactionNotFound}
 }
 
 // HasCapability reports whether the node advertises capability.

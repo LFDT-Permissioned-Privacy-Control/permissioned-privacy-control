@@ -3,7 +3,25 @@ package nodepolicy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 )
+
+// ErrInvalidStatus: the node's answer for one transaction is not a valid
+// status (it wraps ErrNodeResponse). In a batched answer it is that entry's
+// error only; the other entries stand.
+var ErrInvalidStatus = fmt.Errorf("%w: invalid transaction status", ErrNodeResponse)
+
+// MaxCreatedContracts bounds the contracts one transaction's status may
+// report. It is the node's own bound: the node evaluates at most MAX_CHECKS
+// (128) policy-checked frames per transaction, calls and creates together,
+// and refuses the whole transaction at the next one, so an included
+// transaction never created more (node/reth/src/policy.rs; pinned by
+// TestCreatedContractsBoundIsTheNodesFrameLimit). A longer list is a protocol
+// violation, never truncated.
+const MaxCreatedContracts = 128
+
+// maxBlockNumber is the largest block number OPS stores (BIGINT).
+const maxBlockNumber = 1<<63 - 1
 
 type CreatedContract struct {
 	Address     string `json:"address"`
@@ -42,8 +60,11 @@ func (c *Client) TransactionStatus(ctx context.Context, hash string) (Transactio
 	if err := decodeStrict(raw, &status); err != nil {
 		return TransactionStatus{}, ErrNodeResponse
 	}
-	if status.TransactionHash != hash || !identifier(status.PrincipalID) || !identifier(status.OrgID) || !identifier(status.ContextID) || !ValidBootID(status.BootID) {
+	if !ValidBootID(status.BootID) {
 		return TransactionStatus{}, ErrNodeResponse
+	}
+	if status.TransactionHash != hash {
+		return TransactionStatus{}, ErrInvalidStatus
 	}
 	if err := status.Validate(); err != nil {
 		return TransactionStatus{}, err
@@ -51,39 +72,45 @@ func (c *Client) TransactionStatus(ctx context.Context, hash string) (Transactio
 	return status, nil
 }
 
+// Validate checks one status answer; a failure is ErrInvalidStatus.
 func (status TransactionStatus) Validate() error {
 	if !hexField(status.TransactionHash, 32) || !identifier(status.PrincipalID) || !identifier(status.OrgID) || !identifier(status.ContextID) {
-		return ErrNodeResponse
+		return ErrInvalidStatus
 	}
 	outcome := status.Execution
 	if (outcome.FinalizedBlockHash == nil) != (outcome.FinalizedBlockNumber == nil) || (outcome.FinalizedBlockHash != nil && !hexField(*outcome.FinalizedBlockHash, 32)) {
-		return ErrNodeResponse
+		return ErrInvalidStatus
 	}
-	if outcome.Created == nil || len(outcome.Created) > 128 || len(outcome.ReasonCode) > 128 {
-		return ErrNodeResponse
+	// Block numbers are stored as BIGINT: a larger one would fail the whole
+	// batch it is written in, so it is this answer's fault alone.
+	if (outcome.BlockNumber != nil && *outcome.BlockNumber > maxBlockNumber) || (outcome.FinalizedBlockNumber != nil && *outcome.FinalizedBlockNumber > maxBlockNumber) {
+		return ErrInvalidStatus
+	}
+	if outcome.Created == nil || len(outcome.Created) > MaxCreatedContracts || len(outcome.ReasonCode) > 128 {
+		return ErrInvalidStatus
 	}
 	switch outcome.Status {
 	case "included", "reverted":
 		if outcome.BlockHash == nil || !hexField(*outcome.BlockHash, 32) || outcome.BlockNumber == nil || outcome.FactsVersion == 0 {
-			return ErrNodeResponse
+			return ErrInvalidStatus
 		}
 		if outcome.Status == "reverted" && len(outcome.Created) > 0 {
-			return ErrNodeResponse
+			return ErrInvalidStatus
 		}
 		if outcome.Finalized && (outcome.FinalizedBlockNumber == nil || *outcome.FinalizedBlockNumber < *outcome.BlockNumber || (*outcome.FinalizedBlockNumber == *outcome.BlockNumber && *outcome.FinalizedBlockHash != *outcome.BlockHash)) {
-			return ErrNodeResponse
+			return ErrInvalidStatus
 		}
 	case "pending", "denied", "expired":
 		if outcome.Finalized || outcome.BlockHash != nil || outcome.BlockNumber != nil || len(outcome.Created) > 0 {
-			return ErrNodeResponse
+			return ErrInvalidStatus
 		}
 	default:
-		return ErrNodeResponse
+		return ErrInvalidStatus
 	}
 	seen := map[string]bool{}
 	for _, created := range outcome.Created {
 		if !hexField(created.Address, 20) || created.OrgID != status.OrgID || created.PrincipalID != status.PrincipalID || seen[created.Address] {
-			return ErrNodeResponse
+			return ErrInvalidStatus
 		}
 		seen[created.Address] = true
 	}
@@ -102,18 +129,25 @@ type FinalizedHead struct {
 
 // BatchedStatus is one entry of a batched status answer: the single-call
 // status (with the batch's boot id) and, for a transaction not included,
-// whether the node's pool holds it.
+// whether the node's pool holds it. Err (ErrInvalidStatus) is set instead
+// when the node's entry for this hash was not a valid answer; Status and
+// Pooled are then empty, and only this hash is affected.
 type BatchedStatus struct {
 	Status TransactionStatus
 	Pooled bool
+	Err    error
+	// NotFound: the node's definitive canonical miss for this hash (the
+	// string "not_found", CapabilityTransactionNotFound; Status is empty).
+	// Act on it only for a node that advertises the capability.
+	NotFound bool
 }
 
 // TransactionStatusBatch is the answer of ops_transactionStatuses: one entry
 // per requested hash in request order. A nil entry is no answer for that hash
 // in this call (unknown, a failed lookup, a block that left the chain while
 // the answer was prepared, or the node's per-call budget): never evidence of
-// absence. Finalized is nil while finality is unknown or only genesis is
-// final.
+// absence; an entry with Err is an invalid answer for that hash alone.
+// Finalized is nil while finality is unknown or only genesis is final.
 type TransactionStatusBatch struct {
 	BootID         string
 	Finalized      *FinalizedHead
@@ -194,6 +228,13 @@ func (c *Client) TransactionEvidence(ctx context.Context, hashes, senders []stri
 		return TransactionStatusBatch{}, err
 	}
 	out.Receipts = receipts
+	for i, entry := range out.Statuses {
+		// A definitive miss has no receipt by definition; anything else is
+		// an invalid answer for that hash.
+		if entry != nil && entry.NotFound && (receipts[i] == nil || *receipts[i]) {
+			out.Statuses[i] = &BatchedStatus{Err: ErrInvalidStatus}
+		}
+	}
 	if wire.SenderNonces != nil {
 		var nonces []*uint64 // a null entry is a protocol error, never 0
 		if out.Finalized == nil || json.Unmarshal(*wire.SenderNonces, &nonces) != nil || len(nonces) != len(senders) {
@@ -229,26 +270,43 @@ func decodeBatch(wire batchWire, hashes []string) (TransactionStatusBatch, error
 		return TransactionStatusBatch{}, ErrNodeResponse
 	}
 	// Only a block above genesis is ever reported final (genesis: null).
-	if f := wire.Finalized; f != nil && (!hexField(f.Hash, 32) || f.Number == 0 || f.Timestamp <= 0) {
+	if f := wire.Finalized; f != nil && (!hexField(f.Hash, 32) || f.Number == 0 || f.Number > maxBlockNumber || f.Timestamp <= 0) {
 		return TransactionStatusBatch{}, ErrNodeResponse
 	}
 	out := TransactionStatusBatch{BootID: wire.BootID, Finalized: wire.Finalized, CanonicalEpoch: wire.CanonicalEpoch, Statuses: make([]*BatchedStatus, len(hashes))}
+	// Entries are decoded one by one: an invalid one is an error for its hash
+	// only, never for the transactions answered with it.
 	for i, entry := range entries {
 		if string(entry) == "null" {
 			continue
 		}
-		var e batchEntryWire
-		if err := decodeStrict(entry, &e); err != nil || e.TransactionHash != hashes[i] {
-			return TransactionStatusBatch{}, ErrNodeResponse
+		if string(entry) == `"not_found"` {
+			out.Statuses[i] = &BatchedStatus{NotFound: true}
+			continue
 		}
-		status := TransactionStatus{TransactionHash: e.TransactionHash, PrincipalID: e.PrincipalID, OrgID: e.OrgID, ContextID: e.ContextID, Execution: e.Execution, BootID: wire.BootID}
-		if err := status.Validate(); err != nil {
-			return TransactionStatusBatch{}, err
+		status, pooled, err := decodeBatchEntry(entry, hashes[i], wire.BootID)
+		if err != nil {
+			out.Statuses[i] = &BatchedStatus{Err: err}
+			continue
 		}
-		if e.Pooled && status.Execution.Status != "pending" && status.Execution.Status != "denied" && status.Execution.Status != "expired" {
-			return TransactionStatusBatch{}, ErrNodeResponse
-		}
-		out.Statuses[i] = &BatchedStatus{Status: status, Pooled: e.Pooled}
+		out.Statuses[i] = &BatchedStatus{Status: status, Pooled: pooled}
 	}
 	return out, nil
+}
+
+// decodeBatchEntry decodes and validates one batched entry for hash; any
+// failure is ErrInvalidStatus.
+func decodeBatchEntry(entry json.RawMessage, hash, bootID string) (TransactionStatus, bool, error) {
+	var e batchEntryWire
+	if err := decodeStrict(entry, &e); err != nil || e.TransactionHash != hash {
+		return TransactionStatus{}, false, ErrInvalidStatus
+	}
+	status := TransactionStatus{TransactionHash: e.TransactionHash, PrincipalID: e.PrincipalID, OrgID: e.OrgID, ContextID: e.ContextID, Execution: e.Execution, BootID: bootID}
+	if err := status.Validate(); err != nil {
+		return TransactionStatus{}, false, ErrInvalidStatus
+	}
+	if e.Pooled && status.Execution.Status != "pending" && status.Execution.Status != "denied" && status.Execution.Status != "expired" {
+		return TransactionStatus{}, false, ErrInvalidStatus
+	}
+	return status, e.Pooled, nil
 }

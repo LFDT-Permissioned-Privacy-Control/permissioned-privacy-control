@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS node_tx_binding (
     org_id               UUID NOT NULL,
     signer               BYTEA NOT NULL CHECK (octet_length(signer) = 20),
     nonce                BIGINT NOT NULL CHECK (nonce >= 0),
-    -- 1 pending, 2 provisional, 3 renewal_stopped, 4 tombstone.
-    state                SMALLINT NOT NULL CHECK (state BETWEEN 1 AND 4),
+    -- 1 pending, 2 provisional, 3 renewal_stopped.
+    state                SMALLINT NOT NULL CHECK (state BETWEEN 1 AND 3),
     -- The state before the last admission upsert (NULL after an insert), so
     -- the upsert's quota delta is computed under the row lock.
     prev_state           SMALLINT,

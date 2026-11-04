@@ -117,8 +117,10 @@ identity and cannot read each other's transaction status.
 
 Acceptance is not inclusion or finality. `waitForFinality` ends only on a final
 status with completed OPS reconciliation: `included` or `reverted` with
-`execution.finalized`, or `dropped` (a finalized transaction used the nonce; the
-transaction can never execute). Reverts and drops are returned for the caller to
+`execution.finalized`, or `dropped`: with `nonce_consumed` a finalized
+transaction used its nonce and it can never execute. Lease expiry alone keeps
+the transaction nonterminal, with its immutable principal binding retained
+independently of final-status retention. Reverts and drops are returned for the caller to
 handle. `pending`, `provisional` and `renewal_stopped` are nonterminal:
 `renewal_stopped` means OPS will not renew the transaction's identity, but it
 may still settle, so the helper keeps polling and passes every status to the

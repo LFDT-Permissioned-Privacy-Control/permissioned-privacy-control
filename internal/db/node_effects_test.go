@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -291,6 +292,60 @@ func TestOwnershipConflictSkipsOnlyTheConflictingAddress(t *testing.T) {
 	owner, err := f.d.GetContractByAddress(ctx, otherOrg, taken)
 	require.NoError(t, err)
 	require.NotNil(t, owner, "the other organisation keeps its address")
+}
+
+// A refused address is decided once: the marker keeps the conflict count with
+// the ownership bit, so a retry after the effects committed (a crash, or a
+// failed tracking finalize) reports the same refusal instead of "applied"
+// (independent review, finding 4).
+func TestOwnershipConflictCountSurvivesARetry(t *testing.T) {
+	f := newEffectsFixture(t)
+	ctx := t.Context()
+	_, otherOrg := cacheGenFixtures(t, f.d, ctx)
+	taken := "0x" + strings.Repeat("ee", 20)
+	require.NoError(t, f.d.CreateContract(ctx, &rbac.Contract{ID: uuid.NewString(), OrgID: otherOrg, Address: taken, Name: "taken"}))
+	e := f.effects(9, true, false)
+	e.Created = []nodepolicy.CreatedContract{{Address: taken, OrgID: f.org, PrincipalID: f.deployer}, {Address: f.address, OrgID: f.org, PrincipalID: f.deployer}}
+	first, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, e)
+	require.NoError(t, err)
+	require.Equal(t, 1, first.OwnershipConflicts)
+	again, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, e)
+	require.NoError(t, err)
+	require.False(t, again.OwnershipApplied, "a retry applies nothing")
+	require.Equal(t, 1, again.OwnershipConflicts, "a retry reports the refusal decided by the first run")
+}
+
+// The caller's before-commit step (the refusal's audit event) runs inside the
+// effects transaction: when it fails nothing is applied, and the result it
+// sees is the one that commits (independent review, finding 4).
+func TestEffectsBeforeCommitFailureAppliesNothing(t *testing.T) {
+	f := newEffectsFixture(t)
+	ctx := t.Context()
+	_, otherOrg := cacheGenFixtures(t, f.d, ctx)
+	taken := "0x" + strings.Repeat("ed", 20)
+	require.NoError(t, f.d.CreateContract(ctx, &rbac.Contract{ID: uuid.NewString(), OrgID: otherOrg, Address: taken, Name: "taken"}))
+	e := f.effects(9, true, true)
+	e.Created = []nodepolicy.CreatedContract{{Address: taken, OrgID: f.org, PrincipalID: f.deployer}, {Address: f.address, OrgID: f.org, PrincipalID: f.deployer}}
+	var seen []NodeTxEffectsResult
+	e.BeforeCommit = func(r NodeTxEffectsResult) error {
+		seen = append(seen, r)
+		return errors.New("audit buffer unavailable")
+	}
+	_, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, e)
+	require.Error(t, err)
+	require.Len(t, seen, 1)
+	require.Equal(t, 1, seen[0].OwnershipConflicts)
+	contracts, grants, visibility := f.counts(t)
+	require.Equal(t, [3]int{0, 0, 0}, [3]int{contracts, grants, visibility}, "nothing commits without the before-commit step")
+	var markers int
+	require.NoError(t, f.d.Conn().QueryRow(`SELECT count(*) FROM node_tx_effects_applied`).Scan(&markers))
+	require.Zero(t, markers)
+	e.BeforeCommit = func(r NodeTxEffectsResult) error { seen = append(seen, r); return nil }
+	result, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, e)
+	require.NoError(t, err)
+	require.Equal(t, seen[1], result, "the before-commit step sees the committed result")
+	contracts, grants, visibility = f.counts(t)
+	require.Equal(t, [3]int{1, 1, 1}, [3]int{contracts, grants, visibility})
 }
 
 // G19 (store half): renewal re-finds only the record bound to its own

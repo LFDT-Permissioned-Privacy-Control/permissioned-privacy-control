@@ -679,7 +679,7 @@ func reconcileReport(ctx context.Context, stack *Stack, report *Gate2Report, sta
 	if r.FinalizedPerSecond > 0 {
 		r.ProjectedDrainSec = float64(r.BacklogAtWindowEnd) / r.FinalizedPerSecond
 	}
-	if rows, err := stack.ExecDB.QueryContext(ctx, `SELECT CASE state WHEN 1 THEN 'pending' WHEN 2 THEN 'provisional' WHEN 3 THEN 'renewal_stopped' ELSE 'tombstone' END, count(*) FROM node_tx_binding GROUP BY 1
+	if rows, err := stack.ExecDB.QueryContext(ctx, `SELECT CASE state WHEN 1 THEN 'pending' WHEN 2 THEN 'provisional' WHEN 3 THEN 'renewal_stopped' ELSE 'other' END, count(*) FROM node_tx_binding GROUP BY 1
  UNION ALL SELECT CASE state WHEN 10 THEN 'included' WHEN 11 THEN 'reverted' ELSE 'dropped' END, count(*) FROM node_tx_status GROUP BY 1`); err == nil {
 		for rows.Next() {
 			var state string

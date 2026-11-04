@@ -24,6 +24,49 @@ type countingNode struct {
 	reads  atomic.Int32
 }
 
+type advancingFactClock struct {
+	reads  int
+	onRead func()
+}
+
+func (c *advancingFactClock) NodePolicyVersion(context.Context) (uint64, error) {
+	c.reads++
+	if c.reads == 1 {
+		if c.onRead != nil {
+			c.onRead()
+		}
+		return 7, nil
+	}
+	return 8, nil
+}
+
+// A fact commit and its publication can both finish after the first DB
+// clock read. This is normal churn, not evidence of a foreign node feed.
+func TestReadinessRechecksClockWhenPublicationOvertakesItsRead(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		t.Run(map[bool]string{false: "request", true: "live readiness"}[live], func(t *testing.T) {
+			now := time.Now()
+			network := nodepolicy.Network{ChainID: 31337, DeploymentID: "clock-overtaken"}
+			status := nodepolicy.NodeStatus{ProtocolVersion: 1, Network: network, Capabilities: nodepolicy.RequiredCapabilities(), Version: 8, Digest: strings.Repeat("a", 64), Ready: true, ExpiresAt: now.Add(time.Minute).Unix()}
+			source := &advancingFactClock{}
+			bridge, err := newNodeExecutionBridge(source, &countingNode{status: status}, nodepolicy.Signer{KeyID: "ops", PrivateKey: ed25519.NewKeyFromSeed(make([]byte, 32))}, network, time.Minute, func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			source.onRead = func() { bridge.cache.finish(bridge.cache.begin(now), status, nil) }
+			var version uint64
+			if live {
+				version, _, err = bridge.executionStatus(context.Background())
+			} else {
+				version, _, _, err = bridge.readiness(context.Background())
+			}
+			if err != nil || version != 8 || source.reads < 2 {
+				t.Fatalf("publication overtook clock: version=%d reads=%d error=%v", version, source.reads, err)
+			}
+		})
+	}
+}
+
 func (n *countingNode) PolicyStatus(context.Context) (nodepolicy.NodeStatus, error) {
 	n.reads.Add(1)
 	return n.status, nil
@@ -169,8 +212,10 @@ func waitingStatus(version uint64) nodepolicy.NodeStatus {
 var waitRequest = NodeExecutionIdentityRequest{Scope: "simulation", PrincipalID: "user-a", OrgID: "org-a", Signer: "0x" + strings.Repeat("11", 20), BindingHash: "0x" + strings.Repeat("22", 32)}
 
 // Requests waiting on the node for facts hold transaction-lane connections,
-// so at most maxFactWaiters go at once; the rest are refused with
-// ErrFactsPending at once, and a slot frees when its node call returns.
+// so at most maxFactWaiters go at once; the rest wait in OPS, holding no node
+// connection, for the publication in flight (within the lag budget) and are
+// refused with ErrFactsPending only when it does not arrive (F8); a slot
+// frees when its node call returns.
 func TestFactWaitersAreBoundedAndReleased(t *testing.T) {
 	now := time.Unix(1020, 0)
 	var dbVersion atomic.Uint64
@@ -184,14 +229,63 @@ func TestFactWaitersAreBoundedAndReleased(t *testing.T) {
 		}
 		identities = append(identities, wire)
 	}
+	started := time.Now()
 	if _, err := bridge.PrepareIdentity(context.Background(), waitRequest); !errors.Is(err, nodepolicy.ErrFactsPending) {
-		t.Fatalf("waiter over the cap: %v, want ErrFactsPending", err)
+		t.Fatalf("waiter over the cap without a publication: %v, want ErrFactsPending", err)
+	}
+	if waited := time.Since(started); waited < nodeFactWaitBudget/2 {
+		t.Fatalf("an over-cap waiter was refused after %v, not after waiting for the publication", waited)
+	}
+	// The publication lands while an over-cap request waits: it is admitted
+	// at the new version, without a node fact wait.
+	done := make(chan error, 1)
+	go func() {
+		_, err := bridge.PrepareIdentity(context.Background(), waitRequest)
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	bridge.cache.applied(now, nodepolicy.AppliedState{Version: 8, Digest: strings.Repeat("b", 64), ExpiresAt: 1060})
+	if err := <-done; err != nil {
+		t.Fatalf("an over-cap request whose publication landed: %v", err)
 	}
 	if _, err := bridge.Simulate(context.Background(), identities[0], nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := bridge.PrepareIdentity(context.Background(), waitRequest); err != nil {
 		t.Fatalf("a returned node call did not free its slot: %v", err)
+	}
+}
+
+func TestOverflowWaiterAcceptsACoalescedNewerPublication(t *testing.T) {
+	now := time.Unix(1020, 0)
+	var dbVersion atomic.Uint64
+	dbVersion.Store(8)
+	bridge := waitingBridge(t, &dbVersion, &countingNode{status: waitingStatus(7)}, &now)
+	for i := 0; i < maxFactWaiters; i++ {
+		if _, err := bridge.PrepareIdentity(context.Background(), waitRequest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	type result struct {
+		wire []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		wire, err := bridge.PrepareIdentity(context.Background(), waitRequest)
+		done <- result{wire, err}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	dbVersion.Store(9)
+	bridge.cache.applied(now, nodepolicy.AppliedState{Version: 9, Digest: strings.Repeat("b", 64), ExpiresAt: 1060})
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("coalesced publication: %v", got.err)
+	}
+	var envelope nodepolicy.Envelope
+	var identity nodepolicy.Identity
+	if json.Unmarshal(got.wire, &envelope) != nil || json.Unmarshal(envelope.Payload, &identity) != nil || identity.MinSnapshotVersion != 9 {
+		t.Fatalf("waiter did not require the refreshed clock: %+v", identity)
 	}
 }
 

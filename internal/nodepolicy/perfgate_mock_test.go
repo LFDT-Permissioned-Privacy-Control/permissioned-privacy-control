@@ -46,11 +46,15 @@ func TestPerfgateMockSpeaksTheStrictNodeProtocol(t *testing.T) {
 
 	source := &memorySource{snapshot: snapshotFixture()}
 	signer := testSigner()
-	publisher, err := NewPublisher(PublisherConfig{Network: network, ConsumerID: "producer", Signer: signer, Source: source, Node: client, Lifetime: 30 * time.Second})
+	// The publisher's clock moves a heartbeat interval per tick: a heartbeat
+	// right after a publication is skipped.
+	var offset time.Duration
+	publisher, err := NewPublisher(PublisherConfig{Network: network, ConsumerID: "producer", Signer: signer, Source: source, Node: client, Lifetime: 30 * time.Second, Now: func() time.Time { return time.Now().Add(offset) }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ { // snapshot, heartbeat, then a delta after a change
+		offset = time.Duration(i) * heartbeatSkip
 		if i == 2 {
 			source.snapshot.Version++
 			source.snapshot.Principals[0].Banned = true

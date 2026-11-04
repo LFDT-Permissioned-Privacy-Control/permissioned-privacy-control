@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // nodeChainReader reads the node's public chain state (NODE_URL), the
@@ -17,13 +18,21 @@ import (
 // and whether the node still holds a transaction at all (pool or chain).
 type nodeChainReader interface {
 	// DroppedEvidence reads, in one request (one backend), the block at the
-	// finalized height and hash the private node reported, the signer's nonce
-	// at exactly that block (by hash, EIP-1898), and whether each hash has a
-	// canonical receipt. A backend that does not hold that block answers
-	// errNodeChain: evidence that is unavailable is never evidence of absence.
-	DroppedEvidence(ctx context.Context, number uint64, hash, signer string, hashes []string) (nonce uint64, receipts map[string]bool, err error)
+	// finalized height and hash the private node reported (and its
+	// timestamp), the signer's nonce at exactly that block (by hash,
+	// EIP-1898), and whether each hash has a canonical receipt. A backend that
+	// does not hold that block answers errNodeChain: evidence that is
+	// unavailable is never evidence of absence.
+	DroppedEvidence(ctx context.Context, number uint64, hash, signer string, hashes []string) (chainEvidence, error)
 	// Known reports, per hash, whether the node's pool or chain holds it.
 	Known(ctx context.Context, hashes []string) (map[string]bool, error)
+}
+
+// chainEvidence is one DroppedEvidence read.
+type chainEvidence struct {
+	Nonce     uint64
+	Timestamp time.Time // of the finalized block
+	Receipts  map[string]bool
 }
 
 // errNodeChain: the public node RPC did not answer usably. Evidence that is
@@ -90,9 +99,9 @@ func hexQuantity(raw json.RawMessage) (uint64, error) {
 	return strconv.ParseUint(s[2:], 16, 64)
 }
 
-func (c rpcChain) DroppedEvidence(ctx context.Context, number uint64, hash, signer string, hashes []string) (uint64, map[string]bool, error) {
+func (c rpcChain) DroppedEvidence(ctx context.Context, number uint64, hash, signer string, hashes []string) (chainEvidence, error) {
 	if len(hashes) == 0 || len(hashes) > maxChainBatch-2 {
-		return 0, nil, errNodeChain
+		return chainEvidence{}, errNodeChain
 	}
 	calls := []chainCall{
 		{"eth_getBlockByNumber", []any{fmt.Sprintf("0x%x", number), false}},
@@ -103,27 +112,32 @@ func (c rpcChain) DroppedEvidence(ctx context.Context, number uint64, hash, sign
 	}
 	results, err := c.batch(ctx, calls)
 	if err != nil {
-		return 0, nil, err
+		return chainEvidence{}, err
 	}
 	var block struct {
-		Number string `json:"number"`
-		Hash   string `json:"hash"`
+		Number    string `json:"number"`
+		Hash      string `json:"hash"`
+		Timestamp string `json:"timestamp"`
 	}
 	if json.Unmarshal(results[0], &block) != nil || !strings.EqualFold(block.Hash, hash) {
-		return 0, nil, errNodeChain // another chain, or a backend without that block
+		return chainEvidence{}, errNodeChain // another chain, or a backend without that block
 	}
 	if n, err := hexQuantity(json.RawMessage(strconv.Quote(block.Number))); err != nil || n != number {
-		return 0, nil, errNodeChain
+		return chainEvidence{}, errNodeChain
+	}
+	timestamp, err := hexQuantity(json.RawMessage(strconv.Quote(block.Timestamp)))
+	if err != nil || timestamp == 0 || timestamp > 1<<62 {
+		return chainEvidence{}, errNodeChain
 	}
 	nonce, err := hexQuantity(results[1])
 	if err != nil {
-		return 0, nil, errNodeChain
+		return chainEvidence{}, errNodeChain
 	}
 	receipts := make(map[string]bool, len(hashes))
 	for i, h := range hashes {
 		receipts[h] = string(bytes.TrimSpace(results[2+i])) != "null"
 	}
-	return nonce, receipts, nil
+	return chainEvidence{Nonce: nonce, Timestamp: time.Unix(int64(timestamp), 0), Receipts: receipts}, nil
 }
 
 // presence asks method for every hash and reports which answered non-null.

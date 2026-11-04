@@ -25,7 +25,7 @@ type trackingStore interface {
 	TrackedBatch(context.Context, [][]byte) ([]db.TrackedTransaction, error)
 	TrackedPayloads(context.Context, [][]byte) (map[string][]byte, error)
 	LookupTracked(context.Context, []byte) (db.TrackedTransaction, error)
-	TrackingHorizon(context.Context) (uint64, error)
+	TrackingHorizon(context.Context) (db.DiscoveryHorizon, error)
 	ListTracked(context.Context, uint64, uint64, []byte, int) ([]db.TrackedTransaction, error)
 	TrackingMeta(context.Context) (db.TrackingMeta, error)
 }
@@ -50,6 +50,9 @@ const (
 	// adoptSpacing bounds re-reads of tracking_meta after an incarnation
 	// mismatch.
 	adoptSpacing = time.Second
+	// admittedFeedMax bounds the hashes handed to this instance's reconciler
+	// in memory; beyond it they are dropped and the reconciler rescans.
+	admittedFeedMax = 65536
 )
 
 // errTrackingUnavailable: the intent could not be recorded; nothing was sent.
@@ -82,6 +85,39 @@ type nodeTracking struct {
 
 	// commits counts admission batch commits (tests and the batch report).
 	commits atomic.Int64
+
+	// admitted are the hashes of bindings this instance inserted or revived,
+	// handed to its own reconciler in memory, so their discovery never waits
+	// for the database's discovery horizon (independent review, finding 3).
+	// admittedLost: some were dropped (bounded); the reconciler rescans.
+	feedMu       sync.Mutex
+	admitted     [][]byte
+	admittedLost bool
+}
+
+// feed hands committed admissions to this instance's reconciler.
+func (t *nodeTracking) feed(hashes [][]byte) {
+	if len(hashes) == 0 {
+		return
+	}
+	t.feedMu.Lock()
+	defer t.feedMu.Unlock()
+	for _, h := range hashes {
+		if len(t.admitted) >= admittedFeedMax {
+			t.admittedLost = true
+			return
+		}
+		t.admitted = append(t.admitted, h)
+	}
+}
+
+// drainAdmitted takes the handed-over hashes and whether any were dropped.
+func (t *nodeTracking) drainAdmitted() ([][]byte, bool) {
+	t.feedMu.Lock()
+	defer t.feedMu.Unlock()
+	hashes, lost := t.admitted, t.admittedLost
+	t.admitted, t.admittedLost = nil, false
+	return hashes, lost
 }
 
 type admitRequest struct {
@@ -227,6 +263,13 @@ func (t *nodeTracking) commitBatch(ctx context.Context, batch []*admitRequest) {
 	}
 	if err == nil {
 		t.commits.Add(1)
+		var fed [][]byte
+		for i, r := range results {
+			if r.Outcome == db.AdmitInserted || r.Outcome == db.AdmitRevived {
+				fed = append(fed, admissions[i].Hash)
+			}
+		}
+		t.feed(fed)
 	} else if suppressed, ok := t.log.Allow("admit:"+nodeErrorClass(err), time.Now(), failureLogEvery); ok {
 		slog.Warn("execution-tracking admission batch failed", "batch", len(batch), "error", err, "suppressed", suppressed)
 	}

@@ -2812,11 +2812,11 @@
                         "type": "boolean"
                     },
                     "reconciliation_note": {
-                        "description": "ReconciliationNote: why renewal stopped (for example max_age,\nprincipal_banned, compliance_denied, nonce_conflict), nonce_consumed for\ndropped, or effects_not_applied.",
+                        "description": "ReconciliationNote: why renewal stopped (for example max_age,\nprincipal_banned, compliance_denied, nonce_conflict), why it was dropped\n(nonce_consumed or finalized_lease_expiry), or effects_not_applied.",
                         "type": "string"
                     },
                     "status": {
-                        "description": "Status: pending (waiting for inclusion; OPS keeps it deliverable),\nprovisional (in a block that is not final yet), renewal_stopped (OPS will\nnot renew it; it may still settle), included or reverted (in a finalized\nblock; final), dropped (a finalized transaction used its nonce; final).",
+                        "description": "Status: pending (waiting for inclusion; OPS keeps it deliverable),\nprovisional (in a block that is not final yet), renewal_stopped (OPS will\nnot renew it; it may still settle), included or reverted (in a finalized\nblock; final), dropped (final: a finalized transaction used its nonce,\nor every identity of a transaction OPS stopped renewing expired before a\nfinalized block that does not include it; then its nonce is still free).",
                         "enum": [
                             "pending",
                             "provisional",
@@ -15064,7 +15064,7 @@
         },
         "/api/v1/admin/orgs/{org_id}/execution/ownership-recovery": {
             "post": {
-                "description": "After the execution-tracking database was lost or recreated, a deployment that finalized meanwhile is not registered automatically. A named human with current full authority over the organization can register it from the node's finalized evidence: the node must report the transaction as included and final, deployed by a principal of this organization, within the node's evidence retention. Ownership is applied exactly once (a deployment already registered, by reconciliation or an earlier recovery, is not registered again), never below the replay floor, and never for an address another organization owns. Any transaction that is unknown, not final, not a deployment or not this organization's is answered with the same 404. The action is recorded in the RBAC audit log.",
+                "description": "After the execution-tracking database was lost or recreated, a deployment that finalized meanwhile is not registered automatically. A named human with current full authority over the organization can register it from the node's finalized evidence: the node must report the transaction as included and final, deployed by a principal of this organization, within the node's evidence retention. Ownership is applied exactly once (a deployment already registered, by reconciliation or an earlier recovery, is not registered again), never below the replay floor, and never for an address another organization owns. Any transaction that is unknown, not final, not a deployment or not this organization's is answered with the same 404. The action is recorded in the RBAC audit log in the same transaction as the change: if the record cannot be written, nothing is registered and the request fails with 500.",
                 "parameters": [
                     {
                         "description": "Organization UUID",
@@ -15156,6 +15156,16 @@
                             }
                         },
                         "description": "Too Many Requests"
+                    },
+                    "500": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "nothing was changed (for example the audit record could not be written)"
                     },
                     "503": {
                         "content": {
@@ -22805,7 +22815,7 @@
         },
         "/api/v1/me/transactions/{hash}/execution": {
             "get": {
-                "description": "Status for a transaction submitted by this named principal, with current organization membership and KYC required. Shared signing addresses do not share status access. pending, provisional (included in a block that is not final yet) and renewal_stopped (OPS will not renew its identity, but it may still settle; reconciliation_note names why, e.g. max_age, principal_banned, compliance_denied, nonce_conflict) are nonterminal: a provisional transaction can return to pending after a reorganization, and a renewal_stopped one can still be included while its last identity is valid. Wait for a final status rather than treating renewal_stopped as a failure. included and reverted (in a finalized block) and dropped (reported only once a finalized block used the transaction's nonce and the transaction itself was never included; an expired identity alone is never final) are final; reconciled means OPS bookkeeping for the final status is committed, and reconciliation_note effects_not_applied means a deployment or visibility effect was refused. Final statuses are kept for the configured retention (RETENTION_NODE_SUBMISSIONS), after which the transaction is not found. This endpoint never returns raw transactions, signing envelopes or visibility recipients.",
+                "description": "Status for a transaction submitted by this named principal, with current organization membership and KYC required. Shared signing addresses do not share status access. pending, provisional (included in a block that is not final yet) and renewal_stopped (OPS will not renew its identity, but it may still settle; reconciliation_note names why, e.g. max_age, principal_banned, compliance_denied, nonce_conflict) are nonterminal: a provisional transaction can return to pending after a reorganization, and a renewal_stopped one can still be included while its last identity is valid. Wait for a final status rather than treating renewal_stopped as a failure. included and reverted (in a finalized block) and dropped are final. dropped with reconciliation_note nonce_consumed can never execute (a finalized transaction used its nonce); with finalized_lease_expiry OPS had stopped renewing it and every identity issued for it expired before a finalized block that does not include it: it is not accepted again while its status is kept, but its nonce is still free, so send a replacement at the same nonce to rule out a later execution after that; reconciled means OPS bookkeeping for the final status is committed, and reconciliation_note effects_not_applied means a deployment or visibility effect was refused. Final statuses are kept for the configured retention (RETENTION_NODE_SUBMISSIONS), after which the transaction is not found. This endpoint never returns raw transactions, signing envelopes or visibility recipients.",
                 "parameters": [
                     {
                         "description": "Lowercase transaction hash",

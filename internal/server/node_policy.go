@@ -132,6 +132,30 @@ type nodeStatusTicket struct {
 type nodeStatusCache struct {
 	seq     atomic.Uint64
 	current atomic.Pointer[nodeStatusObservation]
+	// changed is closed (and replaced) whenever a newer observation is
+	// recorded, so requests can wait for the node's facts without polling.
+	changedMu sync.Mutex
+	changed   chan struct{}
+}
+
+// notify wakes everything waiting for a newer observation.
+func (c *nodeStatusCache) notify() {
+	c.changedMu.Lock()
+	if c.changed != nil {
+		close(c.changed)
+		c.changed = nil
+	}
+	c.changedMu.Unlock()
+}
+
+// next returns a channel closed at the next recorded observation.
+func (c *nodeStatusCache) next() <-chan struct{} {
+	c.changedMu.Lock()
+	defer c.changedMu.Unlock()
+	if c.changed == nil {
+		c.changed = make(chan struct{})
+	}
+	return c.changed
 }
 
 func (c *nodeStatusCache) begin(at time.Time) nodeStatusTicket {
@@ -139,15 +163,43 @@ func (c *nodeStatusCache) begin(at time.Time) nodeStatusTicket {
 }
 
 func (c *nodeStatusCache) finish(t nodeStatusTicket, status nodepolicy.NodeStatus, err error) {
-	o := &nodeStatusObservation{seq: t.seq, at: t.at, status: status, err: err}
+	c.store(&nodeStatusObservation{seq: t.seq, at: t.at, status: status, err: err})
+}
+
+func (c *nodeStatusCache) store(o *nodeStatusObservation) {
 	for {
 		current := c.current.Load()
 		if current != nil && current.seq > o.seq {
 			return
 		}
 		if c.current.CompareAndSwap(current, o) {
+			c.notify()
 			return
 		}
+	}
+}
+
+// applied records the node's acknowledgement of a fact publication (it
+// holds version, digest and expiry now) on top of the newest ready
+// observation, so requests on the publishing instance see the new facts
+// without waiting for the next status read (F8). Anything other than a
+// fresh, ready, error-free observation is left to the probe.
+func (c *nodeStatusCache) applied(at time.Time, ack nodepolicy.AppliedState) {
+	for {
+		current := c.current.Load()
+		if current == nil || current.err != nil || !current.status.Ready || ack.Version <= current.status.Version || at.Before(current.at) {
+			return
+		}
+		status := current.status
+		status.Version, status.Digest, status.ExpiresAt = ack.Version, ack.Digest, ack.ExpiresAt
+		next := &nodeStatusObservation{seq: c.seq.Add(1), at: at, status: status}
+		if c.current.CompareAndSwap(current, next) {
+			c.notify()
+			return
+		}
+		// A probe or another acknowledgement won after the load. Recheck
+		// that observation rather than publishing a stale derived value
+		// with a newly allocated sequence number.
 	}
 }
 
@@ -324,6 +376,35 @@ func (b *nodeExecutionBridge) acquireFactWait(contextID string) bool {
 	}
 }
 
+// awaitFacts waits until the cached node status holds at least version and
+// is ready for it, at most until the current lag episode's fact-wait budget
+// ends (nodeFactWaitBudget after the node was first seen behind) or ctx
+// ends. It reports whether the node has the facts now.
+func (b *nodeExecutionBridge) awaitFacts(ctx context.Context, version uint64, at time.Time) (uint64, time.Time, bool) {
+	b.behindMu.Lock()
+	remaining := b.behind.since.Add(nodeFactWaitBudget).Sub(b.now())
+	b.behindMu.Unlock()
+	timer := time.NewTimer(max(remaining, 0))
+	defer timer.Stop()
+	for {
+		changed := b.cache.next()
+		var err error
+		version, at, err = b.checkClock(ctx, b.cache.load(), version, at)
+		if err == nil {
+			return version, at, true
+		} else if !errors.Is(err, errFactWait) {
+			return version, at, false // not a publication in flight any more
+		}
+		select {
+		case <-changed:
+		case <-timer.C:
+			return version, at, false
+		case <-ctx.Done():
+			return version, at, false
+		}
+	}
+}
+
 // releaseFactWait frees the slot of an identity once its node call returned.
 func (b *nodeExecutionBridge) releaseFactWait(contextID string) {
 	b.waitingMu.Lock()
@@ -355,6 +436,7 @@ func (o observingFactNode) PolicyStatus(ctx context.Context) (nodepolicy.NodeSta
 func (o observingFactNode) ApplyPolicy(ctx context.Context, wire []byte) (nodepolicy.AppliedState, error) {
 	applied, err := o.node.ApplyPolicy(ctx, wire)
 	if err == nil {
+		o.bridge.cache.applied(o.bridge.now(), applied)
 		o.bridge.kickProbe()
 	}
 	return applied, err
@@ -397,6 +479,21 @@ func (b *nodeExecutionBridge) clock(ctx context.Context) (uint64, time.Time, err
 	return version, b.now(), err
 }
 
+// checkClock rechecks the authoritative clock when a publication overtook
+// the earlier DB read. A node still ahead of that fresh read remains a feed
+// conflict; an ordinary concurrent commit must not refuse unaffected work.
+func (b *nodeExecutionBridge) checkClock(ctx context.Context, o *nodeStatusObservation, version uint64, at time.Time) (uint64, time.Time, error) {
+	err := b.check(o, version)
+	if !errors.Is(err, nodepolicy.ErrFeedConflict) {
+		return version, at, err
+	}
+	version, at, clockErr := b.clock(ctx)
+	if clockErr != nil {
+		return 0, time.Time{}, nodepolicy.ErrNodeUnavailable
+	}
+	return version, at, b.check(o, version)
+}
+
 // readiness returns the database fact version the request requires and the
 // issuing time read with it. waits reports that the node is behind and will
 // wait for that version itself.
@@ -408,9 +505,9 @@ func (b *nodeExecutionBridge) readiness(ctx context.Context) (version uint64, at
 	// Taken after the version read: a status read with a higher sequence
 	// started after the database answered.
 	mark := b.cache.seq.Load()
-	err = b.check(b.cache.load(), version)
+	version, at, err = b.checkClock(ctx, b.cache.load(), version, at)
 	if err != nil && !errors.Is(err, errFactWait) {
-		err = b.check(b.refreshAfter(ctx, mark), version)
+		version, at, err = b.checkClock(ctx, b.refreshAfter(ctx, mark), version, at)
 	}
 	if errors.Is(err, errFactWait) {
 		return version, at, true, nil
@@ -423,7 +520,7 @@ func (b *nodeExecutionBridge) readiness(ctx context.Context) (version uint64, at
 // and rate-bounded like the request-path refresh, so readiness probes cannot
 // crowd fact publication off the control lane.
 func (b *nodeExecutionBridge) executionStatus(ctx context.Context) (uint64, nodepolicy.NodeStatus, error) {
-	version, err := b.source.NodePolicyVersion(ctx)
+	version, at, err := b.clock(ctx)
 	if err != nil {
 		return 0, nodepolicy.NodeStatus{}, nodepolicy.ErrNodeUnavailable
 	}
@@ -435,7 +532,8 @@ func (b *nodeExecutionBridge) executionStatus(ctx context.Context) (uint64, node
 	if o.err != nil {
 		return version, nodepolicy.NodeStatus{}, o.err
 	}
-	if err := b.check(o, version); err != nil && !errors.Is(err, errFactWait) {
+	version, _, err = b.checkClock(ctx, o, version, at)
+	if err != nil && !errors.Is(err, errFactWait) {
 		return version, o.status, err
 	}
 	return version, o.status, nil
@@ -494,7 +592,16 @@ func (b *nodeExecutionBridge) PrepareIdentity(ctx context.Context, request NodeE
 	}
 	contextID := uuid.NewString()
 	if waits && !b.acquireFactWait(contextID) {
-		return nil, nodepolicy.ErrFactsPending
+		// Every slot for the node's own fact wait is taken: wait here, holding
+		// no node connection, for the publication in flight (bounded by the
+		// lag episode's budget), instead of refusing a request whose facts
+		// are about to arrive (P7 L5, F8).
+		var ready bool
+		version, at, ready = b.awaitFacts(ctx, version, at)
+		if !ready {
+			return nil, nodepolicy.ErrFactsPending
+		}
+		waits = false
 	}
 	lifetime := b.lifetime
 	if request.Scope == "transaction" && b.txLifetime > 0 {
@@ -539,11 +646,16 @@ func (b *nodeExecutionBridge) SubmitTransaction(ctx context.Context, identity []
 		if err != nil {
 			return nodepolicy.Submission{}, nodepolicy.ErrNodeUnavailable
 		}
-		if result.Outcome != db.AdmitIncomparable || attempt >= 2 {
+		needsResign := result.Outcome == db.AdmitIncomparable || (result.Outcome == db.AdmitKept && i.MinSnapshotVersion < result.MinVersion)
+		if !needsResign {
 			break
 		}
-		// Neither envelope dominates the other (a database clock step): sign
-		// again at the current clock (§4.8.3), bounded.
+		if attempt >= 2 {
+			return nodepolicy.Submission{}, nodepolicy.ErrNodeUnavailable
+		}
+		// Re-read the current clock and sign again for incomparable envelopes
+		// or a delayed attempt below the durable winner's fact floor. The
+		// latter must never install stale authority in a restarted registry.
 		again, err := b.PrepareIdentity(ctx, NodeExecutionIdentityRequest{Scope: "transaction", PrincipalID: i.PrincipalID, OrgID: i.OrgID, Signer: i.Signer, BindingHash: i.BindingHash})
 		if err != nil {
 			return nodepolicy.Submission{}, err
@@ -946,6 +1058,14 @@ func (s *Server) initNodePolicy() error {
 			reconciler.batched = func() bool {
 				o := bridge.cache.load()
 				return o != nil && o.err == nil && o.status.HasCapability(nodepolicy.CapabilityTransactionStatuses)
+			}
+			reconciler.notFound = func() bool {
+				o := bridge.cache.load()
+				return o != nil && o.err == nil && o.status.HasCapability(nodepolicy.CapabilityTransactionNotFound)
+			}
+			if s.metrics != nil {
+				alerts := s.metrics.NodeTrackingAlertsTotal
+				reconciler.alert = func(kind string) { alerts.WithLabelValues(kind).Inc() }
 			}
 			reconciler.keeper = &nodeKeeper{node: client, chain: chain, checker: rechecker, clock: s.db, signer: signer, network: network, ttl: txTTL, maxAge: maxAge, budget: renewal.Budget, boot: bridge.observedBoot, now: time.Now}
 			go func() { defer close(reconcilerDone); runNodeReconciler(term, reconciler) }()
