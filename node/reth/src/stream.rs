@@ -19,18 +19,39 @@ use std::{
 const MAX_CHAIN_BYTES: usize = 256 << 20;
 const MAX_CHAIN_RECORDS: usize = 8192;
 
-/// The durable record list: the snapshot and deltas a generation was built
-/// from, by version and content address. Written once per snapshot/delta;
-/// every block manifest built on that generation references it by id.
-#[derive(Serialize, Deserialize)]
+/// The durable record list of one generation: its own record (the snapshot or
+/// delta that made it) and the list of the generation it extends, so its
+/// size is constant and a chain's lists grow linearly with its length.
+/// Written once per snapshot/delta; every block manifest built on that
+/// generation references it by id, and the id commits to the whole chain
+/// back to its snapshot.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordList {
     format_version: u32,
     facts_version: u64,
     facts_digest: B256,
-    records: Vec<ArchivedRecord>,
+    /// The chain's snapshot version.
+    base_version: u64,
+    /// Records in the chain up to and including this one (a snapshot: 1).
+    records: u64,
+    /// The list of the generation this delta extends; none for a snapshot.
+    previous: Option<ListRef>,
+    record: ArchivedRecord,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
+/// A stored record list: the facts version it completes, and its id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListRef {
+    version: u64,
+    list: ArtifactId,
+}
+
+const LIST_FORMAT: u32 = 4;
+/// A stored record list is read with this bound (one is about 400 bytes).
+const MAX_LIST_BYTES: usize = 4096;
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArchivedRecord {
     kind: String,
@@ -44,7 +65,14 @@ pub struct AppliedFacts {
     snapshot: Arc<Snapshot>,
     digest: B256,
     lease: Header,
-    records: Arc<Vec<ArchivedRecord>>,
+    /// The snapshot or delta that made this generation (a heartbeat keeps
+    /// it: it renews the lease of the same facts).
+    record: ArchivedRecord,
+    /// The chain's snapshot version, and its records up to this generation.
+    base_version: u64,
+    chain_records: usize,
+    /// The generation this delta extends: its version and durable list.
+    previous: Option<(u64, Option<ArtifactId>)>,
     chain_bytes: usize,
     heartbeat: Option<Arc<SignedEnvelope>>,
     /// The durable record-list object, once the records are on disk. Only
@@ -83,20 +111,31 @@ impl AppliedFacts {
     }
     /// The version of the snapshot this generation's chain starts from.
     pub fn base_version(&self) -> u64 {
-        self.records
-            .first()
-            .map(|record| record.version)
-            .unwrap_or(0)
+        self.base_version
     }
 
-    pub(crate) fn record_list(&self) -> Result<Vec<u8>, String> {
-        serde_json::to_vec(&RecordList {
-            format_version: 3,
+    /// This generation's record list. A delta's names the durable list of
+    /// the generation it extends, so that one must be durable first.
+    fn list(&self) -> Result<RecordList, String> {
+        let previous = match self.previous {
+            None => None,
+            Some((version, Some(list))) => Some(ListRef { version, list }),
+            Some((_, None)) => return Err("policy facts are not durable".into()),
+        };
+        Ok(RecordList {
+            format_version: LIST_FORMAT,
             facts_version: self.version(),
             facts_digest: self.digest,
-            records: self.records.as_ref().clone(),
+            base_version: self.base_version,
+            records: self.chain_records as u64,
+            previous,
+            record: self.record.clone(),
         })
-        .map_err(|_| "invalid policy record list".into())
+    }
+
+    /// The stored form of this generation's record list.
+    pub(crate) fn record_list(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(&self.list()?).map_err(|_| "invalid policy record list".into())
     }
 
     pub(crate) fn with_checkpoint(&self, checkpoint: ArtifactId) -> Self {
@@ -117,7 +156,7 @@ pub enum Prepared {
     /// renews the lease.
     Next {
         base: Option<Arc<AppliedFacts>>,
-        next: AppliedFacts,
+        next: Box<AppliedFacts>,
         record: bool,
     },
 }
@@ -218,7 +257,7 @@ impl FactStream {
     ) -> Result<Arc<AppliedFacts>, String> {
         let stream = Self::restore_records(verifier, store, version, checkpoint, at)?;
         if let Some(lease) = lease {
-            stream.restore_record("heartbeat", &lease.to_wire(), at)?;
+            stream.restore_record("heartbeat", &lease.to_wire(), at, None)?;
         }
         let facts = stream.latest()?.ok_or("missing retained policy facts")?;
         stream.verifier.validate_header(&facts.lease, at)?;
@@ -228,6 +267,11 @@ impl FactStream {
         Ok(facts)
     }
 
+    /// The generation of list (`version`, `checkpoint`): walk its chain back
+    /// to the snapshot through each list's `previous` (the stored ids commit
+    /// to the whole chain), then re-verify and re-apply every record forward,
+    /// each generation installed with its own list, which it must reproduce
+    /// field for field.
     fn restore_records(
         verifier: Verifier,
         store: &ArtifactStore,
@@ -235,42 +279,73 @@ impl FactStream {
         checkpoint: ArtifactId,
         at: i64,
     ) -> Result<Self, String> {
-        let list: RecordList = decode_strict(&store.get_list(version, checkpoint)?)?;
-        if list.format_version != 3
-            || list.facts_version != version
-            || list.records.is_empty()
-            || list.records.len() > MAX_CHAIN_RECORDS
-        {
-            return Err("invalid policy checkpoint".into());
+        let invalid = || "invalid policy checkpoint".to_owned();
+        let mut chain: Vec<(ListRef, RecordList)> = Vec::new();
+        let mut next = Some(ListRef {
+            version,
+            list: checkpoint,
+        });
+        while let Some(at_ref) = next {
+            if chain.len() >= MAX_CHAIN_RECORDS {
+                return Err(invalid());
+            }
+            let list: RecordList = decode_strict(&store.get_list_bounded(
+                at_ref.version,
+                at_ref.list,
+                MAX_LIST_BYTES,
+            )?)?;
+            let snapshot = list.records == 1;
+            // One shape per position: a snapshot opens the chain, every
+            // other record is a delta naming the generation it extends.
+            if list.format_version != LIST_FORMAT
+                || list.facts_version != at_ref.version
+                || list.record.version != list.facts_version
+                || list.records == 0
+                || list.records > MAX_CHAIN_RECORDS as u64
+                || snapshot != list.previous.is_none()
+                || snapshot != (list.base_version == list.facts_version)
+                || list.record.kind != if snapshot { "snapshot" } else { "delta" }
+                || list.base_version > list.facts_version
+            {
+                return Err(invalid());
+            }
+            // Consistent with the list read before, whose `previous` named
+            // this one: same chain, one record shorter, an older version.
+            if let Some((child, child_list)) = chain.last()
+                && (child_list.records != list.records + 1
+                    || child_list.base_version != list.base_version
+                    || at_ref.version >= child.version)
+            {
+                return Err(invalid());
+            }
+            next = list.previous;
+            chain.push((at_ref, list));
         }
         let stream = Self::new(verifier);
-        for (index, record) in list.records.iter().enumerate() {
-            if record.kind != if index == 0 { "snapshot" } else { "delta" } {
-                return Err("invalid checkpoint record order".into());
+        for (list_ref, list) in chain.iter().rev() {
+            let wire = store.get_record(list.record.version, list.record.envelope)?;
+            stream.restore_record(&list.record.kind, &wire, at, Some(list_ref.list))?;
+            let facts = stream.latest()?.ok_or("missing retained policy facts")?;
+            if facts.version() != list.facts_version
+                || facts.digest() != list.facts_digest
+                || facts.list()? != *list
+            {
+                return Err("policy checkpoint state mismatch".into());
             }
-            stream.restore_record(
-                &record.kind,
-                &store.get_record(record.version, record.envelope)?,
-                at,
-            )?;
         }
-        let facts = stream.latest()?.ok_or("missing retained policy facts")?;
-        if facts.version() != list.facts_version
-            || facts.digest() != list.facts_digest
-            || facts
-                .records
-                .as_ref()
-                .iter()
-                .map(|r| (r.version, r.envelope))
-                .ne(list.records.iter().map(|r| (r.version, r.envelope)))
-        {
-            return Err("policy checkpoint state mismatch".into());
-        }
-        stream.install(Some(&facts), Arc::new(facts.with_checkpoint(checkpoint)))?;
         Ok(stream)
     }
 
-    fn restore_record(&self, kind: &str, wire: &[u8], at: i64) -> Result<(), String> {
+    /// Re-verify and apply one archived record on the installed generation,
+    /// installing the result with `checkpoint` as its durable list (a
+    /// heartbeat keeps its generation's).
+    fn restore_record(
+        &self,
+        kind: &str,
+        wire: &[u8],
+        at: i64,
+        checkpoint: Option<ArtifactId>,
+    ) -> Result<(), String> {
         let payload = self.verifier.open(kind, wire)?;
         let value: serde_json::Value = decode_strict(&payload)?;
         let issued = value
@@ -280,8 +355,16 @@ impl FactStream {
         if issued > at.saturating_add(5) {
             return Err("future archived policy facts".into());
         }
-        self.accept(kind, wire, issued)?;
-        Ok(())
+        match self.prepare(kind, wire, issued)? {
+            Prepared::Unchanged(_) => Ok(()),
+            Prepared::Next { base, next, .. } => {
+                let next = match checkpoint {
+                    Some(list) => next.with_checkpoint(list),
+                    None => *next,
+                };
+                self.install(base.as_ref(), Arc::new(next))
+            }
+        }
     }
 
     pub fn pin(&self, now: i64, minimum_version: u64) -> Result<Arc<AppliedFacts>, String> {
@@ -344,9 +427,10 @@ impl FactStream {
             .clone())
     }
 
-    /// Validate in memory only and install: no durability. Unit tests and
-    /// restore use it; a node installs through `PolicyRuntime::accept_facts`,
-    /// and candidate blocks refuse facts without a durable record list.
+    /// Validate in memory only and install: no durability. Unit tests use it;
+    /// a node installs through `PolicyRuntime::accept_facts`, restore through
+    /// `prepare` and `install`, and candidate blocks refuse facts without a
+    /// durable record list.
     pub fn accept(
         &self,
         kind: &str,
@@ -356,7 +440,7 @@ impl FactStream {
         match self.prepare(kind, envelope, now)? {
             Prepared::Unchanged(facts) => Ok(facts),
             Prepared::Next { base, next, .. } => {
-                let next = Arc::new(next);
+                let next = Arc::new(*next);
                 self.install(base.as_ref(), next.clone())?;
                 Ok(next)
             }
@@ -412,17 +496,19 @@ impl FactStream {
                         return Err("conflicting or stale policy snapshot".into());
                     }
                 }
-                let records = Arc::new(vec![ArchivedRecord {
-                    kind: kind.into(),
-                    version: snapshot.version,
-                    envelope: id,
-                }]);
                 AppliedFacts {
                     lease: snapshot.header.clone(),
                     max_issued: snapshot.header.issued_at,
+                    record: ArchivedRecord {
+                        kind: kind.into(),
+                        version: snapshot.version,
+                        envelope: id,
+                    },
+                    base_version: snapshot.version,
+                    chain_records: 1,
+                    previous: None,
                     snapshot: Arc::new(snapshot),
                     digest,
-                    records,
                     chain_bytes: wire.len(),
                     heartbeat: None,
                     checkpoint: None,
@@ -448,24 +534,25 @@ impl FactStream {
                 {
                     return Err("resynchronisation required: policy delta gap or conflict".into());
                 }
-                if old.records.len() >= MAX_CHAIN_RECORDS
+                if old.chain_records >= MAX_CHAIN_RECORDS
                     || old.chain_bytes + wire.len() > MAX_CHAIN_BYTES
                 {
                     return Err("resynchronisation required: policy checkpoint limit".into());
                 }
                 let snapshot = apply_delta(old.snapshot(), &delta)?;
-                let mut records = old.records.as_ref().clone();
-                records.push(ArchivedRecord {
-                    kind: kind.into(),
-                    version: delta.version,
-                    envelope: id,
-                });
                 AppliedFacts {
                     max_issued: old.max_issued.max(delta.header.issued_at),
                     lease: delta.header,
                     snapshot: Arc::new(snapshot),
                     digest,
-                    records: Arc::new(records),
+                    record: ArchivedRecord {
+                        kind: kind.into(),
+                        version: delta.version,
+                        envelope: id,
+                    },
+                    base_version: old.base_version,
+                    chain_records: old.chain_records + 1,
+                    previous: Some((old.version(), old.checkpoint)),
                     chain_bytes: old.chain_bytes + wire.len(),
                     heartbeat: None,
                     checkpoint: None,
@@ -501,7 +588,7 @@ impl FactStream {
         };
         Ok(Prepared::Next {
             base: current,
-            next,
+            next: Box::new(next),
             record: kind != "heartbeat",
         })
     }

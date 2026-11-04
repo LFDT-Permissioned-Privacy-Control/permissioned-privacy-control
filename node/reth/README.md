@@ -274,9 +274,14 @@ if the latest snapshot or delta's own lease has expired. Self-import reuses that
 imports once from the execution it recorded, without reading the manifest back); ordinary simulations use current
 permissions even when querying historical chain state.
 
-The state directory (layout 3; a directory from an earlier build is refused)
+The state directory (layout 4; a directory from an earlier build is refused:
+upgrade with the node stopped at a finalized head and an empty directory)
 keeps signed snapshot and delta records and their record lists by fact version,
-and one compressed manifest file per produced block. Final and written blocks'
+and one compressed manifest file per produced block. A record list names its
+own record and the list of the generation it extends, so it stays about 400
+bytes (under 512) however long the fact chain grows: about two small files per snapshot or
+delta. Replay and restart walk a chain's lists back to its snapshot (at most
+8192). Final and written blocks'
 manifests are compacted, in batches of at least 256 or a full 4096-height
 range, into segment files of finalized canonical blocks (a lookup reads the
 segment's footer, index and one entry); other builds of a final height, which

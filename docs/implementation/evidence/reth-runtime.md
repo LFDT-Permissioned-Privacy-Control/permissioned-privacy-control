@@ -366,7 +366,7 @@ across a simulated crash (`node/reth/tests/common/mod.rs`):
 | Produced block | 2 per transaction (envelope) + 4 per transaction (status) + checkpoint re-put of every record + 2 (manifest) | **2** (one manifest file and its directory) | `one_manifest_publication_per_block` |
 | Snapshot or delta | checkpoint re-put of every record since the snapshot | **6** (record, record list, head pointer), independent of chain length | `fact_record_written_once_before_install_independent_of_chain_length` |
 | Heartbeat | checkpoint re-put | **0**; it travels in the manifests of the blocks it made fresh | `heartbeat_never_written_separately`, `replay_after_snapshot_expiry_uses_embedded_heartbeat` |
-| Restart | read and verify every `tx-` identity ever stored | reads the layout marker, the fact head, its record list and records only | `restart_reads_are_independent_of_history` |
+| Restart | read and verify every `tx-` identity ever stored | reads the layout marker, the fact head, its chain's record lists and records only | `restart_reads_are_independent_of_history` |
 
 A block manifest embeds the decoded identity envelope (key id, exact signed
 payload, signature) and outcome of every transaction, the id of the durable
@@ -377,6 +377,33 @@ and by one id per record in the list. The fixture's 200
 transactions compress to less than a third of their JSON envelopes. Facts are
 installed only after their records are durable, by one serialised writer; a
 candidate block refuses facts without a durable record list.
+
+A record list names only its own record and the list of the generation it
+extends (independent review, finding 6). Before, each list named every record
+of its chain, so a chain of k deltas wrote about 110·k bytes per delta: at one
+delta per second, about 270 GB of lists over the 7-day retention. After 300
+deltas the largest list is now 378 bytes and all 301 lists take 113 KB; the
+same run wrote a 33 KB list before
+(`record_lists_grow_linearly_and_replay_walks_the_chain`, which also replays
+blocks built on the first, second and last generation, before and after a
+restart). Replay and restart walk the chain back to its snapshot (lists read
+with a 4 KiB bound) and check every link: the record and version a list names,
+its chain length and snapshot version against the list it extends; then the
+restored generation must reproduce each list field for field
+(`a_list_that_does_not_link_into_its_chain_is_refused`, which checks which of
+the two passes refuses each tampered list). A chain at the limit of 8192
+records restores (`the_longest_chain_restores_through_its_lists`, 2.8 s for
+the whole file in release). A crash after every storage operation of the third
+delta of a chain (v4 on v1 to v3) leaves the
+old or the new generation, every earlier block replays, and the chain continues
+from what survived (`crash_at_every_step_of_a_chained_delta_keeps_every_block_replayable`).
+Replay still re-applies every delta of the chain, and now reads one list per
+record as well (at most 8192 of each per replay or restart). Collection keeps
+every list of a chain a retained block or the installed facts reach, and lets
+the chain go once a newer snapshot is the lowest base
+(`a_delta_chain_keeps_every_list_its_retained_blocks_reach`, which fails with
+the old "below the lowest facts version" bound). The layout is now 4; a
+layout-3 directory is refused (`an_earlier_layout_is_refused`).
 
 Crash cases run in process against the same model: a crash before or after the
 manifest's file or directory sync, between a fact record and its head pointer,
@@ -561,14 +588,16 @@ model:
 | A segment lookup reads the footer, the index and one entry, not the segment | `segment_lookup_reads_footer_index_and_one_entry` |
 | A crash after every storage operation of a compaction (temp write, link, directory syncs, each unlink) recovers with every canonical block found exactly and no discarded build resurrected | `crash_at_each_segment_publication_step_recovers_with_exact_lookups` |
 | The retention setting and an earlier layout | `retention_setting_accepts_forever_and_whole_durations`, `an_earlier_layout_is_refused` |
+| Retained blocks on the last delta of a chain keep every list and record back to its snapshot; a newer snapshot lets the chain go once its blocks are pruned | `a_delta_chain_keeps_every_list_its_retained_blocks_reach` |
 
 Collection deletes by version range: snapshot versions strictly increase, so
 each fact chain occupies its own version range, and a record list never names a
-record older than its chain's snapshot. Lists below the lowest facts version and
-records below the lowest snapshot version over every root (retained segments and
+record older than its chain's snapshot. Lists and records below the lowest
+snapshot version over every root (retained segments and
 block files, the installed facts, every candidate still building, registered
 under the fact-stream lock and read before any listing) are deleted. With the
-tests' maintenance disabled, seven of them fail; with pinned candidates ignored
+tests' maintenance disabled, seven of them failed (before the delta-chain test
+was added); with pinned candidates ignored
 as roots, the pinned-build test fails; with segments and block files ignored as
 roots, the two single-root tests fail. Live runs (`crash.py`, `smoke.py`) are
 shorter than a compaction batch (256 finalized blocks), so compaction is proven

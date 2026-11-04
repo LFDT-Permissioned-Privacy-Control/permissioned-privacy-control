@@ -805,7 +805,7 @@ impl PolicyRuntime {
                     self.archive.set_head(next.version(), list)?;
                     next.with_checkpoint(list)
                 } else {
-                    next
+                    *next
                 };
                 let next = Arc::new(next);
                 self.feed.install(base.as_ref(), next.clone())?;

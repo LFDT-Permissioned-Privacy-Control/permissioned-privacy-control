@@ -2,7 +2,7 @@
 //! addresses, not issuer signatures. Replay must also verify the retained signed
 //! records and identities before constructing an execution handle.
 //!
-//! Layout of the state directory (version 3; older layouts are refused, there
+//! Layout of the state directory (version 4; older layouts are refused, there
 //! is no importer):
 //! - `LAYOUT`: the layout marker, written first on initialisation;
 //! - `LOCK`: held exclusively by the one node process using the directory;
@@ -10,7 +10,8 @@
 //! - `facts/<version / 4096 as {:08x}>/<version as {:016x}>-<sha256>`: signed
 //!   snapshot and delta records, by their own version;
 //! - `lists/<version / 4096 as {:08x}>/<version as {:016x}>-<sha256>`: record
-//!   lists, by the facts version they complete;
+//!   lists, by the facts version they complete; each names its own record and
+//!   the list of the generation it extends, back to its chain's snapshot;
 //! - `pointers/facts-head`: the installed generation's record list;
 //! - `blocks/<height / 4096 as {:08x}>/<height as {:016x}>-<hash>`: one
 //!   produced block's manifest, a one-entry segment (see `manifest`);
@@ -20,10 +21,10 @@
 //!
 //! Versions order fact records: snapshot versions strictly increase, so each
 //! fact chain (a snapshot and its deltas) occupies its own ascending version
-//! range, and every record a list names has at least the list's base
-//! (snapshot) version. Collection therefore deletes by version range: lists
-//! below the lowest facts version and records below the lowest base version
-//! any retained manifest, the installed facts or a pinned candidate uses.
+//! range, and every record and list a list reaches has at least the list's
+//! base (snapshot) version. Collection therefore deletes by version range:
+//! lists and records below the lowest base version any retained manifest, the
+//! installed facts or a pinned candidate uses.
 
 use crate::{
     manifest::{
@@ -108,7 +109,7 @@ pub const RUN_REMOVALS: usize = 1024;
 /// defers collection (retention is a minimum, so deferring is safe).
 const ROOT_FILES: usize = 65_536;
 
-const LAYOUT: &[u8] = b"ops-node-policy-archive 3\n";
+const LAYOUT: &[u8] = b"ops-node-policy-archive 4\n";
 
 /// How long compacted manifests (and the fact records only they reference)
 /// are kept, counted from the block's timestamp. Only finalized blocks are
@@ -418,7 +419,7 @@ impl ArtifactStore {
 
     /// A stored record, checked against its content address.
     pub fn get_record(&self, version: u64, id: ArtifactId) -> Result<Vec<u8>, String> {
-        self.get_versioned("facts", version, id)
+        self.get_versioned("facts", version, id, MAX_OBJECT)
     }
 
     /// Store a record list completing facts `version` durably.
@@ -428,7 +429,17 @@ impl ArtifactStore {
 
     /// A stored record list, checked against its content address.
     pub fn get_list(&self, version: u64, id: ArtifactId) -> Result<Vec<u8>, String> {
-        self.get_versioned("lists", version, id)
+        self.get_versioned("lists", version, id, MAX_OBJECT)
+    }
+
+    /// `get_list`, refusing a file larger than `limit`.
+    pub(crate) fn get_list_bounded(
+        &self,
+        version: u64,
+        id: ArtifactId,
+        limit: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.get_versioned("lists", version, id, limit)
     }
 
     /// Point `facts-head` at the stored list of facts `version`.
@@ -465,8 +476,14 @@ impl ArtifactStore {
         Ok(id)
     }
 
-    fn get_versioned(&self, area: &str, version: u64, id: ArtifactId) -> Result<Vec<u8>, String> {
-        let bytes = self.read_bounded(&self.versioned_path(area, version, id), MAX_OBJECT)?;
+    fn get_versioned(
+        &self,
+        area: &str,
+        version: u64,
+        id: ArtifactId,
+        limit: usize,
+    ) -> Result<Vec<u8>, String> {
+        let bytes = self.read_bounded(&self.versioned_path(area, version, id), limit)?;
         if ArtifactId::of(&bytes) != id {
             return Err("execution artifact digest mismatch".into());
         }
@@ -982,10 +999,12 @@ impl ArtifactStore {
         Ok(())
     }
 
-    /// Delete record lists below the lowest facts version and records below
-    /// the lowest base version over every root: retained segments and
-    /// per-block manifests, the installed facts and pinned candidates (in
-    /// `input.live`, read before this listing).
+    /// Delete record lists and records below the lowest base version over
+    /// every root: retained segments and per-block manifests, the installed
+    /// facts and pinned candidates (in `input.live`, read before this
+    /// listing). A root's list reaches every list of its chain from the
+    /// snapshot on, so lists go by the base version too (the roots' facts
+    /// versions are no longer a bound; segment names keep them).
     fn collect(
         &self,
         input: &MaintenanceInput,
@@ -1019,14 +1038,14 @@ impl ArtifactStore {
                 }
             }
         }
-        let Some((facts, base)) = lowest else {
+        let Some((_, base)) = lowest else {
             return Ok(Collected::Done);
         };
         let budget = report.budget();
         if budget == 0 {
             return Ok(Collected::More);
         }
-        let lists = self.remove_below("lists", facts, budget)?;
+        let lists = self.remove_below("lists", base, budget)?;
         let records = self.remove_below("facts", base, budget - lists)?;
         report.removed_lists += lists;
         report.removed_records += records;

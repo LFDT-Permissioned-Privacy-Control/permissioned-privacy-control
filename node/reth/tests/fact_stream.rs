@@ -205,7 +205,7 @@ fn chain_limits_require_a_new_snapshot() {
     let stream = FactStream::new(verifier());
     let (wire, mut digest) = envelope("snapshot", &snapshot());
     stream.accept("snapshot", &wire, 1020).unwrap();
-    // A snapshot plus 8191 deltas is the longest chain a record list holds.
+    // A snapshot plus 8191 deltas is the longest chain a record list closes.
     for version in 2..=8192u64 {
         let mut next = delta(&digest);
         next["previous_version"] = json!(version - 1);

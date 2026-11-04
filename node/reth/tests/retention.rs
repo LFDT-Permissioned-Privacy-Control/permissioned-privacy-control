@@ -198,6 +198,71 @@ fn prune_removes_manifests_after_retention_and_unreachable_records() {
     node.runtime.replay(&block(450, 0, AT + 40)).unwrap();
 }
 
+/// Delta `version` on top of the installed facts with `digest` (no rows).
+fn delta(version: u64, digest: &str) -> serde_json::Value {
+    serde_json::json!({"network":common::fixture::network(),"issued_at":1800000000,"expires_at":1800000060,
+    "previous_version":version - 1,"previous_digest":digest,"version":version,
+    "upserts":{"principals":[],"groups":[],"contracts":[],"policies":[],"sanctions":[]},
+    "deletes":{"principals":[],"groups":[],"contracts":[],"policies":[],"sanctions":[]}})
+}
+
+fn digest_of(payload: &serde_json::Value) -> String {
+    use sha2::Digest;
+    alloy_primitives::hex::encode(sha2::Sha256::digest(serde_json::to_vec(payload).unwrap()))
+}
+
+#[test]
+fn a_delta_chain_keeps_every_list_its_retained_blocks_reach() {
+    let node = Node::new(Retention::Seconds(100));
+    let mut digest = digest_of(&snapshot());
+    // Blocks on v1, v2 and v3 at AT (pruned later), on v4 at AT + 40 (kept).
+    for (version, heights, at) in [
+        (1, 1..=300, AT),
+        (2, 301..=600, AT),
+        (3, 601..=900, AT),
+        (4, 901..=1200, AT + 40),
+    ] {
+        if version > 1 {
+            let next = delta(version, &digest);
+            node.runtime
+                .accept_facts("delta", &seal("delta", &next), AT)
+                .unwrap();
+            digest = digest_of(&next);
+        }
+        let last = *heights.end();
+        node.produce(heights, at);
+        // Compacted per group, so each group's segment has its own age.
+        node.chain.finalize(last);
+        node.settle(at);
+    }
+    node.settle(AT + 120);
+    assert!(node.manifest(900, 0).is_none() && node.manifest(901, 0).is_some());
+    // The retained blocks (facts 4) reach every list back to the snapshot.
+    assert_eq!(versions(&node, "lists"), [1, 2, 3, 4]);
+    assert_eq!(versions(&node, "facts"), [1, 2, 3, 4]);
+    node.runtime.replay(&block(1000, 0, AT + 40)).unwrap();
+    // What a restart restores: the head's chain, read back from disk.
+    let (version, head) = node.runtime.archive.head().unwrap().unwrap();
+    let restored = ops_reth_policy::stream::FactStream::restore(
+        verifier(),
+        &node.runtime.archive,
+        version,
+        head,
+        AT,
+    )
+    .unwrap();
+    assert_eq!(restored.latest().unwrap().unwrap().version(), 4);
+    // A newer snapshot, then pruning the delta chain's blocks: its lists and
+    // records go.
+    node.snapshot(10);
+    node.produce(1201..=1500, AT + 40);
+    node.chain.finalize(1500);
+    node.settle(AT + 200);
+    assert!(node.manifest(1200, 0).is_none());
+    assert_eq!(versions(&node, "lists"), [10]);
+    assert_eq!(versions(&node, "facts"), [10]);
+}
+
 #[test]
 fn pinned_old_facts_build_keeps_records() {
     let node = Node::new(Retention::Seconds(100));
@@ -413,13 +478,16 @@ fn retention_setting_accepts_forever_and_whole_durations() {
 
 #[test]
 fn an_earlier_layout_is_refused() {
-    let storage = MemoryStorage::new();
-    storage.plant(
-        &Path::new(ROOT).join("LAYOUT"),
-        b"ops-node-policy-archive 2\n",
-    );
-    let error = ArtifactStore::open_with(Path::new(ROOT), storage).unwrap_err();
-    assert!(error.contains("empty directory"), "{error}");
+    // Layout 3 held record lists naming every record of their chain.
+    for earlier in [
+        &b"ops-node-policy-archive 2\n"[..],
+        b"ops-node-policy-archive 3\n",
+    ] {
+        let storage = MemoryStorage::new();
+        storage.plant(&Path::new(ROOT).join("LAYOUT"), earlier);
+        let error = ArtifactStore::open_with(Path::new(ROOT), storage).unwrap_err();
+        assert!(error.contains("empty directory"), "{error}");
+    }
 }
 
 #[test]

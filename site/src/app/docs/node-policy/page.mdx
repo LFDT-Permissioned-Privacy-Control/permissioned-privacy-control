@@ -300,7 +300,12 @@ the `OPS_NODE_POLICY_` prefix with OPS but are not OPS settings. Set
 not a volume's root or a symlink: owned by the node's user with mode 0700 and
 empty when first used (the node creates it if its parent exists). One node
 process locks it. A directory written by an older layout is refused; there is
-no importer, so point the node at a new empty directory.
+no importer, so point the node at a new empty directory. Stop the node at a
+finalized head before you switch: blocks above it would need their execution
+evidence, which stays in the old directory. Allow about two small files per
+policy fact change in the directory, besides each block's evidence: they stay
+until a newer full snapshot replaces their chain and the blocks that use the
+chain are past the manifest retention.
 
 Size the node for the expected load:
 
