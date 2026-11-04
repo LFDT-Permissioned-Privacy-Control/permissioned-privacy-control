@@ -38,6 +38,11 @@ var fileConfig map[string]string
 // configured.
 var fileConfigErr error
 
+// FileError reports a CONFIG_FILE that was set but could not be loaded, for
+// commands that read configuration without the server's full Validate (the
+// migration command).
+func FileError() error { return fileConfigErr }
+
 // secretKeys are settings that must NEVER be sourced from a plaintext config
 // file — they belong in the environment or a secrets manager (org policy: AWS
 // Secrets Manager via IRSA/CSI). If any of these appears in the file,

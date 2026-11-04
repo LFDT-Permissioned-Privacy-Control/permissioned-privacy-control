@@ -496,7 +496,7 @@ func sampleSeries(ctx context.Context, stack *Stack, report *Gate2Report, mu *sy
 			return
 		case at := <-ticker.C:
 			var sealed sql.NullInt64
-			if err := stack.AuditDB.QueryRowContext(ctx, `SELECT MAX(buffer_seq) FROM access_logs`).Scan(&sealed); err == nil {
+			if err := stack.AuditDB.QueryRowContext(ctx, sealedSeqQuery).Scan(&sealed); err == nil {
 				add("audit_sealed_seq", at, float64(sealed.Int64))
 			}
 			add("audit_buffer_bytes", at, float64(dirBytes(bufferDir)))
@@ -525,13 +525,19 @@ func sampleSeries(ctx context.Context, stack *Stack, report *Gate2Report, mu *sy
 	}
 }
 
+// sealedSeqQuery reads how far the audit sealer got: the highest sealed
+// buffer sequence, as an offset within its allocation range (RD-1410: each
+// OPS start numbers its entries in a range of 2^40 of its own; a tree from
+// before ranges numbers from 1, which the mask leaves unchanged).
+const sealedSeqQuery = `SELECT MAX(buffer_seq) & ((1::bigint << 40) - 1) FROM access_logs`
+
 func waitAuditDrain(ctx context.Context, stack *Stack, limit time.Duration) (bool, float64) {
 	start := time.Now()
 	var previous int64 = -1
 	stable := 0
 	for time.Since(start) < limit {
 		var sealed sql.NullInt64
-		if err := stack.AuditDB.QueryRowContext(ctx, `SELECT MAX(buffer_seq) FROM access_logs`).Scan(&sealed); err != nil {
+		if err := stack.AuditDB.QueryRowContext(ctx, sealedSeqQuery).Scan(&sealed); err != nil {
 			return false, time.Since(start).Seconds()
 		}
 		if sealed.Int64 == previous {

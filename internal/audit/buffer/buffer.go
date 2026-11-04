@@ -33,8 +33,11 @@
 //     max(high-water, last entry), so after a full drain and reopen a new
 //     entry never reuses a sequence the chain already sealed.
 //   - External seed. A buffer opened with RequireSeed refuses appends until
-//     SeedFloor gives it the chain's sealed high-water, which also covers a
-//     recreated, empty buffer directory.
+//     it is seeded: with SeedRange (the server), the allocation range this run
+//     drew from the audit database, so every sequence it allocates is unique
+//     across all instances and runs, which also covers a recreated, empty
+//     buffer directory; or with SeedFloor, the sealed high-water of a chain it
+//     alone writes.
 package buffer
 
 import (
@@ -56,12 +59,21 @@ const (
 	entryKeyLen = 1 + 8
 )
 
+// RangeShift is the width of one allocation range (SeedRange): range n holds
+// sequences n<<RangeShift + 1 .. (n+1)<<RangeShift - 1, and range 0 the
+// sequences buffers numbered per chain before ranges existed.
+const RangeShift = 40
+
 // highWaterKey holds the persisted allocation high-water. Its prefix sorts
 // outside the entry range, so Drain and DeleteThrough never touch it.
 var highWaterKey = []byte{'h'}
 
-// ErrNotSeeded is returned by Append on a RequireSeed buffer before SeedFloor.
+// ErrNotSeeded is returned by Append on a RequireSeed buffer before it is seeded.
 var ErrNotSeeded = errors.New("audit buffer is not seeded: the sealed chain's high-water is not known yet")
+
+// ErrRangeExhausted is returned when this run's allocation range is used up;
+// a restart draws a new one.
+var ErrRangeExhausted = errors.New("audit buffer allocation range exhausted: restart the instance to draw a new range")
 
 // Buffer is a durable, ordered, append-only staging buffer for audit entries.
 type Buffer struct {
@@ -69,10 +81,11 @@ type Buffer struct {
 
 	mu       sync.Mutex
 	next     uint64              // last allocated (or seeded) sequence
+	top      uint64              // last sequence of this run's range (0: unbounded)
 	frontier uint64              // every sequence <= frontier has completed
 	done     map[uint64]struct{} // completed sequences above the frontier
 	seeded   bool
-	appended bool // SeedFloor is refused once an append has been allocated
+	appended bool // seeding is refused once an append has been allocated
 
 	deleteMu sync.Mutex // serialises DeleteThrough and owns hw
 	hw       uint64     // persisted allocation high-water
@@ -232,6 +245,28 @@ func (b *Buffer) SeedFloor(floor uint64) error {
 	return nil
 }
 
+// SeedRange gives a buffer this run's allocation range: new entries are
+// numbered base+1 .. top. Entries already in the buffer (earlier runs) keep
+// their sequences. It refuses a range that does not start at or above every
+// sequence this buffer has allocated or persisted (the audit database handed a
+// range out again, as after a restore), and must run before the first append.
+func (b *Buffer) SeedRange(base, top uint64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.appended {
+		return errors.New("audit buffer seed refused: appends have already been allocated")
+	}
+	if top <= base {
+		return fmt.Errorf("audit buffer seed refused: empty range %d..%d", base+1, top)
+	}
+	if base < b.next {
+		return fmt.Errorf("audit buffer seed refused: range %d..%d does not start above this buffer's own sequence %d", base+1, top, b.next)
+	}
+	b.next, b.frontier, b.top = base, base, top
+	b.seeded = true
+	return nil
+}
+
 // Seeded reports whether appends are accepted.
 func (b *Buffer) Seeded() bool {
 	b.mu.Lock()
@@ -285,6 +320,10 @@ func (b *Buffer) Append(data []byte) (uint64, error) {
 		b.mu.Unlock()
 		return 0, ErrNotSeeded
 	}
+	if b.top > 0 && b.next >= b.top {
+		b.mu.Unlock()
+		return 0, ErrRangeExhausted
+	}
 	b.next++
 	seq := b.next
 	b.appended = true
@@ -315,6 +354,10 @@ func (b *Buffer) AppendBatch(data [][]byte) ([]uint64, error) {
 		b.mu.Unlock()
 		return nil, ErrNotSeeded
 	}
+	if b.top > 0 && b.top-b.next < uint64(len(data)) {
+		b.mu.Unlock()
+		return nil, ErrRangeExhausted
+	}
 	first := b.next + 1
 	b.next += uint64(len(data))
 	b.appended = true
@@ -344,6 +387,46 @@ func (b *Buffer) AppendBatch(data [][]byte) ([]uint64, error) {
 		return nil, fmt.Errorf("audit buffer append: %w", err)
 	}
 	return seqs, nil
+}
+
+// Rekey moves the entry stored under seq to the next sequence of this run's
+// range, in one synced write (the new key is set and the old one deleted
+// together), and returns the new sequence. The sealer uses it for an earlier
+// entry whose sequence another chain's row already holds, so it can be sealed
+// at all.
+func (b *Buffer) Rekey(seq uint64) (uint64, error) {
+	value, closer, err := b.db.Get(entryKey(seq))
+	if err != nil {
+		return 0, fmt.Errorf("audit buffer rekey %d: %w", seq, err)
+	}
+	data := append([]byte(nil), value...)
+	_ = closer.Close()
+	b.mu.Lock()
+	if !b.seeded {
+		b.mu.Unlock()
+		return 0, ErrNotSeeded
+	}
+	if b.top > 0 && b.next >= b.top {
+		b.mu.Unlock()
+		return 0, ErrRangeExhausted
+	}
+	b.next++
+	moved := b.next
+	b.appended = true
+	b.mu.Unlock()
+	defer b.complete(moved)
+	batch := b.db.NewBatch()
+	defer batch.Close()
+	if err := batch.Set(entryKey(moved), data, nil); err != nil {
+		return 0, fmt.Errorf("audit buffer rekey: %w", err)
+	}
+	if err := batch.Delete(entryKey(seq), nil); err != nil {
+		return 0, fmt.Errorf("audit buffer rekey: %w", err)
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return 0, fmt.Errorf("audit buffer rekey: %w", err)
+	}
+	return moved, nil
 }
 
 // Drain returns up to max buffered entries in ascending sequence order, starting

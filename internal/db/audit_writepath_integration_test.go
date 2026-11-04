@@ -69,7 +69,7 @@ func (a dbCheckpointAdapter) WriteReAnchor(ctx context.Context, r audit.ReAnchor
 // server.go installs: deserialize the buffered JSON record, seal it into the
 // access_logs chain via SealBufferedAccessLog tagged with its buffer_seq and
 // chain_name. A corrupt record is skipped (not fatal), matching production.
-func makeSealFn(database *db.DB, chain db.RBACAuditChain, chainName string) sealer.SealFunc {
+func makeSealFn(database *db.DB, chain db.AccessLogChain, chainName string) sealer.SealFunc {
 	return func(ctx context.Context, seq uint64, data []byte) error {
 		var rec db.AccessLogRecord
 		if err := json.Unmarshal(data, &rec); err != nil {
@@ -365,34 +365,23 @@ func TestAuditWritePath_MultiChainName_IndependentWalk(t *testing.T) {
 	const chainA = "inst_a"
 	const chainB = "inst_b"
 
-	bufA, err := buffer.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open buffer A: %v", err)
-	}
-	t.Cleanup(func() { _ = bufA.Close() })
-	bufB, err := buffer.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open buffer B: %v", err)
-	}
-	t.Cleanup(func() { _ = bufB.Close() })
-
-	// Each instance owns its own buffer with an INDEPENDENT seq space, but they
-	// share ONE access_logs table whose buffer_seq UNIQUE index is global (not
-	// per chain_name — see migration 062). In production the per-instance buffer
-	// seq spaces are disjoint; mirror that here by advancing buffer B's sequence
-	// past buffer A's range so the two never collide on the shared index.
-	// (Verified separately: making them OVERLAP trips a 23505 unique-constraint
-	// error on the buffer_seq index — a real cross-instance constraint, reported
-	// in the summary, not a bug in this test.)
-	const seqOffsetB = 1000
-	for i := 0; i < seqOffsetB; i++ {
-		if _, err := bufB.Append([]byte("x")); err != nil {
-			t.Fatalf("advance bufB seq: %v", err)
+	// Each instance owns its own buffer, and they share ONE access_logs table
+	// whose buffer_seq UNIQUE index is global (not per chain_name). As in
+	// production, each buffer numbers its entries in an allocation range of
+	// its own (audit/004, RD-1410), so the two never collide on that index.
+	const rangeWidth = uint64(1) << buffer.RangeShift
+	openRanged := func(index uint64) *buffer.Buffer {
+		b, err := buffer.Open(t.TempDir(), buffer.RequireSeed())
+		if err != nil {
+			t.Fatalf("open buffer: %v", err)
 		}
+		if err := b.SeedRange(index*rangeWidth, (index+1)*rangeWidth-1); err != nil {
+			t.Fatalf("seed buffer: %v", err)
+		}
+		t.Cleanup(func() { _ = b.Close() })
+		return b
 	}
-	if err := bufB.DeleteThrough(seqOffsetB); err != nil {
-		t.Fatalf("clear bufB placeholders: %v", err)
-	}
+	bufA, bufB := openRanged(1), openRanged(2)
 
 	// Each chain_name gets its OWN in-process HashChain (single writer per chain).
 	chA := audit.NewHashChain("")

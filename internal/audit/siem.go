@@ -2,10 +2,14 @@ package audit
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -22,12 +26,19 @@ type SIEMConfig struct {
 	BatchSize       int
 	FlushInterval   time.Duration
 	FallbackLogPath string // If set, failed batches are appended here as JSON lines.
+	// Senders is the number of batches delivered at once (default
+	// DefaultSIEMSenders). Delivery capacity is about Senders × BatchSize /
+	// the endpoint's round-trip time.
+	Senders int
 	// AllowInsecure relaxes the SSRF guard so HTTP (not just HTTPS) and
 	// loopback/private destinations are accepted. Intended for tests and
 	// local development only — production callers MUST leave this false so
 	// netguard.ValidateWebhookURL (strict mode) is applied.
 	AllowInsecure bool
 }
+
+// DefaultSIEMSenders is the default number of concurrent SIEM deliveries.
+const DefaultSIEMSenders = 4
 
 // SIEMEvent represents an audit event to forward to a SIEM system.
 type SIEMEvent struct {
@@ -46,15 +57,31 @@ type SIEMEvent struct {
 }
 
 // SIEMForwarder batches audit events and forwards them to a SIEM webhook.
+// Events wait in a bounded in-memory queue of batches; Senders goroutines
+// deliver full batches as soon as they are complete, and every flush interval
+// also the last, partial one.
 type SIEMForwarder struct {
 	cfg    SIEMConfig
 	client *http.Client
 
-	mu    sync.Mutex
-	batch []SIEMEvent
-	stop  chan struct{}
-	done  chan struct{}
-	kick  chan struct{} // a full batch is waiting: flush now
+	mu sync.Mutex
+	// queue holds the waiting events in batches of at most BatchSize, oldest
+	// first; only the last batch may be partial.
+	queue [][]SIEMEvent
+
+	kick     chan struct{} // a full batch is waiting (one token per sender)
+	tick     chan struct{} // the flush interval passed: send partial batches too
+	stopping chan struct{} // closed by Stop
+	// sendCtx is cancelled when the stop budget is spent, which aborts the
+	// sends in flight and their retry waits.
+	sendCtx    context.Context
+	cancel     context.CancelFunc
+	workers    sync.WaitGroup
+	started    bool
+	stopped    bool // Stop has finished: later events go to the failed-delivery path
+	stopOnce   sync.Once
+	stopBudget time.Duration
+	fallbackMu sync.Mutex // one fallback-log write at a time
 
 	// Prometheus metrics (optional, set via SetMetrics)
 	batchesTotal       *prometheus.CounterVec
@@ -81,10 +108,14 @@ func NewSIEMForwarder(cfg SIEMConfig) (*SIEMForwarder, error) {
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = 30 * time.Second
 	}
+	if cfg.Senders <= 0 {
+		cfg.Senders = DefaultSIEMSenders
+	}
 	if err := netguard.ValidateWebhookURLForEnv(cfg.WebhookURL, cfg.AllowInsecure); err != nil {
 		return nil, fmt.Errorf("siem webhook url: %w", err)
 	}
 
+	sendCtx, cancel := context.WithCancel(context.Background())
 	return &SIEMForwarder{
 		cfg: cfg,
 		client: &http.Client{
@@ -94,37 +125,58 @@ func NewSIEMForwarder(cfg SIEMConfig) (*SIEMForwarder, error) {
 			// hostname; this catches a name that resolves — or rebinds — to an
 			// internal address. Relaxed in non-production, matching the URL
 			// guard's own relaxation.
-			Transport: netguard.GuardedTransport(cfg.AllowInsecure),
+			Transport: siemTransport(cfg),
 			// Disallow redirects: a redirect could lead to a private/internal
 			// address even when the original URL was validated (open-redirect SSRF).
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return fmt.Errorf("redirects not permitted for SIEM webhook")
 			},
 		},
-		batch: make([]SIEMEvent, 0, cfg.BatchSize),
-		stop:  make(chan struct{}),
-		done:  make(chan struct{}),
-		kick:  make(chan struct{}, 1),
+		kick:       make(chan struct{}, cfg.Senders),
+		tick:       make(chan struct{}, 1),
+		stopping:   make(chan struct{}),
+		sendCtx:    sendCtx,
+		cancel:     cancel,
+		stopBudget: stopFlushBudget,
 	}, nil
 }
 
-// maxQueuedBatches bounds the events waiting for the forwarder goroutine.
+// siemTransport is the guarded transport with one idle connection kept per
+// sender, so every sender reuses its connection instead of paying a TCP and
+// TLS handshake per batch.
+func siemTransport(cfg SIEMConfig) *http.Transport {
+	t := netguard.GuardedTransport(cfg.AllowInsecure)
+	t.MaxIdleConnsPerHost = max(t.MaxIdleConnsPerHost, cfg.Senders)
+	return t
+}
+
+// maxQueuedBatches bounds the batches waiting for a sender.
 const maxQueuedBatches = 100
 
 // Send queues an event for the next batch and never waits for the webhook:
-// a full batch wakes the forwarder goroutine, which flushes it. The audit
-// sealer calls Send, so a slow SIEM endpoint must not stall sealing (RD-1410).
-// When the forwarder falls more than maxQueuedBatches batches behind, the
-// oldest batch takes the failed-batch path (fallback log, dropped counter)
-// instead of growing without bound.
+// a full batch wakes a sender, which delivers it. The audit sealer calls
+// Send, so a slow SIEM endpoint must not stall sealing (RD-1410). When the
+// senders fall more than maxQueuedBatches batches behind, the oldest batch
+// takes the failed-batch path (fallback log, dropped counter) instead of
+// growing without bound.
 func (s *SIEMForwarder) Send(event SIEMEvent) {
 	s.mu.Lock()
-	s.batch = append(s.batch, event)
-	full := len(s.batch) >= s.cfg.BatchSize
+	if s.stopped {
+		s.mu.Unlock()
+		s.handleFailedBatch([]SIEMEvent{event}, errSIEMStopped)
+		return
+	}
+	if n := len(s.queue); n == 0 || len(s.queue[n-1]) >= s.cfg.BatchSize {
+		s.queue = append(s.queue, make([]SIEMEvent, 0, s.cfg.BatchSize))
+	}
+	last := len(s.queue) - 1
+	s.queue[last] = append(s.queue[last], event)
+	full := len(s.queue[last]) >= s.cfg.BatchSize
 	var overflow []SIEMEvent
-	if len(s.batch) > maxQueuedBatches*s.cfg.BatchSize {
-		overflow = append([]SIEMEvent(nil), s.batch[:s.cfg.BatchSize]...)
-		s.batch = append(s.batch[:0], s.batch[s.cfg.BatchSize:]...)
+	if len(s.queue) > maxQueuedBatches {
+		overflow = s.queue[0]
+		s.queue[0] = nil
+		s.queue = s.queue[1:]
 	}
 	s.mu.Unlock()
 
@@ -139,66 +191,159 @@ func (s *SIEMForwarder) Send(event SIEMEvent) {
 	}
 }
 
-// Start begins the periodic flush loop.
+// take removes the oldest batch: only a full one unless partial is set.
+func (s *SIEMForwarder) take(partial bool) []SIEMEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.queue) == 0 || (!partial && len(s.queue[0]) < s.cfg.BatchSize) {
+		return nil
+	}
+	events := s.queue[0]
+	s.queue[0] = nil
+	s.queue = s.queue[1:]
+	if len(s.queue) == 0 {
+		s.queue = nil // release the backing array once drained
+	}
+	return events
+}
+
+// queued reports how many events are waiting.
+func (s *SIEMForwarder) queued() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, b := range s.queue {
+		n += len(b)
+	}
+	return n
+}
+
+// Start begins delivery: Senders goroutines and the flush-interval timer.
 func (s *SIEMForwarder) Start() {
-	go s.run()
+	s.mu.Lock()
+	if s.started || s.stopping == nil || isClosed(s.stopping) {
+		s.mu.Unlock()
+		return
+	}
+	s.started = true
+	s.workers.Add(s.cfg.Senders + 1)
+	s.mu.Unlock()
+	go s.ticker()
+	for i := 0; i < s.cfg.Senders; i++ {
+		go s.sender()
+	}
 }
 
-// Stop flushes remaining events and stops the forwarder.
+// Stop delivers what is queued for at most the stop budget, then cancels
+// the sends still in flight. Every event not delivered by then takes the
+// failed-delivery path (the fallback log when one is configured), including
+// batches a cancelled send was carrying.
 func (s *SIEMForwarder) Stop() {
-	close(s.stop)
-	<-s.done
+	s.stopOnce.Do(func() {
+		s.mu.Lock()
+		close(s.stopping) // under mu: Start never adds workers after this
+		s.mu.Unlock()
+		done := make(chan struct{})
+		go func() {
+			s.workers.Wait()
+			close(done)
+		}()
+		budget := time.NewTimer(s.stopBudget)
+		defer budget.Stop()
+		select {
+		case <-done:
+		case <-budget.C:
+			s.cancel()
+			<-done
+		}
+		s.cancel()
+		s.mu.Lock()
+		s.stopped = true
+		s.mu.Unlock()
+		if rest := s.takeAll(); len(rest) > 0 {
+			s.handleFailedBatch(rest, errSIEMStopped)
+		}
+	})
 }
 
-func (s *SIEMForwarder) run() {
-	defer close(s.done)
+var errSIEMStopped = errors.New("SIEM forwarder stopped before delivery")
 
-	ticker := time.NewTicker(s.cfg.FlushInterval)
-	defer ticker.Stop()
+func isClosed(c chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
+}
 
+func (s *SIEMForwarder) takeAll() []SIEMEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var rest []SIEMEvent
+	for _, b := range s.queue {
+		rest = append(rest, b...)
+	}
+	s.queue = nil
+	return rest
+}
+
+func (s *SIEMForwarder) ticker() {
+	defer s.workers.Done()
+	t := time.NewTicker(s.cfg.FlushInterval)
+	defer t.Stop()
 	for {
 		select {
-		case <-s.stop:
-			s.flushBy(time.Now().Add(stopFlushBudget))
+		case <-s.stopping:
 			return
-		case <-ticker.C:
-			s.flush()
-		case <-s.kick:
-			s.flush()
+		case <-t.C:
+			select {
+			case s.tick <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
 
-// stopFlushBudget bounds the final flush at Stop: what is still queued after
-// it takes the failed-delivery path, so a SIEM outage cannot hold shutdown
-// for every queued batch's retries.
+func (s *SIEMForwarder) sender() {
+	defer s.workers.Done()
+	for {
+		select {
+		case <-s.stopping:
+			s.deliverQueued(true)
+			return
+		case <-s.kick:
+			s.deliverQueued(false)
+		case <-s.tick:
+			s.deliverQueued(true)
+		}
+	}
+}
+
+// stopFlushBudget bounds delivery after Stop: what is still queued or in
+// flight once it is spent takes the failed-delivery path, so a SIEM outage
+// cannot hold shutdown for every queued batch's retries.
 const stopFlushBudget = 10 * time.Second
 
-func (s *SIEMForwarder) flush() { s.flushBy(time.Time{}) }
+// flush delivers everything queued on the calling goroutine (tests).
+func (s *SIEMForwarder) flush() { s.deliverQueued(true) }
 
-// flushBy sends everything queued, at most BatchSize events per request. With
-// a non-zero deadline, batches still queued once it has passed are handed to
-// handleFailedBatch instead of being sent.
-func (s *SIEMForwarder) flushBy(deadline time.Time) {
+// deliverQueued sends batches until none is left to take (with partial, the
+// last short one too). Once the send context is cancelled, the rest of the
+// queue takes the failed-delivery path without being sent.
+func (s *SIEMForwarder) deliverQueued(partial bool) {
 	for {
-		s.mu.Lock()
-		if len(s.batch) == 0 {
-			s.mu.Unlock()
+		if s.sendCtx.Err() != nil {
+			if rest := s.takeAll(); len(rest) > 0 {
+				s.handleFailedBatch(rest, errSIEMStopped)
+			}
 			return
 		}
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			rest := s.batch
-			s.batch = make([]SIEMEvent, 0, s.cfg.BatchSize)
-			s.mu.Unlock()
-			s.handleFailedBatch(rest, fmt.Errorf("SIEM forwarder stopped before delivery"))
+		events := s.take(partial)
+		if events == nil {
 			return
 		}
-		n := min(len(s.batch), s.cfg.BatchSize)
-		events := append([]SIEMEvent(nil), s.batch[:n]...)
-		s.batch = append(s.batch[:0], s.batch[n:]...)
-		s.mu.Unlock()
-
-		if err := s.send(events); err != nil {
+		if err := s.send(s.sendCtx, events); err != nil {
 			s.handleFailedBatch(events, err)
 		} else if s.batchesTotal != nil {
 			s.batchesTotal.WithLabelValues("success").Inc()
@@ -208,7 +353,7 @@ func (s *SIEMForwarder) flushBy(deadline time.Time) {
 
 const maxRetries = 3
 
-func (s *SIEMForwarder) send(events []SIEMEvent) error {
+func (s *SIEMForwarder) send(ctx context.Context, events []SIEMEvent) error {
 	body, err := json.Marshal(events)
 	if err != nil {
 		return fmt.Errorf("marshal events: %w", err)
@@ -227,10 +372,16 @@ func (s *SIEMForwarder) send(events []SIEMEvent) error {
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * time.Second)
+			wait := time.NewTimer(time.Duration(attempt) * time.Second)
+			select {
+			case <-ctx.Done():
+				wait.Stop()
+				return fmt.Errorf("after %d attempts: %w (last error: %v)", attempt, ctx.Err(), lastErr)
+			case <-wait.C:
+			}
 		}
 
-		req, err := http.NewRequest(http.MethodPost, s.cfg.WebhookURL, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.WebhookURL, bytes.NewReader(body))
 		if err != nil {
 			return fmt.Errorf("create request: %w", err)
 		}
@@ -241,15 +392,30 @@ func (s *SIEMForwarder) send(events []SIEMEvent) error {
 
 		resp, err := s.client.Do(req)
 		if err != nil {
+			// The transport's error quotes the request URL, which can carry
+			// a collector token; keep only the cause.
+			var urlErr *url.Error
+			if errors.As(err, &urlErr) {
+				err = urlErr.Err
+			}
 			lastErr = err
+			if ctx.Err() != nil {
+				return fmt.Errorf("after %d attempts: %w (last error: %v)", attempt+1, ctx.Err(), lastErr)
+			}
 			continue
 		}
+		// Read what is left of the body so the connection is reused.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return nil
 		}
 		lastErr = fmt.Errorf("SIEM webhook returned status %d", resp.StatusCode)
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout && resp.StatusCode != http.StatusTooManyRequests {
+			// The endpoint refused this request as such: a retry fails the same way.
+			return lastErr
+		}
 	}
 
 	return fmt.Errorf("after %d retries: %w", maxRetries, lastErr)
@@ -280,19 +446,26 @@ func (s *SIEMForwarder) handleFailedBatch(events []SIEMEvent, sendErr error) {
 	slog.Error("SIEM flush failed, dropping events (no fallback path configured)", "error", sendErr, "count", len(events))
 }
 
-// writeFallback appends events as JSON lines to the fallback log file.
+// writeFallback appends events as JSON lines to the fallback log file: the
+// whole batch in one write, and one batch at a time (senders, overflow and
+// Stop can all reach it at once).
 func (s *SIEMForwarder) writeFallback(events []SIEMEvent) error {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	for _, event := range events {
+		if err := enc.Encode(event); err != nil {
+			return fmt.Errorf("encode event for fallback log: %w", err)
+		}
+	}
+	s.fallbackMu.Lock()
+	defer s.fallbackMu.Unlock()
 	f, err := os.OpenFile(s.cfg.FallbackLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return fmt.Errorf("open fallback log: %w", err)
 	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
-	for _, event := range events {
-		if err := enc.Encode(event); err != nil {
-			return fmt.Errorf("write event to fallback log: %w", err)
-		}
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write events to fallback log: %w", err)
 	}
-	return nil
+	return f.Close()
 }

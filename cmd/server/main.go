@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"privacy-proxy/internal/config"
+	"privacy-proxy/internal/migratecli"
 	"privacy-proxy/internal/server"
 	"privacy-proxy/internal/version"
 )
@@ -32,6 +33,14 @@ func main() {
 		"commit", version.Commit,
 		"built", version.BuildTime,
 	)
+
+	// `privacy-proxy migrate [-audit|-exec]` applies migrations and exits
+	// without starting the server, so the shipped image can run one in a
+	// maintenance window (the same command as cmd/migrate). After the build
+	// identity, so the log says which release applied it.
+	if args, ok := migrateArgs(os.Args[1:]); ok {
+		os.Exit(migratecli.Main(args))
+	}
 
 	cfg := config.Load()
 	cfg.Version = version.Version
@@ -120,4 +129,13 @@ func main() {
 		srv.Stop()
 		slog.Info("server stopped gracefully")
 	}
+}
+
+// migrateArgs reports whether the command line asks for the migration
+// subcommand, and its arguments.
+func migrateArgs(args []string) ([]string, bool) {
+	if len(args) > 0 && args[0] == "migrate" {
+		return args[1:], true
+	}
+	return nil, false
 }

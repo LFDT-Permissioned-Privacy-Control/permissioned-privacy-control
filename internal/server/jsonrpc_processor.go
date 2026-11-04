@@ -527,8 +527,8 @@ func (p *JSONRPCProcessor) logAccess(ctx context.Context, req *ProcessRequest, s
 
 	// RD-1112 async path: append to the durable buffer and return; the sealer
 	// chains, persists, and forwards to SIEM off the hot path. Best-effort
-	// (matches the synchronous path): on append failure, log loudly and fall
-	// back to basic chain-less logging so coverage never drops below today.
+	// on append failure, use the synchronous chained writer below. It takes
+	// the same database chain lock as the sealer.
 	if p.auditBuffer != nil {
 		var params []byte
 		if p.logParams && req.Params != nil {
@@ -550,13 +550,12 @@ func (p *JSONRPCProcessor) logAccess(ctx context.Context, req *ProcessRequest, s
 			DenialReason:   req.denialReason,  // RD-1137
 		}
 		if data, mErr := json.Marshal(rec); mErr != nil {
-			slog.Error("audit record marshal failed; basic logging fallback", "error", mErr)
-			p.accessLogger.LogAccess(ctx, req.UserID, req.Method, statusCode, req.ClientIP)
+			slog.Error("audit record marshal failed; synchronous chained logging fallback", "error", mErr)
 		} else if _, aErr := p.auditBuffer.Append(data); aErr != nil {
-			slog.Error("audit buffer append failed; basic logging fallback (entry not chained)", "error", aErr)
-			p.accessLogger.LogAccess(ctx, req.UserID, req.Method, statusCode, req.ClientIP)
+			slog.Error("audit buffer append failed; synchronous chained logging fallback", "error", aErr)
+		} else {
+			return
 		}
-		return
 	}
 
 	if p.enhancedLogger != nil && p.hashChain != nil {
@@ -582,8 +581,9 @@ func (p *JSONRPCProcessor) logAccess(ctx context.Context, req *ProcessRequest, s
 			params, respStatusPtr, req.resolvedOrgID, req.denialReason,
 		)
 		if err != nil {
-			// Fallback to basic logging
-			p.accessLogger.LogAccess(ctx, req.UserID, req.Method, statusCode, req.ClientIP)
+			// Never insert a NULL-hash row into a configured audit chain:
+			// the verifier would report it as tampering.
+			slog.Error("synchronous access-log chain write failed", "error", err)
 			return
 		}
 		_ = id

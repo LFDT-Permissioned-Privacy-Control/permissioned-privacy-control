@@ -50,13 +50,14 @@ func openExecutionTracking(cfg *config.Config, main *db.DB, network nodepolicy.N
 	if cfg.Environment == "production" && (cfg.ExecutionDatabaseURL == cfg.DatabaseURL || cfg.ExecutionAdminDatabaseURL == cfg.DatabaseURL) {
 		return nil, fmt.Errorf("RD-1410: in production the execution-tracking database must be separate from the main database — EXECUTION_DATABASE_URL / EXECUTION_ADMIN_DATABASE_URL must not equal DATABASE_URL (leave them unset to derive a separate <name>_exec database)")
 	}
-	open := func(dsn string) (*db.DB, error) {
+	open := func(dsn string, maxOpen, maxIdle int) (*db.DB, error) {
 		if dsn == cfg.DatabaseURL {
 			return main, nil
 		}
-		return db.NewWithoutMigrate(dsn, db.WithPool(cfg.DBMaxOpenConns, cfg.DBMaxIdleConns, cfg.DBConnMaxLifetime))
+		return db.NewWithoutMigrate(dsn, db.WithPool(maxOpen, maxIdle, cfg.DBConnMaxLifetime))
 	}
-	adminPool, err := open(cfg.ExecutionAdminDatabaseURL)
+	adminOpen, adminIdle := trackingAdminPool(cfg)
+	adminPool, err := open(cfg.ExecutionAdminDatabaseURL, adminOpen, adminIdle)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open execution-tracking admin database: %w", err)
 	}
@@ -75,9 +76,12 @@ func openExecutionTracking(cfg *config.Config, main *db.DB, network nodepolicy.N
 	}
 	runtimePool := adminPool
 	if cfg.ExecutionDatabaseURL != cfg.ExecutionAdminDatabaseURL {
-		if runtimePool, err = open(cfg.ExecutionDatabaseURL); err != nil {
+		if runtimePool, err = open(cfg.ExecutionDatabaseURL, cfg.DBMaxOpenConns, cfg.DBMaxIdleConns); err != nil {
 			return fail(fmt.Errorf("failed to open execution-tracking runtime database: %w", err))
 		}
+	}
+	if runtimePool != main {
+		warnIfPoolExceedsServer(runtimePool, "EXECUTION_DATABASE_URL")
 	}
 	t.runtime = db.NewExecHandle(runtimePool)
 	// The runtime identity must see the same, migrated tracking database the
@@ -94,6 +98,20 @@ func openExecutionTracking(cfg *config.Config, main *db.DB, network nodepolicy.N
 	}
 	slog.Info("execution tracking database ready (RD-1410)", "incarnation", t.meta.Incarnation)
 	return t, nil
+}
+
+// trackingAdminPoolConns bounds the tracking owner's own pool: it runs
+// migrations, partition maintenance and retention, a few statements at a time.
+const trackingAdminPoolConns = 4
+
+// trackingAdminPool sizes the tracking owner's pool (open, idle). When the
+// runtime connects with the same DSN the one pool serves both and keeps the
+// runtime size.
+func trackingAdminPool(cfg *config.Config) (int, int) {
+	if cfg.ExecutionAdminDatabaseURL == cfg.ExecutionDatabaseURL {
+		return cfg.DBMaxOpenConns, cfg.DBMaxIdleConns
+	}
+	return trackingAdminPoolConns, trackingAdminPoolConns / 2
 }
 
 // close closes the pools that are not the main pool (reused in dev/tests).

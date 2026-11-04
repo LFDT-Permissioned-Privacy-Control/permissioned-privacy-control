@@ -6,23 +6,27 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"sync/atomic"
+	"syscall"
 	"time"
 
 	"privacy-proxy/internal/audit"
 	"privacy-proxy/internal/audit/buffer"
 	"privacy-proxy/internal/audit/sealer"
 	"privacy-proxy/internal/db"
+	"privacy-proxy/internal/metrics"
 	"privacy-proxy/internal/rbac"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // accessLogStore is what the sealing needs from the audit database
 // (*db.AuditDB).
 type accessLogStore interface {
-	GetMaxAccessLogBufferSeq(ctx context.Context, chainName string) (uint64, error)
-	GetLatestAccessLogHashForChain(ctx context.Context, chainName string) (string, error)
-	SealBufferedAccessLog(ctx context.Context, chain db.RBACAuditChain, rec db.AccessLogRecord, bufferSeq uint64, chainName string) (string, error)
-	SealBufferedAccessLogs(ctx context.Context, chain db.BatchAuditChain, records []db.BufferedAccessLog, chainName string) ([]db.SealedAccessLog, error)
+	ReserveAccessLogBufferRange(ctx context.Context) (uint64, error)
+	MaxAccessLogBufferSeqBetween(ctx context.Context, lo, hi uint64) (uint64, error)
+	MaxChainAccessLogBufferSeqBelow(ctx context.Context, chainName string, limit uint64) (uint64, error)
+	SealBufferedAccessLog(ctx context.Context, chain db.AccessLogChain, rec db.AccessLogRecord, bufferSeq uint64, chainName string) (string, error)
+	SealBufferedAccessLogs(ctx context.Context, chain db.AccessLogChain, records []db.BufferedAccessLog, chainName string) ([]db.SealedAccessLog, error)
 	SealedAccessLogsBySeq(ctx context.Context, chainName string, seqs []uint64) ([]db.SealedAccessLogRow, error)
 }
 
@@ -31,9 +35,15 @@ type siemSender interface {
 	Send(audit.SIEMEvent)
 }
 
-// accessLogSealing is the single writer of this instance's access-log chain
-// when the async audit buffer is enabled (RD-1112): the per-record and batch
-// seal functions the sealer calls, and SIEM forwarding after each commit.
+// accessLogSealing is this instance's writer of its access-log chain when
+// the async audit buffer is enabled (RD-1112): the per-record and batch seal
+// functions the sealer calls, and SIEM forwarding after each commit.
+//
+// Several instances may share an audit database and even a chain name
+// (RD-1410): each numbers its entries in an allocation range of its own
+// (audit/004), so its resume point is its range's sealed high-water, and each
+// write links to the chain head it reads under the chain's transaction lock,
+// so writers of one chain never fork it.
 //
 // Every sealed row is handed to the SIEM forwarder at least once while the
 // sealer runs (RD-1410), including rows sealed before a restart whose buffer
@@ -48,11 +58,8 @@ type accessLogSealing struct {
 	chain   *audit.HashChain
 	name    string
 	siem    siemSender
-	// stale is set after a write whose outcome is unknown (an error after the
-	// statement may have committed). The chain head is then re-read from the
-	// database before the next seal, so the next entry never links to a head
-	// that is not the stored one.
-	stale atomic.Bool
+	// base and top bound this run's allocation range (base+1 .. top).
+	base, top uint64
 	// unsettled holds the (clamped) records of seal writes whose outcome was
 	// unknown, by buffer sequence. Only the sealer's goroutine uses it.
 	unsettled map[uint64]db.AccessLogRecord
@@ -68,22 +75,178 @@ const settleTimeout = 5 * time.Second
 // sealer's context, so a shutdown does not cancel it mid-commit.
 const sealCommitTimeout = 30 * time.Second
 
-func (a *accessLogSealing) highWater(ctx context.Context) (uint64, error) {
-	return a.auditDB.GetMaxAccessLogBufferSeq(ctx, a.name)
+// rangeSize is the number of sequences in one allocation range.
+const rangeSize = uint64(1) << buffer.RangeShift
+
+// maxRangeDraws bounds how often a starting instance draws again when the
+// audit database hands out a range that is already in use (a database
+// restored from a backup older than its last starts).
+const maxRangeDraws = 64
+
+// ReasonAuditSealingStopped is the /ready reason while the async audit
+// buffer's sealing has stopped (chain refused, or stalled).
+const ReasonAuditSealingStopped = "audit_sealing_stopped"
+
+const (
+	ReasonAuditBufferLowSpace    = "audit_buffer_low_space"
+	ReasonAuditBufferUnavailable = "audit_buffer_unavailable"
+)
+
+func auditBufferVolumeSpace(dir string) func() (uint64, uint64, error) {
+	return func() (uint64, uint64, error) {
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(dir, &st); err != nil {
+			return 0, 0, err
+		}
+		return st.Bavail * uint64(st.Bsize), st.Blocks * uint64(st.Bsize), nil
+	}
 }
 
-// ready re-reads the chain head after an ambiguous write.
-func (a *accessLogSealing) ready(ctx context.Context) error {
-	if !a.stale.Load() {
-		return nil
+func (s *Server) auditReadinessReason() string {
+	if s.auditSealingStopped() {
+		return ReasonAuditSealingStopped
 	}
-	head, err := a.auditDB.GetLatestAccessLogHashForChain(ctx, a.name)
+	if s.auditBufferSpace != nil {
+		free, total, err := s.auditBufferSpace()
+		if err != nil {
+			return ReasonAuditBufferUnavailable
+		}
+		if free < min(uint64(1)<<30, total/4) {
+			return ReasonAuditBufferLowSpace
+		}
+	}
+	return ""
+}
+
+// auditSealingStopped reports whether the async audit buffer's sealing has
+// stopped: records are still buffered durably, but none reaches the audit
+// database, so the instance reports not ready (fail closed).
+func (s *Server) auditSealingStopped() bool {
+	return s.auditSealer != nil && s.auditSealer.State().Stopped
+}
+
+// registerAuditSealingMetrics exposes the sealer's state as gauges.
+func registerAuditSealingMetrics(reg prometheus.Registerer, s *sealer.Sealer) {
+	metrics.RegisterAuditSealing(reg, func() metrics.AuditSealingState {
+		st := s.State()
+		return metrics.AuditSealingState{Stopped: st.Stopped, Degraded: st.Degraded, Reason: st.Reason, Backlog: st.Backlog, LastProgress: st.LastProgress}
+	})
+}
+
+// openAccessLogSealing opens the async audit buffer at dir and the sealer of
+// chain, as a starting server does (RD-1410): it draws this run's allocation
+// range from the audit database, seeds the buffer with it before any append,
+// and wires the sealer to resume every earlier range from its own sealed
+// high-water. tune adjusts the sealer configuration (tests).
+func openAccessLogSealing(ctx context.Context, store accessLogStore, dir, chain string, siem siemSender, tune func(*sealer.Config)) (*buffer.Buffer, *sealer.Sealer, *accessLogSealing, error) {
+	buf, err := buffer.Open(dir, buffer.RequireSeed())
 	if err != nil {
-		return fmt.Errorf("reload access-log chain head: %w", err)
+		return nil, nil, nil, fmt.Errorf("async audit buffer init (AUDIT_BUFFER_DIR=%q): %w", dir, err)
 	}
-	a.chain.Reset(head)
-	a.stale.Store(false)
-	return nil
+	base, top, err := reserveBufferRange(ctx, store, buf.AllocatedThrough())
+	if err == nil {
+		err = buf.SeedRange(base, top)
+	}
+	if err != nil {
+		_ = buf.Close()
+		return nil, nil, nil, fmt.Errorf("async audit buffer: %w", err)
+	}
+	sealing := &accessLogSealing{auditDB: store, chain: audit.NewHashChain(""), name: chain, siem: siem, base: base, top: top}
+	// A tick works through earlier runs' entries first, then drains this
+	// run's backlog in multi-row batch writes; a failed batch is sealed
+	// record by record, stopping at the failing one. Settle forwards rows
+	// whose seal outcome the sealer could not observe.
+	cfg := sealer.Config{SealBatch: sealing.sealBatch, Settle: sealing.settle, RangeBase: base, RangeHighWater: sealing.rangeHighWater, Verify: sealing.verify, OnMove: sealing.moved}
+	if tune != nil {
+		tune(&cfg)
+	}
+	return buf, sealer.New(buf, sealing.seal, sealing.highWater, cfg), sealing, nil
+}
+
+// reserveBufferRange draws this run's allocation range. A range is drawn
+// again when it does not start above the buffer's own entries or already
+// holds rows, which only a restored audit database (its sequence moved back)
+// produces; after maxRangeDraws it refuses with the remedy.
+func reserveBufferRange(ctx context.Context, store accessLogStore, allocated uint64) (uint64, uint64, error) {
+	for draw := 0; draw < maxRangeDraws; draw++ {
+		n, err := store.ReserveAccessLogBufferRange(ctx)
+		if err != nil {
+			return 0, 0, err
+		}
+		base := n << buffer.RangeShift
+		top := base + rangeSize - 1
+		if base < allocated {
+			// Drawing again cannot catch up: the buffer was numbered in a
+			// range the database has not handed out yet (it was restored).
+			return 0, 0, fmt.Errorf("the audit database handed out allocation range %d, below this buffer's own entries (range %d): it was restored from a backup; advance access_logs_buffer_range_seq to at least %d before starting (see the audit-integrity documentation)", n, allocated>>buffer.RangeShift, allocated>>buffer.RangeShift+1)
+		}
+		used, err := store.MaxAccessLogBufferSeqBetween(ctx, base, top)
+		if err != nil {
+			return 0, 0, err
+		}
+		if used == 0 {
+			return base, top, nil
+		}
+	}
+	return 0, 0, fmt.Errorf("the audit database keeps handing out allocation ranges that are already in use (was it restored from a backup?): advance access_logs_buffer_range_seq past every range in use before starting (see the audit-integrity documentation)")
+}
+
+// highWater is this run's sealed high-water: within its own range only this
+// buffer writes, so the range's highest stored sequence is exact.
+func (a *accessLogSealing) highWater(ctx context.Context) (uint64, error) {
+	return a.auditDB.MaxAccessLogBufferSeqBetween(ctx, a.base+1, a.top)
+}
+
+// rangeHighWater is the sealed high-water of an earlier run's range; range 0
+// holds the entries numbered per chain before ranges existed.
+func (a *accessLogSealing) rangeHighWater(ctx context.Context, index uint64) (uint64, error) {
+	if index == 0 {
+		return a.auditDB.MaxChainAccessLogBufferSeqBelow(ctx, a.name, rangeSize)
+	}
+	lo := index << buffer.RangeShift
+	return a.auditDB.MaxAccessLogBufferSeqBetween(ctx, lo, lo+rangeSize-1)
+}
+
+// moved forgets what was tracked under an entry's old sequence: the record
+// under it is not this entry's, so settling it would compare a foreign row.
+func (a *accessLogSealing) moved(from, _ uint64) {
+	delete(a.unsettled, from)
+}
+
+// verify compares earlier entries with the rows stored under their
+// sequences in any chain (sealer.Config.Verify). A corrupt entry, which is
+// never sealed, counts as sealed.
+func (a *accessLogSealing) verify(ctx context.Context, entries []buffer.Entry) ([]sealer.Verdict, error) {
+	seqs := make([]uint64, len(entries))
+	for i, e := range entries {
+		seqs[i] = e.Seq
+	}
+	read, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+	defer cancel()
+	rows, err := a.auditDB.SealedAccessLogsBySeq(read, "", seqs)
+	if err != nil {
+		return nil, err
+	}
+	stored := make(map[uint64]db.SealedAccessLogRow, len(rows))
+	for _, r := range rows {
+		stored[r.Seq] = r
+	}
+	out := make([]sealer.Verdict, len(entries))
+	for i, e := range entries {
+		rec, ok := decodeBuffered(e.Seq, e.Data)
+		row, found := stored[e.Seq]
+		switch {
+		case !ok:
+			out[i] = sealer.Sealed
+		case !found:
+			out[i] = sealer.Missing
+		case sameSealedRecord(row, db.ClampAccessLogRecord(rec)):
+			out[i] = sealer.Sealed
+		default:
+			out[i] = sealer.Foreign
+		}
+	}
+	return out, nil
 }
 
 func decodeBuffered(seq uint64, data []byte) (db.AccessLogRecord, bool) {
@@ -102,14 +265,10 @@ func (a *accessLogSealing) seal(ctx context.Context, seq uint64, data []byte) er
 	if !ok {
 		return nil
 	}
-	if err := a.ready(ctx); err != nil {
-		return err
-	}
 	write, cancel := context.WithTimeout(context.WithoutCancel(ctx), sealCommitTimeout)
 	defer cancel()
 	hash, err := a.auditDB.SealBufferedAccessLog(write, a.chain, rec, seq, a.name)
 	if err != nil {
-		a.stale.Store(true)
 		a.unsettle(seq, rec)
 		return err
 	}
@@ -128,9 +287,6 @@ func (a *accessLogSealing) sealBatch(ctx context.Context, entries []buffer.Entry
 	if len(records) == 0 {
 		return nil
 	}
-	if err := a.ready(ctx); err != nil {
-		return err
-	}
 	write, cancel := context.WithTimeout(context.WithoutCancel(ctx), sealCommitTimeout)
 	defer cancel()
 	sealed, err := a.auditDB.SealBufferedAccessLogs(write, a.chain, records, a.name)
@@ -138,7 +294,6 @@ func (a *accessLogSealing) sealBatch(ctx context.Context, entries []buffer.Entry
 		// The batch may have committed. The sealer re-seals it record by
 		// record; if it had, those retries fail on the unique buffer
 		// sequence, and settle forwards the rows the chain holds.
-		a.stale.Store(true)
 		for _, rec := range records {
 			a.unsettle(rec.Seq, rec.Record)
 		}
@@ -199,7 +354,9 @@ func (a *accessLogSealing) settle(ctx context.Context, highWater uint64, recover
 	found := make(map[uint64]bool, len(seqs))
 	for chunk := range slices.Chunk(seqs, settleChunk) {
 		read, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
-		rows, err := a.auditDB.SealedAccessLogsBySeq(read, a.name, chunk)
+		// Any chain: an earlier run may have sealed under another chain
+		// name, and the content comparison below tells records apart.
+		rows, err := a.auditDB.SealedAccessLogsBySeq(read, "", chunk)
 		cancel()
 		if err != nil {
 			a.settleFailedAt = time.Now()
@@ -254,7 +411,8 @@ func sameSealedRecord(row db.SealedAccessLogRow, want db.AccessLogRecord) bool {
 		stored = *row.ResponseStatus
 	}
 	return row.ExternalID == want.ExternalID && row.Method == want.Method && row.StatusCode == want.StatusCode &&
-		row.CorrelationID == want.CorrelationID && row.IPAddress == want.IPAddress && stored == response
+		row.CorrelationID == want.CorrelationID && row.IPAddress == want.IPAddress && stored == response &&
+		row.Params == string(want.Params) && row.OrgID == want.OrgID && row.DenialReason == want.DenialReason
 }
 
 // forward sends the sealed record to the SIEM (off the request path).

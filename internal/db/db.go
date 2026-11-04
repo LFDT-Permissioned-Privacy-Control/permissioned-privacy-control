@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"log/slog"
 	"slices"
@@ -349,7 +350,7 @@ func checkAccessLogsOwnership(ctx context.Context, conn *pgx.Conn, current int32
 					"(its sequence follows). REASSIGN OWNED BY %[2]s TO %[3]s; moves the whole audit schema instead, "+
 					"but also everything else %[2]s owns in that database and the databases it owns. "+
 					"The migration rewrites the table: on a large deployment run it in a maintenance window, "+
-					"instances stopped, with `migrate -audit` (make db-migrate-audit).", object, owner, currentUser)
+					"instances stopped, with `privacy-proxy migrate -audit` (make db-migrate-audit from a checkout).", object, owner, currentUser)
 		}
 	}
 	return rows.Err()
@@ -855,9 +856,26 @@ func (d *DB) LogAccessChained(
 	orgID string,
 	denialReason string,
 ) (int64, time.Time, string, error) {
+	return d.logAccessChained(ctx, chain, externalID, method, statusCode, ipAddress, correlationID, params, responseStatus, orgID, denialReason, "access_logs")
+}
+
+func (d *DB) logAccessChained(
+	ctx context.Context,
+	chain RBACAuditChain,
+	externalID, method string,
+	statusCode int,
+	ipAddress, correlationID string,
+	params []byte,
+	responseStatus *int,
+	orgID, denialReason, chainName string,
+) (int64, time.Time, string, error) {
 	if chain == nil {
 		id, createdAt, err := d.LogAccessEnhanced(ctx, externalID, method, statusCode, ipAddress, correlationID, params, responseStatus, orgID, denialReason)
 		return id, createdAt, "", err
+	}
+	accessChain, ok := chain.(AccessLogChain)
+	if !ok {
+		return 0, time.Time{}, "", fmt.Errorf("access-log chain must support resetting its stored head")
 	}
 
 	var corrID *string
@@ -873,49 +891,54 @@ func (d *DB) LogAccessChained(
 	var outID int64
 	var outCreatedAt time.Time
 
-	hash, err := chain.Append(func(prev string) (string, func(string) error, error) {
-		var id int64
-		if scanErr := d.conn.QueryRowContext(ctx,
-			`SELECT nextval('access_logs_id_seq')`,
-		).Scan(&id); scanErr != nil {
-			return "", nil, fmt.Errorf("reserve access_logs id: %w", scanErr)
-		}
-		// Postgres TIMESTAMP stores microsecond precision; Go's
-		// time.Now() carries nanoseconds. Truncate so the hash content
-		// (computed before write) matches the value the verifier reads
-		// back. Without this, every chain would look tampered on
-		// re-read because the last three digits of the format string
-		// disagree.
-		createdAt := time.Now().UTC().Truncate(time.Microsecond)
-		paramsDigest := ""
-		if len(params) > 0 {
-			paramsDigest = string(params)
-		}
-		content := AccessLogChainContent(id, externalID, method, ipAddress, statusCode, respStatus, createdAt, correlationID, paramsDigest)
+	var hash string
+	err := d.withAccessLogChainLocked(ctx, accessChain, chainName, func(tx *sql.Tx) error {
+		var appendErr error
+		hash, appendErr = chain.Append(func(prev string) (string, func(string) error, error) {
+			var id int64
+			if scanErr := tx.QueryRowContext(ctx,
+				`SELECT nextval('access_logs_id_seq')`,
+			).Scan(&id); scanErr != nil {
+				return "", nil, fmt.Errorf("reserve access_logs id: %w", scanErr)
+			}
+			// Postgres TIMESTAMP stores microsecond precision; Go's
+			// time.Now() carries nanoseconds. Truncate so the hash content
+			// (computed before write) matches the value the verifier reads
+			// back. Without this, every chain would look tampered on
+			// re-read because the last three digits of the format string
+			// disagree.
+			createdAt := time.Now().UTC().Truncate(time.Microsecond)
+			paramsDigest := ""
+			if len(params) > 0 {
+				paramsDigest = string(params)
+			}
+			content := AccessLogChainContent(id, externalID, method, ipAddress, statusCode, respStatus, createdAt, correlationID, paramsDigest)
 
-		write := func(hash string) error {
-			// org_id (RD-1135) is appended to the row but is deliberately
-			// absent from `content` above — it is a confidentiality-scoping
-			// attribute for reads, not part of the tamper-evident hash. The
-			// chain content + verifier therefore stay at format v2.
-			res, execErr := d.conn.ExecContext(ctx,
-				`INSERT INTO access_logs
-					(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, hash_format_version, created_at, entry_hash, org_id, denial_reason)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 2, $9, $10, $11, $12)`,
-				id, externalID, method, statusCode, ipAddress, corrID, params, responseStatus, createdAt, hash, nullableText(orgID), nullableText(denialReason),
-			)
-			if execErr != nil {
-				return fmt.Errorf("insert access_logs: %w", execErr)
+			write := func(hash string) error {
+				// org_id (RD-1135) is appended to the row but is deliberately
+				// absent from `content` above — it is a confidentiality-scoping
+				// attribute for reads, not part of the tamper-evident hash. The
+				// chain content + verifier therefore stay at format v2.
+				res, execErr := tx.ExecContext(ctx,
+					`INSERT INTO access_logs
+					(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, hash_format_version, created_at, entry_hash, org_id, denial_reason, chain_name)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 2, $9, $10, $11, $12, $13)`,
+					id, externalID, method, statusCode, ipAddress, corrID, params, responseStatus, createdAt, hash, nullableText(orgID), nullableText(denialReason), chainName,
+				)
+				if execErr != nil {
+					return fmt.Errorf("insert access_logs: %w", execErr)
+				}
+				if affected, _ := res.RowsAffected(); affected != 1 {
+					return fmt.Errorf("insert access_logs: expected 1 row, got %d", affected)
+				}
+				outID = id
+				outCreatedAt = createdAt
+				return nil
 			}
-			if affected, _ := res.RowsAffected(); affected != 1 {
-				return fmt.Errorf("insert access_logs: expected 1 row, got %d", affected)
-			}
-			outID = id
-			outCreatedAt = createdAt
-			return nil
-		}
-		_ = prev
-		return content, write, nil
+			_ = prev
+			return content, write, nil
+		})
+		return appendErr
 	})
 	if err != nil {
 		return 0, time.Time{}, "", err
@@ -958,14 +981,121 @@ func (d *DB) GetMaxAccessLogBufferSeq(ctx context.Context, chainName string) (ui
 	return uint64(seq.Int64), nil
 }
 
+// BufferRangeShift is the width of one async-buffer allocation range
+// (audit/004): range n holds buffer sequences n<<40 + 1 .. (n+1)<<40 - 1, and
+// range 0 the per-chain sequences written before ranges existed.
+const BufferRangeShift = 40
+
+// ReserveAccessLogBufferRange draws the next allocation range for an async
+// audit buffer (RD-1410). Ranges never repeat, so every buffer sequence an
+// instance allocates is unique in access_logs by construction.
+func (d *DB) ReserveAccessLogBufferRange(ctx context.Context) (uint64, error) {
+	var n int64
+	if err := d.conn.QueryRowContext(ctx, `SELECT nextval('access_logs_buffer_range_seq')`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("reserve audit buffer range: %w", err)
+	}
+	if n < 1 || n >= 1<<(63-BufferRangeShift) {
+		return 0, fmt.Errorf("reserve audit buffer range: range %d is outside 1..%d", n, int64(1)<<(63-BufferRangeShift)-1)
+	}
+	return uint64(n), nil
+}
+
+// MaxAccessLogBufferSeqBetween returns the highest buffer_seq in [lo, hi]
+// across all chains, 0 if none: within one allocation range that is the one
+// buffer's sealed high-water.
+func (d *DB) MaxAccessLogBufferSeqBetween(ctx context.Context, lo, hi uint64) (uint64, error) {
+	var seq sql.NullInt64
+	if err := d.conn.QueryRowContext(ctx,
+		`SELECT MAX(buffer_seq) FROM access_logs WHERE buffer_seq BETWEEN $1 AND $2`, int64(lo), int64(hi)).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("max access_logs buffer_seq in range: %w", err)
+	}
+	if !seq.Valid || seq.Int64 < 0 {
+		return 0, nil
+	}
+	return uint64(seq.Int64), nil
+}
+
+// MaxChainAccessLogBufferSeqBelow returns chainName's highest buffer_seq
+// below limit, 0 if none: the resume point of entries numbered per chain
+// before allocation ranges existed.
+func (d *DB) MaxChainAccessLogBufferSeqBelow(ctx context.Context, chainName string, limit uint64) (uint64, error) {
+	var seq sql.NullInt64
+	if err := d.conn.QueryRowContext(ctx,
+		`SELECT MAX(buffer_seq) FROM access_logs WHERE chain_name = $1 AND buffer_seq < $2`, chainName, int64(limit)).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("max access_logs buffer_seq of chain: %w", err)
+	}
+	if !seq.Valid || seq.Int64 < 0 {
+		return 0, nil
+	}
+	return uint64(seq.Int64), nil
+}
+
+// AccessLogChain is the in-process hash chain that links sealed access-log
+// rows (audit.HashChain). Reset sets its head to the stored one.
+type AccessLogChain interface {
+	Append(build func(prevHash string) (content string, write func(hash string) error, err error)) (string, error)
+	AppendBatch(build func(prevHash string) (contents []string, write func(hashes []string) error, err error)) ([]string, error)
+	Reset(lastHash string)
+}
+
+// accessLogChainLockClass is the first half of the transaction advisory lock
+// that serialises the writers of one access-log chain (the second half is a
+// hash of the chain name). It sits beside the configuration scope lock
+// (730074) and the node-policy publisher lease (730075).
+const accessLogChainLockClass int64 = 730076
+
+// AccessLogChainLockKey is the advisory-lock key of one access-log chain.
+func AccessLogChainLockKey(chainName string) int64 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(chainName))
+	return accessLogChainLockClass<<32 | int64(h.Sum32())
+}
+
+// sqlQuerier is what a seal runs its statements on (a transaction).
+type sqlQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// withAccessLogChainLocked runs fn in a transaction that holds the chain's
+// advisory lock, after resetting chain to the head stored for chainName
+// (RD-1410). Every writer of the chain takes the same lock before it
+// reads the head, so writers of one chain — several instances
+// sharing a chain name, or a write after one whose outcome was unknown —
+// always link to the stored head and never fork the chain. The synchronous
+// LogAccessChained fallback uses this lock too. The lock ends with the transaction.
+func (d *DB) withAccessLogChainLocked(ctx context.Context, chain AccessLogChain, chainName string, fn func(tx *sql.Tx) error) error {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("seal access logs: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, AccessLogChainLockKey(chainName)); err != nil {
+		return fmt.Errorf("seal access logs: lock chain: %w", err)
+	}
+	head, err := latestAccessLogHashOn(ctx, tx, chainName)
+	if err != nil {
+		return err
+	}
+	chain.Reset(head)
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("seal access logs: commit: %w", err)
+	}
+	return nil
+}
+
 // SealBufferedAccessLog seals one buffered access-log record into the chain,
 // tagged with its buffer sequence. It mirrors LogAccessChained's canonical
 // content exactly (buffer_seq is NOT part of the hashed content), so the
 // verifier and existing rows are unaffected. buffer_seq is UNIQUE, so a
 // double-seal surfaces as a loud constraint error rather than a silent
-// duplicate; the sealer's high-water resume normally prevents that from ever
-// happening.
-func (d *DB) SealBufferedAccessLog(ctx context.Context, chain RBACAuditChain, rec AccessLogRecord, bufferSeq uint64, chainName string) (string, error) {
+// duplicate. The row links to the chain's stored head, read under the
+// chain's lock (withAccessLogChainLocked).
+func (d *DB) SealBufferedAccessLog(ctx context.Context, chain AccessLogChain, rec AccessLogRecord, bufferSeq uint64, chainName string) (string, error) {
 	if chain == nil {
 		return "", fmt.Errorf("seal access log: nil chain")
 	}
@@ -980,37 +1110,41 @@ func (d *DB) SealBufferedAccessLog(ctx context.Context, chain RBACAuditChain, re
 		respStatus = *rec.ResponseStatus
 	}
 
-	hash, err := chain.Append(func(prev string) (string, func(string) error, error) {
-		var id int64
-		if scanErr := d.conn.QueryRowContext(ctx,
-			`SELECT nextval('access_logs_id_seq')`,
-		).Scan(&id); scanErr != nil {
-			return "", nil, fmt.Errorf("reserve access_logs id: %w", scanErr)
-		}
-		createdAt := time.Now().UTC().Truncate(time.Microsecond)
-		paramsDigest := ""
-		if len(rec.Params) > 0 {
-			paramsDigest = string(rec.Params)
-		}
-		content := AccessLogChainContent(id, rec.ExternalID, rec.Method, rec.IPAddress, rec.StatusCode, respStatus, createdAt, rec.CorrelationID, paramsDigest)
+	var hash string
+	err := d.withAccessLogChainLocked(ctx, chain, chainName, func(tx *sql.Tx) error {
+		var err error
+		hash, err = chain.Append(func(string) (string, func(string) error, error) {
+			var id int64
+			if scanErr := tx.QueryRowContext(ctx,
+				`SELECT nextval('access_logs_id_seq')`,
+			).Scan(&id); scanErr != nil {
+				return "", nil, fmt.Errorf("reserve access_logs id: %w", scanErr)
+			}
+			createdAt := time.Now().UTC().Truncate(time.Microsecond)
+			paramsDigest := ""
+			if len(rec.Params) > 0 {
+				paramsDigest = string(rec.Params)
+			}
+			content := AccessLogChainContent(id, rec.ExternalID, rec.Method, rec.IPAddress, rec.StatusCode, respStatus, createdAt, rec.CorrelationID, paramsDigest)
 
-		write := func(hash string) error {
-			res, execErr := d.conn.ExecContext(ctx,
-				`INSERT INTO access_logs
-					(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, hash_format_version, created_at, entry_hash, buffer_seq, chain_name, org_id, denial_reason)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 2, $9, $10, $11, $12, $13, $14)`,
-				id, rec.ExternalID, rec.Method, rec.StatusCode, rec.IPAddress, corrID, rec.Params, rec.ResponseStatus, createdAt, hash, int64(bufferSeq), chainName, nullableText(rec.OrgID), nullableText(rec.DenialReason),
-			)
-			if execErr != nil {
-				return fmt.Errorf("insert access_logs (seal): %w", execErr)
+			write := func(hash string) error {
+				res, execErr := tx.ExecContext(ctx,
+					`INSERT INTO access_logs
+						(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, hash_format_version, created_at, entry_hash, buffer_seq, chain_name, org_id, denial_reason)
+					 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 2, $9, $10, $11, $12, $13, $14)`,
+					id, rec.ExternalID, rec.Method, rec.StatusCode, rec.IPAddress, corrID, rec.Params, rec.ResponseStatus, createdAt, hash, int64(bufferSeq), chainName, nullableText(rec.OrgID), nullableText(rec.DenialReason),
+				)
+				if execErr != nil {
+					return fmt.Errorf("insert access_logs (seal): %w", execErr)
+				}
+				if affected, _ := res.RowsAffected(); affected != 1 {
+					return fmt.Errorf("insert access_logs (seal): expected 1 row, got %d", affected)
+				}
+				return nil
 			}
-			if affected, _ := res.RowsAffected(); affected != 1 {
-				return fmt.Errorf("insert access_logs (seal): expected 1 row, got %d", affected)
-			}
-			return nil
-		}
-		_ = prev
-		return content, write, nil
+			return content, write, nil
+		})
+		return err
 	})
 	if err != nil {
 		return "", err
@@ -1047,12 +1181,6 @@ func ClampAccessLogRecord(rec AccessLogRecord) AccessLogRecord {
 	return rec
 }
 
-// BatchAuditChain is a hash chain that links several entries in one step
-// (audit.HashChain).
-type BatchAuditChain interface {
-	AppendBatch(build func(prevHash string) (contents []string, write func(hashes []string) error, err error)) ([]string, error)
-}
-
 // BufferedAccessLog is one buffered access-log record and its buffer sequence.
 type BufferedAccessLog struct {
 	Seq    uint64
@@ -1074,81 +1202,19 @@ type SealedAccessLog struct {
 // unchanged. created_at is one timestamp per batch (the verifier orders the
 // chain by id, not by time). buffer_seq stays UNIQUE, so a double seal fails
 // the whole batch loudly. Records must be in ascending buffer sequence.
-func (d *DB) SealBufferedAccessLogs(ctx context.Context, chain BatchAuditChain, records []BufferedAccessLog, chainName string) ([]SealedAccessLog, error) {
+func (d *DB) SealBufferedAccessLogs(ctx context.Context, chain AccessLogChain, records []BufferedAccessLog, chainName string) ([]SealedAccessLog, error) {
 	if chain == nil {
 		return nil, fmt.Errorf("seal access logs: nil chain")
 	}
 	if len(records) == 0 {
 		return nil, nil
 	}
-	n := len(records)
 	var sealed []SealedAccessLog
-	_, err := chain.AppendBatch(func(string) ([]string, func([]string) error, error) {
-		rows, err := d.conn.QueryContext(ctx, `SELECT nextval('access_logs_id_seq') FROM generate_series(1, $1)`, n)
-		if err != nil {
-			return nil, nil, fmt.Errorf("reserve access_logs ids: %w", err)
-		}
-		ids := make([]int64, 0, n)
-		for rows.Next() {
-			var id int64
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, nil, fmt.Errorf("reserve access_logs ids: %w", err)
-			}
-			ids = append(ids, id)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil || len(ids) != n {
-			return nil, nil, fmt.Errorf("reserve access_logs ids: got %d of %d: %v", len(ids), n, err)
-		}
-		slices.Sort(ids)
-		createdAt := time.Now().UTC().Truncate(time.Microsecond)
-		contents := make([]string, n)
-		externalIDs, methods, ips, entryHashes := make([]string, n), make([]string, n), make([]string, n), make([]string, n)
-		statuses := make([]int32, n)
-		correlations, params, orgIDs, denials := make([]*string, n), make([]*string, n), make([]*string, n), make([]*string, n)
-		responses := make([]*int32, n)
-		created := make([]time.Time, n)
-		seqs := make([]int64, n)
-		for i, buffered := range records {
-			rec := ClampAccessLogRecord(buffered.Record)
-			respStatus := rec.StatusCode
-			if rec.ResponseStatus != nil {
-				respStatus = *rec.ResponseStatus
-				r := int32(*rec.ResponseStatus)
-				responses[i] = &r
-			}
-			paramsDigest := ""
-			if len(rec.Params) > 0 {
-				paramsDigest = string(rec.Params)
-				params[i] = &paramsDigest
-			}
-			contents[i] = AccessLogChainContent(ids[i], rec.ExternalID, rec.Method, rec.IPAddress, rec.StatusCode, respStatus, createdAt, rec.CorrelationID, paramsDigest)
-			externalIDs[i], methods[i], ips[i], statuses[i] = rec.ExternalID, rec.Method, rec.IPAddress, int32(rec.StatusCode)
-			correlations[i], orgIDs[i], denials[i] = nullableText(rec.CorrelationID), nullableText(rec.OrgID), nullableText(rec.DenialReason)
-			created[i], seqs[i] = createdAt, int64(buffered.Seq)
-		}
-		write := func(hashes []string) error {
-			copy(entryHashes, hashes)
-			res, err := d.conn.ExecContext(ctx, `INSERT INTO access_logs
-				(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, hash_format_version, created_at, entry_hash, buffer_seq, chain_name, org_id, denial_reason)
-				SELECT u.id, u.external_id, u.method, u.status_code, u.ip_address, u.correlation_id, u.request_params, u.response_status, 2, u.created_at, u.entry_hash, u.buffer_seq, $12, u.org_id, u.denial_reason
-				FROM unnest($1::bigint[], $2::text[], $3::text[], $4::int[], $5::text[], $6::text[], $7::text[], $8::int[], $9::timestamp[], $10::text[], $11::bigint[], $13::text[], $14::text[])
-				  AS u(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, created_at, entry_hash, buffer_seq, org_id, denial_reason)`,
-				ids, externalIDs, methods, statuses, ips, correlations, params, responses, created, entryHashes, seqs, chainName, orgIDs, denials)
-			if err != nil {
-				return fmt.Errorf("insert access_logs (batch seal): %w", err)
-			}
-			if affected, _ := res.RowsAffected(); affected != int64(n) {
-				return fmt.Errorf("insert access_logs (batch seal): expected %d rows, got %d", n, affected)
-			}
-			sealed = make([]SealedAccessLog, n)
-			for i := range sealed {
-				sealed[i] = SealedAccessLog{Hash: hashes[i], CreatedAt: createdAt}
-			}
-			return nil
-		}
-		return contents, write, nil
+	err := d.withAccessLogChainLocked(ctx, chain, chainName, func(tx *sql.Tx) error {
+		_, err := chain.AppendBatch(func(string) ([]string, func([]string) error, error) {
+			return d.batchSealBuild(ctx, tx, records, chainName, &sealed)
+		})
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -1156,23 +1222,98 @@ func (d *DB) SealBufferedAccessLogs(ctx context.Context, chain BatchAuditChain, 
 	return sealed, nil
 }
 
+// batchSealBuild reserves the batch's ids and returns its chain contents and
+// the INSERT that writes it, on tx (SealBufferedAccessLogs).
+func (d *DB) batchSealBuild(ctx context.Context, tx sqlQuerier, records []BufferedAccessLog, chainName string, sealed *[]SealedAccessLog) ([]string, func([]string) error, error) {
+	n := len(records)
+	rows, err := tx.QueryContext(ctx, `SELECT nextval('access_logs_id_seq') FROM generate_series(1, $1)`, n)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reserve access_logs ids: %w", err)
+	}
+	ids := make([]int64, 0, n)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, nil, fmt.Errorf("reserve access_logs ids: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil || len(ids) != n {
+		return nil, nil, fmt.Errorf("reserve access_logs ids: got %d of %d: %v", len(ids), n, err)
+	}
+	slices.Sort(ids)
+	createdAt := time.Now().UTC().Truncate(time.Microsecond)
+	contents := make([]string, n)
+	externalIDs, methods, ips, entryHashes := make([]string, n), make([]string, n), make([]string, n), make([]string, n)
+	statuses := make([]int32, n)
+	correlations, params, orgIDs, denials := make([]*string, n), make([]*string, n), make([]*string, n), make([]*string, n)
+	responses := make([]*int32, n)
+	created := make([]time.Time, n)
+	seqs := make([]int64, n)
+	for i, buffered := range records {
+		rec := ClampAccessLogRecord(buffered.Record)
+		respStatus := rec.StatusCode
+		if rec.ResponseStatus != nil {
+			respStatus = *rec.ResponseStatus
+			r := int32(*rec.ResponseStatus)
+			responses[i] = &r
+		}
+		paramsDigest := ""
+		if len(rec.Params) > 0 {
+			paramsDigest = string(rec.Params)
+			params[i] = &paramsDigest
+		}
+		contents[i] = AccessLogChainContent(ids[i], rec.ExternalID, rec.Method, rec.IPAddress, rec.StatusCode, respStatus, createdAt, rec.CorrelationID, paramsDigest)
+		externalIDs[i], methods[i], ips[i], statuses[i] = rec.ExternalID, rec.Method, rec.IPAddress, int32(rec.StatusCode)
+		correlations[i], orgIDs[i], denials[i] = nullableText(rec.CorrelationID), nullableText(rec.OrgID), nullableText(rec.DenialReason)
+		created[i], seqs[i] = createdAt, int64(buffered.Seq)
+	}
+	write := func(hashes []string) error {
+		copy(entryHashes, hashes)
+		res, err := tx.ExecContext(ctx, `INSERT INTO access_logs
+			(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, hash_format_version, created_at, entry_hash, buffer_seq, chain_name, org_id, denial_reason)
+			SELECT u.id, u.external_id, u.method, u.status_code, u.ip_address, u.correlation_id, u.request_params, u.response_status, 2, u.created_at, u.entry_hash, u.buffer_seq, $12, u.org_id, u.denial_reason
+			FROM unnest($1::bigint[], $2::text[], $3::text[], $4::int[], $5::text[], $6::text[], $7::text[], $8::int[], $9::timestamp[], $10::text[], $11::bigint[], $13::text[], $14::text[])
+			  AS u(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, created_at, entry_hash, buffer_seq, org_id, denial_reason)`,
+			ids, externalIDs, methods, statuses, ips, correlations, params, responses, created, entryHashes, seqs, chainName, orgIDs, denials)
+		if err != nil {
+			return fmt.Errorf("insert access_logs (batch seal): %w", err)
+		}
+		if affected, _ := res.RowsAffected(); affected != int64(n) {
+			return fmt.Errorf("insert access_logs (batch seal): expected %d rows, got %d", n, affected)
+		}
+		*sealed = make([]SealedAccessLog, n)
+		for i := range *sealed {
+			(*sealed)[i] = SealedAccessLog{Hash: hashes[i], CreatedAt: createdAt}
+		}
+		return nil
+	}
+	return contents, write, nil
+}
+
 // SealedAccessLogRow is a sealed access-log row as stored, with its buffer
 // sequence: what the sealer forwards when it could not observe the write.
 type SealedAccessLogRow struct {
 	Seq            uint64
+	ChainName      string
 	ExternalID     string
 	Method         string
 	StatusCode     int
 	ResponseStatus *int
 	IPAddress      string
 	CorrelationID  string
+	Params         string
+	OrgID          string
+	DenialReason   string
 	EntryHash      string
 	CreatedAt      time.Time
 }
 
-// SealedAccessLogsBySeq returns the rows of chainName sealed under the given
-// buffer sequences (the sealer settles writes whose outcome it could not
-// observe; RD-1410).
+// SealedAccessLogsBySeq returns the rows of chainName ("" for any chain)
+// sealed under the given buffer sequences (the sealer settles writes whose
+// outcome it could not observe and verifies earlier runs' entries; RD-1410).
 func (d *DB) SealedAccessLogsBySeq(ctx context.Context, chainName string, seqs []uint64) ([]SealedAccessLogRow, error) {
 	if len(seqs) == 0 {
 		return nil, nil
@@ -1181,9 +1322,10 @@ func (d *DB) SealedAccessLogsBySeq(ctx context.Context, chainName string, seqs [
 	for i, seq := range seqs {
 		keys[i] = int64(seq)
 	}
-	rows, err := d.conn.QueryContext(ctx, `SELECT buffer_seq, external_id, method, status_code, response_status,
-		COALESCE(ip_address, ''), COALESCE(correlation_id, ''), COALESCE(entry_hash, ''), created_at
-		FROM access_logs WHERE chain_name = $1 AND buffer_seq = ANY($2::bigint[])`, chainName, keys)
+	rows, err := d.conn.QueryContext(ctx, `SELECT buffer_seq, chain_name, external_id, method, status_code, response_status,
+		COALESCE(ip_address, ''), COALESCE(correlation_id, ''), COALESCE(request_params, ''), COALESCE(org_id, ''), COALESCE(denial_reason, ''),
+		COALESCE(entry_hash, ''), created_at
+		FROM access_logs WHERE ($1 = '' OR chain_name = $1) AND buffer_seq = ANY($2::bigint[])`, chainName, keys)
 	if err != nil {
 		return nil, fmt.Errorf("read sealed access logs: %w", err)
 	}
@@ -1193,7 +1335,7 @@ func (d *DB) SealedAccessLogsBySeq(ctx context.Context, chainName string, seqs [
 		var r SealedAccessLogRow
 		var seq int64
 		var response sql.NullInt64
-		if err := rows.Scan(&seq, &r.ExternalID, &r.Method, &r.StatusCode, &response, &r.IPAddress, &r.CorrelationID, &r.EntryHash, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&seq, &r.ChainName, &r.ExternalID, &r.Method, &r.StatusCode, &response, &r.IPAddress, &r.CorrelationID, &r.Params, &r.OrgID, &r.DenialReason, &r.EntryHash, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("read sealed access logs: %w", err)
 		}
 		r.Seq = uint64(seq)
@@ -1344,8 +1486,14 @@ func (d *DB) GetLatestAccessLogHash(ctx context.Context) (string, error) {
 // global tail (RD-1112 #8, prevents the multi-writer fork). For the default
 // chain_name ('access_logs') this is equivalent to the global query.
 func (d *DB) GetLatestAccessLogHashForChain(ctx context.Context, chainName string) (string, error) {
+	return latestAccessLogHashOn(ctx, d.conn, chainName)
+}
+
+// latestAccessLogHashOn reads a chain's head on q: its last hashed row, else
+// the anchor its last prune left, else "" (an empty chain).
+func latestAccessLogHashOn(ctx context.Context, q sqlQuerier, chainName string) (string, error) {
 	var hash sql.NullString
-	err := d.conn.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT entry_hash FROM access_logs WHERE chain_name = $1 AND entry_hash IS NOT NULL ORDER BY id DESC LIMIT 1`,
 		chainName,
 	).Scan(&hash)
@@ -1355,14 +1503,12 @@ func (d *DB) GetLatestAccessLogHashForChain(ctx context.Context, chainName strin
 	if hash.Valid && hash.String != "" {
 		return hash.String, nil
 	}
-	anchor, err := d.GetAuditChainAnchor(ctx, chainName)
-	if err != nil {
-		return "", err
+	var anchor sql.NullString
+	err = q.QueryRowContext(ctx, `SELECT last_pruned_entry_hash FROM audit_chain_anchor WHERE chain_name = $1`, chainName).Scan(&anchor)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("failed to read audit chain anchor %q: %w", chainName, err)
 	}
-	if anchor != nil {
-		return anchor.LastPrunedEntryHash, nil
-	}
-	return "", nil
+	return anchor.String, nil
 }
 
 // CleanupAccessLogs deletes access log entries older than the given time AND

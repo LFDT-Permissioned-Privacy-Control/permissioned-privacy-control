@@ -155,6 +155,9 @@ type Server struct {
 	auditBuffer       *buffer.Buffer
 	auditSealer       *sealer.Sealer
 	auditSealerCancel context.CancelFunc
+	// auditBufferSpace reads the buffer volume's available and total bytes.
+	// Nil when durable buffering is disabled.
+	auditBufferSpace func() (uint64, uint64, error)
 	// RD-1112 #8 signed truncation-detection checkpoints (nil when disabled).
 	auditCheckpointWorker *audit.CheckpointWorker
 	auditCheckpointCancel context.CancelFunc
@@ -371,6 +374,23 @@ func buildExplorerBackend(sqlStore *explorer.Store, indexerURL string) (explorer
 	return b, nil
 }
 
+// webhookOrigin is the scheme and host of a webhook URL, for logs: a
+// collector token in the path, query or user info stays out of them.
+func webhookOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "(unparseable)"
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// siemDropsWithoutFallback reports a production SIEM without a fallback log:
+// a batch the endpoint cannot take (an outage, or a queue that fell too far
+// behind) is then counted and dropped instead of being kept on local disk.
+func siemDropsWithoutFallback(cfg *config.Config) bool {
+	return cfg.IsProduction() && cfg.SIEMWebhookURL != "" && cfg.SIEMFallbackLogPath == ""
+}
+
 // warnIfPoolExceedsServer warns at startup when one instance's pool alone can
 // open more connections than the database server accepts (RD-1410). Several
 // instances, the audit pools on the same server and other clients all count
@@ -505,7 +525,7 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 			return nil, fmt.Errorf("failed to open audit runtime database: %w", err)
 		}
 	}
-	auditDB := db.NewAuditHandle(auditPool)
+	auditDB := db.NewAuditHandleForChain(auditPool, cfg.AuditChainName)
 	if cfg.AuditDatabaseURL == cfg.AuditAdminDatabaseURL {
 		// Derived-default deployment (or an operator pointing both DSNs at the
 		// same owner identity): the runtime pool connects as the owner, so the
@@ -874,6 +894,7 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 			BatchSize:       cfg.SIEMBatchSize,
 			FlushInterval:   cfg.SIEMFlushInterval,
 			FallbackLogPath: cfg.SIEMFallbackLogPath,
+			Senders:         cfg.SIEMSenders,
 			AllowInsecure:   !cfg.IsProduction(),
 		})
 		if siemErr != nil {
@@ -882,42 +903,37 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 		siemForwarder.SetMetrics(m.SIEMBatchesTotal, m.SIEMEventsDroppedTotal)
 		siemForwarder.Start()
 		s.siemForwarder = siemForwarder
-		slog.Info("SIEM forwarding enabled", "webhook", cfg.SIEMWebhookURL, "batch_size", cfg.SIEMBatchSize, "flush_interval", cfg.SIEMFlushInterval)
+		slog.Info("SIEM forwarding enabled", "webhook", webhookOrigin(cfg.SIEMWebhookURL), "batch_size", cfg.SIEMBatchSize, "senders", cfg.SIEMSenders, "flush_interval", cfg.SIEMFlushInterval)
+		if siemDropsWithoutFallback(cfg) {
+			slog.Warn("SIEM forwarding has no fallback log: events the SIEM endpoint cannot take are dropped; set SIEM_FALLBACK_LOG_PATH to keep them on local disk")
+		}
 	}
 
 	// RD-1112: async access-log auditing. When AUDIT_BUFFER_DIR is set, the hot
-	// path appends each entry to a durable Pebble buffer and a single background
-	// sealer drains it into the access_logs chain off the request path — removing
-	// the per-request chain mutex + 2 PG round-trips that capped throughput. A
-	// single-writer sealer means no chain fork. Empty dir = synchronous legacy path.
+	// path appends each entry to a durable Pebble buffer and a background
+	// sealer drains it into the access_logs chain off the request path —
+	// removing the per-request chain mutex + 2 PG round-trips that capped
+	// throughput. Empty dir = synchronous legacy path.
 	if cfg.AuditBufferDir != "" {
-		// RequireSeed: no append is accepted until the buffer's sequence floor
-		// is the chain's sealed high-water (seeded below, before the request
-		// path exists), so a drained or recreated buffer never reuses a
-		// sequence the chain already sealed (RD-1410).
-		auditBuf, bufErr := buffer.Open(cfg.AuditBufferDir, buffer.RequireSeed())
-		if bufErr != nil {
-			return nil, fmt.Errorf("async audit buffer init (AUDIT_BUFFER_DIR=%q): %w", cfg.AuditBufferDir, bufErr)
-		}
-		s.auditBuffer = auditBuf
-
-		sealing := &accessLogSealing{auditDB: auditDB, chain: hashChain, name: cfg.AuditChainName}
+		// RD-1410: the buffer accepts no append until it holds this run's
+		// allocation range, drawn from the audit database before the request
+		// path exists, so no two runs or instances ever share a sequence.
+		var siem siemSender
 		if siemForwarder != nil {
-			sealing.siem = siemForwarder
+			siem = siemForwarder
 		}
-		// A tick drains the whole backlog in multi-row batch writes; a failed
-		// batch is sealed record by record, stopping at the failing one.
-		// Settle forwards rows whose seal outcome the sealer could not observe.
-		s.auditSealer = sealer.New(auditBuf, sealing.seal, sealing.highWater, sealer.Config{SealBatch: sealing.sealBatch, Settle: sealing.settle})
 		seedCtx, cancelSeed := context.WithTimeout(context.Background(), 15*time.Second)
-		seedErr := s.auditSealer.Seed(seedCtx)
+		auditBuf, auditSealer, _, sealErr := openAccessLogSealing(seedCtx, auditDB, cfg.AuditBufferDir, cfg.AuditChainName, siem, func(c *sealer.Config) {
+			c.StallAfter = cfg.AuditSealingStallLimit
+		})
 		cancelSeed()
-		if seedErr != nil {
-			_ = auditBuf.Close()
-			s.auditBuffer, s.auditSealer = nil, nil
+		if sealErr != nil {
 			s.Stop()
-			return nil, fmt.Errorf("async audit buffer: read the sealed chain high-water from the audit database: %w", seedErr)
+			return nil, sealErr
 		}
+		s.auditBuffer, s.auditSealer = auditBuf, auditSealer
+		s.auditBufferSpace = auditBufferVolumeSpace(cfg.AuditBufferDir)
+		registerAuditSealingMetrics(m.Registry, auditSealer)
 		sealerCtx, sealerCancel := context.WithCancel(context.Background())
 		s.auditSealerCancel = sealerCancel
 		go s.auditSealer.Run(sealerCtx)
@@ -1450,14 +1466,15 @@ const MaxRequestBodySize = 1 << 20 // 1MB
 // @Success      200 {object} apimodels.JSONRPCResponseEnvelope "JSON-RPC response; may carry a JSON-RPC-level error member"
 // @Failure      400 {object} apimodels.APIError "unreadable body, malformed, ambiguous (duplicate or case-variant members) or batch JSON-RPC, invalid visibleTo, or an unsupported tracer/config (a tracer other than callTracer, withLog or malformed trace params)"
 // @Failure      401 {object} apimodels.APIError "identity required but unresolved on a trace method (debug_traceCall / debug_traceTransaction)"
-// @Failure      403 {object} apimodels.APIError "runtime-trace, standard-profile trace-access (debug_traceTransaction for a non-participant or a missing transaction) or compliance denial"
+// @Failure      403 {object} apimodels.APIError "runtime-trace, standard-profile trace-access (debug_traceTransaction for a non-participant or a missing transaction) or compliance denial, or in Reth policy mode a request the execution node rejected"
 // @Failure      404 {object} apimodels.APIError "method not allowed for the caller (denials are masked as method not found), or a strict-profile mined trace unavailable to the caller"
 // @Failure      413 {object} apimodels.APIError "request body too large"
 // @Failure      429 {object} apimodels.APIError "concurrency limit, signed-approval simulation budget, upstream rate limit, or in Reth policy mode the pending transactions of the caller, or of the caller's organization, at their limit (retry after Retry-After seconds, once some are included)"
 // @Failure      500 {object} apimodels.APIError "trace-validation or compliance-check error"
 // @Failure      502 {object} apimodels.APIError "failed to forward to the upstream node"
-// @Failure      503 {object} apimodels.APIError "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, or when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds); a transaction already recorded is never refused for the limit"
-// @Header       503 {integer} Retry-After "seconds before the same request may succeed (set when publication of policy facts is pending or the pending-work limit is reached)"
+// @Failure      409 {object} apimodels.APIError "in Reth policy mode, the signed transaction conflicts with an earlier submission, or its nonce is already used or held by another pending transaction"
+// @Failure      503 {object} apimodels.APIError "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds; a transaction already recorded is never refused for the limit), or when a transaction was recorded but its delivery to the node failed (it may still execute: check its status or resend it unchanged)"
+// @Header       503 {integer} Retry-After "seconds before the same request may succeed (set when publication of policy facts is pending, the pending-work limit is reached, or a recorded transaction's delivery failed)"
 // @Header       429 {integer} Retry-After "seconds before the same request may succeed (set at the per-principal or per-organization pending-work limit)"
 // @Security     BearerAuth
 // @Router       /rpc [post]
@@ -2061,6 +2078,47 @@ func (s *Server) deprecationMiddleware(oldPath, newPath string) gin.HandlerFunc 
 	}
 }
 
+// internalPeerIP reports whether ip is on a network the management API
+// accepts: localhost, the private and Tailscale ranges below, and
+// TRUSTED_INTERNAL_CIDRS.
+func (s *Server) internalPeerIP(ip net.IP) bool {
+	// Allowed private networks:
+	// - 127.0.0.1/32: Localhost IPv4
+	// - ::1/128: Localhost IPv6
+	// - 172.16.0.0/12: Docker bridge networks (RFC1918)
+	// - 192.168.0.0/16: Docker custom networks / WiFi (RFC1918)
+	// - 100.64.0.0/10: Tailscale / CGNAT
+	allowedCIDRs := []string{
+		"127.0.0.1/32",
+		"::1/128",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"10.0.0.0/8",
+		"100.64.0.0/10",
+	}
+	// Append custom CIDRs from TRUSTED_INTERNAL_CIDRS env var
+	if s.config != nil {
+		allowedCIDRs = append(allowedCIDRs, s.config.TrustedInternalCIDRs...)
+	}
+	for _, cidr := range allowedCIDRs {
+		_, subnet, _ := net.ParseCIDR(cidr)
+		if subnet != nil && subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// internalPeer is internalPeerIP for the raw TCP peer of r.
+func (s *Server) internalPeer(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && s.internalPeerIP(ip)
+}
+
 // localhostOnlyMiddleware restricts admin API access to requests arriving over the local
 // network — localhost, Docker bridge networks, LAN, or Tailscale.
 //
@@ -2094,35 +2152,7 @@ func (s *Server) localhostOnlyMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Allowed private networks:
-		// - 127.0.0.1/32: Localhost IPv4
-		// - ::1/128: Localhost IPv6
-		// - 172.16.0.0/12: Docker bridge networks (RFC1918)
-		// - 192.168.0.0/16: Docker custom networks / WiFi (RFC1918)
-		// - 100.64.0.0/10: Tailscale / CGNAT
-		allowedCIDRs := []string{
-			"127.0.0.1/32",
-			"::1/128",
-			"172.16.0.0/12",
-			"192.168.0.0/16",
-			"10.0.0.0/8",
-			"100.64.0.0/10",
-		}
-		// Append custom CIDRs from TRUSTED_INTERNAL_CIDRS env var
-		if s.config != nil {
-			allowedCIDRs = append(allowedCIDRs, s.config.TrustedInternalCIDRs...)
-		}
-
-		isAllowed := false
-		for _, cidr := range allowedCIDRs {
-			_, subnet, _ := net.ParseCIDR(cidr)
-			if subnet != nil && subnet.Contains(ip) {
-				isAllowed = true
-				break
-			}
-		}
-
-		if !isAllowed {
+		if !s.internalPeerIP(ip) {
 			c.JSON(http.StatusForbidden, gin.H{
 				"error": "management API is only accessible from localhost, private networks, or Tailscale",
 			})

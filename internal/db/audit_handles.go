@@ -35,11 +35,21 @@ import (
 // AuditDB is the runtime handle for the append-only audit database. It wraps a
 // *DB pool and exposes only the access_logs / audit-chain surface.
 type AuditDB struct {
-	pool *DB
+	pool      *DB
+	chainName string
 }
 
 // NewAuditHandle wraps an open pool as the runtime audit handle.
-func NewAuditHandle(pool *DB) *AuditDB { return &AuditDB{pool: pool} }
+func NewAuditHandle(pool *DB) *AuditDB { return NewAuditHandleForChain(pool, "access_logs") }
+
+// NewAuditHandleForChain also binds synchronous and buffer-fallback writes
+// to the server's configured chain, matching its buffered sealer.
+func NewAuditHandleForChain(pool *DB, name string) *AuditDB {
+	if name == "" {
+		name = "access_logs"
+	}
+	return &AuditDB{pool: pool, chainName: name}
+}
 
 // Conn exposes the wrapped pool's connection (integrity verifier + pool
 // identity for Server.Stop's double-close guards).
@@ -73,7 +83,7 @@ func (a *AuditDB) LogAccessChained(
 	orgID string,
 	denialReason string,
 ) (int64, time.Time, string, error) {
-	return a.pool.LogAccessChained(ctx, chain, externalID, method, statusCode, ipAddress, correlationID, params, responseStatus, orgID, denialReason)
+	return a.pool.logAccessChained(ctx, chain, externalID, method, statusCode, ipAddress, correlationID, params, responseStatus, orgID, denialReason, a.chainName)
 }
 
 // --- access-log reads (admin endpoints + disclosure activity views) ---
@@ -116,16 +126,28 @@ func (a *AuditDB) GetLatestAccessLogHashForChain(ctx context.Context, chainName 
 	return a.pool.GetLatestAccessLogHashForChain(ctx, chainName)
 }
 
-func (a *AuditDB) SealBufferedAccessLog(ctx context.Context, chain RBACAuditChain, rec AccessLogRecord, bufferSeq uint64, chainName string) (string, error) {
+func (a *AuditDB) SealBufferedAccessLog(ctx context.Context, chain AccessLogChain, rec AccessLogRecord, bufferSeq uint64, chainName string) (string, error) {
 	return a.pool.SealBufferedAccessLog(ctx, chain, rec, bufferSeq, chainName)
 }
 
-func (a *AuditDB) SealBufferedAccessLogs(ctx context.Context, chain BatchAuditChain, records []BufferedAccessLog, chainName string) ([]SealedAccessLog, error) {
+func (a *AuditDB) SealBufferedAccessLogs(ctx context.Context, chain AccessLogChain, records []BufferedAccessLog, chainName string) ([]SealedAccessLog, error) {
 	return a.pool.SealBufferedAccessLogs(ctx, chain, records, chainName)
 }
 
 func (a *AuditDB) SealedAccessLogsBySeq(ctx context.Context, chainName string, seqs []uint64) ([]SealedAccessLogRow, error) {
 	return a.pool.SealedAccessLogsBySeq(ctx, chainName, seqs)
+}
+
+func (a *AuditDB) ReserveAccessLogBufferRange(ctx context.Context) (uint64, error) {
+	return a.pool.ReserveAccessLogBufferRange(ctx)
+}
+
+func (a *AuditDB) MaxAccessLogBufferSeqBetween(ctx context.Context, lo, hi uint64) (uint64, error) {
+	return a.pool.MaxAccessLogBufferSeqBetween(ctx, lo, hi)
+}
+
+func (a *AuditDB) MaxChainAccessLogBufferSeqBelow(ctx context.Context, chainName string, limit uint64) (uint64, error) {
+	return a.pool.MaxChainAccessLogBufferSeqBelow(ctx, chainName, limit)
 }
 
 func (a *AuditDB) GetMaxAccessLogBufferSeq(ctx context.Context, chainName string) (uint64, error) {

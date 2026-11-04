@@ -38,6 +38,8 @@ NODE_URL=http://your-ethereum-node:8545
 
 All other environment variables (`JWT_SECRET`, `ADMIN_API_TOKEN`, etc.) must be identical across instances — they share the same user base and token validation.
 
+`AUDIT_CHAIN_NAME` is the exception that may differ: instances with an async audit buffer can share one chain name, but giving each its own, stable name (for example a StatefulSet pod name) keeps each instance's access-log entries in a chain of their own. See [Audit Log Integrity](/docs/security/audit-integrity#high-throughput-async-write-path).
+
 <Callout variant="danger" title="JWT secrets must match">
   If instances have different `JWT_SECRET` or `JWT_REFRESH_SECRET` values, tokens issued by one instance will be rejected by another.
 </Callout>

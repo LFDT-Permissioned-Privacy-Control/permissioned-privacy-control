@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ type captureEnhancedLogger struct {
 	calledChained   bool
 	gotOrgID        string
 	gotDenialReason string
+	writeErr        error
 }
 
 func (c *captureEnhancedLogger) LogAccessChained(
@@ -35,7 +37,7 @@ func (c *captureEnhancedLogger) LogAccessChained(
 	c.calledChained = true
 	c.gotOrgID = orgID
 	c.gotDenialReason = denialReason
-	return 1, time.Time{}, "hash", nil
+	return 1, time.Time{}, "hash", c.writeErr
 }
 
 func (c *captureEnhancedLogger) LogAccessEnhanced(
@@ -101,4 +103,39 @@ func TestLogAccess_EmptyResolvedOrgIDStaysEmpty(t *testing.T) {
 
 	require.True(t, cl.calledChained)
 	assert.Equal(t, "", cl.gotOrgID)
+}
+
+type failedAccessBuffer struct{}
+
+func (failedAccessBuffer) Append([]byte) (uint64, error) {
+	return 0, errors.New("buffer write failed")
+}
+
+type countBasicAccessLogger struct{ calls int }
+
+func (l *countBasicAccessLogger) LogAccess(context.Context, string, string, int, string) error {
+	l.calls++
+	return nil
+}
+
+func TestLogAccess_BufferFailureUsesChainedFallback(t *testing.T) {
+	for _, failChain := range []bool{false, true} {
+		t.Run(map[bool]string{false: "chain succeeds", true: "chain fails"}[failChain], func(t *testing.T) {
+			chained, basic := &captureEnhancedLogger{}, &countBasicAccessLogger{}
+			if failChain {
+				chained.writeErr = errors.New("audit database unavailable")
+			}
+			p := NewJSONRPCProcessor(JSONRPCProcessorConfig{
+				ReadProfile: rbac.ReadProfileStandard, AuditBuffer: failedAccessBuffer{},
+				AccessLogger: basic, EnhancedAuditLogger: chained, HashChain: audit.NewHashChain(""),
+			})
+			p.logAccess(context.Background(), &ProcessRequest{
+				UserID: "did:test:fallback", Method: "eth_call", resolvedOrgID: "org-fallback", denialReason: ReasonSenderNotLinked,
+			}, 403)
+			require.True(t, chained.calledChained)
+			assert.Equal(t, "org-fallback", chained.gotOrgID)
+			assert.Equal(t, ReasonSenderNotLinked, chained.gotDenialReason)
+			assert.Zero(t, basic.calls, "a configured audit chain must never get an unchained fallback row")
+		})
+	}
 }
