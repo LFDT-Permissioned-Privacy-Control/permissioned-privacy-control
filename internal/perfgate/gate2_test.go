@@ -183,6 +183,10 @@ func TestGate2(t *testing.T) {
 	if minFreeGiB < 12 {
 		t.Fatal("OPS_GATE2_MIN_FREE_GIB must be an integer of at least 12 (the approved P7 disk floor)")
 	}
+	closedWorkloadRate := envInt(t, "OPS_GATE2_CLOSED_WORKLOAD_RATE", 12_000)
+	if closedWorkloadRate <= 0 {
+		t.Fatal("OPS_GATE2_CLOSED_WORKLOAD_RATE must be a positive integer")
+	}
 	output := os.Getenv("OPS_GATE2_OUTPUT")
 	if output == "" || os.Getenv("OPS_GATE2_SERVER") == "" {
 		t.Fatal("OPS_GATE2_SERVER and OPS_GATE2_OUTPUT are required")
@@ -243,6 +247,8 @@ func TestGate2(t *testing.T) {
 			Dir:         dir,
 			MinFreeGiB:  float64(minFreeGiB),
 			Log:         t.Logf,
+
+			ClosedWorkloadRate: closedWorkloadRate,
 		}
 		if len(concurrencies) == 1 {
 			runGate2Case(ctx, t, config)
@@ -303,5 +309,50 @@ func TestParseConcurrenciesAndOpenLoopPool(t *testing.T) {
 		if got := OpenLoopConnections(rate); got != want {
 			t.Fatalf("pool for %d/s = %d, want %d", rate, got, want)
 		}
+	}
+}
+
+func TestGate2WorkloadInventorySizing(t *testing.T) {
+	base := Gate2Config{Loop: "closed", Rate: 5250, Warmup: 31 * time.Second, Window: time.Minute}
+	for _, tc := range []struct {
+		name       string
+		closedRate int
+		loop       string
+		rate, want int
+	}{
+		{"default", 0, "closed", 5250, 1_092_000},
+		{"memory-adapted", 4000, "closed", 5250, 364_000},
+		{"open-loop ignores closed inventory setting", 4000, "open", 250, 22_750},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base
+			c.ClosedWorkloadRate, c.Loop, c.Rate = tc.closedRate, tc.loop, tc.rate
+			got, err := gate2WorkloadSize(c)
+			if err != nil || got != tc.want {
+				t.Fatalf("size = %d %v, want %d", got, err, tc.want)
+			}
+		})
+	}
+	base.ClosedWorkloadRate = -1
+	if _, err := gate2WorkloadSize(base); err == nil {
+		t.Fatal("negative inventory rate accepted")
+	}
+	base.ClosedWorkloadRate = int(^uint(0) >> 1)
+	if _, err := gate2WorkloadSize(base); err == nil {
+		t.Fatal("overflowing inventory accepted")
+	}
+}
+
+func TestGate2WorkloadExhaustionCannotReportCapacity(t *testing.T) {
+	start := time.Unix(1000, 0)
+	p := Phases{Start: start, WindowStart: start, WindowEnd: start.Add(time.Minute)}
+	records := []RequestRecord{{Scheduled: start.Add(time.Second), Sent: start.Add(time.Second), Done: start.Add(2 * time.Second), HTTPStatus: 200, OK: true}}
+	ordinary := accountGate2Workload(records, p, false)
+	exhausted := accountGate2Workload(records, p, true)
+	if !ordinary.Valid || exhausted.Valid || !strings.Contains(exhausted.InvalidReason, "exhausted") {
+		t.Fatalf("exhaustion validity: ordinary=%+v exhausted=%+v", ordinary, exhausted)
+	}
+	if ordinary.CompletedInWindow != exhausted.CompletedInWindow || ordinary.AchievedPerSecond != exhausted.AchievedPerSecond {
+		t.Fatal("invalidating exhaustion rewrote observed completions")
 	}
 }

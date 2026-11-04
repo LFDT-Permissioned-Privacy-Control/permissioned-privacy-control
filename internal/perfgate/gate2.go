@@ -41,6 +41,10 @@ type Gate2Config struct {
 	ExtraEnv    map[string]string `json:"extra_env"`
 	Dir         string            `json:"-"`
 	MinFreeGiB  float64           `json:"min_free_gib"`
+
+	// ClosedWorkloadRate sizes pre-signed inventory; it never paces requests.
+	ClosedWorkloadRate int `json:"closed_workload_rate"`
+
 	// Q6, when set, runs the tracking-write prototype against this stack's
 	// tracking database over the same phases (concurrent with the server load).
 	Q6  *Q6Config                        `json:"q6,omitempty"`
@@ -79,6 +83,8 @@ type Gate2Report struct {
 	Errors                []string                    `json:"errors,omitempty"`
 	Aborted               string                      `json:"aborted,omitempty"`
 	Q6                    *Q6Report                   `json:"q6,omitempty"`
+
+	ClosedWorkloadExhausted bool `json:"closed_workload_exhausted"`
 
 	// NodeConnectionsInWindow is the TCP connections OPS opened to the mock
 	// node per listener during the steady window: near zero with pooled
@@ -165,6 +171,32 @@ func dirBytes(path string) int64 {
 	return total
 }
 
+// gate2WorkloadSize prepares a finite unique workload before every timed phase.
+// Closed-loop inventory headroom changes memory use, never request pacing.
+func gate2WorkloadSize(c Gate2Config) (int, error) {
+	rate := c.Rate
+	if c.Loop == "closed" {
+		rate = c.ClosedWorkloadRate
+		if rate == 0 {
+			rate = 12_000
+		}
+	}
+	seconds := int((c.Warmup + c.Window) / time.Second)
+	if rate <= 0 || seconds <= 0 || rate > int(^uint(0)>>1)/seconds {
+		return 0, fmt.Errorf("invalid workload rate/duration")
+	}
+	return rate * seconds, nil
+}
+
+func accountGate2Workload(records []RequestRecord, phases Phases, exhausted bool) WindowReport {
+	window := Account(records, phases)
+	if exhausted {
+		window.Valid = false
+		window.InvalidReason = "closed loop exhausted pre-signed transactions; increase OPS_GATE2_CLOSED_WORKLOAD_RATE before interpreting capacity"
+	}
+	return window
+}
+
 // RunGate2 runs one case end to end and returns its report.
 func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 	logf := func(format string, args ...any) {
@@ -174,6 +206,13 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 	}
 	if free := freeGiB(c.Dir); free >= 0 && free < c.MinFreeGiB {
 		return nil, fmt.Errorf("only %.1f GiB free (< %.0f GiB); refusing to run", free, c.MinFreeGiB)
+	}
+	if c.ClosedWorkloadRate == 0 {
+		c.ClosedWorkloadRate = 12_000
+	}
+	total, err := gate2WorkloadSize(c)
+	if err != nil {
+		return nil, err
 	}
 	if c.MockProcs <= 0 {
 		c.MockProcs = 3
@@ -215,11 +254,7 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 	if runEnd := time.Now().Add(2*time.Second + c.Warmup + c.Window + c.Drain + drainLimit); runEnd.After(seededAt.Add(29 * time.Minute)) {
 		return nil, fmt.Errorf("run would outlive the 30 min access tokens issued at seed time")
 	}
-	seconds := int((c.Warmup + c.Window) / time.Second)
-	total := c.Rate * seconds
-	if c.Loop == "closed" {
-		total = 12_000 * seconds
-	}
+
 	txs, err := SignWorkload(senders, 31337, total, runtime.NumCPU())
 	if err != nil {
 		return nil, err
@@ -366,7 +401,7 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 		time.Sleep(time.Until(start))
 		records = ClosedLoop(loadCtx, client, target, c.Concurrency, phases.WindowEnd)
 		if len(records) == len(target.Bodies) {
-			report.Errors = append(report.Errors, "closed loop ran out of pre-signed transactions before the window ended; the rate is understated")
+			report.ClosedWorkloadExhausted = true
 		}
 	} else {
 		records = OpenLoop(loadCtx, client, target, c.Rate, total, start, c.Connections)
@@ -411,7 +446,7 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 	samplerWG.Wait()
 	report.Aborted = abortReason
 
-	report.Window = Account(records, phases)
+	report.Window = accountGate2Workload(records, phases, report.ClosedWorkloadExhausted)
 	if !report.Window.Valid {
 		report.Errors = append(report.Errors, "invalid result: "+report.Window.InvalidReason)
 	}
