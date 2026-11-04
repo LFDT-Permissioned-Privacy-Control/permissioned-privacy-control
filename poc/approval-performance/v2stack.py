@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
@@ -123,10 +124,11 @@ class V2Node(h.Node):
 class V2Stack(g.GasstormStack):
     """GasstormStack's seed and RPC helpers over a V2 node and OPS in Reth mode."""
 
-    def __init__(self, name, ops_env=None):
+    def __init__(self, name, ops_env=None, transport_barriers=False):
         self.cached_contracts, self.rpc_local, self.rpc_connections = {}, threading.local(), []
         self.rpc_connections_lock = threading.Lock()
         self.name, self.disabled, self.containers, self.node, self.ops = name, False, [], None, None
+        self.transport_barriers = None
         self.directory = h.SCRATCH / (name + "-" + str(time.time_ns()))
         self.directory.mkdir(parents=True)
         self.admin_token, self.tokens = "ops-reth-local-demo-only", {}
@@ -160,6 +162,9 @@ class V2Stack(g.GasstormStack):
             deployment, token = "perf-" + secrets.token_hex(4), secrets.token_hex(24)
             self.node = V2Node(name, deployment, base64.b64encode(public).decode(), token)
             self.node_token, self.extra_ops = token, {}
+            if transport_barriers:
+                from transport_barrier import NodeTransportBarriers
+                self.transport_barriers = NodeTransportBarriers(self.node.private_url)
             self.url = "http://127.0.0.1:" + str(h.unused_port())
             env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "TMPDIR", "LANG")}
             env.update(ENVIRONMENT="development", GIN_MODE="release", PORT=self.url.rsplit(":", 1)[1], BASE_URL=self.url,
@@ -176,6 +181,9 @@ class V2Stack(g.GasstormStack):
                        OPS_NODE_POLICY_CHAIN_ID="31337", OPS_NODE_POLICY_DEPLOYMENT_ID=deployment,
                        PLATFORM_ADMIN_SUBJECTS=",".join(REVIEWERS))
             env.update({k: v for k, v in (ops_env or {}).items() if not k.startswith("OPS_APPROVAL_")})
+            if self.transport_barriers:
+                env["OPS_NODE_POLICY_URL"] = self.transport_barriers.endpoint("a")
+                env["DATABASE_URL"] = self.instance_database_url(env["DATABASE_URL"], "a")
             self.ops_environment = env
             self.opslog = (self.directory / "ops.log").open("w")
             self.ops = self.spawn_ops(env, self.opslog, self.url, self.directory / "ops.log")
@@ -231,12 +239,23 @@ class V2Stack(g.GasstormStack):
             url = "http://127.0.0.1:" + str(h.unused_port())
             env = dict(self.ops_environment, PORT=url.rsplit(":", 1)[1], BASE_URL=url,
                        AUDIT_BUFFER_DIR=str(self.directory / ("audit-buffer-" + name)))
+            if self.transport_barriers:
+                env["OPS_NODE_POLICY_URL"] = self.transport_barriers.endpoint(name)
+                env["DATABASE_URL"] = self.instance_database_url(env["DATABASE_URL"], name)
             log = (self.directory / f"ops-{name}.log").open("w")
             # Registered before the start, so close() also closes a failed one's log.
             self.extra_ops[name] = (url, env, log, None)
         process = self.spawn_ops(env, log, url, self.directory / f"ops-{name}.log")
         self.extra_ops[name] = (url, env, log, process)
         return url
+
+    @staticmethod
+    def instance_database_url(url, name):
+        """Tag the real publisher backend so a crash targets its actual owner."""
+        parts = urllib.parse.urlsplit(url)
+        query = dict(urllib.parse.parse_qsl(parts.query))
+        query["application_name"] = "ops-live-" + name
+        return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
 
     def stop_extra_ops(self, name, sig=signal.SIGKILL):
         url, env, log, process = self.extra_ops[name]
@@ -309,8 +328,12 @@ class V2Stack(g.GasstormStack):
                     shutil.copy2(self.directory / "ops.log", h.EVIDENCE / (self.name + "-ops.log"))
         finally:
             try:
-                if self.node is not None:
-                    self.node.close()
+                try:
+                    if self.transport_barriers:
+                        self.transport_barriers.close()
+                finally:
+                    if self.node is not None:
+                        self.node.close()
             finally:
                 for container in reversed(self.containers):
                     subprocess.run(["docker", "stop", "-t", "3", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
