@@ -560,11 +560,40 @@ func (s *Stack) WaitFactsCurrent(ctx context.Context, limit time.Duration) (uint
 
 // Metrics scrapes the OPS Prometheus endpoint.
 func (s *Stack) Metrics() (string, error) {
-	resp, err := setupClient.Get(s.URL + "/metrics")
+	return s.MetricsContext(context.Background())
+}
+
+func (s *Stack) MetricsContext(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.URL+"/metrics", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := setupClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("metrics returned HTTP %d", resp.StatusCode)
+	}
 	data, err := io.ReadAll(resp.Body)
 	return string(data), err
+}
+
+// FinalizedVisible checks a frozen node-finalized cohort against committed
+// status rows. No final_at timestamp is interpreted as a commit timestamp.
+func (s *Stack) FinalizedVisible(ctx context.Context, hashes []string) (bool, error) {
+	values := make([][]byte, len(hashes))
+	for i, hash := range hashes {
+		value, err := hex.DecodeString(strings.TrimPrefix(hash, "0x"))
+		if err != nil || len(value) != 32 {
+			return false, fmt.Errorf("invalid finalized cohort hash")
+		}
+		values[i] = value
+	}
+	var complete bool
+	err := s.ExecDB.QueryRowContext(ctx, `SELECT NOT EXISTS (
+ SELECT 1 FROM unnest($1::bytea[]) target(hash)
+ WHERE NOT EXISTS (SELECT 1 FROM node_tx_status s WHERE s.tx_hash=target.hash AND s.state IN (10,11)))`, values).Scan(&complete)
+	return complete, err
 }

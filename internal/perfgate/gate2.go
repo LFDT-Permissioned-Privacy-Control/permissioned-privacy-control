@@ -49,33 +49,36 @@ type Gate2Config struct {
 
 // Gate2Report is the per-case JSON report.
 type Gate2Report struct {
-	Config         Gate2Config                 `json:"config"`
-	Machine        map[string]any              `json:"machine_start"`
-	MachineEnd     map[string]any              `json:"machine_end"`
-	Env            map[string]string           `json:"server_env"`
-	Window         WindowReport                `json:"window"`
-	Stages         map[string]Millis           `json:"stages_ms"`
-	Clusters       map[string]ClusterDelta     `json:"db_window"`
-	WriteStmts     map[string]map[string]int64 `json:"write_statements_window"`
-	WaitEvents     map[string]int              `json:"wait_event_samples_window"`
-	PerTx          map[string]float64          `json:"per_tx"`
-	OPSCPUSeconds  float64                     `json:"ops_cpu_seconds_window"`
-	MockCPUSeconds float64                     `json:"mock_cpu_seconds_window"`
-	RunnerCPU      float64                     `json:"runner_cpu_seconds_window"`
-	Statements     map[string][]Statement      `json:"top_statements"`
-	ServerStages   map[string]HistogramSummary `json:"server_histograms"`
-	ServerCounters map[string]float64          `json:"server_counter_deltas"`
-	Tables         []TableStats                `json:"tables_at_end"`
-	Audit          AuditReport                 `json:"audit"`
-	Reconcile      *ReconcileReport            `json:"reconciliation,omitempty"`
-	Node           MockStats                   `json:"mock_node"`
-	OPSLog         map[string]int              `json:"ops_log_messages"`
-	FactClock      map[string]uint64           `json:"fact_clock,omitempty"`
-	ClockOffsetMS  float64                     `json:"db_minus_host_clock_ms"`
-	Series         map[string][]Sample         `json:"series"`
-	Errors         []string                    `json:"errors,omitempty"`
-	Aborted        string                      `json:"aborted,omitempty"`
-	Q6             *Q6Report                   `json:"q6,omitempty"`
+	Config                Gate2Config                 `json:"config"`
+	Machine               map[string]any              `json:"machine_start"`
+	MachineEnd            map[string]any              `json:"machine_end"`
+	Env                   map[string]string           `json:"server_env"`
+	Window                WindowReport                `json:"window"`
+	Stages                map[string]Millis           `json:"stages_ms"`
+	Clusters              map[string]ClusterDelta     `json:"db_window"`
+	WriteStmts            map[string]map[string]int64 `json:"write_statements_window"`
+	WaitEvents            map[string]int              `json:"wait_event_samples_window"`
+	PerTx                 map[string]float64          `json:"per_tx"`
+	OPSCPUSeconds         float64                     `json:"ops_cpu_seconds_window"`
+	MockCPUSeconds        float64                     `json:"mock_cpu_seconds_window"`
+	RunnerCPU             float64                     `json:"runner_cpu_seconds_window"`
+	Statements            map[string][]Statement      `json:"top_statements"`
+	ServerStages          map[string]HistogramSummary `json:"server_histograms"`
+	ServerCounters        map[string]float64          `json:"server_counter_deltas"`
+	Tables                []TableStats                `json:"tables_at_end"`
+	Audit                 AuditReport                 `json:"audit"`
+	Reconcile             *ReconcileReport            `json:"reconciliation,omitempty"`
+	Node                  MockStats                   `json:"mock_node"`
+	OPSLog                map[string]int              `json:"ops_log_messages"`
+	FactClock             map[string]uint64           `json:"fact_clock,omitempty"`
+	ClockOffsetMS         float64                     `json:"db_minus_host_clock_ms"`
+	Series                map[string][]Sample         `json:"series"`
+	AuditObservations     []AuditSample               `json:"audit_observations,omitempty"`
+	ReconcileObservations []ReconcileSample           `json:"reconciliation_observations,omitempty"`
+	FinalizedTail         TailObservation             `json:"finalized_tail_observation"`
+	Errors                []string                    `json:"errors,omitempty"`
+	Aborted               string                      `json:"aborted,omitempty"`
+	Q6                    *Q6Report                   `json:"q6,omitempty"`
 
 	// NodeConnectionsInWindow is the TCP connections OPS opened to the mock
 	// node per listener during the steady window: near zero with pooled
@@ -94,27 +97,41 @@ type AuditReport struct {
 	OldestAgeAtEndSec  float64 `json:"oldest_unsealed_age_at_window_end_s"`
 	DrainSeconds       float64 `json:"drain_seconds_observed"`
 	// RecordsPerRequest is sealed records per answered request (k).
-	RecordsPerRequest         float64 `json:"records_per_answered_request"`
-	RecordsPerRequestMeasured bool    `json:"records_per_request_measured"`
-	Drained                   bool    `json:"drained"`
-	ProjectedDrainSec         float64 `json:"projected_drain_seconds"`
-	BufferBytesAtEnd          int64   `json:"buffer_bytes_at_window_end"`
+	RecordsPerRequest             float64  `json:"records_per_answered_request"`
+	RecordsPerRequestMeasured     bool     `json:"records_per_request_measured"`
+	Drained                       bool     `json:"drained"`
+	ProjectedDrainSec             float64  `json:"projected_drain_seconds"`
+	BufferBytesAtEnd              int64    `json:"buffer_bytes_at_window_end"`
+	BacklogObserved               bool     `json:"backlog_observed"`
+	DrainObserved                 bool     `json:"drain_observed"`
+	LifecycleComplete             bool     `json:"lifecycle_complete"`
+	DrainFromWindowEndSec         float64  `json:"drain_seconds_from_window_end"`
+	FinalObservedBacklog          *float64 `json:"final_observed_backlog,omitempty"`
+	FinalizedTailDrainedWithin30s bool     `json:"finalized_tail_drained_within_30s"`
+	FinalizedTailDrainObserved    bool     `json:"finalized_tail_drain_observed"`
 }
 
 // ReconcileReport is the V2 post-request lifecycle (finalized outcomes in OPS).
 type ReconcileReport struct {
-	IntentsInWindow      int64            `json:"intents_in_window"`
-	FinalizedInWindow    int64            `json:"ops_finalized_in_window"`
-	FinalizedPerSecond   float64          `json:"ops_finalized_per_second"`
-	BacklogAtWindowEnd   int64            `json:"unreconciled_finalized_backlog_at_window_end"`
-	BacklogTrend         float64          `json:"backlog_trend_per_second"`
-	BacklogBound         float64          `json:"backlog_bound_5s_x_admission"`
-	LagMS                Millis           `json:"finalized_outcome_lag_ms"`
-	StatesAtEnd          map[string]int64 `json:"states_at_end"`
-	ProjectedDrainSec    float64          `json:"projected_drain_seconds"`
-	CensoredLags         int64            `json:"lag_censored_unreconciled"`
-	SamplesOverBound     int              `json:"window_samples_over_backlog_bound"`
-	TailDrainedWithin30s bool             `json:"tail_drained_within_30s"`
+	IntentsInWindow             int64            `json:"intents_in_window"`
+	FinalizedInWindow           int64            `json:"ops_finalized_in_window"`
+	FinalizedPerSecond          float64          `json:"ops_finalized_per_second"`
+	BacklogAtWindowEnd          int64            `json:"unreconciled_finalized_backlog_at_window_end"`
+	BacklogTrend                float64          `json:"backlog_trend_per_second"`
+	BacklogBound                float64          `json:"backlog_bound_5s_x_admission"`
+	LagMS                       *Millis          `json:"finalized_outcome_lag_ms"`
+	InsertTimestampLagMS        Millis           `json:"insert_timestamp_lag_ms"`
+	FinalizedInWindowObserved   bool             `json:"finalized_in_window_observed"`
+	FinalizedInWindowLowerBound bool             `json:"finalized_in_window_is_lower_bound"`
+	BacklogObserved             bool             `json:"backlog_observed"`
+	BacklogWindowSamples        int              `json:"backlog_window_samples"`
+	StatesAtEnd                 map[string]int64 `json:"states_at_end"`
+	ProjectedDrainSec           float64          `json:"projected_drain_seconds"`
+	CensoredLags                int64            `json:"lag_censored_unreconciled"`
+	SamplesOverBound            int              `json:"window_samples_over_backlog_bound"`
+	TailDrainedWithin30s        bool             `json:"tail_drained_within_30s"`
+	FinalizedTailObserved       bool             `json:"finalized_tail_observed"`
+	FinalizedTailVisibleAt      time.Time        `json:"finalized_tail_visible_at"`
 }
 
 // OpenLoopConnections is the default open-loop pool: the offered rate times a
@@ -190,9 +207,10 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 		}
 		logf("baseline execution policy activated (author/reviewer)")
 	}
-	// The load runs to WindowEnd + Drain, then the audit drain is observed for
-	// up to another Drain.
-	if runEnd := time.Now().Add(2*time.Second + c.Warmup + c.Window + 2*c.Drain); runEnd.After(seededAt.Add(29 * time.Minute)) {
+	// The load runs to WindowEnd + Drain. Observe the full lifecycle for at
+	// least finality lag + 30 s; a quiet audit tick before finality is not drain.
+	drainLimit := max(c.Drain, c.FinalityLag+30*time.Second)
+	if runEnd := time.Now().Add(2*time.Second + c.Warmup + c.Window + c.Drain + drainLimit); runEnd.After(seededAt.Add(29 * time.Minute)) {
 		return nil, fmt.Errorf("run would outlive the 30 min access tokens issued at seed time")
 	}
 	seconds := int((c.Warmup + c.Window) / time.Second)
@@ -254,6 +272,21 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 	defer abort()
 	sampleCtx, stopSampling := context.WithCancel(ctx)
 	var samplerWG sync.WaitGroup
+	// Observe the finalized prefix independently of HTTP completion: an open
+	// load can consume its whole drain deadline before returning to this call.
+	tailCtx, stopTail := context.WithCancel(runCtx)
+	defer stopTail()
+	tailDone := make(chan struct{})
+	var tail TailObservation
+	if c.Mode == "reth" {
+		go func() {
+			defer close(tailDone)
+			tail = observeFinalizedTail(tailCtx, stack.Node.Stamps, stack.FinalizedVisible, stack.MetricsContext,
+				phases.WindowEnd, phases.WindowEnd.Add(25*time.Second), phases.WindowEnd.Add(30*time.Second), 250*time.Millisecond)
+		}()
+	} else {
+		close(tailDone)
+	}
 	var abortReason string
 	var seriesMu sync.Mutex
 	samplerWG.Add(1)
@@ -346,7 +379,32 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 		}
 	}
 	logf("load finished; observing drain up to %s", c.Drain)
-	report.Audit.Drained, report.Audit.DrainSeconds = waitAuditDrain(ctx, stack, c.Drain)
+	drain := waitForAuditDrain(ctx, stack.MetricsContext, func(ctx context.Context) (bool, error) {
+		if c.Mode != "reth" {
+			return true, nil
+		}
+		var pending bool
+		err := stack.ExecDB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM node_tx_binding)`).Scan(&pending)
+		return !pending, err
+	}, drainLimit, time.Second, phases.WindowEnd)
+	report.Audit.Drained, report.Audit.DrainSeconds = drain.Drained, drain.WaitSeconds
+	report.Audit.DrainObserved, report.Audit.LifecycleComplete = drain.Observed, drain.LifecycleComplete
+	report.Audit.DrainFromWindowEndSec, report.Audit.FinalObservedBacklog = drain.FromWindowEndSeconds, drain.FinalBacklog
+	if c.Mode == "reth" && drain.Drained && drain.LifecycleComplete && !drain.LastAuditStarted.Before(phases.WindowEnd) && !drain.LastAuditEnded.After(phases.WindowEnd.Add(30*time.Second)) {
+		// The full pipeline emptied early. Query the exact finalized cohort
+		// now, rather than inferring its committed visibility from empty
+		// bindings or waiting for the late-prefix observer's timer.
+		stopTail()
+		<-tailDone
+		tail = observeFinalizedTail(ctx, stack.Node.Stamps, stack.FinalizedVisible, stack.MetricsContext,
+			phases.WindowEnd, time.Now(), phases.WindowEnd.Add(30*time.Second), 250*time.Millisecond)
+		if tail.Reconciled {
+			tail.Method = "early_finalized_prefix_visibility"
+		}
+	} else {
+		<-tailDone
+	}
+	report.FinalizedTail = tail
 	stopSampling()
 	samplerWG.Wait()
 	report.Aborted = abortReason
@@ -417,6 +475,12 @@ func RunGate2(ctx context.Context, c Gate2Config) (*Gate2Report, error) {
 	if c.Mode == "reth" {
 		report.Reconcile = reconcileReport(ctx, stack, report, stamps, phases, time.Duration(report.ClockOffsetMS*float64(time.Millisecond)))
 	}
+	if r := report.Reconcile; r != nil {
+		r.FinalizedTailObserved, r.TailDrainedWithin30s = tail.VisibilityObserved, tail.Reconciled
+		r.FinalizedTailVisibleAt = tail.VisibleAt
+		report.Audit.FinalizedTailDrainObserved = tail.AuditObserved
+		report.Audit.FinalizedTailDrainedWithin30s = tail.AuditDrained
+	}
 	report.Node, _ = stack.Node.Stats()
 	if report.Node.StalledTxs > 0 {
 		report.Errors = append(report.Errors, fmt.Sprintf("%d transactions from %d senders wait behind nonce gaps left by rejections; finalization and backlog figures exclude them", report.Node.StalledTxs, report.Node.StalledSenders))
@@ -478,9 +542,9 @@ func timeWait() int {
 	return n
 }
 
-// sampleSeries records one point per second without scanning tables under
-// test: sealed audit sequence, buffer size, mock finality counters, TIME_WAIT
-// sockets, free disk and Postgres wait events (window only).
+// sampleSeries records one point per second. Reconciliation uses a visible
+// status COUNT before node finality (with observer query time recorded);
+// node status answers alone never establish committed OPS progress.
 func sampleSeries(ctx context.Context, stack *Stack, report *Gate2Report, mu *sync.Mutex, p Phases, c Gate2Config, abort func(string)) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -500,11 +564,48 @@ func sampleSeries(ctx context.Context, stack *Stack, report *Gate2Report, mu *sy
 				add("audit_sealed_seq", at, float64(sealed.Int64))
 			}
 			add("audit_buffer_bytes", at, float64(dirBytes(bufferDir)))
+			started := time.Now()
+			metricCtx, cancel := context.WithTimeout(ctx, time.Second)
+			if text, err := stack.MetricsContext(metricCtx); err == nil {
+				if observed := observeAuditMetrics(text); observed.known {
+					ended := time.Now()
+					add("audit_pending_entries", ended, observed.backlog)
+					mu.Lock()
+					report.AuditObservations = append(report.AuditObservations, AuditSample{Started: started, Ended: ended, Backlog: observed.backlog, Healthy: observed.healthy})
+					mu.Unlock()
+				}
+			}
+			cancel()
+			var visible int64
+			queryStarted := time.Now()
+			var visibilityErr error
+			inWindow := !queryStarted.Before(p.WindowStart) && queryStarted.Before(p.WindowEnd)
+			if c.Mode == "reth" && inWindow {
+				queryCtx, cancel := context.WithTimeout(ctx, time.Second)
+				visibilityErr = stack.ExecDB.QueryRowContext(queryCtx, `SELECT count(*) FROM node_tx_status WHERE state IN (10,11)`).Scan(&visible)
+				cancel()
+			}
+			queryEnded := time.Now()
+			if c.Mode == "reth" && inWindow {
+				// This exact visible-row count may scan status partitions. Its
+				// duration is reported, so observer work is not hidden in TPS.
+				add("reconciliation_observer_query_ms", queryEnded, queryEnded.Sub(queryStarted).Seconds()*1000)
+			}
 			if stats, err := stack.Node.Stats(); err == nil {
-				add("node_included", at, float64(stats.Included))
-				add("node_finalized", at, float64(stats.FinalizedTxs))
-				add("node_final_status_answered", at, float64(stats.FinalAnswered))
-				add("unreconciled_finalized_backlog", at, float64(stats.FinalizedTxs-stats.FinalAnswered))
+				observedAt := time.Now()
+				add("node_included", observedAt, float64(stats.Included))
+				add("node_finalized", observedAt, float64(stats.FinalizedTxs))
+				add("node_final_status_answered", observedAt, float64(stats.FinalAnswered))
+				if c.Mode == "reth" && inWindow && visibilityErr == nil {
+					if backlog, ok := conservativeBacklog(visible, stats.FinalizedTxs); ok {
+						add("unreconciled_finalized_backlog", observedAt, float64(backlog))
+						mu.Lock()
+						report.ReconcileObservations = append(report.ReconcileObservations, ReconcileSample{
+							QueryStarted: queryStarted, QueryEnded: queryEnded, NodeObservedAt: observedAt,
+							VisibleFinalized: visible, NodeFinalized: stats.FinalizedTxs, BacklogUpperBound: backlog})
+						mu.Unlock()
+					}
+				}
 			}
 			add("time_wait_sockets", at, float64(timeWait()))
 			free := freeGiB(c.Dir)
@@ -530,29 +631,6 @@ func sampleSeries(ctx context.Context, stack *Stack, report *Gate2Report, mu *sy
 // OPS start numbers its entries in a range of 2^40 of its own; a tree from
 // before ranges numbers from 1, which the mask leaves unchanged).
 const sealedSeqQuery = `SELECT MAX(buffer_seq) & ((1::bigint << 40) - 1) FROM access_logs`
-
-func waitAuditDrain(ctx context.Context, stack *Stack, limit time.Duration) (bool, float64) {
-	start := time.Now()
-	var previous int64 = -1
-	stable := 0
-	for time.Since(start) < limit {
-		var sealed sql.NullInt64
-		if err := stack.AuditDB.QueryRowContext(ctx, sealedSeqQuery).Scan(&sealed); err != nil {
-			return false, time.Since(start).Seconds()
-		}
-		if sealed.Int64 == previous {
-			stable++
-			if stable >= 3 { // three sealer ticks without progress: buffer empty
-				return true, time.Since(start).Seconds() - 3
-			}
-		} else {
-			stable = 0
-		}
-		previous = sealed.Int64
-		time.Sleep(time.Second)
-	}
-	return false, time.Since(start).Seconds()
-}
 
 func seriesBetween(series []Sample, from, to time.Time) []Sample {
 	var out []Sample
@@ -628,7 +706,7 @@ func summarizeAudit(report *Gate2Report, records []RequestRecord, p Phases) {
 	}
 	a := &report.Audit
 	a.RecordsPerRequest, a.RecordsPerRequestMeasured = 1, false
-	if final := sealed[len(sealed)-1].Value; report.Audit.Drained && len(answered) > 0 {
+	if final := sealed[len(sealed)-1].Value; report.Audit.Drained && report.Audit.DrainObserved && report.Audit.LifecycleComplete && final > first.Value && len(answered) > 0 {
 		a.RecordsPerRequest, a.RecordsPerRequestMeasured = (final-first.Value)/float64(len(answered)), true
 	}
 	k := a.RecordsPerRequest
@@ -651,6 +729,13 @@ func summarizeAudit(report *Gate2Report, records []RequestRecord, p Phases) {
 	if b, ok := valueAt(report.Series["audit_buffer_bytes"], p.WindowEnd); ok {
 		a.BufferBytesAtEnd = int64(b)
 	}
+	// These direct observations supersede the estimates above. An older
+	// server without the gauges retains estimates, explicitly unobserved.
+	if pending, ok := valueAt(report.Series["audit_pending_entries"], p.WindowEnd); ok {
+		a.BacklogObserved = true
+		a.BacklogAtWindowEnd = int64(pending)
+		a.BacklogTrend = Trend(seriesBetween(report.Series["audit_pending_entries"], p.WindowStart, p.WindowEnd))
+	}
 }
 
 func reconcileReport(ctx context.Context, stack *Stack, report *Gate2Report, stamps map[string]Stamp, p Phases, offset time.Duration) *ReconcileReport {
@@ -662,24 +747,19 @@ func reconcileReport(ctx context.Context, stack *Stack, report *Gate2Report, sta
 	// Intents = submissions answered inside the window (each answered
 	// submission's binding was committed before it was sent).
 	r.IntentsInWindow = int64(report.Window.CompletedInWindow)
-	_ = stack.ExecDB.QueryRowContext(ctx, `SELECT count(*) FROM node_tx_status WHERE final_at >= $1 AND final_at < $2`, p.WindowStart.Add(offset), p.WindowEnd.Add(offset)).Scan(&r.FinalizedInWindow)
+	// Actual committed-row visibility bounds, not final_at INSERT times.
+	r.FinalizedInWindow, r.BacklogWindowSamples, r.FinalizedInWindowObserved = visibleWindowCommits(report.ReconcileObservations, p.WindowStart, p.WindowEnd)
+	r.FinalizedInWindowLowerBound = r.FinalizedInWindowObserved
 	r.FinalizedPerSecond = float64(r.FinalizedInWindow) / windowSeconds
 	series := report.Series["unreconciled_finalized_backlog"]
 	r.BacklogTrend = Trend(seriesBetween(series, p.WindowStart, p.WindowEnd))
-	if v, ok := valueAt(series, p.WindowEnd); ok {
-		r.BacklogAtWindowEnd = int64(v)
+	if sample, ok := sampleAt(series, p.WindowEnd); ok && p.WindowEnd.Sub(sample.At) <= 2*time.Second {
+		r.BacklogAtWindowEnd, r.BacklogObserved = int64(sample.Value), true
 	}
 	r.BacklogBound = 5 * float64(r.IntentsInWindow) / windowSeconds
 	for _, s := range seriesBetween(series, p.WindowStart, p.WindowEnd) {
 		if s.Value > r.BacklogBound {
 			r.SamplesOverBound++
-		}
-	}
-	r.TailDrainedWithin30s = false
-	for _, s := range seriesBetween(series, p.WindowEnd, p.WindowEnd.Add(30*time.Second)) {
-		if s.Value <= 0 {
-			r.TailDrainedWithin30s = true
-			break
 		}
 	}
 	if r.FinalizedPerSecond > 0 {
@@ -727,7 +807,9 @@ func reconcileReport(ctx context.Context, stack *Stack, report *Gate2Report, sta
 			lags = append(lags, queried.Sub(finalizedAt))
 		}
 	}
-	r.LagMS = Percentiles(lags)
+	// final_at is assigned at INSERT, before commit. Retain it only as a
+	// diagnostic distribution; committed-outcome lag remains explicitly null.
+	r.InsertTimestampLagMS = Percentiles(lags)
 	return r
 }
 
