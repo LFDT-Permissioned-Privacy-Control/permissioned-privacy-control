@@ -34,10 +34,14 @@ import (
 // renewable 600, pending-work limit 500. The mock includes at most 5
 // transactions per one-second block.
 
-// simClock is real time plus a simulated offset.
-type simClock struct{ offset atomic.Int64 }
+// simClock advances only when the simulation ticks. Including elapsed wall
+// time makes race instrumentation consume the simulated maximum age.
+type simClock struct {
+	base   time.Time
+	offset atomic.Int64
+}
 
-func (c *simClock) now() time.Time          { return time.Now().Add(time.Duration(c.offset.Load())) }
+func (c *simClock) now() time.Time          { return c.base.Add(time.Duration(c.offset.Load())) }
 func (c *simClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
 
 // simIssuing is the issuing clock on simulated time.
@@ -51,9 +55,9 @@ func (s simIssuing) NodePolicyClock(context.Context) (uint64, time.Time, error) 
 }
 
 // simStore is the tracking store on simulated time: reads report the
-// database clock plus the offset, and the times SQL defaults write
-// (created_at at an insert or revival, claim_expires) are moved by the offset
-// at the moment they are written.
+// simulated database clock, and the times SQL defaults write (created_at at
+// an insert or revival, claim_expires) are shifted from the real database
+// clock onto simulated time at the moment they are written.
 type simStore struct {
 	trackingStore
 	conn  *sql.DB
@@ -62,7 +66,7 @@ type simStore struct {
 
 func (s simStore) shifted(rows []db.TrackedTransaction) []db.TrackedTransaction {
 	for i := range rows {
-		rows[i].DBNow = rows[i].DBNow.Add(time.Duration(s.clock.offset.Load()))
+		rows[i].DBNow = s.clock.now()
 	}
 	return rows
 }
@@ -79,7 +83,7 @@ func (s simStore) ListTracked(ctx context.Context, from, to uint64, after []byte
 
 func (s simStore) LookupTracked(ctx context.Context, hash []byte) (db.TrackedTransaction, error) {
 	row, err := s.trackingStore.LookupTracked(ctx, hash)
-	row.DBNow = row.DBNow.Add(time.Duration(s.clock.offset.Load()))
+	row.DBNow = s.clock.now()
 	return row, err
 }
 
@@ -87,8 +91,8 @@ func (s simStore) shift(column string, hashes [][]byte) error {
 	if len(hashes) == 0 {
 		return nil
 	}
-	_, err := s.conn.Exec(`UPDATE node_tx_binding SET `+column+` = `+column+` + make_interval(secs => $2) WHERE tx_hash = ANY($1) AND `+column+` IS NOT NULL`,
-		hashes, time.Duration(s.clock.offset.Load()).Seconds())
+	_, err := s.conn.Exec(`UPDATE node_tx_binding SET `+column+` = `+column+` + ($2::timestamptz - clock_timestamp()) WHERE tx_hash = ANY($1) AND `+column+` IS NOT NULL`,
+		hashes, s.clock.now())
 	return err
 }
 
@@ -168,7 +172,7 @@ func newCongestionSim(t *testing.T) *congestionSim {
 	if plan.RenewLimit != 600 || plan.AdmitLimit != 500 {
 		t.Fatalf("scaled plan %+v", plan)
 	}
-	s := &congestionSim{t: t, clock: &simClock{}, plan: plan, refused: map[db.AdmitOutcome]int{}}
+	s := &congestionSim{t: t, clock: &simClock{base: time.Now()}, plan: plan, refused: map[db.AdmitOutcome]int{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.ctx = ctx
 	s.mock = perfgate.NewMockNode(perfgate.MockNodeConfig{ChainID: keeperNetwork.ChainID, DeploymentID: keeperNetwork.DeploymentID, PrivateToken: keeperToken, FinalityLag: 2 * time.Second, MaxBlockTxs: 5, Clock: s.clock.now})
