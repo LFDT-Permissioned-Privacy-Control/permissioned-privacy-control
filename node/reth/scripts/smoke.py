@@ -25,7 +25,7 @@ def identity(scope, binding, context):
     return seal('identity', dict(header(), scope=scope, context_id=context, principal_id='fixture_principal', org_id='org_acme', signer=signed['sender'].lower(), binding_hash=binding, min_snapshot_version=1))
 def port():
     with socket.socket() as sock: sock.bind(('127.0.0.1', 0)); return sock.getsockname()[1]
-public, private, auth, p2p, control = [port() for _ in range(5)]
+public, private, auth, p2p, control, ws = [port() for _ in range(6)]
 def rpc(method, params, internal=False, listener=None):
     headers = {'Content-Type': 'application/json'}
     if internal: headers['Authorization'] = 'Bearer local-runtime-smoke-token'
@@ -49,7 +49,7 @@ genesis = dict(config=config, nonce='0x0', timestamp='0x0', gasLimit='0x1c9c380'
 (work / 'genesis.json').write_text(json.dumps(genesis))
 env = dict(os.environ, OPS_NODE_POLICY_CHAIN_ID='31337', OPS_NODE_POLICY_DEPLOYMENT_ID=network['deployment_id'], OPS_NODE_POLICY_PUBLIC_KEYS=json.dumps({'ops': base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()}), OPS_NODE_POLICY_STATE_DIR=str(work / 'policy'), OPS_NODE_POLICY_LISTEN=f'127.0.0.1:{private}', OPS_NODE_POLICY_CONTROL_LISTEN=f'127.0.0.1:{control}', OPS_NODE_POLICY_TOKEN='local-runtime-smoke-token')
 log = open(work / 'node.log', 'w')
-command = [str(pathlib.Path(args.binary).resolve()), 'node', '--chain', str(work / 'genesis.json'), '--dev', '--dev.finality-depth', '1', '--dev.block-time', '1s', '--engine.persistence-threshold', '0', '--datadir', str(work / 'data'), '--http', '--http.addr', '127.0.0.1', '--http.port', str(public), '--http.api', 'eth,net,web3', '--authrpc.port', str(auth), '--addr', '127.0.0.1', '--port', str(p2p), '--disable-discovery', '--log.file.directory', str(work / 'logs'), '--color', 'never']
+command = [str(pathlib.Path(args.binary).resolve()), 'node', '--chain', str(work / 'genesis.json'), '--dev', '--dev.finality-depth', '1', '--dev.block-time', '1s', '--engine.persistence-threshold', '0', '--datadir', str(work / 'data'), '--http', '--http.addr', '127.0.0.1', '--http.port', str(public), '--http.api', 'eth,net,web3,reth', '--ws', '--ws.addr', '127.0.0.1', '--ws.port', str(ws), '--ws.api', 'eth,net,web3,txpool,admin,rpc,reth,miner', '--authrpc.port', str(auth), '--addr', '127.0.0.1', '--port', str(p2p), '--disable-discovery', '--log.file.directory', str(work / 'logs'), '--color', 'never']
 process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
 try:
     for _ in range(100):
@@ -87,15 +87,42 @@ try:
     assert 'error' in rpc('eth_call', [{'from': signed['sender'], 'to': signed['target'], 'data': signed['data']}, 'latest']), 'public call inherited identity'
     assert 'error' in rpc('ops_policyStatus', []), 'private API leaked onto public listener'
     # Public eth_simulateV1 never builds candidate blocks, so it publishes no
-    # manifests. A request 100 blocks ahead would build 99 empty gap fillers
+    # manifests: it is refused by name (below) before Reth sees it; the forced
+    # block limit behind that is covered by public_rpc_never_builds_candidate_blocks.
+    # A request 100 blocks ahead would build 99 empty gap fillers
     # (Reth's default cap is 256); real production cannot reach those heights
     # during the check. (Discarded real payload rebuilds also publish
     # noncanonical manifests, so canonicity alone would not tell.)
+    # The node started with every public module it allows on WS: its startup
+    # guard found every served method reviewed.
     head = int(result('eth_blockNumber', []), 16)
     for blocks in [[{'calls': []}], [{'blockOverrides': {'number': hex(head + 100)}, 'calls': []}]]:
         assert 'error' in rpc('eth_simulateV1', [{'blockStateCalls': blocks}, 'latest']), 'public eth_simulateV1 built blocks'
     ahead = [p.name for p in (work / 'policy' / 'blocks').rglob('*') if p.is_file() and int(p.name.split('-')[0], 16) > head + 20]
     assert not ahead, f'public eth_simulateV1 published manifests: {ahead[:3]}'
+    # Public methods that would replay blocks through the guarded executor
+    # are refused by name before any work, alone and inside a batch; the
+    # ordinary reads beside them still answer.
+    replaying = {
+        'eth_callMany': [[{'transactions': [{'from': signed['sender'], 'to': signed['target'], 'data': signed['data']}]}], {'blockNumber': 'latest', 'transactionIndex': 0}],
+        'eth_getBlockAccessList': ['latest'],
+        'eth_getBlockAccessListByBlockHash': [result('eth_getBlockByNumber', ['latest', False])['hash']],
+        'eth_getBlockAccessListByBlockNumber': ['latest'],
+        'eth_getBlockAccessListRaw': ['latest'],
+        'eth_simulateV1': [{'blockStateCalls': [{'calls': []}]}, 'latest'],
+        'reth_getBlockExecutionOutcome': ['latest', '0x1'],
+    }
+    def assert_refused(answer, method):
+        assert answer.get('error', {}).get('code') == -32601 and answer['error'].get('message') == 'method not available on the guarded node', (method, answer)
+    for method, params in replaying.items():
+        assert_refused(rpc(method, params), method)
+    batch = []
+    for index, (method, params) in enumerate(replaying.items()):
+        batch += [{'jsonrpc': '2.0', 'id': 2 * index, 'method': method, 'params': params}, {'jsonrpc': '2.0', 'id': 2 * index + 1, 'method': 'eth_getBlockByNumber', 'params': ['latest', False]}]
+    answers = {a['id']: a for a in json.load(urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{public}', json.dumps(batch).encode(), {'Content-Type': 'application/json'}), timeout=10))}
+    for entry in batch:
+        if entry['method'] == 'eth_getBlockByNumber': assert answers[entry['id']].get('result', {}).get('hash'), answers[entry['id']]
+        else: assert_refused(answers[entry['id']], entry['method'])
     receipts = {}
     for name in ['call', 'create']:
         tx = signed[name]
@@ -107,6 +134,7 @@ try:
             time.sleep(.2)
         else: raise RuntimeError(f'{name} receipt timeout')
         assert receipt['status'] == '0x1', receipt
+        assert result('eth_getBlockByNumber', [receipt['blockNumber'], False])['hash'] == receipt['blockHash'], 'an ordinary block read failed'
         receipts[name] = receipt
         # A resend of the included transaction under a new identity: the pool
         # says "nonce too low", its own receipt exists, so it is accepted.
@@ -126,7 +154,8 @@ try:
         if name == 'create':
             assert status['execution']['created'] == [{'address': receipt['contractAddress'], 'org_id': 'org_acme', 'principal_id': 'fixture_principal'}], status
     assert receipts['create']['contractAddress']
-    # Batched status: request order, an unknown hash as null, the finalized
+    # Batched status: request order, an unknown hash as "not_found" (the
+    # lookup succeeded, nothing holds it, no identity), the finalized
     # head (final and written) with its header's timestamp; with senders, each
     # hash's receipt presence and the sender's nonce at exactly that block.
     assert 'transaction_statuses_v1' in result('ops_policyStatus', [], True)['capabilities']
@@ -135,7 +164,10 @@ try:
     plain = result('ops_transactionStatuses', [hashes], True)
     assert set(plain) == {'boot_id', 'finalized', 'canonical_epoch', 'statuses'} and plain['boot_id'] == ack['boot_id'], plain
     batch = result('ops_transactionStatuses', [hashes, [signed['sender'].lower()]], True)
-    assert batch['statuses'][1] is None and batch['canonical_epoch'] == 0 and batch['receipts'] == [True, False, True], batch
+    assert batch['statuses'][1] == 'not_found' and batch['canonical_epoch'] == 0 and batch['receipts'] == [True, False, True], batch
+    assert 'transaction_not_found_v1' in result('ops_policyStatus', [], True)['capabilities']
+    missing = rpc('ops_transactionStatus', [unknown], True)
+    assert missing.get('error') == {'code': -32014, 'message': 'transaction not found'}, missing
     final = batch['finalized']
     final_header = result('eth_getBlockByHash', [final['hash'], False])
     assert int(final_header['number'], 16) == final['number'] and int(final_header['timestamp'], 16) == final['timestamp'], (batch, final_header)
@@ -181,8 +213,8 @@ try:
     # identity for (the denied one, restored to the pool) has no status.
     batch = result('ops_transactionStatuses', [[signed['create']['hash'], signed['denied']['hash']]], True)
     assert batch['boot_id'] == status['boot_id'] != ack['boot_id'], batch
-    assert batch['statuses'][0]['execution']['status'] == 'included' and batch['statuses'][1] is None, batch
-    summary = {'ok': True, 'workdir': str(work), 'created': receipts['create']['contractAddress'], 'blocks': {name: receipt['blockNumber'] for name, receipt in receipts.items()}, 'checks': ['signed-facts', 'scoped-call-estimate-trace', 'public-isolation', 'state-and-block-override-rejection', 'signed-pool-submission', 'real-block-self-import', 'create', 'canonical-creation-status', 'chain-finality-evidence', 'candidate-preview-active-gate', 'candidate-live-read-isolation', 'current-revocation', 'scoped-admin-diagnostics', 'restart-recovery', 'public-simulate-builds-nothing', 'included-resend-accepted', 'control-listener', 'batched-status']}
+    assert batch['statuses'][0]['execution']['status'] == 'included' and batch['statuses'][1] == 'not_found', batch
+    summary = {'ok': True, 'workdir': str(work), 'created': receipts['create']['contractAddress'], 'blocks': {name: receipt['blockNumber'] for name, receipt in receipts.items()}, 'checks': ['signed-facts', 'scoped-call-estimate-trace', 'public-isolation', 'state-and-block-override-rejection', 'signed-pool-submission', 'real-block-self-import', 'create', 'canonical-creation-status', 'chain-finality-evidence', 'candidate-preview-active-gate', 'candidate-live-read-isolation', 'current-revocation', 'scoped-admin-diagnostics', 'restart-recovery', 'public-simulate-builds-nothing', 'included-resend-accepted', 'control-listener', 'batched-status', 'public-replay-methods-refused']}
     (work / 'result.json').write_text(json.dumps(summary, indent=2)); print(json.dumps(summary))
 except Exception:
     log.flush(); print((work / 'node.log').read_text()[-16000:]); raise

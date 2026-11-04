@@ -372,9 +372,16 @@ def main():
                 assert number > after, f'{tx_hash} lost from block {number}, below the head {after}'
                 del verified[tx_hash]
         missing = [tx for tx in submitted if not receipt(tx)]
+        # Without a receipt (never included, or in a block the stop lost)
+        # and with no identity after the restart: a definitive canonical
+        # miss, not "no answer", on both status calls.
         for tx in missing:
             answer = node.rpc('ops_transactionStatus', [tx['hash']], True, check=False)
-            assert 'error' in answer, f'status disclosed for a transaction without a receipt: {answer}'
+            assert answer.get('error', {}).get('code') == -32014, f'not a definitive miss for a transaction without a receipt: {answer}'
+        for start in range(0, len(missing), 256):
+            chunk = [tx['hash'] for tx in missing[start:start + 256]]
+            batch = node.rpc('ops_transactionStatuses', [chunk], True)
+            assert batch['statuses'] == ['not_found'] * len(chunk), f'not a definitive miss: {batch}'
         return dict(committed_at_stop=stopped.committed, saved_at_stop=saved_number, last_built_at_stop=stopped.last_added(),
                     head_after_restart=after, lost_blocks_with_txs=len(stopped.with_transactions(after)),
                     status_refused=len(missing), finalized_kept=len(final))

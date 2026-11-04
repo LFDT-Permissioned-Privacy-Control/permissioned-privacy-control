@@ -2,7 +2,7 @@
 //! addresses, not issuer signatures. Replay must also verify the retained signed
 //! records and identities before constructing an execution handle.
 //!
-//! Layout of the state directory (version 3; older layouts are refused, there
+//! Layout of the state directory (version 4; older layouts are refused, there
 //! is no importer):
 //! - `LAYOUT`: the layout marker, written first on initialisation;
 //! - `LOCK`: held exclusively by the one node process using the directory;
@@ -10,7 +10,8 @@
 //! - `facts/<version / 4096 as {:08x}>/<version as {:016x}>-<sha256>`: signed
 //!   snapshot and delta records, by their own version;
 //! - `lists/<version / 4096 as {:08x}>/<version as {:016x}>-<sha256>`: record
-//!   lists, by the facts version they complete;
+//!   lists, by the facts version they complete; each names its own record and
+//!   the list of the generation it extends, back to its chain's snapshot;
 //! - `pointers/facts-head`: the installed generation's record list;
 //! - `blocks/<height / 4096 as {:08x}>/<height as {:016x}>-<hash>`: one
 //!   produced block's manifest, a one-entry segment (see `manifest`);
@@ -20,10 +21,10 @@
 //!
 //! Versions order fact records: snapshot versions strictly increase, so each
 //! fact chain (a snapshot and its deltas) occupies its own ascending version
-//! range, and every record a list names has at least the list's base
-//! (snapshot) version. Collection therefore deletes by version range: lists
-//! below the lowest facts version and records below the lowest base version
-//! any retained manifest, the installed facts or a pinned candidate uses.
+//! range, and every record and list a list reaches has at least the list's
+//! base (snapshot) version. Collection therefore deletes by version range:
+//! lists and records below the lowest base version any retained manifest, the
+//! installed facts or a pinned candidate uses.
 
 use crate::{
     manifest::{
@@ -108,7 +109,7 @@ pub const RUN_REMOVALS: usize = 1024;
 /// defers collection (retention is a minimum, so deferring is safe).
 const ROOT_FILES: usize = 65_536;
 
-const LAYOUT: &[u8] = b"ops-node-policy-archive 3\n";
+const LAYOUT: &[u8] = b"ops-node-policy-archive 4\n";
 
 /// How long compacted manifests (and the fact records only they reference)
 /// are kept, counted from the block's timestamp. Only finalized blocks are
@@ -418,7 +419,7 @@ impl ArtifactStore {
 
     /// A stored record, checked against its content address.
     pub fn get_record(&self, version: u64, id: ArtifactId) -> Result<Vec<u8>, String> {
-        self.get_versioned("facts", version, id)
+        self.get_versioned("facts", version, id, MAX_OBJECT)
     }
 
     /// Store a record list completing facts `version` durably.
@@ -428,7 +429,17 @@ impl ArtifactStore {
 
     /// A stored record list, checked against its content address.
     pub fn get_list(&self, version: u64, id: ArtifactId) -> Result<Vec<u8>, String> {
-        self.get_versioned("lists", version, id)
+        self.get_versioned("lists", version, id, MAX_OBJECT)
+    }
+
+    /// `get_list`, refusing a file larger than `limit`.
+    pub(crate) fn get_list_bounded(
+        &self,
+        version: u64,
+        id: ArtifactId,
+        limit: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.get_versioned("lists", version, id, limit)
     }
 
     /// Point `facts-head` at the stored list of facts `version`.
@@ -465,8 +476,14 @@ impl ArtifactStore {
         Ok(id)
     }
 
-    fn get_versioned(&self, area: &str, version: u64, id: ArtifactId) -> Result<Vec<u8>, String> {
-        let bytes = self.read_bounded(&self.versioned_path(area, version, id), MAX_OBJECT)?;
+    fn get_versioned(
+        &self,
+        area: &str,
+        version: u64,
+        id: ArtifactId,
+        limit: usize,
+    ) -> Result<Vec<u8>, String> {
+        let bytes = self.read_bounded(&self.versioned_path(area, version, id), limit)?;
         if ArtifactId::of(&bytes) != id {
             return Err("execution artifact digest mismatch".into());
         }
@@ -479,26 +496,44 @@ impl ArtifactStore {
     /// 4096 blocks). The record list it references must already be durable.
     /// Idempotent per block: an existing manifest whose transactions carry the
     /// same principals, organizations, signers and outcomes stays (another
-    /// build may differ only in lease, facts or identity lease times).
+    /// build may differ only in lease, facts or identity lease times), also
+    /// when two builds of the block publish at the same time.
     pub fn publish_manifest(&self, manifest: &BlockManifest) -> Result<Published, String> {
         self.get_list(manifest.facts_version, manifest.records)?;
         let directory = self.directory(&self.block_directory(manifest.number))?;
         let name = manifest_name(manifest.number, manifest.hash);
-        if let Some(existing) = self
+        let existing = match self
             .storage
             .read(&directory.join(&name), MAX_SEGMENT)
             .map_err(|_| "invalid execution archive file".to_owned())?
         {
-            let existing = read_entry(&existing, manifest.number, manifest.hash)?
-                .ok_or("invalid execution manifest")?;
-            if evidence(&existing)? != evidence(manifest)? {
-                return Err("conflicting execution manifest".into());
+            Some(existing) => {
+                self.storage.sync_dir(&directory).map_err(io_error)?;
+                existing
             }
-            self.storage.sync_dir(&directory).map_err(io_error)?;
-            return Ok(Published::Existing);
+            // Another build of this block may link its manifest between this
+            // check and this link (concurrent payload builds): its evidence
+            // decides, exactly as if it had been there first.
+            None => match link_immutable(
+                self.storage.as_ref(),
+                &self.root.join("tmp"),
+                &directory,
+                &name,
+                &write_segment(&[manifest])?,
+                MAX_SEGMENT,
+            )? {
+                Linked::Published => return Ok(Published::New),
+                // The other build published exactly this manifest.
+                Linked::Same => return Ok(Published::Existing),
+                Linked::Other(existing) => existing,
+            },
+        };
+        let existing = read_entry(&existing, manifest.number, manifest.hash)?
+            .ok_or("invalid execution manifest")?;
+        if evidence(&existing)? != evidence(manifest)? {
+            return Err("conflicting execution manifest".into());
         }
-        self.publish_immutable(&directory, &name, &write_segment(&[manifest])?)?;
-        Ok(Published::New)
+        Ok(Published::Existing)
     }
 
     /// The manifest of block (number, hash), if this node published it: its
@@ -964,10 +999,12 @@ impl ArtifactStore {
         Ok(())
     }
 
-    /// Delete record lists below the lowest facts version and records below
-    /// the lowest base version over every root: retained segments and
-    /// per-block manifests, the installed facts and pinned candidates (in
-    /// `input.live`, read before this listing).
+    /// Delete record lists and records below the lowest base version over
+    /// every root: retained segments and per-block manifests, the installed
+    /// facts and pinned candidates (in `input.live`, read before this
+    /// listing). A root's list reaches every list of its chain from the
+    /// snapshot on, so lists go by the base version too (the roots' facts
+    /// versions are no longer a bound; segment names keep them).
     fn collect(
         &self,
         input: &MaintenanceInput,
@@ -1001,14 +1038,14 @@ impl ArtifactStore {
                 }
             }
         }
-        let Some((facts, base)) = lowest else {
+        let Some((_, base)) = lowest else {
             return Ok(Collected::Done);
         };
         let budget = report.budget();
         if budget == 0 {
             return Ok(Collected::More);
         }
-        let lists = self.remove_below("lists", facts, budget)?;
+        let lists = self.remove_below("lists", base, budget)?;
         let records = self.remove_below("facts", base, budget - lists)?;
         report.removed_lists += lists;
         report.removed_records += records;
@@ -1060,9 +1097,54 @@ impl ArtifactStore {
     }
 }
 
+/// What `link_immutable` found under the name.
+enum Linked {
+    /// These bytes, linked here, now durable.
+    Published,
+    /// These same bytes, linked first by another writer, now durable.
+    Same,
+    /// Other bytes another writer linked first, now durable.
+    Other(Vec<u8>),
+}
+
 /// temp file → `sync_all` → hard link → unlink temp → directory `sync_all`:
 /// 2 syncs. The temp lives in `temporary` (cleared at open), so a crash at any
 /// point leaves at most a leftover there and never a partial published name.
+/// When another writer linked the name first, its directory entry is made
+/// durable all the same and its bytes are compared (a file longer than
+/// `limit` is an error, never truncated).
+fn link_immutable(
+    storage: &dyn Storage,
+    temporary: &Path,
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+    limit: usize,
+) -> Result<Linked, String> {
+    let destination = directory.join(name);
+    let temporary = temporary.join(temporary_name());
+    // Only our own temp is ever removed: a failed create leaves nothing to clean.
+    storage.write_synced(&temporary, bytes).map_err(io_error)?;
+    let linked = storage.link(&temporary, &destination).map_err(io_error);
+    let cleanup = storage.remove(&temporary).map(|_| ()).map_err(io_error);
+    let found = if linked? {
+        Linked::Published
+    } else {
+        match storage
+            .read(&destination, limit)
+            .map_err(|_| "invalid execution archive file".to_owned())?
+        {
+            Some(existing) if existing == bytes => Linked::Same,
+            Some(existing) => Linked::Other(existing),
+            None => return Err("invalid execution archive file".into()),
+        }
+    };
+    cleanup?;
+    storage.sync_dir(directory).map_err(io_error)?;
+    Ok(found)
+}
+
+/// `link_immutable` for content that must be exactly these bytes.
 fn publish_immutable(
     storage: &dyn Storage,
     temporary: &Path,
@@ -1070,23 +1152,10 @@ fn publish_immutable(
     name: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let destination = directory.join(name);
-    let temporary = temporary.join(temporary_name());
-    // Only our own temp is ever removed: a failed create leaves nothing to clean.
-    storage.write_synced(&temporary, bytes).map_err(io_error)?;
-    let linked = storage.link(&temporary, &destination).map_err(io_error);
-    let cleanup = storage.remove(&temporary).map(|_| ()).map_err(io_error);
-    if !linked?
-        && storage
-            .read(&destination, bytes.len())
-            .map_err(|_| "invalid execution archive file".to_owned())?
-            .as_deref()
-            != Some(bytes)
-    {
-        return Err("conflicting immutable execution artifact".into());
+    match link_immutable(storage, temporary, directory, name, bytes, bytes.len())? {
+        Linked::Published | Linked::Same => Ok(()),
+        Linked::Other(_) => Err("conflicting immutable execution artifact".into()),
     }
-    cleanup?;
-    storage.sync_dir(directory).map_err(io_error)
 }
 
 fn bucket_name(number: u64) -> String {

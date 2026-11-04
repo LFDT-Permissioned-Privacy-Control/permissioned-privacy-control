@@ -4,7 +4,7 @@
 use crate::{
     context::ExecutionBinding,
     identity::{Admission, IdentityRegistry},
-    runtime::{MAX_STATUS_BATCH, PolicyRuntime, StatusBatch},
+    runtime::{BatchedAnswer, MAX_STATUS_BATCH, PolicyRuntime, StatusBatch, TRANSACTION_NOT_FOUND},
     wire::{Identity, MAX_ENVELOPE_BYTES, SimulationRequest, decode_strict, parse_simulation},
 };
 use alloy_consensus::{Transaction, TxEnvelope, transaction::SignerRecoverable};
@@ -20,14 +20,20 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     convert::Infallible,
     future::Future,
     io,
-    sync::Arc,
+    net::IpAddr,
+    sync::{Arc, PoisonError},
     time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
-use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet};
+use tokio::{
+    net::TcpListener,
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
+    task::JoinSet,
+};
 
 const MAX_REQUEST_BYTES: usize = MAX_ENVELOPE_BYTES + 4096;
 /// Request bodies parsed on the async worker; larger ones are parsed on a
@@ -59,8 +65,9 @@ pub const MAX_FACT_WAIT: Duration = Duration::from_secs(5);
 /// so waiters alone can never fill the listener and block the publication
 /// they wait for.
 pub const DEFAULT_FACT_WAITERS: usize = 32;
-/// Batched status calls worked on at once; more wait (holding only their
-/// connection).
+/// Status calls (single and batched together) worked on at once; more wait
+/// (holding only their connection). Loading a block's evidence verifies
+/// every identity in it.
 const STATUS_JOBS: usize = 4;
 
 /// What the transaction pool did with a submitted transaction.
@@ -114,7 +121,9 @@ pub trait ExecutionBackend: Send + Sync {
         raw: Bytes,
         signer: Address,
     ) -> Result<PoolSubmission, String>;
-    async fn transaction_status(&self, _hash: B256) -> Result<Value, String> {
+    /// The execution status of `hash`. Blocking: called on the status lane's
+    /// blocking threads, at most `STATUS_JOBS` at once with the batched call.
+    fn transaction_status(&self, _hash: B256) -> Result<Value, String> {
         Err("transaction status is unavailable".into())
     }
     /// Whether the transaction pool holds each hash, in order (cheap, in
@@ -143,8 +152,8 @@ pub struct PrivateApi {
     /// Bounds concurrent waiters; beyond it a lagging request gets `-32012`
     /// at once.
     waiters: Arc<Semaphore>,
-    /// Bounds concurrent batched status jobs (recovery and reconciliation
-    /// traffic), apart from the admission pool.
+    /// Bounds concurrent status jobs, single and batched (recovery and
+    /// reconciliation traffic), apart from the admission pool.
     status_jobs: Arc<Semaphore>,
 }
 
@@ -213,6 +222,32 @@ struct RpcRequest {
 pub struct ApiResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    /// Only the over-capacity answer: nothing ran, the request may be resent
+    /// (`Retry-After: 1`). Never set on an answer after processing started.
+    retry: bool,
+}
+
+impl ApiResponse {
+    fn new(status: u16, body: &[u8]) -> Self {
+        Self {
+            status,
+            body: body.to_vec(),
+            retry: false,
+        }
+    }
+
+    /// The over-capacity answer: 503, nothing ran.
+    fn at_capacity() -> Self {
+        Self {
+            retry: true,
+            ..Self::new(503, br#"{"error":"private listener at capacity"}"#)
+        }
+    }
+
+    /// Whether this answer means nothing ran and the request may be resent.
+    pub fn retry(&self) -> bool {
+        self.retry
+    }
 }
 
 /// Why a private request failed. Plain messages stay in the node's own
@@ -339,16 +374,10 @@ impl PrivateApi {
         body: &[u8],
     ) -> ApiResponse {
         if !self.authenticated(authorization) {
-            return ApiResponse {
-                status: 401,
-                body: br#"{"error":"unauthorized"}"#.to_vec(),
-            };
+            return ApiResponse::new(401, br#"{"error":"unauthorized"}"#);
         }
         if body.len() > MAX_REQUEST_BYTES {
-            return ApiResponse {
-                status: 413,
-                body: br#"{"error":"request too large"}"#.to_vec(),
-            };
+            return ApiResponse::new(413, br#"{"error":"request too large"}"#);
         }
         // Large bodies (fact snapshots) are parsed off the async worker.
         let parsed = if body.len() > INLINE_PARSE_BYTES {
@@ -368,10 +397,7 @@ impl PrivateApi {
         }
         if !serving.serves(&request.method) {
             if serving == Serving::Overflow {
-                return ApiResponse {
-                    status: 503,
-                    body: br#"{"error":"private listener at capacity"}"#.to_vec(),
-                };
+                return ApiResponse::at_capacity();
             }
             return rpc_error(
                 json!(request.id),
@@ -381,11 +407,11 @@ impl PrivateApi {
         }
         let id = json!(request.id);
         match self.dispatch(request, (self.clock)()).await {
-            Ok(result) => ApiResponse {
-                status: 200,
-                body: serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"result":result}))
+            Ok(result) => ApiResponse::new(
+                200,
+                &serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"result":result}))
                     .expect("serializable RPC result"),
-            },
+            ),
             Err(Failure::FactsPending) => rpc_error(id, -32012, "policy facts pending"),
             Err(Failure::PoolRejected(rejection)) => rpc_error_data(
                 id,
@@ -395,6 +421,11 @@ impl PrivateApi {
             ),
             Err(Failure::Message(error)) if error.starts_with("resynchronisation required") => {
                 rpc_error(id, -32011, "policy resynchronisation required")
+            }
+            // Only the status call: a definitive canonical miss
+            // (`transaction_not_found_v1`).
+            Err(Failure::Message(error)) if error == TRANSACTION_NOT_FOUND => {
+                rpc_error(id, -32014, TRANSACTION_NOT_FOUND)
             }
             Err(Failure::Message(_)) => rpc_error(id, -32000, "private execution request rejected"),
         }
@@ -467,32 +498,42 @@ impl PrivateApi {
                 // this authenticated service listener. The identity comes from
                 // the including block's manifest, or else the live registry; an
                 // unknown hash is an error and discloses nothing.
-                let execution = self.backend.transaction_status(hash).await?;
-                let block = match execution.get("status").and_then(Value::as_str) {
-                    Some("included" | "reverted") => Some((
-                        execution
-                            .get("block_number")
-                            .and_then(Value::as_u64)
-                            .ok_or("invalid execution status")?,
-                        execution
-                            .get("block_hash")
-                            .and_then(Value::as_str)
-                            .and_then(|block| block.parse::<B256>().ok())
-                            .ok_or("invalid execution status")?,
-                    )),
-                    _ => None,
-                };
-                let runtime = self.runtime.clone();
-                // Status has its own blocking lane: archive reads never hold
-                // the admission pool's permits. A block named as the
-                // inclusion block counts for the canonical epoch.
-                let identity = tokio::task::spawn_blocking(move || {
+                // The status lane, shared with the batched call: archive reads
+                // never hold the admission pool's permits, and at most
+                // `STATUS_JOBS` status jobs load block evidence at once. The
+                // permit travels with the job, so a cancelled request cannot
+                // let more run. A block named as the inclusion block counts
+                // for the canonical epoch.
+                let permit = self
+                    .status_jobs
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| "status lookup unavailable")?;
+                let (runtime, backend) = (self.runtime.clone(), self.backend.clone());
+                let (execution, identity) = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    let execution = backend.transaction_status(hash)?;
+                    let block = match execution.get("status").and_then(Value::as_str) {
+                        Some("included" | "reverted") => Some((
+                            execution
+                                .get("block_number")
+                                .and_then(Value::as_u64)
+                                .ok_or("invalid execution status")?,
+                            execution
+                                .get("block_hash")
+                                .and_then(Value::as_str)
+                                .and_then(|block| block.parse::<B256>().ok())
+                                .ok_or("invalid execution status")?,
+                        )),
+                        _ => None,
+                    };
                     let identity = runtime.status_identity(hash, block)?;
                     // A block that left the chain meanwhile is never named.
                     if !runtime.note_reported(block.as_slice())?.1.is_empty() {
                         return Err("canonical chain changed during the lookup".to_owned());
                     }
-                    Ok(identity)
+                    Ok((execution, identity))
                 })
                 .await
                 .map_err(|_| "status lookup failed")??;
@@ -509,7 +550,7 @@ impl PrivateApi {
                 // Optional: senders whose nonce after the finalized block is
                 // wanted, with each hash's receipt presence (dropped evidence).
                 let senders = request.params.get(1).map(status_senders).transpose()?;
-                // A bounded lane of its own: never the admission pool's
+                // The status lane, shared with the single call: never the admission pool's
                 // permits. The permit travels with the job, so a cancelled
                 // request cannot let more jobs run than the bound.
                 let permit = self
@@ -885,8 +926,9 @@ fn status_batch_json(batch: &StatusBatch, evidence: bool, boot_id: &str) -> Valu
         .statuses
         .iter()
         .map(|entry| match entry {
-            None => Value::Null,
-            Some(entry) => json!({
+            BatchedAnswer::Unknown => Value::Null,
+            BatchedAnswer::NotFound => json!("not_found"),
+            BatchedAnswer::Status(entry) => json!({
                 "transaction_hash": format!("{:#x}", entry.hash),
                 "principal_id": entry.identity.principal_id,
                 "org_id": entry.identity.org_id,
@@ -919,22 +961,22 @@ fn require_count(params: &[Value], count: usize) -> Result<(), String> {
     Ok(())
 }
 fn rpc_error_data(id: Value, code: i32, message: &str, data: Value) -> ApiResponse {
-    ApiResponse {
-        status: 200,
-        body: serde_json::to_vec(
+    ApiResponse::new(
+        200,
+        &serde_json::to_vec(
             &json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message,"data":data}}),
         )
         .expect("serializable RPC error"),
-    }
+    )
 }
 fn rpc_error(id: Value, code: i32, message: &str) -> ApiResponse {
-    ApiResponse {
-        status: 200,
-        body: serde_json::to_vec(
+    ApiResponse::new(
+        200,
+        &serde_json::to_vec(
             &json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}),
         )
         .expect("serializable RPC error"),
-    }
+    )
 }
 
 /// Which private methods a listener serves.
@@ -972,15 +1014,23 @@ impl Serving {
 #[derive(Clone, Copy, Debug)]
 pub struct ListenerConfig {
     pub lane: Lane,
-    /// Connections served at once. Above it a connection is still served for
-    /// fact publication and status, and answered 503 with `Retry-After: 1`
-    /// otherwise, then closed.
+    /// Authenticated connections served at once. Above it 64 more are still
+    /// served for fact publication and status, and answered 503 with
+    /// `Retry-After: 1` otherwise, then closed; beyond those an authenticated
+    /// connection gets that 503 at once.
     pub max_connections: usize,
     /// After this long a connection is closed at its next response boundary
     /// (`Connection: close`): an in-flight request always completes. One
     /// that is still open a minute later (a peer that stopped reading) is
     /// closed.
     pub connection_lifetime: Duration,
+    /// A new connection must send the complete head of a request with the
+    /// right token within this long, or it is closed. At least OPS's idle
+    /// timeout (5 s), so OPS always closes an unused pooled connection first.
+    pub first_request_time: Duration,
+    /// How long one request may be processed before it is answered 503
+    /// (the request may still complete).
+    pub request_time: Duration,
 }
 
 impl Default for ListenerConfig {
@@ -989,17 +1039,140 @@ impl Default for ListenerConfig {
             lane: Lane::Execution,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             connection_lifetime: Duration::from_secs(60),
+            first_request_time: IDLE_TIME,
+            request_time: Duration::from_secs(30),
         }
     }
 }
 
 /// Default connections per private listener.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 128;
-/// Connections served above the cap at once; more are closed unanswered.
+/// Authenticated connections served above the cap at once; beyond them an
+/// authenticated connection is answered 503 (nothing ran) and closed.
 const OVERFLOW: usize = 64;
-/// How long an over-capacity connection may take for its one exchange: the
-/// header (10 s), body (15 s) and processing (30 s) bounds, with margin.
-const OVERFLOW_TIME: Duration = Duration::from_secs(60);
+/// How long a connection may wait for its next request's head.
+const IDLE_TIME: Duration = Duration::from_secs(10);
+/// How long a request body may take to arrive.
+const BODY_TIME: Duration = Duration::from_secs(15);
+/// Added to the sum of a connection's bounds for its backstop.
+const BACKSTOP_MARGIN: Duration = Duration::from_secs(5);
+/// Request body read and discarded before a 401, so the answer is not lost
+/// to a reset when the connection closes with unread data.
+const UNAUTHORIZED_BODY: usize = 64 << 10;
+const UNAUTHORIZED_BODY_TIME: Duration = Duration::from_secs(1);
+
+/// A connection's place, decided at its first authenticated request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Place {
+    /// No authenticated request yet: no place in the cap or the overflow.
+    Pending,
+    Admitted(Serving),
+    /// The cap and the overflow are full: answered 503, then closed.
+    Refused,
+}
+
+/// Connections that have not sent an authenticated request yet. They hold no
+/// place in the cap; at most `capacity` wait at once. A new connection beyond
+/// that closes the oldest waiting connection of the peer address with the
+/// most waiting ones, so a flood from some peers mostly closes their own
+/// connections, and an authenticated connection (whose request follows at
+/// once) is admitted unless the flood outpaces it.
+struct Unauthenticated {
+    capacity: usize,
+    waiting: std::sync::Mutex<Waiting>,
+}
+
+#[derive(Default)]
+struct Waiting {
+    next: u64,
+    connections: BTreeMap<u64, (IpAddr, oneshot::Sender<()>)>,
+    peers: BTreeMap<IpAddr, BTreeSet<u64>>,
+}
+
+impl Waiting {
+    fn remove(&mut self, id: u64) -> Option<oneshot::Sender<()>> {
+        let (peer, close) = self.connections.remove(&id)?;
+        if let Some(ids) = self.peers.get_mut(&peer) {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.peers.remove(&peer);
+            }
+        }
+        Some(close)
+    }
+}
+
+impl Unauthenticated {
+    /// A new connection's id, and the signal that closes it to make room.
+    fn join(&self, peer: IpAddr) -> (u64, oneshot::Receiver<()>) {
+        let (close, closed) = oneshot::channel();
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        while waiting.connections.len() >= self.capacity {
+            let Some(oldest) = waiting
+                .peers
+                .values()
+                .max_by_key(|ids| ids.len())
+                .and_then(|ids| ids.first().copied())
+            else {
+                break;
+            };
+            if let Some(close) = waiting.remove(oldest) {
+                let _ = close.send(());
+            }
+        }
+        waiting.next += 1;
+        let id = waiting.next;
+        waiting.connections.insert(id, (peer, close));
+        waiting.peers.entry(peer).or_default().insert(id);
+        (id, closed)
+    }
+
+    fn leave(&self, id: u64) {
+        self.waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+    }
+}
+
+/// One connection's admission, shared by its requests and its task.
+struct Slot {
+    id: u64,
+    lane: Lane,
+    place: tokio::sync::watch::Sender<Place>,
+    permit: std::sync::Mutex<Option<OwnedSemaphorePermit>>,
+    cap: Arc<Semaphore>,
+    overflow: Arc<Semaphore>,
+    unauthenticated: Arc<Unauthenticated>,
+}
+
+impl Slot {
+    /// At an authenticated request: the connection's place, taken at its
+    /// first one (the cap, else the overflow, else refused) and kept.
+    fn admit(&self) -> Place {
+        let current = *self.place.borrow();
+        if current != Place::Pending {
+            return current;
+        }
+        self.unauthenticated.leave(self.id);
+        let (place, permit) = match self.cap.clone().try_acquire_owned() {
+            Ok(permit) => (Place::Admitted(Serving::Lane(self.lane)), Some(permit)),
+            Err(_) => match self.overflow.clone().try_acquire_owned() {
+                Ok(permit) => (Place::Admitted(Serving::Overflow), Some(permit)),
+                Err(_) => (Place::Refused, None),
+            },
+        };
+        *self.permit.lock().unwrap_or_else(PoisonError::into_inner) = permit;
+        self.place.send_replace(place);
+        place
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.unauthenticated.leave(self.id);
+    }
+}
 
 /// The main private listener with default bounds.
 pub async fn serve(
@@ -1011,6 +1184,9 @@ pub async fn serve(
 }
 
 /// Dedicated private HTTP listener with bounded bodies, connections and time.
+/// A connection takes a place in the cap (or the overflow) only at its first
+/// authenticated request; before that it must send one's head within
+/// `first_request_time`, and a failed authentication closes it.
 /// Shutdown stops acceptance, lets in-flight requests finish (connections
 /// close at their response boundary) for at most 10 s, then aborts.
 pub async fn serve_with(
@@ -1019,8 +1195,12 @@ pub async fn serve_with(
     config: ListenerConfig,
     shutdown: impl Future<Output = ()> + Send,
 ) -> io::Result<()> {
-    let limit = Arc::new(Semaphore::new(config.max_connections.max(1)));
+    let cap = Arc::new(Semaphore::new(config.max_connections.max(1)));
     let overflow = Arc::new(Semaphore::new(OVERFLOW));
+    let unauthenticated = Arc::new(Unauthenticated {
+        capacity: config.max_connections.max(1) + OVERFLOW,
+        waiting: std::sync::Mutex::new(Waiting::default()),
+    });
     let (stopping, stop) = tokio::sync::watch::channel(false);
     let mut requests = JoinSet::new();
     let mut last_accept_error: Option<Instant> = None;
@@ -1033,7 +1213,7 @@ pub async fn serve_with(
                 // A failed accept (descriptor limits, an aborted handshake)
                 // never stops the listener.
                 let stream=match incoming {
-                    Ok((stream,_))=>stream,
+                    Ok(accepted)=>accepted,
                     Err(error)=>{
                         // Rate-limited: a persistent error (descriptor
                         // exhaustion) clears when descriptors free up.
@@ -1045,45 +1225,18 @@ pub async fn serve_with(
                         continue;
                     }
                 };
-                let (serving,permit)=match limit.clone().try_acquire_owned() {
-                    Ok(permit)=>(Serving::Lane(config.lane),permit),
-                    Err(_)=>match overflow.clone().try_acquire_owned() {
-                        Ok(permit)=>(Serving::Overflow,permit),
-                        Err(_)=>{drop(stream);continue;}
-                    },
-                };
-                let api=api.clone();
-                let mut stop=stop.clone();
-                let lifetime=config.connection_lifetime;
-                requests.spawn(async move {
-                    let _permit=permit;
-                    let opened=Instant::now();
-                    let service=service_fn(move |req|{
-                        let api=api.clone();
-                        async move {
-                            let mut response=handle_http(api,serving,req).await?;
-                            // Recycle at a response boundary, never mid-request.
-                            if serving==Serving::Overflow || opened.elapsed()>=lifetime {
-                                response.headers_mut().insert(hyper::header::CONNECTION,hyper::header::HeaderValue::from_static("close"));
-                            }
-                            Ok::<_,Infallible>(response)
-                        }
-                    });
-                    let mut builder=http1::Builder::new();
-                    builder.timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(10));
-                    let backstop=if serving==Serving::Overflow {OVERFLOW_TIME} else {lifetime+Duration::from_secs(60)};
-                    let connection=builder.serve_connection(TokioIo::new(stream),service);
-                    tokio::pin!(connection);
-                    let _=tokio::time::timeout(backstop,async {
-                        tokio::select! {
-                            _=connection.as_mut()=>{},
-                            _ = async { let _ = stop.wait_for(|stopping| *stopping).await; } =>{
-                                connection.as_mut().graceful_shutdown();
-                                let _=connection.await;
-                            }
-                        }
-                    }).await;
+                let (stream,peer)=stream;
+                let (id,evicted)=unauthenticated.join(peer.ip());
+                let slot=Arc::new(Slot {
+                    id,
+                    lane:config.lane,
+                    place:tokio::sync::watch::Sender::new(Place::Pending),
+                    permit:std::sync::Mutex::new(None),
+                    cap:cap.clone(),
+                    overflow:overflow.clone(),
+                    unauthenticated:unauthenticated.clone(),
                 });
+                requests.spawn(connection(stream,api.clone(),slot,evicted,config,stop.clone()));
             }
         }
     }
@@ -1097,55 +1250,144 @@ pub async fn serve_with(
     }
     Ok(())
 }
-async fn handle_http(
+
+/// Serve one accepted connection until it closes, its backstop, or shutdown.
+async fn connection(
+    stream: tokio::net::TcpStream,
     api: Arc<PrivateApi>,
-    serving: Serving,
-    request: Request<Incoming>,
-) -> Result<Response<Full<bytes::Bytes>>, Infallible> {
-    let authorization = request
+    slot: Arc<Slot>,
+    evicted: oneshot::Receiver<()>,
+    config: ListenerConfig,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
+    let opened = Instant::now();
+    let lifetime = config.connection_lifetime;
+    let request_time = config.request_time;
+    let mut place = slot.place.subscribe();
+    let service = service_fn(move |request: Request<Incoming>| {
+        let (api, slot) = (api.clone(), slot.clone());
+        async move {
+            // A failed authentication closes the connection, and never
+            // takes a place in the cap. Refusals before any work read the
+            // body first: an answer followed by a close with unread data
+            // would reach the client as a reset.
+            if !api.authenticated(authorization(&request)) {
+                discard(
+                    request.into_body(),
+                    UNAUTHORIZED_BODY,
+                    UNAUTHORIZED_BODY_TIME,
+                )
+                .await;
+                return Ok::<_, Infallible>(closing(http_response(ApiResponse::new(
+                    401,
+                    br#"{"error":"unauthorized"}"#,
+                ))));
+            }
+            let serving = match slot.admit() {
+                Place::Admitted(serving) => serving,
+                _ => {
+                    discard(request.into_body(), MAX_REQUEST_BYTES, BODY_TIME).await;
+                    return Ok(closing(http_response(ApiResponse::at_capacity())));
+                }
+            };
+            let response = handle_http(api, serving, request_time, request).await?;
+            // Recycle at a response boundary, never mid-request.
+            Ok(
+                if serving == Serving::Overflow
+                    || opened.elapsed() >= lifetime
+                    || matches!(response.status().as_u16(), 401 | 404 | 413)
+                {
+                    closing(response)
+                } else {
+                    response
+                },
+            )
+        }
+    });
+    let mut builder = http1::Builder::new();
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(IDLE_TIME);
+    let connection = builder.serve_connection(TokioIo::new(stream), service);
+    tokio::pin!(connection);
+    // Until its first authenticated request a connection is closed at the
+    // first-request deadline, when a newer unauthenticated connection needs
+    // its place, or at shutdown. None of these cuts an admitted connection.
+    {
+        let unadmitted_exit = async {
+            tokio::select! {
+                _ = tokio::time::sleep(config.first_request_time) => {},
+                Ok(()) = evicted => {},
+                _ = stop.wait_for(|stopping| *stopping) => {},
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = connection.as_mut() => return,
+            _ = place.wait_for(|place| *place != Place::Pending) => {},
+            _ = unadmitted_exit => {},
+        }
+    }
+    // From the accept, the sum of the bounds of what may still run, with a
+    // margin: an in-flight request is never cut, only a peer that stopped
+    // reading. The lane: the lifetime, then one more idle wait, body and
+    // processing. The overflow (and a refusal): its one exchange.
+    let backstop = match *place.borrow() {
+        Place::Pending => return,
+        Place::Admitted(Serving::Lane(_)) => {
+            lifetime + IDLE_TIME + BODY_TIME + request_time + BACKSTOP_MARGIN
+        }
+        Place::Admitted(Serving::Overflow) | Place::Refused => {
+            config.first_request_time + BODY_TIME + request_time + BACKSTOP_MARGIN
+        }
+    };
+    let _ = tokio::time::timeout(backstop.saturating_sub(opened.elapsed()), async {
+        tokio::select! {
+            _ = connection.as_mut() => {},
+            _ = async { let _ = stop.wait_for(|stopping| *stopping).await; } => {
+                connection.as_mut().graceful_shutdown();
+                let _ = connection.await;
+            }
+        }
+    })
+    .await;
+}
+
+/// Read and drop at most `limit` bytes of a request body, for at most `time`.
+async fn discard(mut body: Incoming, limit: usize, time: Duration) {
+    let _ = tokio::time::timeout(time, async {
+        let mut read = 0usize;
+        while let Some(Ok(frame)) = body.frame().await {
+            read += frame.data_ref().map_or(0, |data| data.len());
+            if read > limit {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
+fn authorization(request: &Request<Incoming>) -> &str {
+    request
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
-        .to_string();
-    let response = if !api.authenticated(&authorization) {
-        ApiResponse {
-            status: 401,
-            body: br#"{"error":"unauthorized"}"#.to_vec(),
-        }
-    } else if request.method() != hyper::Method::POST
-        || request.uri().path() != "/"
-        || request.uri().query().is_some()
-    {
-        ApiResponse {
-            status: 404,
-            body: br#"{"error":"not found"}"#.to_vec(),
-        }
-    } else {
-        match tokio::time::timeout(
-            Duration::from_secs(15),
-            Limited::new(request.into_body(), MAX_REQUEST_BYTES).collect(),
-        )
-        .await
-        {
-            Ok(Ok(body)) => match tokio::time::timeout(
-                Duration::from_secs(30),
-                api.process_serving(serving, &authorization, &body.to_bytes()),
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(_) => ApiResponse {
-                    status: 503,
-                    body: br#"{"error":"execution node unavailable"}"#.to_vec(),
-                },
-            },
-            _ => ApiResponse {
-                status: 413,
-                body: br#"{"error":"invalid request body"}"#.to_vec(),
-            },
-        }
-    };
+}
+
+/// The answer closes its connection after it is sent.
+fn closing(mut response: Response<Full<bytes::Bytes>>) -> Response<Full<bytes::Bytes>> {
+    response.headers_mut().insert(
+        hyper::header::CONNECTION,
+        hyper::header::HeaderValue::from_static("close"),
+    );
+    response
+}
+
+/// The HTTP form of an answer. Only the over-capacity answer carries
+/// `Retry-After` ("nothing ran, resend"): a timed-out request may have run.
+fn http_response(response: ApiResponse) -> Response<Full<bytes::Bytes>> {
+    let retry = response.retry;
     let mut result = Response::new(Full::new(bytes::Bytes::from(response.body)));
     *result.status_mut() =
         StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -1157,13 +1399,48 @@ async fn handle_http(
         "cache-control",
         hyper::header::HeaderValue::from_static("no-store"),
     );
-    // Only the over-capacity answer means "nothing ran, retry": a timed-out
-    // request may have run.
-    if serving == Serving::Overflow && result.status() == StatusCode::SERVICE_UNAVAILABLE {
+    if retry {
         result.headers_mut().insert(
             hyper::header::RETRY_AFTER,
             hyper::header::HeaderValue::from_static("1"),
         );
     }
-    Ok(result)
+    result
+}
+
+async fn handle_http(
+    api: Arc<PrivateApi>,
+    serving: Serving,
+    request_time: Duration,
+    request: Request<Incoming>,
+) -> Result<Response<Full<bytes::Bytes>>, Infallible> {
+    let authorization = authorization(&request).to_owned();
+    let response = if !api.authenticated(&authorization) {
+        ApiResponse::new(401, br#"{"error":"unauthorized"}"#)
+    } else if request.method() != hyper::Method::POST
+        || request.uri().path() != "/"
+        || request.uri().query().is_some()
+    {
+        ApiResponse::new(404, br#"{"error":"not found"}"#)
+    } else {
+        match tokio::time::timeout(
+            BODY_TIME,
+            Limited::new(request.into_body(), MAX_REQUEST_BYTES).collect(),
+        )
+        .await
+        {
+            Ok(Ok(body)) => match tokio::time::timeout(
+                request_time,
+                api.process_serving(serving, &authorization, &body.to_bytes()),
+            )
+            .await
+            {
+                Ok(response) => response,
+                // The request may still complete: no Retry-After.
+                Err(_) => ApiResponse::new(503, br#"{"error":"execution node unavailable"}"#),
+            },
+            _ => ApiResponse::new(413, br#"{"error":"invalid request body"}"#),
+        }
+    };
+    Ok(http_response(response))
 }

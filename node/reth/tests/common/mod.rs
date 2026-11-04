@@ -242,6 +242,28 @@ impl MemoryStorage {
         directory.durable.insert(name, inode);
     }
 
+    /// Create a file whose data is durable but whose directory entry is not
+    /// yet (a writer between its link and its directory sync; test fixtures).
+    pub fn plant_unsynced(&self, path: &Path, bytes: &[u8]) {
+        let (parent, name) = split(path).unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.next += 1;
+        let inode = state.next;
+        state.inodes.insert(
+            inode,
+            Inode {
+                data: bytes.to_vec(),
+                durable: Some(bytes.to_vec()),
+            },
+        );
+        state
+            .directories
+            .entry(parent)
+            .or_default()
+            .live
+            .insert(name, inode);
+    }
+
     /// Run one operation: consult the hook (outside the state lock, so a hook
     /// may block), then apply `body` under the lock only if no crash or restart
     /// happened meanwhile. `CrashAfter` crashes whether `body` succeeded or not.

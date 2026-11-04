@@ -86,13 +86,28 @@ pub struct BatchedStatus {
     pub pooled: bool,
 }
 
+/// One position of a batched status answer.
+#[derive(Clone, Debug)]
+pub enum BatchedAnswer {
+    Status(Box<BatchedStatus>),
+    /// A definitive canonical miss: the inclusion lookup succeeded, no
+    /// canonical block holds the hash, and the node holds no identity for
+    /// it (for example its block was lost in a crash before it was written).
+    /// Not final: the node cannot execute it now.
+    NotFound,
+    /// No answer: no evidence either way.
+    Unknown,
+}
+
+/// The single status call's error for a definitive canonical miss.
+pub const TRANSACTION_NOT_FOUND: &str = "transaction not found";
+
 /// A batched status answer, in request order.
 #[derive(Clone, Debug)]
 pub struct StatusBatch {
     pub finalized: Option<FinalizedHead>,
     pub canonical_epoch: u64,
-    /// `None` where the node has no answer for a hash.
-    pub statuses: Vec<Option<BatchedStatus>>,
+    pub statuses: Vec<BatchedAnswer>,
     /// Per hash: a canonical block holds it (its own receipt exists), none
     /// does, or `None` when that could not be read. Looked up after the
     /// finalized block was fixed.
@@ -805,7 +820,7 @@ impl PolicyRuntime {
                     self.archive.set_head(next.version(), list)?;
                     next.with_checkpoint(list)
                 } else {
-                    next
+                    *next
                 };
                 let next = Arc::new(next);
                 self.feed.install(base.as_ref(), next.clone())?;
@@ -898,9 +913,11 @@ impl PolicyRuntime {
                 inclusion.success,
                 self.finality_evidence(inclusion.number),
             ),
+            // The lookup succeeded and no canonical block holds it: with no
+            // identity either, that is a definitive miss.
             None => Ok(self
                 .pending_status(hash, now)?
-                .ok_or("unknown execution identity")?
+                .ok_or(TRANSACTION_NOT_FOUND)?
                 .1),
         }
     }
@@ -912,10 +929,12 @@ impl PolicyRuntime {
     /// The effective finalized block F is fixed before any inclusion is looked
     /// up, so "no canonical block holds H" together with a nonce at F past
     /// H's can never describe an H that was itself finalized meanwhile.
-    /// Every entry's finality is decided against that one F. A hash without a
-    /// canonical block or live identity, without readable evidence for its
-    /// block, or past this call's budget of uncached blocks, has no entry.
-    /// The canonical epoch is read last, after this answer's blocks are noted.
+    /// Every entry's finality is decided against that one F. A hash that no
+    /// canonical block holds and the node holds no identity for is
+    /// `NotFound`; one whose lookup failed, whose block has no readable
+    /// evidence, or past this call's budget of uncached blocks, has no
+    /// answer. The canonical epoch is read last, after this answer's blocks
+    /// are noted.
     pub fn transaction_statuses(
         &self,
         hashes: &[B256],
@@ -954,13 +973,16 @@ impl PolicyRuntime {
                         inclusion,
                         finalized,
                         &mut cold_blocks,
-                    ),
+                    )
+                    .map_or(BatchedAnswer::Unknown, |status| {
+                        BatchedAnswer::Status(Box::new(status))
+                    }),
                     Some(true),
                     Some((inclusion.number, inclusion.hash)),
                 ),
                 Ok(None) => (self.batched_pending(hash, in_pool, now), Some(false), None),
                 // No evidence either way: never the registry's answer.
-                Err(_) => (None, None, None),
+                Err(_) => (BatchedAnswer::Unknown, None, None),
             };
             statuses.push(entry);
             receipts.push(receipt);
@@ -981,7 +1003,7 @@ impl PolicyRuntime {
         // transactions get no answer (and no receipt evidence) this time.
         for ((entry, receipt), block) in statuses.iter_mut().zip(&mut receipts).zip(&blocks) {
             if block.is_some_and(|block| gone.contains(&block)) {
-                *entry = None;
+                *entry = BatchedAnswer::Unknown;
                 *receipt = None;
             }
         }
@@ -1051,16 +1073,19 @@ impl PolicyRuntime {
         })
     }
 
-    /// A transaction not included: only a live identity has a status, as in
-    /// the single status call.
-    fn batched_pending(&self, hash: B256, pooled: bool, now: i64) -> Option<BatchedStatus> {
-        let (identity, execution) = self.pending_status(hash, now).ok()??;
-        Some(BatchedStatus {
-            hash,
-            identity: (&identity).into(),
-            execution,
-            pooled,
-        })
+    /// A transaction no canonical block holds: its live identity's status,
+    /// as in the single status call, or a definitive miss without one.
+    fn batched_pending(&self, hash: B256, pooled: bool, now: i64) -> BatchedAnswer {
+        match self.pending_status(hash, now) {
+            Ok(Some((identity, execution))) => BatchedAnswer::Status(Box::new(BatchedStatus {
+                hash,
+                identity: (&identity).into(),
+                execution,
+                pooled,
+            })),
+            Ok(None) => BatchedAnswer::NotFound,
+            Err(_) => BatchedAnswer::Unknown,
+        }
     }
 
     /// The status of a transaction no canonical block holds: `None` without

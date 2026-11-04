@@ -366,7 +366,7 @@ across a simulated crash (`node/reth/tests/common/mod.rs`):
 | Produced block | 2 per transaction (envelope) + 4 per transaction (status) + checkpoint re-put of every record + 2 (manifest) | **2** (one manifest file and its directory) | `one_manifest_publication_per_block` |
 | Snapshot or delta | checkpoint re-put of every record since the snapshot | **6** (record, record list, head pointer), independent of chain length | `fact_record_written_once_before_install_independent_of_chain_length` |
 | Heartbeat | checkpoint re-put | **0**; it travels in the manifests of the blocks it made fresh | `heartbeat_never_written_separately`, `replay_after_snapshot_expiry_uses_embedded_heartbeat` |
-| Restart | read and verify every `tx-` identity ever stored | reads the layout marker, the fact head, its record list and records only | `restart_reads_are_independent_of_history` |
+| Restart | read and verify every `tx-` identity ever stored | reads the layout marker, the fact head, its chain's record lists and records only | `restart_reads_are_independent_of_history` |
 
 A block manifest embeds the decoded identity envelope (key id, exact signed
 payload, signature) and outcome of every transaction, the id of the durable
@@ -378,12 +378,52 @@ transactions compress to less than a third of their JSON envelopes. Facts are
 installed only after their records are durable, by one serialised writer; a
 candidate block refuses facts without a durable record list.
 
+A record list names only its own record and the list of the generation it
+extends (independent review, finding 6). Before, each list named every record
+of its chain, so a chain of k deltas wrote about 110·k bytes per delta: at one
+delta per second, about 270 GB of lists over the 7-day retention. After 300
+deltas the largest list is now 378 bytes and all 301 lists take 113 KB; the
+same run wrote a 33 KB list before
+(`record_lists_grow_linearly_and_replay_walks_the_chain`, which also replays
+blocks built on the first, second and last generation, before and after a
+restart). Replay and restart walk the chain back to its snapshot (lists read
+with a 4 KiB bound) and check every link: the record and version a list names,
+its chain length and snapshot version against the list it extends; then the
+restored generation must reproduce each list field for field
+(`a_list_that_does_not_link_into_its_chain_is_refused`, which checks which of
+the two passes refuses each tampered list). A chain at the limit of 8192
+records restores (`the_longest_chain_restores_through_its_lists`, 2.8 s for
+the whole file in release). A crash after every storage operation of the third
+delta of a chain (v4 on v1 to v3) leaves the
+old or the new generation, every earlier block replays, and the chain continues
+from what survived (`crash_at_every_step_of_a_chained_delta_keeps_every_block_replayable`).
+Replay still re-applies every delta of the chain, and now reads one list per
+record as well (at most 8192 of each per replay or restart). Collection keeps
+every list of a chain a retained block or the installed facts reach, and lets
+the chain go once a newer snapshot is the lowest base
+(`a_delta_chain_keeps_every_list_its_retained_blocks_reach`, which fails with
+the old "below the lowest facts version" bound). The layout is now 4; a
+layout-3 directory is refused (`an_earlier_layout_is_refused`).
+
 Crash cases run in process against the same model: a crash before or after the
 manifest's file or directory sync, between a fact record and its head pointer,
 and between the head pointer and installation. Every block whose assembly
 returned replays after restart, and neither the live nor the restored facts go
 backwards (the lease may: heartbeats are not persisted, so a restarted node is
 fresh again at the publisher's next heartbeat).
+
+Two builds of one block can publish at the same time (Reth builds an empty
+payload beside the one in flight when it has no best payload yet). The build
+that loses the link compares the evidence of the manifest that won, as a later
+republish does, and is accepted when the transactions, principals,
+organizations, signers and outcomes agree, once the winner's directory entry
+is durable (`concurrent_publication_of_equivalent_evidence_is_idempotent`,
+which crashes right after and finds the winner's manifest); a byte-identical
+winner counts as existing too (`concurrent_publication_of_the_same_manifest_is_existing`),
+and other evidence is still refused
+(`concurrent_publication_of_other_evidence_still_conflicts`).
+Before, the losing build compared raw bytes, which include the lease and the
+record list, so its block assembly failed (independent review, finding 5).
 
 A live run (`node/reth/scripts/crash.py`, 2026-11-03, seed 1410, 36
 transactions, binary `60bc930ad306…`, report
@@ -459,6 +499,60 @@ every connection after 60 s, including a request in flight. With overflow
 serving and recycling disabled, all three tests fail. `smoke.py` publishes facts
 through `OPS_NODE_POLICY_CONTROL_LISTEN` and checks that it refuses a submission.
 
+Unauthenticated peers (independent review, finding 2), and the timeout answer
+(finding 3):
+
+| Behaviour | Test |
+|---|---|
+| A request with a wrong token is answered `401` with `Connection: close`, and the connection closes | `unauthorized_request_closes_the_connection` |
+| A connection that starts no request is closed at the first-request deadline; an authenticated one stays open past it | `silent_connection_is_closed_at_the_first_request_deadline` |
+| 82 silent connections (more than the cap of 2 plus the 64 overflow places) and 8 failed authentications take no place: two submissions are still served within the cap, a third gets the over-capacity `503` with `Retry-After: 1`, status is served | `unauthenticated_connections_never_take_the_cap` |
+| With the cap and the 64 overflow places held by authenticated connections, a further one is answered `503` with `Retry-After: 1` and closed (it was closed unanswered before) | `authenticated_connection_beyond_the_overflow_is_answered_503` |
+| Fact publication on an overflow connection held past the processing bound is answered `503` without `Retry-After` (it may have run) | `timed_out_answer_on_an_overflow_connection_has_no_retry_after` |
+| A `401`, and the `503` beyond the overflow, are sent only after the request body was read, so a client writing its body in parts never hits a reset | `refusals_before_admission_read_the_body_first` |
+| 76 silent connections beside an idle admitted connection and a submission in flight: the oldest waiting connection is closed, the submission completes `accepted`, the idle connection still answers | `evicting_unauthenticated_connections_never_cuts_an_admitted_one` |
+
+The first five failed against the previous listener: a 401 kept the connection
+open, a silent connection stayed until the 10 s header timeout, silent
+connections took every place at accept (the submissions saw a closed
+connection), and the timeout answer carried `Retry-After: 1`. The body test
+failed against the first version of this change, which answered before the
+body arrived.
+
+## Public RPC guard (2026-11-03)
+
+The independent review (finding 1) found public methods of the `eth` module
+that re-execute a block through the guarded executor, so an anonymous caller
+could make the node re-verify a block's whole evidence in a loop. Every public
+method of the modules the node still serves was checked in the pinned Reth for
+a path into the block executor or block building; seven have one and are
+refused by name, alone or in a batch, with `-32601` before any work:
+`eth_callMany` (with a `transactionIndex`), the four `eth_getBlockAccessList`
+forms, `eth_simulateV1` (also off through its block limit) and
+`reth_getBlockExecutionOutcome` (up to 128 blocks). The other 98 methods the
+pinned Reth registers for the allowed modules (`eth`, `net`, `web3`, `txpool`,
+`admin`, `rpc`, `reth`, `miner`, on HTTP and WS, listed from a node started
+with all of them) are the reviewed list; the node refuses to start when a
+public transport would serve any other method, so a Reth upgrade that adds one
+fails closed, and the refused methods are also removed from every transport.
+The node also refuses to start with `--auth-ipc`, which serves the engine API
+without JWT.
+
+| Behaviour | Test |
+|---|---|
+| Reth's own public server with the guard, HTTP and WS on separate servers and on one port: each refused method is answered `-32601` and its handler never runs, alone and inside a batch mixed with ordinary methods; the ordinary ones run | `refused_methods_never_run_over_http`, `refused_methods_never_run_over_ws` |
+| A refused method sent as a notification, alone, in a batch of notifications or beside a call, never runs (jsonrpsee 0.26 never runs a notification anyway; the test pins that) | `refused_notifications_never_run` |
+| An unreviewed public method refuses startup; otherwise the refused methods are removed from every transport | `startup_guard_refuses_unreviewed_methods_and_removes_refused_ones`, `reviewed_and_refused_methods_are_disjoint` |
+| `--auth-ipc` is refused at startup | `unsafe_public_rpc_is_refused_at_startup` |
+
+With the guard switched off, both server tests fail (the handlers ran), and
+the startup test fails for `--auth-ipc`. `smoke.py` starts the node with
+`--http.api eth,net,web3,reth` and every allowed module on WS (so the startup
+guard checks the whole reviewed list), sends each refused method to the live
+node, alone and in a batch with `eth_getBlockByNumber`, and checks the fixed
+error, while block reads, receipts and the public `eth_call` refusal stay as
+before.
+
 ## Bounded fact wait and self-import (2026-11-03)
 
 | Behaviour | Test |
@@ -494,14 +588,16 @@ model:
 | A segment lookup reads the footer, the index and one entry, not the segment | `segment_lookup_reads_footer_index_and_one_entry` |
 | A crash after every storage operation of a compaction (temp write, link, directory syncs, each unlink) recovers with every canonical block found exactly and no discarded build resurrected | `crash_at_each_segment_publication_step_recovers_with_exact_lookups` |
 | The retention setting and an earlier layout | `retention_setting_accepts_forever_and_whole_durations`, `an_earlier_layout_is_refused` |
+| Retained blocks on the last delta of a chain keep every list and record back to its snapshot; a newer snapshot lets the chain go once its blocks are pruned | `a_delta_chain_keeps_every_list_its_retained_blocks_reach` |
 
 Collection deletes by version range: snapshot versions strictly increase, so
 each fact chain occupies its own version range, and a record list never names a
-record older than its chain's snapshot. Lists below the lowest facts version and
-records below the lowest snapshot version over every root (retained segments and
+record older than its chain's snapshot. Lists and records below the lowest
+snapshot version over every root (retained segments and
 block files, the installed facts, every candidate still building, registered
 under the fact-stream lock and read before any listing) are deleted. With the
-tests' maintenance disabled, seven of them fail; with pinned candidates ignored
+tests' maintenance disabled, seven of them failed (before the delta-chain test
+was added); with pinned candidates ignored
 as roots, the pinned-build test fails; with segments and block files ignored as
 roots, the two single-root tests fail. Live runs (`crash.py`, `smoke.py`) are
 shorter than a compaction batch (256 finalized blocks), so compaction is proven
@@ -538,18 +634,21 @@ model, and the `main.rs` unit tests:
 
 | Behaviour | Test |
 |---|---|
-| Entries in request order (a repeated hash answered at each position), an unknown hash `null`, the node's boot id, each entry equal to the single call's result plus `pooled` | `batched_status_answers_in_request_order_with_unknown_as_null` |
+| Entries in request order (a repeated hash answered at each position), an unknown hash `"not_found"`, the node's boot id, each entry equal to the single call's result plus `pooled` | `batched_status_answers_in_request_order_with_unknown_as_not_found` |
 | 1 to 256 lowercase hashes and senders; more, none, uppercase, unprefixed, short or non-string values and other parameter shapes fail the call | `batched_status_takes_one_to_256_lowercase_hashes` |
 | The finalized head is capped at the height Reth has written, every entry's finality is decided against it, and a finalized answer releases the slot | `finalized_head_is_capped_at_the_written_height` |
 | No finality evidence (and no nonce read) while finality is unknown, only genesis is final, or the finalized header cannot be read | `finality_evidence_is_withheld_when_unknown_genesis_or_unreadable` |
 | With senders: each hash's receipt presence (unknown for a failed lookup, whose entry is then `null`, never the registry's "pending") and the senders' nonces, read once per call at exactly the finalized hash; without senders, neither field and no state read | `dropped_evidence_reads_receipts_and_nonces_at_the_finalized_hash` |
-| A pending transaction no longer pooled is reported so (eviction); an included one never is; a pooled transaction without an identity has no status | `pooled_tells_a_pending_transaction_from_an_evicted_one` |
+| A pending transaction no longer pooled is reported so (eviction); an included one never is; a pooled transaction without an identity is `"not_found"` | `pooled_tells_a_pending_transaction_from_an_evicted_one` |
+| A transaction OPS saw included in a block a crash lost (never written) is `"not_found"` after the restart in the batch and `-32014` from the single call, distinct from a failed lookup (`null`, `-32000`); once delivered again it is `pending` (P7 L1, N7) | `a_transaction_in_a_block_lost_by_a_crash_is_not_found_after_restart` |
+| Live: after every restart of `crash.py`, every transaction without a receipt (in a block the kill lost, or never included) is `-32014` and `"not_found"`; four of the eight stops lost a block with transactions (2026-11-04, seed 1410, report `.tmp/ops-reth-crash-elhd8luw/result.json`) | `crash.py` |
 | The canonical epoch stays on appends and on replaced blocks no answer named, and changes when a block named by a batched or a single status answer leaves the chain; the answer that sees a loss, also one during it, reports it and anchors its own blocks | `canonical_epoch_changes_when_a_reported_block_leaves_the_chain`, `a_change_during_an_answer_is_reported_by_that_answer`, `the_answer_that_reports_a_change_anchors_its_own_blocks`, `a_block_named_below_the_highest_is_still_watched_after_a_change` |
 | Named blocks at or below the finalized block are no longer watched | `named_blocks_at_or_below_finality_are_no_longer_watched` |
 | A block that left the chain while an answer was prepared is never named in it, also as a receipt of a hash without an entry | `a_block_gone_by_the_end_of_an_answer_is_never_named` |
 | The finalized block is fixed before any transaction is looked up: a block finalized meanwhile decides nothing and the nonces are read at the earlier one | `the_finalized_block_is_fixed_before_any_transaction_is_looked_up` |
 | A canonical block without local evidence gives `null` | `included_without_local_evidence_is_null` |
 | After a restart one call loads at most 16 uncached blocks; the next answers the rest | `a_call_loads_a_bounded_number_of_uncached_blocks` |
+| The single `ops_transactionStatus` shares the batched call's lane: eight concurrent single calls run four at a time (all eight ran at once before, independent review finding 4), and a batched call waits behind them | `single_status_calls_share_the_bounded_status_lane` |
 | Without a chain or a pool view the call fails | `batched_status_fails_closed_without_chain_or_pool_view` |
 | Not served on the control listener; answers while every admission worker is held | `batched_status_is_served_only_on_the_execution_listener_off_the_admission_pool` |
 | Startup refuses pruning of the transaction index, receipts or bodies | `pruning_of_transaction_data_is_refused_at_startup` |

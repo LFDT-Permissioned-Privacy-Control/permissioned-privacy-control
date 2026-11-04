@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [features]
-reth-sdk = ["dep:reth-ethereum", "dep:revm-inspectors", "dep:alloy-rpc-types-trace", "dep:tower"]
+reth-sdk = ["dep:reth-ethereum", "dep:revm-inspectors", "dep:alloy-rpc-types-trace", "dep:tower", "dep:jsonrpsee"]
 
 [[bin]]
 name = "ops-reth"
@@ -39,6 +39,11 @@ reth-ethereum = { path = "../../.tmp/reth/crates/ethereum/reth", features = ["no
 revm-inspectors = { version = "=0.42.0", optional = true }
 alloy-rpc-types-trace = { version = "=2.3.0", optional = true }
 tower = { version = "=0.5.3", optional = true }
+# The version Reth pins: the public RPC guard is Reth RPC middleware.
+jsonrpsee = { version = "=0.26.0", features = ["server"], optional = true }
+
+[dev-dependencies]
+jsonrpsee = { version = "=0.26.0", features = ["server", "ws-client"] }
 
 [profile.dev]
 debug = 0

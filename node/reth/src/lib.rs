@@ -8,6 +8,8 @@ pub mod facts;
 pub mod identity;
 pub mod manifest;
 pub mod policy;
+#[cfg(feature = "reth-sdk")]
+pub mod public_rpc;
 pub mod runtime;
 #[cfg(feature = "reth-sdk")]
 pub mod sdk;

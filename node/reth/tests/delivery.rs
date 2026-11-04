@@ -56,7 +56,7 @@ impl ExecutionBackend for Pool {
         }
         answer.unwrap_or(Ok(PoolSubmission::Inserted(tx_hash())))
     }
-    async fn transaction_status(&self, _hash: alloy_primitives::B256) -> Result<Value, String> {
+    fn transaction_status(&self, _hash: alloy_primitives::B256) -> Result<Value, String> {
         Ok(
             json!({"status":"pending","facts_version":7,"block_hash":null,"block_number":null,"reason_code":"","created":[]}),
         )

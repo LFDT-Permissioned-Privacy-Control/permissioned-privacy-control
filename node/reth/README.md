@@ -54,8 +54,8 @@ belongs to OPS; the node only receives trusted public keys.
 | `OPS_NODE_POLICY_PUBLIC_KEYS` | JSON object mapping key ID to base64 Ed25519 public key |
 | `OPS_NODE_POLICY_LISTEN` | Private listener, for example `127.0.0.1:8555` |
 | `OPS_NODE_POLICY_TOKEN` | Bearer token shared with OPS |
-| `OPS_NODE_POLICY_MAX_CONNECTIONS` | Optional connections the private listener serves at once, 1–65536; default `128`. Above it, up to 64 more connections are still served for fact publication and status and answered `503` with `Retry-After: 1` otherwise; beyond those a connection is closed. With several OPS instances, cover the sum of their connections |
-| `OPS_NODE_POLICY_CONTROL_LISTEN` | Optional second private listener, for example `127.0.0.1:8556`, serving only fact publication and status (`ops_policyApply`, `ops_policyStatus`; other methods get the generic error), with the same token, so fact changes apply while the main listener is full |
+| `OPS_NODE_POLICY_MAX_CONNECTIONS` | Optional authenticated connections the private listener serves at once, 1–65536; default `128`. Above it, up to 64 more authenticated connections are still served for fact publication and status and answered `503` with `Retry-After: 1` otherwise; beyond those an authenticated connection is answered the same `503` and closed. A connection counts only from its first authenticated request. With several OPS instances, cover the sum of their connections |
+| `OPS_NODE_POLICY_CONTROL_LISTEN` | Optional, recommended in production: a second private listener, for example `127.0.0.1:8556`, serving only fact publication and status (`ops_policyApply`, `ops_policyStatus`; other methods get the generic error), with the same token, so fact changes apply while the main listener is full. Bind it to an interface only OPS can reach (firewalled, not the main listener's), so no other peer can load it |
 | `OPS_NODE_POLICY_CONTROL_MAX_CONNECTIONS` | Optional connections the control listener serves at once, 1–1024; default `16` (plus the same 64 over-capacity connections) |
 | `OPS_NODE_POLICY_FACT_WAIT` | Optional bounded wait of a submission or simulation whose fact floor is above the installed, fresh facts: `0s`–`5s`, as a whole number of `ms` or `s`; default `1s`. Then error `-32012` (capability `fact_wait_v1`, advertised unless `0s`). At most 32 requests wait at once; more, and stale or missing facts, are answered at once |
 | `OPS_NODE_POLICY_VERIFY_WORKERS` | Optional concurrent identity-admission jobs (signature verification, transaction decoding, signer recovery), 1–64; default `4` |
@@ -114,6 +114,14 @@ flight completes. An idle connection is closed after 10 s; a connection still
 open a minute after its lifetime (a peer that stopped reading), an
 over-capacity connection after a minute, and every connection 10 s into a
 shutdown are dropped.
+A connection takes a place in the listener's limit only at its first
+authenticated request. Before that it must send a complete request head with
+the right token within 10 s, and at most the limit plus 64 such connections
+wait at once (a new one closes the oldest waiting connection of the peer
+address with the most waiting), so peers without the token cannot hold the
+places OPS needs. A request without the right token is answered `401` and its
+connection is closed; so are `404` and `413` answers. A `503` after the 30 s
+processing bound carries no `Retry-After`: that request may have run.
 
 The private listener supports `ops_policyApply`, `ops_policyStatus`,
 `ops_submitTransaction`, `ops_simulate`, `ops_transactionStatus` and
@@ -123,11 +131,21 @@ It is separate from public Reth JSON-RPC. IPC is disabled, and the node refuses
 to start with a public RPC module that replays, traces, validates or builds
 blocks through the guarded executor (`debug`, `trace`, `ots`, `flashbots`, `mev`,
 `testing`, or `all`), with `--rpc.forwarder` (it would send guarded
-transactions to a node without policy and hide local pool rejections) or with
+transactions to a node without policy and hide local pool rejections), with
+`--auth-ipc` (the engine API must stay JWT-authenticated), with
 `--debug.reorg-frequency`, or with a `--db.sync-mode` other than `durable`
 (finality is reported only for blocks Reth has written, which must survive a
-host crash). Public `eth_simulateV1` builds no blocks (its block limit is
-forced to 0). `eth_call`, `eth_estimateGas`, and `debug_traceCall` are available through
+host crash). On public HTTP and WS, the methods of the remaining modules that
+would replay blocks through the guarded executor or build blocks are refused
+by name, alone or in a batch, with error `-32601` ("method not available on
+the guarded node") before any work: `eth_callMany`, `eth_getBlockAccessList`,
+`eth_getBlockAccessListByBlockHash`, `eth_getBlockAccessListByBlockNumber`,
+`eth_getBlockAccessListRaw`, `eth_simulateV1` and
+`reth_getBlockExecutionOutcome`. Every other public method of the modules the
+node allows was reviewed for the pinned Reth, and the node refuses to start when
+a public transport would serve a method outside that review (after a Reth
+upgrade, re-review and extend the list in `src/public_rpc.rs`). Public
+`eth_simulateV1` also builds no blocks (its block limit is forced to 0). `eth_call`, `eth_estimateGas`, and `debug_traceCall` are available through
 signed private simulations; public calls cannot inherit an OPS principal.
 Nonempty state/code/storage and block overrides are rejected for every simulation
 mode. An authenticated call never authorizes replacing customer bytecode with a
@@ -170,7 +188,12 @@ transaction: after a clean shutdown Reth restores the pool from its backup. An `
 status describes the current lease and is not final: a
 previously pinned candidate can still settle, so OPS continues receipt polling.
 Once the expired lease has been reclaimed, a status request for the not-included
-transaction returns an error. Rule denials describe the current
+transaction returns error `-32014` ("transaction not found", capability
+`transaction_not_found_v1`): the lookup succeeded, no canonical block holds the
+transaction and the node holds no identity for it, as after a crash that lost
+the transaction's unwritten block. It is not final: the node cannot execute
+the transaction until OPS delivers it again. Any other failure stays the
+generic error, which is no evidence. Rule denials describe the current
 candidate and are not final pool eviction: Reth can retry an already admitted
 transaction when later facts change. Included creation metadata is returned only
 when a canonical receipt matches the exact archived block, and includes nested
@@ -202,12 +225,14 @@ order. An entry is the `ops_transactionStatus` result without `boot_id`, plus
 `pooled`: the node's pool holds the transaction, never `true` once it is
 included, so a pending transaction that is not pooled was evicted. The
 finalized block is read before any transaction is looked up, and every entry's
-finality is decided against it. An entry is `null` when the node has no answer
-for the hash in this call: no canonical block and no registered identity, a
-canonical block without local evidence, a failed lookup, or a block beyond the
-call's budget of 16 blocks whose evidence is not cached yet (loading one
-verifies every identity in it; the next call finds more cached). A `null` is
-never evidence that the transaction is gone. `canonical_epoch` starts at 0 at
+finality is decided against it. An entry is the string `"not_found"` when the
+lookup succeeded, no canonical block holds the hash and the node holds no
+identity for it (the single call's `-32014`). An entry is `null` when the node
+has no answer for the hash in this call: a canonical block without local
+evidence, a failed lookup, or a block beyond the call's budget of 16 blocks
+whose evidence is not cached yet (loading one verifies every identity in it;
+the next call finds more cached). Neither is evidence that the transaction is
+gone for good. `canonical_epoch` starts at 0 at
 every process start and changes whenever a block that a status answer of the
 same process named as a transaction's inclusion block has left the canonical
 chain before becoming final; the first answer that sees the loss reports it
@@ -236,8 +261,9 @@ treated as canonical.
 Malformed parameters (more than 256 hashes or senders, none, or not lowercase
 `0x` hex of the right length), or a node without a chain or pool view yet,
 fail the whole call with the generic error. The call is served only on the
-main listener and runs on its own bounded lane (four calls at once), never on
-the admission workers.
+main listener and runs on the status lane (four status jobs at once, shared
+with the single `ops_transactionStatus`, which loads a block's evidence the
+same way), never on the admission workers.
 
 The local example uses `--dev.finality-depth 1`; Reth's default is 64. These are
 the dev miner's forkchoice decisions, not an external consensus guarantee. The
@@ -255,9 +281,14 @@ if the latest snapshot or delta's own lease has expired. Self-import reuses that
 imports once from the execution it recorded, without reading the manifest back); ordinary simulations use current
 permissions even when querying historical chain state.
 
-The state directory (layout 3; a directory from an earlier build is refused)
+The state directory (layout 4; a directory from an earlier build is refused:
+upgrade with the node stopped at a finalized head and an empty directory)
 keeps signed snapshot and delta records and their record lists by fact version,
-and one compressed manifest file per produced block. Final and written blocks'
+and one compressed manifest file per produced block. A record list names its
+own record and the list of the generation it extends, so it stays about 400
+bytes (under 512) however long the fact chain grows: about two small files per snapshot or
+delta. Replay and restart walk a chain's lists back to its snapshot (at most
+8192). Final and written blocks'
 manifests are compacted, in batches of at least 256 or a full 4096-height
 range, into segment files of finalized canonical blocks (a lookup reads the
 segment's footer, index and one entry); other builds of a final height, which

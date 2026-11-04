@@ -10,7 +10,7 @@ use ops_reth_policy::{
     },
     archive::{ArtifactStore, Retention},
     context::ExecutionBinding,
-    runtime::PolicyRuntime,
+    runtime::{PolicyRuntime, TransactionStatus},
     sdk::{OpsExecutorBuilder, ProviderChain},
     simulation,
     transaction::PolicyTx,
@@ -50,7 +50,7 @@ use std::{
 type BackendFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send>>;
 type SubmitFn =
     Arc<dyn Fn(Identity, Bytes, Address) -> BackendFuture<PoolSubmission> + Send + Sync>;
-type StatusFn = Arc<dyn Fn(B256) -> BackendFuture<Value> + Send + Sync>;
+type StatusFn = Arc<dyn Fn(B256) -> Result<TransactionStatus, String> + Send + Sync>;
 type PooledFn = Arc<dyn Fn(&[B256]) -> Vec<bool> + Send + Sync>;
 type SimulateFn =
     Arc<dyn Fn(Identity, SimulationRequest, Bytes) -> BackendFuture<Value> + Send + Sync>;
@@ -74,6 +74,7 @@ impl ExecutionBackend for Backend {
             "scoped_diagnostics_v1",
             "finalized_status_v1",
             "transaction_statuses_v1",
+            "transaction_not_found_v1",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -90,8 +91,8 @@ impl ExecutionBackend for Backend {
     ) -> Result<PoolSubmission, String> {
         (self.submit)(identity, raw, signer).await
     }
-    async fn transaction_status(&self, hash: B256) -> Result<Value, String> {
-        (self.status)(hash).await
+    fn transaction_status(&self, hash: B256) -> Result<Value, String> {
+        serde_json::to_value((self.status)(hash)?).map_err(|_| "invalid execution status".into())
     }
     async fn simulate(
         &self,
@@ -144,7 +145,8 @@ fn pool_submission(result: Result<B256, EthApiError>) -> Result<PoolSubmission, 
 /// Public RPC modules that replay, simulate or build blocks through the guarded
 /// executor: historical debug/trace and Otterscan replay (forensic replay is
 /// authenticated), bundle simulation and block validation, and test block
-/// building. `all` includes them.
+/// building. `all` includes them. The few such methods of the modules the node
+/// still serves are refused by name at runtime (`public_rpc`).
 const REFUSED_RPC_MODULES: [RethRpcModule; 6] = [
     RethRpcModule::Debug,
     RethRpcModule::Trace,
@@ -175,6 +177,11 @@ fn refuse_unsafe_rpc(rpc: &RpcServerArgs) -> eyre::Result<()> {
         eyre::bail!(
             "--rpc.forwarder is not supported: it sends guarded transactions to a node without policy and hides local pool rejections"
         );
+    }
+    // The engine API over IPC needs no JWT, and it includes methods that
+    // replay blocks through the guarded executor.
+    if rpc.auth_ipc {
+        eyre::bail!("--auth-ipc is not supported: the engine API must stay JWT-authenticated");
     }
     Ok(())
 }
@@ -220,7 +227,8 @@ fn settle_nonce_rejection(
 
 /// Settings the guarded node forces on public RPC. A public `pending` query or
 /// `eth_simulateV1` would build candidate blocks through the guarded executor
-/// and publish their manifests; OPS needs neither.
+/// and publish their manifests; OPS needs neither. IPC stays off: Reth applies
+/// no RPC middleware to it (the refused methods are still removed from it).
 fn force_rpc_settings(rpc: &mut RpcServerArgs) -> eyre::Result<()> {
     rpc.ipcdisable = true;
     rpc.rpc_pending_block = "none".parse().map_err(eyre::Report::msg)?;
@@ -347,7 +355,9 @@ fn main() -> eyre::Result<()> {
             EthereumEngineValidatorBuilder::default(),
             engine_builder,
             validator_builder,
-            tower::layer::util::Identity::new(),
+            // Public HTTP and WS: methods that replay blocks through the
+            // guarded executor are refused before any work.
+            ops_reth_policy::public_rpc::RefuseReplayLayer,
             tower::layer::util::Identity::new(),
         );
         let handle = builder
@@ -356,6 +366,12 @@ fn main() -> eyre::Result<()> {
                 EthereumNode::components().executor(OpsExecutorBuilder(runtime.clone())),
             )
             .with_add_ons(addons)
+            // Every public method served must be reviewed for the guarded
+            // node, so a Reth upgrade that adds one fails closed here.
+            .extend_rpc_modules(|ctx| {
+                ops_reth_policy::public_rpc::guard_configured(ctx.modules)
+                    .map_err(eyre::Report::msg)
+            })
             .launch_with_debug_capabilities()
             .await?;
         // The node's own canonical chain drives finality: status, and identity
@@ -387,18 +403,10 @@ fn main() -> eyre::Result<()> {
         let eth_submit = handle.node.rpc_registry.eth_api().clone();
         let eth_simulate = eth_submit.clone();
         let status_runtime = runtime.clone();
-        let status: StatusFn = Arc::new(move |hash| {
-            let runtime = status_runtime.clone();
-            Box::pin(async move {
-                // From the node's canonical chain (index lookups, never the
-                // block's other receipts) and the block's evidence; finality
-                // never above what Reth has written.
-                let status = tokio::task::spawn_blocking(move || runtime.status(hash, now()))
-                    .await
-                    .map_err(|_| "status lookup failed")??;
-                serde_json::to_value(status).map_err(|_| "invalid execution status".into())
-            })
-        });
+        // On the status lane's blocking threads: from the node's canonical
+        // chain (index lookups, never the block's other receipts) and the
+        // block's evidence; finality never above what Reth has written.
+        let status: StatusFn = Arc::new(move |hash| status_runtime.status(hash, now()));
         let submit: SubmitFn = Arc::new(move |identity: Identity, raw: Bytes, signer| {
             let eth = eth_submit.clone();
             Box::pin(async move {
@@ -596,6 +604,37 @@ mod tests {
     use reth_ethereum::cli::{chainspec::EthereumChainSpecParser, interface::Cli};
 
     #[test]
+    fn backend_status_is_the_execution_object() {
+        let backend = |status: StatusFn| Backend {
+            submit: Arc::new(|_, _, _| Box::pin(async { Err("unused".into()) })),
+            simulate: Arc::new(|_, _, _| Box::pin(async { Err("unused".into()) })),
+            status,
+            pooled: Arc::new(|hashes: &[B256]| vec![false; hashes.len()]),
+        };
+        let pending = backend(Arc::new(|_| {
+            Ok(TransactionStatus {
+                status: "pending".into(),
+                facts_version: 7,
+                block_hash: None,
+                block_number: None,
+                reason_code: String::new(),
+                created: Vec::new(),
+                finalized: false,
+                finalized_block_hash: None,
+                finalized_block_number: None,
+            })
+        }));
+        let value = pending.transaction_status(B256::ZERO).unwrap();
+        assert_eq!(value["status"], "pending", "{value}");
+        assert_eq!(value["facts_version"], 7, "{value}");
+        let failing = backend(Arc::new(|_| Err("lookup failed".into())));
+        assert_eq!(
+            failing.transaction_status(B256::ZERO).unwrap_err(),
+            "lookup failed"
+        );
+    }
+
+    #[test]
     fn already_known_pool_error_is_an_already_pooled_transaction() {
         let hash = B256::repeat_byte(7);
         assert_eq!(
@@ -659,6 +698,7 @@ mod tests {
             &["--http", "--http.api", "flashbots"],
             &["--http", "--http.api", "all"],
             &["--rpc.forwarder", "http://127.0.0.1:8545"],
+            &["--auth-ipc"],
         ] {
             assert!(
                 refuse_unsafe_rpc(&rpc(arguments)).is_err(),

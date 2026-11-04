@@ -1,5 +1,6 @@
 //! Batched transaction status (`ops_transactionStatuses`, capability
-//! `transaction_statuses_v1`): request order, unknown hashes as null, at most
+//! `transaction_statuses_v1`): request order, a hash nothing holds and no
+//! identity covers as "not_found" (lookup failures as null), at most
 //! 256 hashes, the effective finalized head (final and written), pool
 //! presence for eviction detection, a canonical epoch that changes when a
 //! reported block leaves the chain, the node's boot id, and, on request,
@@ -178,7 +179,7 @@ impl ExecutionBackend for Pool {
     ) -> Result<PoolSubmission, String> {
         Err("unused".into())
     }
-    async fn transaction_status(&self, hash: B256) -> Result<Value, String> {
+    fn transaction_status(&self, hash: B256) -> Result<Value, String> {
         Ok(serde_json::to_value(self.runtime.status(hash, AT)?).unwrap())
     }
     async fn simulate(
@@ -326,7 +327,7 @@ fn set(names: &[&str]) -> BTreeSet<String> {
 }
 
 #[tokio::test]
-async fn batched_status_answers_in_request_order_with_unknown_as_null() {
+async fn batched_status_answers_in_request_order_with_unknown_as_not_found() {
     let node = node();
     let boot = call(&node.api, "ops_policyStatus", json!([])).await["result"]["boot_id"].clone();
     let result = answer(&node.api, &[A, UNKNOWN, P, A, B]).await;
@@ -340,10 +341,14 @@ async fn batched_status_answers_in_request_order_with_unknown_as_null() {
     assert_eq!(result["canonical_epoch"], 0, "{result}");
     let entries = result["statuses"].as_array().unwrap();
     assert_eq!(entries.len(), 5, "{result}");
-    assert!(entries[1].is_null(), "an unknown hash disclosed a status");
+    // Nothing holds it and no identity: a definitive miss, no status.
+    assert_eq!(
+        entries[1], "not_found",
+        "an unknown hash disclosed a status"
+    );
     assert_eq!(entries[0], entries[3], "a repeated hash got another answer");
     for (entry, hash) in entries.iter().zip([A, UNKNOWN, P, A, B]) {
-        if entry.is_null() {
+        if !entry.is_object() {
             continue;
         }
         assert_eq!(
@@ -399,7 +404,7 @@ async fn batched_status_takes_one_to_256_lowercase_hashes() {
     let full = answer(&node.api, &[UNKNOWN; 256]).await;
     let entries = full["statuses"].as_array().unwrap();
     assert_eq!(entries.len(), 256);
-    assert!(entries.iter().all(Value::is_null));
+    assert!(entries.iter().all(|entry| entry == "not_found"));
     let many: Vec<String> = vec![hex(UNKNOWN); 257];
     let upper = hex(UNKNOWN).to_uppercase().replacen("0X", "0x", 1);
     let sender = format!("{:#x}", sender());
@@ -566,11 +571,11 @@ async fn pooled_tells_a_pending_transaction_from_an_evicted_one() {
     assert_eq!(included["statuses"][0]["execution"]["status"], "included");
     assert_eq!(included["statuses"][0]["pooled"], false, "{included}");
     // Pooled without an identity (a pool restored after a restart): the node
-    // has no status for it.
+    // cannot execute it, so it is a definitive miss until OPS delivers it.
     let orphan = B256::repeat_byte(9);
     node.pool.pooled.lock().unwrap().insert(orphan);
     let restored = answer(&node.api, &[orphan]).await;
-    assert!(restored["statuses"][0].is_null(), "{restored}");
+    assert_eq!(restored["statuses"][0], "not_found", "{restored}");
 }
 
 #[tokio::test]
@@ -825,4 +830,197 @@ async fn batched_status_is_served_only_on_the_execution_listener_off_the_admissi
 
 fn seal_value() -> Value {
     serde_json::from_slice(&seal("identity", &identity(UNKNOWN, "ctx-x"))).unwrap()
+}
+
+/// A backend whose single status answers block on a gate, counting how many
+/// run at once (finding 4: the single call had no bound).
+struct Held {
+    runtime: Arc<PolicyRuntime>,
+    gate: Arc<common::Gate>,
+    entered: std::sync::atomic::AtomicUsize,
+    active: std::sync::atomic::AtomicUsize,
+    most: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl ExecutionBackend for Held {
+    fn capabilities(&self) -> Vec<String> {
+        common::golden::Backend.capabilities()
+    }
+    async fn submit(
+        &self,
+        _identity: Identity,
+        _raw: Bytes,
+        _signer: Address,
+    ) -> Result<PoolSubmission, String> {
+        Err("unused".into())
+    }
+    fn transaction_status(&self, hash: B256) -> Result<Value, String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.entered.fetch_add(1, SeqCst);
+        let now = self.active.fetch_add(1, SeqCst) + 1;
+        self.most.fetch_max(now, SeqCst);
+        self.gate.pass();
+        self.active.fetch_sub(1, SeqCst);
+        Ok(serde_json::to_value(self.runtime.status(hash, AT)?).unwrap())
+    }
+    async fn simulate(
+        &self,
+        _identity: Identity,
+        _request: SimulationRequest,
+        _exact: Bytes,
+    ) -> Result<Value, String> {
+        Err("unused".into())
+    }
+    fn pooled(&self, hashes: &[B256]) -> Result<Vec<bool>, String> {
+        Ok(vec![false; hashes.len()])
+    }
+}
+
+/// Opens the gate when the test ends, also on a failed assertion, so no
+/// blocking thread stays parked.
+struct OpenOnDrop(Arc<common::Gate>);
+
+impl Drop for OpenOnDrop {
+    fn drop(&mut self) {
+        self.0.open();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn single_status_calls_share_the_bounded_status_lane() {
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::time::Duration;
+    let node = node();
+    let held = Arc::new(Held {
+        runtime: node.runtime.clone(),
+        gate: common::Gate::new(),
+        entered: Default::default(),
+        active: Default::default(),
+        most: Default::default(),
+    });
+    let _open = OpenOnDrop(held.gate.clone());
+    let api = Arc::new(
+        PrivateApi::new(
+            node.runtime.clone(),
+            held.clone(),
+            "private-test-token".into(),
+            Arc::new(|| AT),
+        )
+        .unwrap(),
+    );
+    let single = |api: Arc<PrivateApi>| {
+        tokio::spawn(async move { call(&api, "ops_transactionStatus", json!([hex(P)])).await })
+    };
+    let calls: Vec<_> = (0..8).map(|_| single(api.clone())).collect();
+    let mut reached = false;
+    for _ in 0..2_000 {
+        if held.active.load(SeqCst) >= 4 {
+            reached = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(reached, "four status jobs never started");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        (held.most.load(SeqCst), held.entered.load(SeqCst)),
+        (4, 4),
+        "single status calls ran beside each other without a bound"
+    );
+    // Cancelled requests (a client gone, the 30 s bound): the jobs already
+    // running keep their places until they finish, so nothing else starts.
+    for call in &calls {
+        call.abort();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        held.entered.load(SeqCst),
+        4,
+        "a queued call ran after its cancel"
+    );
+    // The batched call shares the lane: it waits for those jobs.
+    let batch = tokio::spawn({
+        let api = api.clone();
+        async move { answer(&api, &[A]).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !batch.is_finished(),
+        "the batched call ran beside four status jobs"
+    );
+    held.gate.open();
+    let answered = tokio::time::timeout(Duration::from_secs(5), batch)
+        .await
+        .expect("the batched call ran once the lane was free")
+        .unwrap();
+    assert_eq!(answered["statuses"][0]["execution"]["status"], "included");
+    let result = call(&api, "ops_transactionStatus", json!([hex(P)])).await;
+    assert_eq!(
+        result["result"]["execution"]["status"], "pending",
+        "{result}"
+    );
+    assert!(held.most.load(SeqCst) <= 4);
+}
+
+#[tokio::test]
+async fn a_transaction_in_a_block_lost_by_a_crash_is_not_found_after_restart() {
+    let storage = MemoryStorage::new();
+    let chain = base_chain();
+    {
+        // Before the crash: C produced in block 5, canonical but not yet
+        // written (heights 0..=4 are final and written).
+        let archive = ArtifactStore::open_with(Path::new("/state"), storage.clone()).unwrap();
+        let runtime = Arc::new(PolicyRuntime::new(verifier(), Arc::new(archive), 64));
+        runtime
+            .accept_facts("snapshot", &seal("snapshot", &snapshot()), AT)
+            .unwrap();
+        runtime.attach_chain(chain.clone());
+        runtime
+            .accept_identity(&seal("identity", &identity(C, "ctx-c")), AT)
+            .unwrap();
+        let candidate = runtime.pin_candidate(AT).unwrap();
+        assert!(execute(&candidate, C));
+        runtime
+            .persist(&candidate, &block(5, B256::repeat_byte(50), vec![C]))
+            .unwrap();
+        chain.block(5, B256::repeat_byte(50), vec![C]);
+        let (api, _) = api(&runtime, true);
+        let before = answer(&api, &[C]).await;
+        assert_eq!(before["statuses"][0]["execution"]["status"], "included");
+        assert_eq!(before["statuses"][0]["execution"]["finalized"], false);
+    }
+    // The crash loses block 5 (never written) and every identity.
+    chain.canonical.lock().unwrap().remove(&5);
+    let archive = ArtifactStore::open_with(Path::new("/state"), storage.clone()).unwrap();
+    let runtime = Arc::new(PolicyRuntime::open(verifier(), Arc::new(archive), 64, AT).unwrap());
+    runtime.attach_chain(chain.clone());
+    let (api, _) = api(&runtime, true);
+    // C: a definitive miss, distinct from no answer (a failed lookup).
+    chain.failing.lock().unwrap().insert(UNKNOWN);
+    let result = evidence(&api, &[C, UNKNOWN], &[sender()]).await;
+    assert_eq!(result["statuses"], json!(["not_found", null]), "{result}");
+    assert_eq!(result["receipts"], json!([false, null]), "{result}");
+    let single = call(&api, "ops_transactionStatus", json!([hex(C)])).await;
+    assert_eq!(
+        single["error"],
+        json!({"code": -32014, "message": "transaction not found"}),
+        "{single}"
+    );
+    let failed = call(&api, "ops_transactionStatus", json!([hex(UNKNOWN)])).await;
+    assert_eq!(failed["error"]["code"], -32000, "{failed}");
+    // Once OPS delivers it again, it is pending, never not found.
+    runtime
+        .accept_identity(&seal("identity", &identity(C, "ctx-c2")), AT)
+        .unwrap();
+    let redelivered = answer(&api, &[C]).await;
+    assert_eq!(
+        redelivered["statuses"][0]["execution"]["status"], "pending",
+        "{redelivered}"
+    );
+    let single = call(&api, "ops_transactionStatus", json!([hex(C)])).await;
+    assert_eq!(
+        single["result"]["execution"]["status"], "pending",
+        "{single}"
+    );
 }

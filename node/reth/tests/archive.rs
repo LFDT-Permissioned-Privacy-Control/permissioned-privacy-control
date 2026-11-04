@@ -6,7 +6,10 @@ use ops_reth_policy::{
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 mod common;
@@ -346,4 +349,110 @@ fn republish_keeps_equivalent_evidence_and_refuses_another_principal() {
     outcome.entries[1].success = false;
     assert!(store.publish_manifest(&outcome).is_err());
     assert_eq!(store.manifest(3, original.hash).unwrap(), Some(original));
+}
+
+/// Two builds of one block race: the other build's manifest is linked
+/// between this build's existence check and its own link, its directory entry
+/// not yet synced (the other build is between its link and its sync).
+fn race_with(other: &BlockManifest) -> (Arc<common::MemoryStorage>, ArtifactStore) {
+    let storage = common::MemoryStorage::new();
+    let store = ArtifactStore::open_with(std::path::Path::new("/state"), storage.clone()).unwrap();
+    let planted = std::sync::atomic::AtomicBool::new(false);
+    let bytes = ops_reth_policy::manifest::write_segment(&[other]).unwrap();
+    let racer = Arc::downgrade(&storage);
+    let name = format!(
+        "{:016x}-{}",
+        other.number,
+        alloy_primitives::hex::encode(other.hash)
+    );
+    storage.set_hook(move |op, path| {
+        if op == common::Op::Link
+            && path.ends_with(&name)
+            && !planted.swap(true, std::sync::atomic::Ordering::SeqCst)
+            && let Some(storage) = racer.upgrade()
+        {
+            storage.plant_unsynced(path, &bytes);
+        }
+        common::Action::Proceed
+    });
+    (storage, store)
+}
+
+#[test]
+fn concurrent_publication_of_equivalent_evidence_is_idempotent() {
+    let probe =
+        ArtifactStore::open_with(std::path::Path::new("/probe"), common::MemoryStorage::new())
+            .unwrap();
+    let original = manifest(&probe);
+    let mut other = original.clone();
+    other.facts_version += 1;
+    let verifier = common::fixture::verifier();
+    let mut later = common::fixture::identity(B256::repeat_byte(4), "ctx-later");
+    later["issued_at"] = serde_json::json!(1800000005);
+    other.entries[0].envelope = verifier
+        .open_envelope("identity", &common::fixture::seal("identity", &later))
+        .unwrap();
+    let (storage, store) = race_with(&other);
+    let original = BlockManifest {
+        records: list(&store, original.facts_version),
+        ..original
+    };
+    list(&store, other.facts_version);
+    assert_eq!(
+        store.publish_manifest(&original).unwrap(),
+        ops_reth_policy::archive::Published::Existing,
+        "the losing build of equivalent evidence must not fail"
+    );
+    assert!(storage.names(std::path::Path::new("/state/tmp")).is_empty());
+    // `Existing` means durable: the winner's entry survives a crash now.
+    drop(store);
+    storage.crash();
+    storage.restart();
+    let store = ArtifactStore::open_with(std::path::Path::new("/state"), storage).unwrap();
+    assert_eq!(store.manifest(3, original.hash).unwrap(), Some(other));
+}
+
+#[test]
+fn concurrent_publication_of_the_same_manifest_is_existing() {
+    let probe =
+        ArtifactStore::open_with(std::path::Path::new("/probe"), common::MemoryStorage::new())
+            .unwrap();
+    let original = manifest(&probe);
+    let (storage, store) = race_with(&original);
+    list(&store, original.facts_version);
+    assert_eq!(
+        store.publish_manifest(&original).unwrap(),
+        ops_reth_policy::archive::Published::Existing,
+        "only the build that linked the manifest published it"
+    );
+    drop(store);
+    storage.crash();
+    storage.restart();
+    let store = ArtifactStore::open_with(std::path::Path::new("/state"), storage).unwrap();
+    assert_eq!(store.manifest(3, original.hash).unwrap(), Some(original));
+}
+
+#[test]
+fn concurrent_publication_of_other_evidence_still_conflicts() {
+    let probe =
+        ArtifactStore::open_with(std::path::Path::new("/probe"), common::MemoryStorage::new())
+            .unwrap();
+    let original = manifest(&probe);
+    let verifier = common::fixture::verifier();
+    let mut foreign = common::fixture::identity(B256::repeat_byte(4), "ctx");
+    foreign["principal_id"] = serde_json::json!("another_principal");
+    let mut other = original.clone();
+    other.entries[0].envelope = verifier
+        .open_envelope("identity", &common::fixture::seal("identity", &foreign))
+        .unwrap();
+    let (_storage, store) = race_with(&other);
+    let original = BlockManifest {
+        records: list(&store, original.facts_version),
+        ..original
+    };
+    assert_eq!(
+        store.publish_manifest(&original).unwrap_err(),
+        "conflicting execution manifest"
+    );
+    assert_eq!(store.manifest(3, original.hash).unwrap(), Some(other));
 }
