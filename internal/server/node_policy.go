@@ -541,7 +541,7 @@ func (b *nodeExecutionBridge) executionStatus(ctx context.Context) (uint64, node
 
 // handleReady reports whether execution can use current authoritative facts.
 // @Summary Execution readiness
-// @Description Returns 503 until the configured execution node has fresh policy facts matching the database, and, with the async audit buffer, while audit sealing has stopped (the audit chain was refused, or no record reached the audit database for five minutes while records waited); callers on the networks the management API accepts then also get `reason: audit_sealing_stopped`. No private policy or identity data is returned.
+// @Description Returns 503 until the execution node has fresh facts matching the database, or the durable audit buffer is unhealthy. Audit sealing becomes unready immediately for a refused chain, or after AUDIT_SEALING_STALL_LIMIT without progress while records wait (default 30 minutes). A buffer volume below its free-space reserve, or whose space cannot be checked, also makes the instance unready. Management-network callers receive audit_sealing_stopped, audit_buffer_low_space or audit_buffer_unavailable as the reason; public callers receive no reason. No private policy or identity data is returned.
 // @Tags Health
 // @Produce json
 // @Success 200 {object} apimodels.ReadinessResponse

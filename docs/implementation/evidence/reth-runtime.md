@@ -661,8 +661,58 @@ and timestamp with its header, the sender's nonce with
 `eth_getTransactionCount` at that block hash, the receipts with the
 transactions' inclusion, each entry with the single call, `pooled` with
 `eth_getTransactionByHash` for a pending transaction, and, after a restart, a
-new boot id and `null` for a transaction restored to the pool without an
-identity.
+new boot id and `"not_found"` for a transaction restored to the pool without
+an identity.
 
 Not yet covered here: throughput, which is measured end to end through OPS
 separately.
+
+
+## End-to-end throughput through OPS (2026-11-03)
+
+The V1 `poc/approval-performance/transactions.py` harness offered 5,000
+requests/s for 60 seconds through OPS, PostgreSQL, Redis and the real node.
+Identity was a local mock; linking, RBAC and preflight were real. V2 used
+product defaults in Reth policy mode without preflight. Committed TPS counts
+successful receipts observed inside the sending window; late receipts do
+not increase it. The measured OPS code was `9279c400`.
+
+Machine: shared Apple M2 Max, 12 cores, 32 GiB, macOS 27.2, OrbStack
+PostgreSQL 15. Concurrent builds/tests raised load averages to 10–38; the
+later exploratory runs were on battery. These are diagnostic workstation
+measurements, not production capacity or a quiet-host acceptance run.
+
+| Case | Best committed TPS | Median committed TPS | Best-run queue-to-commit p95 |
+|---|---:|---:|---:|
+| V1 signed approvals | 2,094.3 | 1,984.5 | 2.749 s |
+| V2 guarded node | 1,788.1 | 1,778.0 | 3.095 s |
+
+V2 reached 85.4% of the same-day V1 best and missed the original 1,962 TPS
+and 2.84-second p95 targets. A gate-off run at higher contention measured
+2,063.7 TPS. The measured manifest footprint was about 144 bytes per
+committed transaction, with no admission syncs, no identity-capacity refusals
+and no steady-state renewals. The saved intent let the keeper complete
+requests canceled at the sending cutoff.
+
+A separate diagnostic V2 run sampled OPS at about 3.3 CPU cores and the node
+at 1.2 cores. The largest V2-specific costs were:
+
+- OPS status reconciliation repeatedly parses each batched JSON response: a
+  duplicate-key walk, field validation, decoding, and per-entry decoding.
+  Its inclusive CPU samples were comparable to the whole request path.
+- The node looks up each polled hash in unpersisted canonical blocks through
+  Reth's transaction metadata lookup, scanning transactions across those
+  blocks. This was the node's largest sampled user-CPU frame.
+
+Potential improvements are one strict decoding pass, scheduling unchanged
+transactions with fewer repeated polls while retaining restart/eviction/reorg
+triggers, and a canonical hash-to-inclusion index for unpersisted blocks.
+These are proposed optimizations; no throughput gain is claimed for them.
+
+The initial live acceptance run also exposed two correctness failures: lost
+unpersisted blocks left transactions provisional after a node crash, and
+fact churn caused refusals for an unaffected principal. The definitive
+`not_found` status and OPS redelivery fix are covered above and in
+`node_crash_redelivery_test.go`; `node_policy_churn_test.go` covers notification
+publication, bounded waiting and clock/cache races. Live results for the
+combined fixes are recorded separately when measured.

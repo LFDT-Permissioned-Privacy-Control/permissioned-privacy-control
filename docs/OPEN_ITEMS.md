@@ -412,10 +412,14 @@ compressed execution manifest per block (one file and one directory sync)
 instead of per-transaction evidence objects; a snapshot or delta writes three
 files (the record, a list of record ids and the head pointer) and a heartbeat
 writes nothing. The earlier 2026-09-17
-private-node load run measured **9.6–11.1 mined transactions/s** on a shared
-Apple M2 Max development setup. That historical result is not a fresh throughput
-measurement of the per-group build. The latest run verified live correctness
-and serial call latency, not sustained transaction throughput.
+private-node load run measured **9.6–11.1 mined transactions/s**. A full-stack
+run on 2026-11-03, through OPS using the V1 harness at 5,000 offered requests/s
+for 60 seconds, measured V2 best **1,788.1 committed TPS** (median 1,778.0),
+versus same-day V1 best 2,094.3 (median 1,984.5), on the shared Apple M2 Max.
+The V2 best run's queue-to-commit p95 was 3.095 seconds. These contended
+workstation measurements establish a development baseline; the original
+1,962 TPS and 2.84-second p95 targets remain unmet. They are not a production
+capacity claim. See the [measurement and bottleneck evidence](implementation/evidence/reth-runtime.md#end-to-end-throughput-through-ops-2026-11-03).
 
 Guarded nodes no longer re-check the signed evidence of finalized blocks they
 re-execute (trusted finalized history). That changes a detective control and
@@ -426,7 +430,11 @@ period.
 inclusion and finality end to end through OPS with
 representative contracts on the intended hardware and block configuration.
 The reciprocal of an in-process policy-check time excludes this work and cannot
-be quoted as achieved node TPS.
+be quoted as achieved node TPS. The measured V2-specific costs are repeated
+strict decoding of batched status answers in OPS and per-hash scans of the
+node's unpersisted blocks. Future improvements are a single strict decode,
+fewer status polls for unchanged transactions, and an indexed canonical
+inclusion lookup. Their throughput gain has not been measured.
 
 **Resolved on the OPS side (fact-change refusals):** the fact version now
 advances only when a column the fact export reads changes, once per database

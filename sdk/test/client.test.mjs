@@ -106,7 +106,7 @@ test('waitForFinality ends only on included, reverted or dropped; renewal_stoppe
   assert.equal(isFinal({status:'dropped',reconciled:false}),false);
   assert.match(describeStatus({status:'renewal_stopped',reconciliation_note:'max_age'}),/will not be renewed; may still settle \(max_age\)/);
   assert.match(describeStatus({status:'dropped'}),/can never execute/);
-  assert.match(describeStatus({status:'dropped',reconciliation_note:'finalized_lease_expiry'}),/last identity expired before a finalized block; its nonce is still free, so replace it at the same nonce \(finalized_lease_expiry\)/);
+  assert.match(describeStatus({status:'dropped',reconciliation_note:'nonce_consumed'}),/a finalized transaction used its nonce \(nonce_consumed\)/);
 });
 
 test('generated routes encode path parameters and reject credential-bearing base URLs',async()=>{

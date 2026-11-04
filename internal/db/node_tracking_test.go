@@ -624,8 +624,9 @@ func dbName(dsn string) string {
 
 // TestBindingNeverDeletedWhileExecutable is G31: a binding row leaves only by
 // a final transition (or the -32012 release of a never-delivered fresh
-// insert); a stopped binding stays until a dropped final (finalized nonce or
-// finalized lease-expiry evidence); status rows leave only by retention.
+// insert); a stopped binding stays until finalized nonce consumption proves
+// it cannot execute. Lease expiry alone is not final; status rows leave only
+// by retention.
 func TestBindingNeverDeletedWhileExecutable(t *testing.T) {
 	f := newTrackingFixture(t)
 	p := newPrincipal()
@@ -1079,10 +1080,8 @@ func TestStoppedBindingsCountTowardTheirOwnersCaps(t *testing.T) {
 	f.principalQuotaConsistent()
 }
 
-// The lease-expiry fence uses the longest identity ever recorded for the
-// binding, not its current envelope: a revival signed with a shorter lease
-// (a database clock step, a shorter lifetime on another instance) leaves the
-// node holding the longer one (independent review, finding 2).
+// A shorter renewal preserves the longest recorded expiry, but neither the
+// shorter nor the maximum expiry can finalize a binding with an unused nonce.
 func TestLeaseExpiryNeverFinalizesAnUnusedNonce(t *testing.T) {
 	f := newTrackingFixture(t)
 	ctx := context.Background()

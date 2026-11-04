@@ -15,11 +15,12 @@ import (
 	"privacy-proxy/internal/rbac"
 )
 
-var effectsNetwork = nodepolicy.Network{ChainID: 31337, DeploymentID: "effects-test"}
+var effectsNetwork = nodepolicy.Network{ChainID: 31337, DeploymentID: "effects-" + uuid.NewString()}
 
 // effectsFixture: an organisation with a deploy group and a member deployer.
 type effectsFixture struct {
 	d                *DB
+	network          nodepolicy.Network
 	org, deployer    string
 	deployerDID      string
 	address, txHash  string
@@ -37,8 +38,11 @@ func newEffectsFixture(t *testing.T) *effectsFixture {
 	_, err := d.Conn().ExecContext(ctx, `INSERT INTO group_access(id,group_id,allowed_methods,claims) VALUES($1,$2,$3,$4)`, uuid.NewString(), group.ID, []string{"eth_sendRawTransaction"}, []string{"deploy"})
 	require.NoError(t, err)
 	require.NoError(t, d.CreateMembership(ctx, &rbac.UserMembership{ID: uuid.NewString(), UserID: user, GroupID: group.ID, Source: rbac.MembershipSourceAdmin}))
-	require.NoError(t, d.EnsureNodeTxEffectsFloor(ctx, effectsNetwork))
-	return &effectsFixture{d: d, org: org, deployer: user, deployerDID: "did:test:deployer", address: "0x" + strings.Repeat("ab", 20), txHash: lowerHex(randomBytes(32)), visibleRecipient: "did:test:recipient"}
+	// Replay floors intentionally survive ResetTestDatabase. Give each fixture
+	// its own network so retention tests cannot change a later test's floor.
+	network := nodepolicy.Network{ChainID: 31337, DeploymentID: "effects-" + uuid.NewString()}
+	require.NoError(t, d.EnsureNodeTxEffectsFloor(ctx, network))
+	return &effectsFixture{d: d, network: network, org: org, deployer: user, deployerDID: "did:test:deployer", address: "0x" + strings.Repeat("ab", 20), txHash: lowerHex(randomBytes(32)), visibleRecipient: "did:test:recipient"}
 }
 
 func (f *effectsFixture) effects(block uint64, ownership, visibility bool) NodeTxEffects {
@@ -63,11 +67,11 @@ func (f *effectsFixture) counts(t *testing.T) (contracts, grants, visibility int
 func TestEffectsAppliedExactlyOnceAcrossDatabases(t *testing.T) {
 	f := newEffectsFixture(t)
 	ctx := t.Context()
-	first, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, f.effects(7, true, true))
+	first, err := f.d.ApplyNodeTxEffects(ctx, f.network, f.effects(7, true, true))
 	require.NoError(t, err)
 	require.True(t, first.OwnershipApplied && first.VisibilityApplied)
 	for i := 0; i < 3; i++ {
-		again, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, f.effects(7, true, true))
+		again, err := f.d.ApplyNodeTxEffects(ctx, f.network, f.effects(7, true, true))
 		require.NoError(t, err)
 		require.False(t, again.OwnershipApplied || again.VisibilityApplied, "a replay applies nothing")
 	}
@@ -79,7 +83,7 @@ func TestEffectsAppliedExactlyOnceAcrossDatabases(t *testing.T) {
 	var markers int
 	require.NoError(t, f.d.Conn().QueryRow(`SELECT count(*) FROM node_tx_effects_applied`).Scan(&markers))
 	require.Equal(t, 1, markers, "only transactions with side effects get a marker")
-	none, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, NodeTxEffects{TransactionHash: lowerHex(randomBytes(32)), PrincipalID: f.deployer, OrgID: f.org, BlockNumber: 8})
+	none, err := f.d.ApplyNodeTxEffects(ctx, f.network, NodeTxEffects{TransactionHash: lowerHex(randomBytes(32)), PrincipalID: f.deployer, OrgID: f.org, BlockNumber: 8})
 	require.NoError(t, err)
 	require.False(t, none.OwnershipApplied || none.VisibilityApplied)
 	require.NoError(t, f.d.Conn().QueryRow(`SELECT count(*) FROM node_tx_effects_applied`).Scan(&markers))
@@ -90,12 +94,12 @@ func TestEffectsAppliedExactlyOnceAcrossDatabases(t *testing.T) {
 func TestRevokedGrantNotReinsertedByReplayOrRecovery(t *testing.T) {
 	f := newEffectsFixture(t)
 	ctx := t.Context()
-	_, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, f.effects(5, true, false))
+	_, err := f.d.ApplyNodeTxEffects(ctx, f.network, f.effects(5, true, false))
 	require.NoError(t, err)
 	_, err = f.d.Conn().ExecContext(ctx, `DELETE FROM contract_grants WHERE contract_id = (SELECT id FROM contracts WHERE lower(address) = $1)`, f.address)
 	require.NoError(t, err) // an administrator revokes the deployer grant
 	for _, e := range []NodeTxEffects{f.effects(5, true, false), f.effects(5, true, true)} {
-		_, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, e) // replay, then a normal finalize
+		_, err := f.d.ApplyNodeTxEffects(ctx, f.network, e) // replay, then a normal finalize
 		require.NoError(t, err)
 	}
 	_, grants, visibility := f.counts(t)
@@ -106,24 +110,24 @@ func TestRevokedGrantNotReinsertedByReplayOrRecovery(t *testing.T) {
 func TestReplayFloorSurvivesRetentionIncrease(t *testing.T) {
 	f := newEffectsFixture(t)
 	ctx := t.Context()
-	_, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, f.effects(5, true, false))
+	_, err := f.d.ApplyNodeTxEffects(ctx, f.network, f.effects(5, true, false))
 	require.NoError(t, err)
 	_, err = f.d.Conn().ExecContext(ctx, `DELETE FROM contract_grants`)
 	require.NoError(t, err)
 	// Retention prunes the marker and raises the floor to its block.
-	pruned, err := f.d.PruneNodeTxEffects(ctx, effectsNetwork, time.Now().Add(time.Hour))
+	pruned, err := f.d.PruneNodeTxEffects(ctx, f.network, time.Now().Add(time.Hour))
 	require.NoError(t, err)
 	require.EqualValues(t, 1, pruned)
-	floor, err := f.d.NodeTxEffectsFloor(ctx, effectsNetwork)
+	floor, err := f.d.NodeTxEffectsFloor(ctx, f.network)
 	require.NoError(t, err)
 	require.EqualValues(t, 5, floor)
 	// Retention raised (7 → 30 days → forever): a later prune with an older
 	// cutoff never lowers the floor, so the old finalizer and an old-manifest
 	// recovery stay refused.
-	_, err = f.d.PruneNodeTxEffects(ctx, effectsNetwork, time.Now().Add(-30*24*time.Hour))
+	_, err = f.d.PruneNodeTxEffects(ctx, f.network, time.Now().Add(-30*24*time.Hour))
 	require.NoError(t, err)
 	for _, e := range []NodeTxEffects{f.effects(5, true, true), f.effects(4, true, false)} {
-		_, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, e)
+		_, err := f.d.ApplyNodeTxEffects(ctx, f.network, e)
 		require.ErrorIs(t, err, ErrBelowReplayFloor)
 	}
 	_, grants, _ := f.counts(t)
@@ -144,7 +148,7 @@ func TestReplayFloorSurvivesRetentionIncrease(t *testing.T) {
 func TestFinalizerPausedAfterFloorReadVsCleanup(t *testing.T) {
 	f := newEffectsFixture(t)
 	ctx := t.Context()
-	key := []any{int64(effectsNetwork.ChainID), effectsNetwork.DeploymentID}
+	key := []any{int64(f.network.ChainID), f.network.DeploymentID}
 
 	// A finalizer paused after its floor read: cleanup cannot raise the floor.
 	finalizer, err := f.d.Conn().BeginTx(ctx, nil)
@@ -165,7 +169,7 @@ func TestFinalizerPausedAfterFloorReadVsCleanup(t *testing.T) {
 	require.NoError(t, err)
 	done := make(chan error, 1)
 	go func() {
-		_, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, f.effects(6, true, true))
+		_, err := f.d.ApplyNodeTxEffects(ctx, f.network, f.effects(6, true, true))
 		done <- err
 	}()
 	select {
@@ -185,10 +189,10 @@ func TestFinalizerPausedAfterFloorReadVsCleanup(t *testing.T) {
 func TestEffectBitsClaimedAtomically(t *testing.T) {
 	f := newEffectsFixture(t)
 	ctx := t.Context()
-	recovery, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, f.effects(7, true, false))
+	recovery, err := f.d.ApplyNodeTxEffects(ctx, f.network, f.effects(7, true, false))
 	require.NoError(t, err)
 	require.True(t, recovery.OwnershipApplied)
-	normal, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, f.effects(7, true, true))
+	normal, err := f.d.ApplyNodeTxEffects(ctx, f.network, f.effects(7, true, true))
 	require.NoError(t, err)
 	require.False(t, normal.OwnershipApplied, "ownership is never applied twice")
 	require.True(t, normal.VisibilityApplied, "recovery left visibility to the finalize")
@@ -200,7 +204,7 @@ func TestEffectBitsClaimedAtomically(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := f.d.ApplyNodeTxEffects(context.Background(), effectsNetwork, f.effects(8, true, i%2 == 0))
+			_, err := f.d.ApplyNodeTxEffects(context.Background(), f.network, f.effects(8, true, i%2 == 0))
 			if err != nil {
 				t.Error(err)
 			}
@@ -283,7 +287,7 @@ func TestOwnershipConflictSkipsOnlyTheConflictingAddress(t *testing.T) {
 	require.NoError(t, f.d.CreateContract(ctx, &rbac.Contract{ID: uuid.NewString(), OrgID: otherOrg, Address: taken, Name: "taken"}))
 	e := f.effects(9, true, false)
 	e.Created = []nodepolicy.CreatedContract{{Address: taken, OrgID: f.org, PrincipalID: f.deployer}, {Address: f.address, OrgID: f.org, PrincipalID: f.deployer}}
-	result, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, e)
+	result, err := f.d.ApplyNodeTxEffects(ctx, f.network, e)
 	require.NoError(t, err)
 	require.Equal(t, 1, result.OwnershipConflicts)
 	require.True(t, result.OwnershipApplied)
@@ -306,10 +310,10 @@ func TestOwnershipConflictCountSurvivesARetry(t *testing.T) {
 	require.NoError(t, f.d.CreateContract(ctx, &rbac.Contract{ID: uuid.NewString(), OrgID: otherOrg, Address: taken, Name: "taken"}))
 	e := f.effects(9, true, false)
 	e.Created = []nodepolicy.CreatedContract{{Address: taken, OrgID: f.org, PrincipalID: f.deployer}, {Address: f.address, OrgID: f.org, PrincipalID: f.deployer}}
-	first, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, e)
+	first, err := f.d.ApplyNodeTxEffects(ctx, f.network, e)
 	require.NoError(t, err)
 	require.Equal(t, 1, first.OwnershipConflicts)
-	again, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, e)
+	again, err := f.d.ApplyNodeTxEffects(ctx, f.network, e)
 	require.NoError(t, err)
 	require.False(t, again.OwnershipApplied, "a retry applies nothing")
 	require.Equal(t, 1, again.OwnershipConflicts, "a retry reports the refusal decided by the first run")
@@ -331,7 +335,7 @@ func TestEffectsBeforeCommitFailureAppliesNothing(t *testing.T) {
 		seen = append(seen, r)
 		return errors.New("audit buffer unavailable")
 	}
-	_, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, e)
+	_, err := f.d.ApplyNodeTxEffects(ctx, f.network, e)
 	require.Error(t, err)
 	require.Len(t, seen, 1)
 	require.Equal(t, 1, seen[0].OwnershipConflicts)
@@ -341,7 +345,7 @@ func TestEffectsBeforeCommitFailureAppliesNothing(t *testing.T) {
 	require.NoError(t, f.d.Conn().QueryRow(`SELECT count(*) FROM node_tx_effects_applied`).Scan(&markers))
 	require.Zero(t, markers)
 	e.BeforeCommit = func(r NodeTxEffectsResult) error { seen = append(seen, r); return nil }
-	result, err := f.d.ApplyNodeTxEffects(ctx, effectsNetwork, e)
+	result, err := f.d.ApplyNodeTxEffects(ctx, f.network, e)
 	require.NoError(t, err)
 	require.Equal(t, seen[1], result, "the before-commit step sees the committed result")
 	contracts, grants, visibility = f.counts(t)

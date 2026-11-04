@@ -906,18 +906,11 @@ type evidenceClient interface {
 	TransactionEvidence(context.Context, []string, []string) (nodepolicy.TransactionStatusBatch, error)
 }
 
-// dropped records the final dropped status of a stopped binding that can no
-// longer execute, on one of three pieces of finalized evidence (plan §4.8.1,
-// independent review finding 2):
-//   - nonce_consumed: the signer's nonce at a finalized block has passed the
-//     transaction's, and no canonical block holds it;
-//   - finalized_lease_expiry: a finalized block is at or past the expiry of
-//     every identity OPS recorded for it (max_expires_at), and no canonical
-//     block holds it: the node validates the identity at the block timestamp,
-//     timestamps increase, and OPS issues stopped bindings no new identity;
-//   - nonce_consumed as well: the hash is included in a finalized block under
-//     another principal or organization (a resubmission of a transaction that
-//     already executed), so this binding never will.
+// dropped records a stopped binding's final dropped status only on finalized
+// nonce consumption: either a competitor used the nonce and no canonical block
+// holds this hash, or the hash finalized under another principal or organization.
+// Expired identities alone leave the unused nonce executable with a fresh
+// identity, so they never release the immutable owner binding.
 //
 // A node that offers the batched status call answers from its own finalized
 // block in one call; otherwise the evidence is read from the public RPC at

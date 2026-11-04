@@ -5,13 +5,15 @@
 -- recorded for the binding. expires_at stays the current envelope's.
 --
 -- ── WHY (ticket: RD-1410, independent review finding 2) ──────────
--- A stopped binding becomes final (dropped, finalized_lease_expiry) once a
--- finalized block is past the expiry of every identity OPS recorded for it
--- and holds no receipt for it. A revival may sign a shorter lease than one the
--- node already holds (a database clock step, or a shorter identity lifetime
--- on another instance): the node keeps the longer identity, so the decision
--- must rest on the longest one, not on the current envelope. Every writer
--- keeps greatest(max_expires_at, the identity it records).
+-- A revival may sign a shorter lease than one the node already holds (a
+-- database clock step, or a shorter identity lifetime on another instance).
+-- The node keeps the longer identity, so retain the longest recorded expiry
+-- as an operational envelope fence. Every writer keeps
+-- greatest(max_expires_at, the identity it records).
+-- Lease expiry alone never finalizes a stopped binding: an unused nonce can
+-- execute under a fresh identity, so the immutable owner binding survives
+-- until finalized nonce consumption. The earlier lease-expiry finality
+-- design was removed after independent review.
 --
 -- ── AFFECTED ROWS ────────────────────────────────────────────────
 -- Existing bindings get max_expires_at = expires_at (in-flight work only;

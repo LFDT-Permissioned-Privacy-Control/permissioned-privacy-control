@@ -452,10 +452,9 @@ func TestCongestionRenewalSimulation(t *testing.T) {
 	// pending-work limit and never beyond it. Then a full inclusion stall:
 	// renewals keep every pending identity live within the budget, renewal
 	// stops at the maximum age (not final), the limit frees up, and once
-	// blocks are finalized again every stopped transaction becomes final:
-	// dropped with nonce_consumed where a finalized competitor used its
-	// nonce; lease expiry alone keeps an immutable non-final binding past its
-	// last identity's expiry (no stopped row is kept for ever, finding 2).
+	// blocks are finalized again, a stopped transaction becomes final only
+	// where a finalized competitor used its nonce. Lease expiry alone keeps
+	// an immutable non-final binding past its last identity's expiry.
 	var stoppedAfter int
 	for second := 0; second < 30; second++ {
 		for i := 0; i < 40; i++ {
@@ -522,17 +521,20 @@ func TestCongestionRenewalSimulation(t *testing.T) {
 	if got := s.state(target.Hash); got.State != db.TrackDropped || got.Reason != db.TrackReasonNonceConsumed {
 		t.Fatalf("a stopped transaction whose nonce a finalized competitor used: %+v", got)
 	}
-	if got := s.state(other.Hash); got.State != db.TrackDropped || got.Reason != db.TrackReasonFinalizedLeaseExpiry {
-		t.Fatalf("a stopped transaction whose identity expired before a finalized block: %+v", got)
+	if got := s.state(other.Hash); got.State != db.TrackRenewalStopped || got.Reason != db.TrackReasonMaxAge || got.FinalAt != nil {
+		t.Fatalf("a stopped transaction with an unused nonce must retain its non-final binding after lease expiry: %+v", got)
 	}
-	if left := s.count(`state = 3`); left != 0 {
-		t.Fatalf("%d stopped transactions left after their identities expired at a finalized block", left)
+	if left := s.count(`state = 3`); left == 0 {
+		t.Fatal("lease expiry removed every stopped binding despite unused nonces")
 	}
 	var expired int
 	if err := s.tracking.runtime.Conn().QueryRow(`SELECT count(*) FROM node_tx_status WHERE state = $1 AND reason = $2`, db.TrackDropped, db.TrackReasonFinalizedLeaseExpiry).Scan(&expired); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("dropped: 1 on finalized nonce evidence, %d on finalized lease expiry, 0 stopped left; %d ticks simulated", expired, s.ticks)
+	if expired != 0 {
+		t.Fatalf("%d transactions incorrectly finalized on lease expiry alone", expired)
+	}
+	t.Logf("dropped on finalized nonce evidence; unused nonces retain stopped bindings; %d ticks simulated", s.ticks)
 }
 
 func (s *congestionSim) includedFor(principal uuid.UUID) int {

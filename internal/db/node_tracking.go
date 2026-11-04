@@ -1148,8 +1148,9 @@ type TrackFinal struct {
 	// earlier generation (revived and stopped again since) is stale.
 	Generation int32
 	// ExpiresBy, when set, requires every identity recorded for the binding
-	// to have expired by then (max_expires_at ≤ ExpiresBy): the timestamp of
-	// the finalized block a lease-expiry dropped rests on.
+	// to have expired by then (max_expires_at ≤ ExpiresBy). This optional
+	// fence is insufficient evidence for finalization by itself; dropped
+	// requires finalized nonce consumption.
 	ExpiresBy *time.Time
 }
 
