@@ -947,6 +947,10 @@ func (s *Server) initNodePolicy() error {
 				o := bridge.cache.load()
 				return o != nil && o.err == nil && o.status.HasCapability(nodepolicy.CapabilityTransactionStatuses)
 			}
+			if s.metrics != nil {
+				alerts := s.metrics.NodeTrackingAlertsTotal
+				reconciler.alert = func(kind string) { alerts.WithLabelValues(kind).Inc() }
+			}
 			reconciler.keeper = &nodeKeeper{node: client, chain: chain, checker: rechecker, clock: s.db, signer: signer, network: network, ttl: txTTL, maxAge: maxAge, budget: renewal.Budget, boot: bridge.observedBoot, now: time.Now}
 			go func() { defer close(reconcilerDone); runNodeReconciler(term, reconciler) }()
 			_ = publisher.Run(term, c.PublishInterval, report)

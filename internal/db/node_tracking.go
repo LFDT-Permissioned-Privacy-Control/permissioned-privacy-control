@@ -1398,15 +1398,61 @@ func (e *ExecDB) TrackedPayloads(ctx context.Context, hashes [][]byte) (map[stri
 	return out, rows.Err()
 }
 
-// TrackingHorizon is the snapshot xmin: every transaction below it has ended,
-// so bindings with admit_xid below it are all visible now.
-func (e *ExecDB) TrackingHorizon(ctx context.Context) (uint64, error) {
-	var xmin string
-	if err := e.pool.conn.QueryRowContext(ctx, `SELECT pg_snapshot_xmin(pg_current_snapshot())::text`).Scan(&xmin); err != nil {
-		return 0, err
-	}
-	return strconv.ParseUint(xmin, 10, 64)
+// DiscoveryHorizon is the discovery horizon of this database: every
+// transaction of this database with an id below Horizon has ended, so
+// bindings with admit_xid below it are all visible now. Only this database's
+// transactions insert bindings, so the transactions of other databases on the
+// same server are excluded (independent review, finding 3): the cluster-wide
+// snapshot xmin would wait for the oldest write transaction anywhere on the
+// server. An in-progress id is excluded only when it is attributed to another
+// database — pg_stat_activity shows it on a backend of another database
+// (visible to an unprivileged role; a backend never changes database), or
+// pg_prepared_xacts shows it prepared in another database — and any other id
+// holds the horizon. Ids not in the snapshot's in-progress list are at or
+// above its xmax (newer transactions too). The 32-bit backend ids are compared
+// with the 64-bit ids modulo 2^32 (in-progress ids are within 2^31 of each
+// other). Next is the snapshot's xmax: Horizon < Next means a transaction of
+// this database (or an unattributed one) is in progress. ClusterWide: those
+// views could not be read (revoked), so Horizon is the cluster-wide xmin.
+type DiscoveryHorizon struct {
+	Horizon, Next uint64
+	ClusterWide   bool
 }
+
+// TrackingHorizon reads the discovery horizon (see DiscoveryHorizon).
+func (e *ExecDB) TrackingHorizon(ctx context.Context) (DiscoveryHorizon, error) {
+	var h, n string
+	err := e.pool.conn.QueryRowContext(ctx, trackingHorizonSQL).Scan(&h, &n)
+	out := DiscoveryHorizon{}
+	if isInsufficientPrivilege(err) {
+		// Still correct, but held by every database's transactions.
+		out.ClusterWide = true
+		err = e.pool.conn.QueryRowContext(ctx, `SELECT pg_snapshot_xmin(s)::text, pg_snapshot_xmax(s)::text FROM pg_current_snapshot() AS s`).Scan(&h, &n)
+	}
+	if err != nil {
+		return DiscoveryHorizon{}, err
+	}
+	if out.Horizon, err = strconv.ParseUint(h, 10, 64); err != nil {
+		return DiscoveryHorizon{}, err
+	}
+	if out.Next, err = strconv.ParseUint(n, 10, 64); err != nil {
+		return DiscoveryHorizon{}, err
+	}
+	return out, nil
+}
+
+const trackingHorizonSQL = `WITH s AS (SELECT pg_current_snapshot() AS snap),
+ other AS (
+   SELECT backend_xid::text::bigint AS x FROM pg_stat_activity
+    WHERE backend_xid IS NOT NULL AND datid IS NOT NULL
+      AND datid <> (SELECT oid FROM pg_database WHERE datname = current_database())
+   UNION ALL
+   SELECT transaction::text::bigint FROM pg_prepared_xacts WHERE database <> current_database())
+ SELECT least(pg_snapshot_xmax(snap),
+              (SELECT min(x) FROM pg_snapshot_xip(snap) AS x
+                WHERE (x::text::numeric % 4294967296)::bigint NOT IN (SELECT x FROM other)))::text,
+        pg_snapshot_xmax(snap)::text
+ FROM s`
 
 // ListTracked pages through bindings admitted in [fromXid, toXid) in admit_xid
 // order, at most limit rows after (afterXid, afterHash) of the previous page.

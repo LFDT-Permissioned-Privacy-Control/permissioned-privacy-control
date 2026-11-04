@@ -969,7 +969,11 @@ func (k *nodeKeeper) droppedFromNode(ctx, transport context.Context, r *nodeReco
 	var confirmed []*trackedRow
 	var evidence []dropEvidence
 	for i, t := range candidates {
-		if entry := batch.Statuses[i]; entry != nil && (entry.Status.Execution.Status == "included" || entry.Status.Execution.Status == "reverted") {
+		entry := batch.Statuses[i]
+		if entry != nil && entry.Err != nil {
+			continue // an invalid answer for this hash: no evidence either way
+		}
+		if entry != nil && (entry.Status.Execution.Status == "included" || entry.Status.Execution.Status == "reverted") {
 			t.dropSeen = time.Time{}
 			continue // the reconciler records the inclusion
 		}

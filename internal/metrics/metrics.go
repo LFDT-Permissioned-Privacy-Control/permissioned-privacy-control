@@ -106,6 +106,11 @@ type Metrics struct {
 	// Pending deployments
 	PendingDeployments prometheus.Gauge
 
+	// Execution tracking (Reth mode): anomalies the reconciler isolates or
+	// works around, by kind (invalid_status, protocol_mismatch,
+	// discovery_stalled, horizon_fallback).
+	NodeTrackingAlertsTotal *prometheus.CounterVec
+
 	// Build info
 	Info *prometheus.GaugeVec
 }
@@ -248,6 +253,12 @@ func New(version string) *Metrics {
 			Help:      "Number of pending contract deployments awaiting confirmation.",
 		}),
 
+		NodeTrackingAlertsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "node_tracking_alerts_total",
+			Help:      "Execution-tracking anomalies by kind: invalid_status (the node answered one transaction's status invalidly; that transaction is quarantined), protocol_mismatch (every entry of a batched answer invalid), discovery_stalled (a long transaction holds the discovery horizon; full scans run), horizon_fallback (discovery uses the cluster-wide horizon). Non-zero needs attention.",
+		}, []string{"kind"}),
+
 		Info: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "build_info",
@@ -269,6 +280,7 @@ func New(version string) *Metrics {
 		m.AuditChainIntegrityViolations,
 		m.CrossOrgOracleIndeterminateTotal,
 		m.PendingDeployments,
+		m.NodeTrackingAlertsTotal,
 		m.Info,
 	)
 

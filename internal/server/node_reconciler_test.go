@@ -606,3 +606,94 @@ func TestBatchedReconcilerPollsBeyondTheSingleCallBound(t *testing.T) {
 		t.Fatalf("slow node: %d of 6000 polled in %s", got, elapsed)
 	}
 }
+
+// batchedStatusNode answers ops_transactionStatuses from statusNode's table;
+// a poisoned hash's entry is an invalid answer (as the decoder reports one).
+type batchedStatusNode struct {
+	*statusNode
+	mu     sync.Mutex
+	poison map[string]bool
+	calls  int
+}
+
+func (n *batchedStatusNode) TransactionStatuses(ctx context.Context, hashes []string) (nodepolicy.TransactionStatusBatch, error) {
+	n.mu.Lock()
+	n.calls++
+	poison := map[string]bool{}
+	for h, p := range n.poison {
+		poison[h] = p
+	}
+	n.mu.Unlock()
+	out := nodepolicy.TransactionStatusBatch{BootID: strings.Repeat("ab", 16), Statuses: make([]*nodepolicy.BatchedStatus, len(hashes))}
+	for i, h := range hashes {
+		if poison[h] {
+			out.Statuses[i] = &nodepolicy.BatchedStatus{Err: nodepolicy.ErrInvalidStatus}
+			continue
+		}
+		if s, err := n.statusNode.TransactionStatus(ctx, h); err == nil {
+			s.BootID = out.BootID
+			out.Statuses[i] = &nodepolicy.BatchedStatus{Status: s}
+		}
+	}
+	return out, nil
+}
+
+func (n *batchedStatusNode) setPoison(hash string, on bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.poison[hash] = on
+}
+
+// One transaction whose status the node answers invalidly never holds up the
+// others polled in the same call (independent review, finding 1): they
+// become final and release their quota; the invalid one alone is quarantined
+// (polled ever less often, alerted), and proceeds once answered validly.
+func TestInvalidStatusEntryIsQuarantinedAlone(t *testing.T) {
+	f := newReconcileFixture(t, nil)
+	node := &batchedStatusNode{statusNode: f.node, poison: map[string]bool{}}
+	f.r.node, f.r.batched = node, func() bool { return true }
+	var alerts []string
+	f.r.alert = func(kind string) { alerts = append(alerts, kind) }
+	bad := f.admit(t, uuid.New(), uuid.New())
+	f.node.set(bad.status("included", 3, 3))
+	node.setPoison(bad.hex, true)
+	var good []trackedTx
+	for i := 0; i < 5; i++ {
+		tx := f.admit(t, uuid.New(), uuid.New())
+		f.node.set(tx.status("included", 3, 3))
+		good = append(good, tx)
+	}
+	now := time.Now()
+	f.r.now = func() time.Time { return now }
+	_ = f.tick(t) // the invalid answer is reported; the others are recorded
+	for _, tx := range good {
+		if s := f.state(t, tx).State; s != db.TrackIncluded {
+			t.Fatalf("a valid entry next to an invalid one: state %d", s)
+		}
+	}
+	if s := f.state(t, bad).State; s != db.TrackPending || f.quota(t) != 1 {
+		t.Fatalf("the invalid entry's row: state %d", s)
+	}
+	quarantined := f.r.rows[string(bad.hash)]
+	if quarantined == nil || quarantined.nextPoll.Sub(now) < reconcileQuarantine {
+		t.Fatalf("not quarantined: %+v", quarantined)
+	}
+	if len(alerts) != 1 || alerts[0] != alertInvalidStatus {
+		t.Fatalf("alerts %v", alerts)
+	}
+	first := quarantined.nextPoll.Sub(now)
+	now = quarantined.nextPoll
+	_ = f.tick(t)
+	if again := quarantined.nextPoll.Sub(now); again <= first {
+		t.Fatalf("quarantine interval %s did not grow from %s", again, first)
+	}
+	// Answered validly again: it finalizes like any other.
+	node.setPoison(bad.hex, false)
+	now = quarantined.nextPoll
+	if err := f.tick(t); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.state(t, bad).State; s != db.TrackIncluded || f.quota(t) != 0 {
+		t.Fatalf("after a valid answer: state %d", s)
+	}
+}

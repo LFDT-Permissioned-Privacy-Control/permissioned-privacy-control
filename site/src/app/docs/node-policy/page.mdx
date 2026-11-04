@@ -502,4 +502,7 @@ offer that answer, OPS reads the node's public RPC (`NODE_URL`) instead: then
 point it at the same single node as the private endpoint, not at a
 load-balanced pool of nodes. OPS records `dropped` only after the same
 evidence was read twice, at least 30 seconds apart; a lookup the node could
-not answer is never evidence.
+not answer is never evidence. If the node answers one transaction's status
+in a form OPS cannot accept, OPS logs an error, asks about that transaction
+ever less often (up to every ten minutes, until the node answers it validly or
+restarts) and goes on with every other transaction.

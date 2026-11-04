@@ -338,7 +338,19 @@ sequenceDiagram
   call and up to 16,384 per tick; a change of the node's canonical epoch
   re-polls every provisional row, and an entry the node could not answer is
   polled again. Otherwise it polls one transaction per call, up to 4,096 per
-  tick.
+  tick. Entries are decoded one by one: an entry that is not a valid status
+  (for example more created contracts than the node's 128 checked frames per
+  transaction allow) quarantines that transaction alone, with a growing
+  interval up to ten minutes, ended by a valid answer or a node restart; a call
+  whose every entry is invalid is a protocol mismatch, retried normally.
+- **Discovery.** The elected reconciler learns its own instance's admissions in
+  memory at once, and other instances' by `admit_xid` below the tracking
+  database's own horizon: the oldest in-progress transaction of that database
+  (`pg_stat_activity` and `pg_prepared_xacts` attribute other databases'
+  transactions, which are ignored). A term starts with a full scan; a horizon
+  held for more than ten seconds is alerted and bindings are then also found by
+  bounded full scans until it moves, so discovery and quota release never wait
+  for one long transaction.
 
 ## What happens for an RPC call
 
