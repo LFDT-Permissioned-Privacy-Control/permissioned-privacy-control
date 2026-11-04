@@ -155,6 +155,9 @@ type Server struct {
 	auditBuffer       *buffer.Buffer
 	auditSealer       *sealer.Sealer
 	auditSealerCancel context.CancelFunc
+	// auditBufferSpace reads the buffer volume's available and total bytes.
+	// Nil when durable buffering is disabled.
+	auditBufferSpace func() (uint64, uint64, error)
 	// RD-1112 #8 signed truncation-detection checkpoints (nil when disabled).
 	auditCheckpointWorker *audit.CheckpointWorker
 	auditCheckpointCancel context.CancelFunc
@@ -522,7 +525,7 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 			return nil, fmt.Errorf("failed to open audit runtime database: %w", err)
 		}
 	}
-	auditDB := db.NewAuditHandle(auditPool)
+	auditDB := db.NewAuditHandleForChain(auditPool, cfg.AuditChainName)
 	if cfg.AuditDatabaseURL == cfg.AuditAdminDatabaseURL {
 		// Derived-default deployment (or an operator pointing both DSNs at the
 		// same owner identity): the runtime pool connects as the owner, so the
@@ -920,13 +923,16 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 			siem = siemForwarder
 		}
 		seedCtx, cancelSeed := context.WithTimeout(context.Background(), 15*time.Second)
-		auditBuf, auditSealer, _, sealErr := openAccessLogSealing(seedCtx, auditDB, cfg.AuditBufferDir, cfg.AuditChainName, siem, nil)
+		auditBuf, auditSealer, _, sealErr := openAccessLogSealing(seedCtx, auditDB, cfg.AuditBufferDir, cfg.AuditChainName, siem, func(c *sealer.Config) {
+			c.StallAfter = cfg.AuditSealingStallLimit
+		})
 		cancelSeed()
 		if sealErr != nil {
 			s.Stop()
 			return nil, sealErr
 		}
 		s.auditBuffer, s.auditSealer = auditBuf, auditSealer
+		s.auditBufferSpace = auditBufferVolumeSpace(cfg.AuditBufferDir)
 		registerAuditSealingMetrics(m.Registry, auditSealer)
 		sealerCtx, sealerCancel := context.WithCancel(context.Background())
 		s.auditSealerCancel = sealerCancel

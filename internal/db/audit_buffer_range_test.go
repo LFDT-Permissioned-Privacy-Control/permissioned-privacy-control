@@ -93,3 +93,48 @@ func TestConcurrentWritersOfOneChainNeverFork(t *testing.T) {
 		t.Fatalf("shared chain: %+v %v", res, err)
 	}
 }
+
+// The request-path fallback must serialize with buffered writers and read
+// the stored head under the same lock, even when its cached head is stale.
+func TestSynchronousFallbackAndBufferedWriterShareChainLock(t *testing.T) {
+	database := setupIntegrityTestDB(t)
+	ctx := context.Background()
+	buffered, fallback := audit.NewHashChain(""), audit.NewHashChain("")
+	base := uint64(100) << db.BufferRangeShift
+	for i := 0; i < 5; i++ {
+		rec := db.AccessLogRecord{ExternalID: "did:test:buffered", Method: "eth_call", StatusCode: 200}
+		if _, err := database.SealBufferedAccessLog(ctx, buffered, rec, base+uint64(i)+1, "access_logs"); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := database.LogAccessChained(ctx, fallback, "did:test:fallback", "eth_call", 200, "127.0.0.1", "", nil, nil, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := audit.NewVerifier(database.Conn(), database).Verify(ctx, audit.ChainAccessLogs)
+	if err != nil || !res.OK || res.ScannedRows != 10 {
+		t.Fatalf("mixed buffered/fallback chain: %+v error=%v", res, err)
+	}
+}
+
+func TestSynchronousFallbackPreservesConfiguredChain(t *testing.T) {
+	database := setupIntegrityTestDB(t)
+	ctx := context.Background()
+	name := "instance-chain"
+	store := db.NewAuditHandleForChain(database, name)
+	if _, err := store.SealBufferedAccessLog(ctx, audit.NewHashChain(""), db.AccessLogRecord{
+		ExternalID: "did:test:buffered", Method: "eth_call", StatusCode: 200,
+	}, uint64(101)<<db.BufferRangeShift, name); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := store.LogAccessChained(ctx, audit.NewHashChain(""), "did:test:fallback", "eth_call", 200, "127.0.0.1", "", nil, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	var named, other int
+	if err := database.Conn().QueryRowContext(ctx, `SELECT count(*) FILTER (WHERE chain_name=$1), count(*) FILTER (WHERE chain_name<>$1) FROM access_logs`, name).Scan(&named, &other); err != nil || named != 2 || other != 0 {
+		t.Fatalf("configured chain: named=%d other=%d error=%v", named, other, err)
+	}
+	res, err := audit.NewVerifier(database.Conn(), database).Verify(ctx, audit.ChainAccessLogs)
+	if err != nil || !res.OK || res.ScannedRows != 2 {
+		t.Fatalf("custom buffered/fallback chain: %+v error=%v", res, err)
+	}
+}

@@ -112,8 +112,14 @@ type Config struct {
 	// OnMove, when set, is told that an entry moved from one sequence to
 	// another (so the caller drops what it tracked under the old one).
 	OnMove func(from, to uint64)
+	// DegradedAfter is how long the sealer may go without progress while
+	// entries wait before State reports it degraded (default 1 minute):
+	// reported and logged, still sealing when it can.
+	DegradedAfter time.Duration
 	// StallAfter is how long the sealer may go without progress while
-	// entries wait before State reports it stalled (default 5 minutes).
+	// entries wait before State reports it stopped (stalled; default 30
+	// minutes, AUDIT_SEALING_STALL_LIMIT). The buffer is durable, so an
+	// audit-database outage shorter than this loses nothing.
 	StallAfter time.Duration
 	// Now is the clock (tests); time.Now by default.
 	Now func() time.Time
@@ -139,6 +145,7 @@ const (
 	// space that it never wrote; sealing stopped until restart.
 	ReasonChainRefused = "chain_refused"
 	// ReasonStalled: no sealing progress for StallAfter while entries wait.
+	// Before that, without progress for DegradedAfter, State is Degraded.
 	ReasonStalled = "stalled"
 )
 
@@ -146,6 +153,9 @@ const (
 type State struct {
 	Stopped bool
 	Reason  string
+	// Degraded: no progress for DegradedAfter while entries wait, not yet
+	// stopped.
+	Degraded bool
 	// LastProgress is the end of the last tick that met no failure.
 	LastProgress time.Time
 	// Backlog approximates the entries of this run not sealed yet.
@@ -184,6 +194,8 @@ type Sealer struct {
 	earlierDone bool
 	// tickFailed: a seal failed during the current tick.
 	tickFailed bool
+	// loggedLevel: the State last logged (0 sealing, 1 degraded, 2 stopped).
+	loggedLevel int
 
 	// Read by State from other goroutines.
 	refused       atomic.Bool
@@ -201,7 +213,10 @@ func New(buf Drainer, seal SealFunc, highWater HighWaterFunc, cfg Config) *Seale
 		cfg.Interval = 1 * time.Second
 	}
 	if cfg.StallAfter <= 0 {
-		cfg.StallAfter = 5 * time.Minute
+		cfg.StallAfter = 30 * time.Minute
+	}
+	if cfg.DegradedAfter <= 0 || cfg.DegradedAfter > cfg.StallAfter {
+		cfg.DegradedAfter = min(time.Minute, cfg.StallAfter)
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -223,13 +238,41 @@ func (s *Sealer) State() State {
 			st.Backlog = allocated - sealed
 		}
 	}
+	waiting := st.Backlog > 0 || s.earlierWait.Load()
+	idle := s.cfg.Now().Sub(last)
 	switch {
 	case s.refused.Load():
 		st.Stopped, st.Reason = true, ReasonChainRefused
-	case (st.Backlog > 0 || s.earlierWait.Load()) && s.cfg.Now().Sub(last) > s.cfg.StallAfter:
+	case waiting && idle > s.cfg.StallAfter:
 		st.Stopped, st.Reason = true, ReasonStalled
+	case waiting && idle > s.cfg.DegradedAfter:
+		st.Degraded = true
 	}
 	return st
+}
+
+// logStateChange logs the transitions of State, once each: degraded (WARN),
+// stopped (ERROR) and recovered (INFO).
+func (s *Sealer) logStateChange() {
+	st := s.State()
+	level := 0
+	switch {
+	case st.Stopped:
+		level = 2
+	case st.Degraded:
+		level = 1
+	}
+	prev := s.loggedLevel
+	s.loggedLevel = level
+	switch {
+	case level == prev:
+	case level == 2:
+		slog.Error("audit sealing stopped: the instance reports not ready; entries stay in the buffer", "reason", st.Reason, "last_progress", st.LastProgress, "backlog", st.Backlog)
+	case level == 1:
+		slog.Warn("audit sealing degraded: no entry reached the audit database recently; entries stay in the buffer", "last_progress", st.LastProgress, "backlog", st.Backlog, "not_ready_after", s.cfg.StallAfter)
+	default:
+		slog.Info("audit sealing recovered")
+	}
 }
 
 // Wait blocks until Run has returned (after ctx cancellation), so the caller
@@ -278,6 +321,7 @@ func (s *Sealer) Tick(ctx context.Context) (sealed int, err error) {
 		if err == nil && !s.tickFailed {
 			s.lastProgress.Store(s.cfg.Now().UnixNano())
 		}
+		s.logStateChange()
 	}()
 	if err := s.Seed(ctx); err != nil {
 		return 0, err

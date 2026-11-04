@@ -856,9 +856,26 @@ func (d *DB) LogAccessChained(
 	orgID string,
 	denialReason string,
 ) (int64, time.Time, string, error) {
+	return d.logAccessChained(ctx, chain, externalID, method, statusCode, ipAddress, correlationID, params, responseStatus, orgID, denialReason, "access_logs")
+}
+
+func (d *DB) logAccessChained(
+	ctx context.Context,
+	chain RBACAuditChain,
+	externalID, method string,
+	statusCode int,
+	ipAddress, correlationID string,
+	params []byte,
+	responseStatus *int,
+	orgID, denialReason, chainName string,
+) (int64, time.Time, string, error) {
 	if chain == nil {
 		id, createdAt, err := d.LogAccessEnhanced(ctx, externalID, method, statusCode, ipAddress, correlationID, params, responseStatus, orgID, denialReason)
 		return id, createdAt, "", err
+	}
+	accessChain, ok := chain.(AccessLogChain)
+	if !ok {
+		return 0, time.Time{}, "", fmt.Errorf("access-log chain must support resetting its stored head")
 	}
 
 	var corrID *string
@@ -874,49 +891,54 @@ func (d *DB) LogAccessChained(
 	var outID int64
 	var outCreatedAt time.Time
 
-	hash, err := chain.Append(func(prev string) (string, func(string) error, error) {
-		var id int64
-		if scanErr := d.conn.QueryRowContext(ctx,
-			`SELECT nextval('access_logs_id_seq')`,
-		).Scan(&id); scanErr != nil {
-			return "", nil, fmt.Errorf("reserve access_logs id: %w", scanErr)
-		}
-		// Postgres TIMESTAMP stores microsecond precision; Go's
-		// time.Now() carries nanoseconds. Truncate so the hash content
-		// (computed before write) matches the value the verifier reads
-		// back. Without this, every chain would look tampered on
-		// re-read because the last three digits of the format string
-		// disagree.
-		createdAt := time.Now().UTC().Truncate(time.Microsecond)
-		paramsDigest := ""
-		if len(params) > 0 {
-			paramsDigest = string(params)
-		}
-		content := AccessLogChainContent(id, externalID, method, ipAddress, statusCode, respStatus, createdAt, correlationID, paramsDigest)
+	var hash string
+	err := d.withAccessLogChainLocked(ctx, accessChain, chainName, func(tx *sql.Tx) error {
+		var appendErr error
+		hash, appendErr = chain.Append(func(prev string) (string, func(string) error, error) {
+			var id int64
+			if scanErr := tx.QueryRowContext(ctx,
+				`SELECT nextval('access_logs_id_seq')`,
+			).Scan(&id); scanErr != nil {
+				return "", nil, fmt.Errorf("reserve access_logs id: %w", scanErr)
+			}
+			// Postgres TIMESTAMP stores microsecond precision; Go's
+			// time.Now() carries nanoseconds. Truncate so the hash content
+			// (computed before write) matches the value the verifier reads
+			// back. Without this, every chain would look tampered on
+			// re-read because the last three digits of the format string
+			// disagree.
+			createdAt := time.Now().UTC().Truncate(time.Microsecond)
+			paramsDigest := ""
+			if len(params) > 0 {
+				paramsDigest = string(params)
+			}
+			content := AccessLogChainContent(id, externalID, method, ipAddress, statusCode, respStatus, createdAt, correlationID, paramsDigest)
 
-		write := func(hash string) error {
-			// org_id (RD-1135) is appended to the row but is deliberately
-			// absent from `content` above — it is a confidentiality-scoping
-			// attribute for reads, not part of the tamper-evident hash. The
-			// chain content + verifier therefore stay at format v2.
-			res, execErr := d.conn.ExecContext(ctx,
-				`INSERT INTO access_logs
-					(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, hash_format_version, created_at, entry_hash, org_id, denial_reason)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 2, $9, $10, $11, $12)`,
-				id, externalID, method, statusCode, ipAddress, corrID, params, responseStatus, createdAt, hash, nullableText(orgID), nullableText(denialReason),
-			)
-			if execErr != nil {
-				return fmt.Errorf("insert access_logs: %w", execErr)
+			write := func(hash string) error {
+				// org_id (RD-1135) is appended to the row but is deliberately
+				// absent from `content` above — it is a confidentiality-scoping
+				// attribute for reads, not part of the tamper-evident hash. The
+				// chain content + verifier therefore stay at format v2.
+				res, execErr := tx.ExecContext(ctx,
+					`INSERT INTO access_logs
+					(id, external_id, method, status_code, ip_address, correlation_id, request_params, response_status, hash_format_version, created_at, entry_hash, org_id, denial_reason, chain_name)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 2, $9, $10, $11, $12, $13)`,
+					id, externalID, method, statusCode, ipAddress, corrID, params, responseStatus, createdAt, hash, nullableText(orgID), nullableText(denialReason), chainName,
+				)
+				if execErr != nil {
+					return fmt.Errorf("insert access_logs: %w", execErr)
+				}
+				if affected, _ := res.RowsAffected(); affected != 1 {
+					return fmt.Errorf("insert access_logs: expected 1 row, got %d", affected)
+				}
+				outID = id
+				outCreatedAt = createdAt
+				return nil
 			}
-			if affected, _ := res.RowsAffected(); affected != 1 {
-				return fmt.Errorf("insert access_logs: expected 1 row, got %d", affected)
-			}
-			outID = id
-			outCreatedAt = createdAt
-			return nil
-		}
-		_ = prev
-		return content, write, nil
+			_ = prev
+			return content, write, nil
+		})
+		return appendErr
 	})
 	if err != nil {
 		return 0, time.Time{}, "", err
@@ -1038,11 +1060,11 @@ type sqlQuerier interface {
 
 // withAccessLogChainLocked runs fn in a transaction that holds the chain's
 // advisory lock, after resetting chain to the head stored for chainName
-// (RD-1410). Every buffered writer of the chain takes the same lock before it
-// reads the head, so buffered writers of one chain — several instances
+// (RD-1410). Every writer of the chain takes the same lock before it
+// reads the head, so writers of one chain — several instances
 // sharing a chain name, or a write after one whose outcome was unknown —
-// always link to the stored head and never fork the chain (the synchronous
-// LogAccessChained path does not take it). The lock ends with the transaction.
+// always link to the stored head and never fork the chain. The synchronous
+// LogAccessChained fallback uses this lock too. The lock ends with the transaction.
 func (d *DB) withAccessLogChainLocked(ctx context.Context, chain AccessLogChain, chainName string, fn func(tx *sql.Tx) error) error {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"syscall"
 	"time"
 
 	"privacy-proxy/internal/audit"
@@ -86,6 +87,37 @@ const maxRangeDraws = 64
 // buffer's sealing has stopped (chain refused, or stalled).
 const ReasonAuditSealingStopped = "audit_sealing_stopped"
 
+const (
+	ReasonAuditBufferLowSpace    = "audit_buffer_low_space"
+	ReasonAuditBufferUnavailable = "audit_buffer_unavailable"
+)
+
+func auditBufferVolumeSpace(dir string) func() (uint64, uint64, error) {
+	return func() (uint64, uint64, error) {
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(dir, &st); err != nil {
+			return 0, 0, err
+		}
+		return st.Bavail * uint64(st.Bsize), st.Blocks * uint64(st.Bsize), nil
+	}
+}
+
+func (s *Server) auditReadinessReason() string {
+	if s.auditSealingStopped() {
+		return ReasonAuditSealingStopped
+	}
+	if s.auditBufferSpace != nil {
+		free, total, err := s.auditBufferSpace()
+		if err != nil {
+			return ReasonAuditBufferUnavailable
+		}
+		if free < min(uint64(1)<<30, total/4) {
+			return ReasonAuditBufferLowSpace
+		}
+	}
+	return ""
+}
+
 // auditSealingStopped reports whether the async audit buffer's sealing has
 // stopped: records are still buffered durably, but none reaches the audit
 // database, so the instance reports not ready (fail closed).
@@ -97,7 +129,7 @@ func (s *Server) auditSealingStopped() bool {
 func registerAuditSealingMetrics(reg prometheus.Registerer, s *sealer.Sealer) {
 	metrics.RegisterAuditSealing(reg, func() metrics.AuditSealingState {
 		st := s.State()
-		return metrics.AuditSealingState{Stopped: st.Stopped, Reason: st.Reason, Backlog: st.Backlog, LastProgress: st.LastProgress}
+		return metrics.AuditSealingState{Stopped: st.Stopped, Degraded: st.Degraded, Reason: st.Reason, Backlog: st.Backlog, LastProgress: st.LastProgress}
 	})
 }
 

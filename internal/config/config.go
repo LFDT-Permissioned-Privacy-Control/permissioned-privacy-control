@@ -255,9 +255,15 @@ type Config struct {
 	AuditCheckpointInterval time.Duration
 	// AuditChainName is this instance's audit chain partition (RD-1112 #8).
 	// Default 'access_logs' (one global chain). For multi-instance, set a
-	// per-instance value (e.g. hostname / pod name) so each instance is the
-	// SOLE writer of its own chain — preventing the multi-writer chain fork.
+	// per-instance value (e.g. hostname / pod name) to reduce contention.
+	// Shared names are safe: every writer takes the chain transaction lock.
 	AuditChainName string
+	// AuditSealingStallLimit is how long the async audit buffer's sealing
+	// may make no progress while entries wait before the instance reports
+	// not ready (RD-1410). Shorter outages only degrade it (a gauge and a
+	// warning): the buffer is durable, so no record is lost meanwhile.
+	AuditSealingStallLimit time.Duration
+	auditSealingErr        error
 	// AuditDatabaseURL is the RUNTIME identity for the SEPARATE, always-on
 	// append-only audit database that holds access_logs (RD-1147). access_logs is
 	// ALWAYS in a separate database — there is NO fallback to the main DB. This
@@ -667,6 +673,15 @@ func Load() *Config {
 		}
 	}
 
+	auditStallLimit, auditStallErr := DefaultAuditSealingStallLimit, error(nil)
+	if v := getEnv("AUDIT_SEALING_STALL_LIMIT", ""); v != "" {
+		if d, err := time.ParseDuration(v); err != nil || d < minAuditSealingStallLimit || d > maxAuditSealingStallLimit {
+			auditStallErr = fmt.Errorf("AUDIT_SEALING_STALL_LIMIT must be a duration from %s to %s", minAuditSealingStallLimit, maxAuditSealingStallLimit)
+		} else {
+			auditStallLimit = d
+		}
+	}
+
 	// SIEM webhook configuration
 	siemWebhookURL := getEnv("SIEM_WEBHOOK_URL", "")
 	siemAuthHeader := getEnv("SIEM_AUTH_HEADER", "")
@@ -843,6 +858,8 @@ func Load() *Config {
 		AuditCheckpointKey:                  getEnv("AUDIT_CHECKPOINT_KEY", ""),
 		AuditCheckpointInterval:             parseDurationEnv("AUDIT_CHECKPOINT_INTERVAL", time.Minute),
 		AuditChainName:                      getEnv("AUDIT_CHAIN_NAME", "access_logs"),
+		AuditSealingStallLimit:              auditStallLimit,
+		auditSealingErr:                     auditStallErr,
 		PrivadoRPCURL:                       getEnv("PRIVADO_RPC_URL", "https://rpc-mainnet.privado.id"),
 		IPFSGateway:                         getEnv("IPFS_GATEWAY", "https://ipfs-proxy-cache.privado.id"), // IPFS gateway for schema resolution
 		JWTSecret:                           getEnv("JWT_SECRET", ""),                                      // If empty, will be auto-generated (dev only)
@@ -1030,6 +1047,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateSIEM(); err != nil {
+		return err
+	}
+	if err := c.validateAuditSealing(); err != nil {
 		return err
 	}
 	if err := c.validatePool(); err != nil {
@@ -1241,6 +1261,25 @@ func getEnv(key, defaultValue string) string {
 		}
 	}
 	return defaultValue
+}
+
+// The stall limit of audit sealing (AUDIT_SEALING_STALL_LIMIT).
+const (
+	DefaultAuditSealingStallLimit = 30 * time.Minute
+	minAuditSealingStallLimit     = time.Minute
+	maxAuditSealingStallLimit     = 24 * time.Hour
+)
+
+// validateAuditSealing refuses an invalid AUDIT_SEALING_STALL_LIMIT. Zero in
+// a literal configuration takes the default.
+func (c *Config) validateAuditSealing() error {
+	if c.auditSealingErr != nil {
+		return c.auditSealingErr
+	}
+	if d := c.AuditSealingStallLimit; d != 0 && (d < minAuditSealingStallLimit || d > maxAuditSealingStallLimit) {
+		return fmt.Errorf("AUDIT_SEALING_STALL_LIMIT must be a duration from %s to %s", minAuditSealingStallLimit, maxAuditSealingStallLimit)
+	}
+	return nil
 }
 
 // maxSIEMSenders bounds SIEM_SENDERS: more parallel requests than this point

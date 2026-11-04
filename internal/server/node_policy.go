@@ -456,12 +456,12 @@ func (s *Server) handleReady(c *gin.Context) {
 	if !status.Ready {
 		response.Status, code = "not_ready", http.StatusServiceUnavailable
 	}
-	if s.auditSealingStopped() {
+	if reason := s.auditReadinessReason(); reason != "" {
 		response, code = apimodels.ReadinessResponse{Status: "not_ready"}, http.StatusServiceUnavailable
 		// The reason tells when audit records stop reaching the audit
 		// database: only callers on the management networks learn it.
 		if s.internalPeer(c.Request) {
-			response.Reason = ReasonAuditSealingStopped
+			response.Reason = reason
 		}
 	}
 	c.Header("Cache-Control", "no-store")

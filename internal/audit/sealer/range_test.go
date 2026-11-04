@@ -332,3 +332,41 @@ func TestCollidingLegacyBacklogMovesInOneTick(t *testing.T) {
 		}
 	}
 }
+
+// Follow-up on finding 6: a sealer without progress is degraded (reported,
+// still ready) until the stall limit, and only then stopped; a refused chain
+// stops it at once.
+func TestNoProgressIsDegradedUntilTheStallLimit(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	b := newBuf(t, 2)
+	defer b.Close()
+	rec := &recorder{}
+	down := true
+	hw := func(ctx context.Context) (uint64, error) {
+		if down {
+			return 0, errors.New("audit database unreachable")
+		}
+		return rec.highWater(ctx)
+	}
+	s := New(b, rec.seal, hw, Config{DegradedAfter: time.Minute, StallAfter: 30 * time.Minute, Now: func() time.Time { return now }})
+	_, _ = s.Tick(context.Background())
+	if st := s.State(); st.Stopped || st.Degraded {
+		t.Fatalf("at once: %+v", st)
+	}
+	now = now.Add(2 * time.Minute)
+	_, _ = s.Tick(context.Background())
+	if st := s.State(); st.Stopped || !st.Degraded {
+		t.Fatalf("two minutes without progress: %+v, want degraded, not stopped", st)
+	}
+	now = now.Add(29 * time.Minute)
+	if st := s.State(); !st.Stopped || st.Reason != ReasonStalled {
+		t.Fatalf("past the stall limit: %+v", st)
+	}
+	down = false
+	if _, err := s.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st := s.State(); st.Stopped || st.Degraded {
+		t.Fatalf("after recovery: %+v", st)
+	}
+}

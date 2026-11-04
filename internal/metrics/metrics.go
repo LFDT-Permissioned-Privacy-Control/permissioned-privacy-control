@@ -288,6 +288,7 @@ func NewNoop() *Metrics {
 // AuditSealingState is what the audit sealing gauges read at scrape time.
 type AuditSealingState struct {
 	Stopped      bool
+	Degraded     bool
 	Reason       string
 	Backlog      uint64
 	LastProgress time.Time
@@ -307,7 +308,7 @@ func RegisterAuditSealing(reg prometheus.Registerer, state func() AuditSealingSt
 		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Namespace:   namespace,
 			Name:        "audit_sealing_stopped",
-			Help:        "1 when audit sealing has stopped for this reason (chain_refused: rows in this instance's own sequence space it never wrote; stalled: no sealing progress for 5 minutes while entries wait). The instance reports not ready meanwhile.",
+			Help:        "1 when audit sealing has stopped for this reason (chain_refused: rows in this instance's own sequence space it never wrote; stalled: no progress for AUDIT_SEALING_STALL_LIMIT while entries wait). The instance reports not ready meanwhile.",
 			ConstLabels: prometheus.Labels{"reason": reason},
 		}, func() float64 {
 			if st := state(); st.Stopped && st.Reason == reason {
@@ -316,6 +317,16 @@ func RegisterAuditSealing(reg prometheus.Registerer, state func() AuditSealingSt
 			return 0
 		}))
 	}
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "audit_sealing_degraded",
+		Help:      "1 when audit sealing has made no progress for a minute while entries wait, before the readiness stall limit.",
+	}, func() float64 {
+		if state().Degraded {
+			return 1
+		}
+		return 0
+	}))
 	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "audit_sealing_backlog_entries",
