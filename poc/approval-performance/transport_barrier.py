@@ -133,6 +133,12 @@ class NodeTransportBarriers:
                 def log_message(self, *_):
                     pass
 
+                def handle(self):
+                    # SIGKILL can reset a kept-alive socket between requests,
+                    # outside do_POST's expected-disconnect handling.
+                    with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                        super().handle()
+
                 def respond(self, status, data, content_type="application/json"):
                     self.send_response(status)
                     self.send_header("Content-Type", content_type)

@@ -1086,9 +1086,9 @@ def ops_failover(args, result, rate=100, seconds=100):
                                  "killed": previous, "survivor": current, "killed_at": killed,
                                  "client": record, "transport": barrier.snapshot()})
 
-        # Hold inclusion until more than one keeper batch has acknowledged
-        # pending work. One forwarded renewal plus held transports and still-
-        # unrenewed bindings prove that the next kill is inside actual renewal.
+        # Build an acknowledged pending backlog. A completed renewal, held
+        # transports and observed still-unrenewed bindings must prove the next
+        # kill is inside actual renewal; the count alone is not that evidence.
         live.driver.pause()
         acknowledged_sql = ("SELECT encode(tx_hash,'hex'),generation,context_id FROM node_tx_binding "
                             "WHERE state=1 AND delivered_generation=generation ORDER BY created_at LIMIT 1024")
@@ -1147,7 +1147,7 @@ def ops_failover(args, result, rate=100, seconds=100):
                        and is_included(receipts.get(p["hash"])) and rows.get(p["hash"]) == 1
                        and first and first["instance"] == p["survivor"]["instance"]
                        and all(not r.get("forwarded_at") for r in p["transport"] if r["held"]))
-            result.check("L11: survivor executes the saved intent once with one client attempt and no old-sender forwarding",
+            result.check("L11: survivor executes the saved intent once with one client attempt and no original held-request forwarding",
                          bool(correct and not bad and not unanswered), hash=p["hash"], client=p["client"],
                          tracking=tracking.get(p["hash"]), receipt=receipts.get(p["hash"]), first_node_forward=first)
         result.evidence("saved_intent_probes", saved_probes)
