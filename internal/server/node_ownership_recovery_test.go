@@ -25,6 +25,9 @@ func (n evidenceNode) TransactionStatus(_ context.Context, hash string) (nodepol
 	if s, ok := n[hash]; ok {
 		return s, nil
 	}
+	if strings.HasPrefix(hash, "0x6") {
+		return nodepolicy.TransactionStatus{}, &nodepolicy.RejectedError{Code: -32014} // N7: on no chain
+	}
 	return nodepolicy.TransactionStatus{}, &nodepolicy.RejectedError{Code: -32000}
 }
 
@@ -68,7 +71,7 @@ func TestOwnershipRecoveryFromManifests(t *testing.T) {
 		response := f.request(t, token, http.MethodPost, path, map[string]any{"transactionHash": hash})
 		return response.Code, response.Body.String()
 	}
-	for _, refused := range []string{foreign, pending, transfer, hash(5)} {
+	for _, refused := range []string{foreign, pending, transfer, hash(5), hash(6)} {
 		code, body := recover(f.admin, refused)
 		require.Equal(t, http.StatusNotFound, code, body)
 		require.Contains(t, body, "finalized deployment not found")

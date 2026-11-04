@@ -417,7 +417,7 @@ func TestStoppedBindingRefusesOtherPrincipalUntilFinal(t *testing.T) {
 		require.True(t, f.transition(h, TrackPending, TrackRenewalStopped, 3))
 		// A dropped decision taken on the stopped generation 2 is stale.
 		block := uint64(10)
-		applied, err := f.exec.FinalizeBatch(ctx, f.inc, []TrackFinal{{Hash: h, State: TrackDropped, Reason: TrackReasonFinalizedLeaseExpiry, BlockNumber: &block, PrincipalID: p1.id, OrgID: p1.org, RequireStopped: true, Generation: 2}})
+		applied, err := f.exec.FinalizeBatch(ctx, f.inc, []TrackFinal{{Hash: h, State: TrackDropped, Reason: TrackReasonNonceConsumed, BlockNumber: &block, PrincipalID: p1.id, OrgID: p1.org, RequireStopped: true, Generation: 2}})
 		require.NoError(t, err)
 		require.False(t, applied[0], "a final decided on generation 2 does not apply to the stopped generation 3")
 		got, err := f.state(h)
@@ -1083,7 +1083,7 @@ func TestStoppedBindingsCountTowardTheirOwnersCaps(t *testing.T) {
 // binding, not its current envelope: a revival signed with a shorter lease
 // (a database clock step, a shorter lifetime on another instance) leaves the
 // node holding the longer one (independent review, finding 2).
-func TestLeaseExpiryFenceUsesTheLongestRecordedIdentity(t *testing.T) {
+func TestLeaseExpiryNeverFinalizesAnUnusedNonce(t *testing.T) {
 	f := newTrackingFixture(t)
 	ctx := context.Background()
 	p := newPrincipal()
@@ -1101,12 +1101,12 @@ func TestLeaseExpiryFenceUsesTheLongestRecordedIdentity(t *testing.T) {
 	require.True(t, got.ExpiresAt.Equal(short.ExpiresAt))
 	require.True(t, got.MaxExpiresAt.Equal(long.ExpiresAt), "max %s, want %s", got.MaxExpiresAt, long.ExpiresAt)
 	block := uint64(10)
-	final := func(by time.Time) bool {
-		applied, err := f.exec.FinalizeBatch(ctx, f.inc, []TrackFinal{{Hash: h, State: TrackDropped, Reason: TrackReasonFinalizedLeaseExpiry, BlockNumber: &block, PrincipalID: p.id, OrgID: p.org, RequireStopped: true, Generation: 2, ExpiresBy: &by}})
-		require.NoError(t, err)
-		return applied[0]
+	for _, by := range []time.Time{short.ExpiresAt.Add(time.Minute), long.ExpiresAt} {
+		_, err := f.exec.FinalizeBatch(ctx, f.inc, []TrackFinal{{Hash: h, State: TrackDropped, Reason: TrackReasonFinalizedLeaseExpiry, BlockNumber: &block, PrincipalID: p.id, OrgID: p.org, RequireStopped: true, Generation: 2, ExpiresBy: &by}})
+		require.Error(t, err, "expiry alone cannot permanently consume an Ethereum nonce")
 	}
-	require.False(t, final(short.ExpiresAt.Add(time.Minute)), "a finalized block past the current lease but before the longest one decides nothing")
-	require.True(t, final(long.ExpiresAt))
+	got, err = f.state(h)
+	require.NoError(t, err)
+	require.Equal(t, TrackRenewalStopped, got.State)
 	f.principalQuotaConsistent()
 }

@@ -85,7 +85,7 @@ func (s *Server) recoverNodeOwnership(c *gin.Context) {
 	}
 	notFound := func() { fail(http.StatusNotFound, "finalized deployment not found") }
 	status, err := s.nodeOwnershipEvidence.TransactionStatus(ctx, req.TransactionHash)
-	if err != nil && !nodepolicy.NodeRefused(err) {
+	if err != nil && !nodepolicy.NodeRefused(err) && !nodepolicy.NodeNotFound(err) {
 		fail(http.StatusServiceUnavailable, "ownership recovery unavailable") // no answer: nothing is known
 		return
 	}

@@ -150,6 +150,7 @@ func newKeeperFixture(t *testing.T, finality time.Duration) *keeperFixture {
 	f.ready.Store(true)
 	f.r = newNodeReconciler(f.writer, &plainEffects{}, f.client, f.audit, keeperNetwork)
 	f.r.batched = f.batched.Load
+	f.r.notFound = func() bool { return true } // the mock advertises definitive misses for both status APIs
 	now := func() time.Time { return time.Now().Add(time.Duration(f.skew.Load())) }
 	f.r.now = now
 	f.k = &nodeKeeper{node: f.node, chain: rpcChain{forward: proxy.New(public.URL).ForwardContext}, checker: f.checker, clock: f.clock, signer: nodepolicy.Signer{KeyID: "ops-a", PrivateKey: ed25519.NewKeyFromSeed(make([]byte, 32))},
@@ -976,13 +977,10 @@ func TestRenewalBudgetAccrual(t *testing.T) {
 	}
 }
 
-// A stopped transaction whose every recorded identity has expired by a
-// finalized block that does not hold it can never execute (the node checks
-// the identity at the block's timestamp, and OPS never renews a stopped
-// binding): it becomes dropped with finalized_lease_expiry on two evidence
-// reads, so stopped rows do not live for ever (independent review, finding
-// 2). Not while the finalized block is earlier than the longest lease.
-func TestStoppedTransactionDropsAfterFinalizedLeaseExpiry(t *testing.T) {
+// Lease expiry is not finality: the same bytes could execute under a fresh
+// identity while their nonce remains unused. The stopped row stays bound
+// after status retention; only its original principal may revive it.
+func TestStoppedTransactionKeepsBindingAfterFinalizedLeaseExpiry(t *testing.T) {
 	for _, fromNode := range []bool{false, true} {
 		name := "public_rpc"
 		if fromNode {
@@ -1034,7 +1032,7 @@ func TestStoppedTransactionDropsAfterFinalizedLeaseExpiry(t *testing.T) {
 			if _, err := f.tracking.runtime.Conn().Exec(`UPDATE tracking_meta SET created_at = clock_timestamp() - interval '1 hour'`); err != nil {
 				t.Fatal(err)
 			}
-			f.r.rows, f.k.expiredAfter = nil, time.Time{}
+			f.r.rows = nil
 			f.tick() // the first read past its longest lease
 			if row := f.row(ours); row.State != db.TrackRenewalStopped {
 				t.Fatalf("dropped on a single evidence read: %+v", row)
@@ -1042,27 +1040,24 @@ func TestStoppedTransactionDropsAfterFinalizedLeaseExpiry(t *testing.T) {
 			f.skew.Add(int64(time.Minute))
 			f.tick()
 			got := f.row(ours)
-			if got.State != db.TrackDropped || got.Reason != db.TrackReasonFinalizedLeaseExpiry {
-				t.Fatalf("not dropped after its last identity expired at a finalized block: %+v", got)
+			if got.State != db.TrackRenewalStopped || got.Final() {
+				t.Fatalf("lease expiry made an unused nonce final: %+v", got)
 			}
-			dropped := f.events("ops.system.dropped")
-			if len(dropped) != 1 || dropped[0].DenialReason != "finalized_lease_expiry" {
-				t.Fatalf("dropped audit %+v", dropped)
+			if dropped := f.events("ops.system.dropped"); len(dropped) != 0 {
+				t.Fatalf("unused nonce was audited as final: %+v", dropped)
 			}
-			for _, want := range []string{`"max_expires_at":`, `"finalized_block_timestamp":`, `"receipt":false`, `"finalized_block_hash":"0x`} {
-				if !strings.Contains(string(dropped[0].Params), want) {
-					t.Fatalf("dropped audit event lacks %s: %s", want, dropped[0].Params)
-				}
+			// Status retention must not remove the anti-rebinding decision.
+			if _, err := f.tracking.runtime.Conn().Exec(`DELETE FROM node_tx_status`); err != nil {
+				t.Fatal(err)
 			}
-			// The quota and shares are released, and the hash is never
-			// admitted again while its status is kept.
 			if used, pending, err := f.tracking.runtime.PendingQuota(context.Background()); err != nil || used != pending {
 				t.Fatalf("quota %d/%d %v", used, pending, err)
 			}
 			if n, err := f.tracking.runtime.PendingQuotaMismatches(context.Background()); err != nil || n != 0 {
 				t.Fatalf("share mismatches %d %v", n, err)
 			}
-			f.admitAs(ours, principal, org, 0, db.AdmitConflict)
+			f.admitAs(ours, uuid.New(), org, 0, db.AdmitConflict)
+			f.admitAs(ours, principal, org, 0, db.AdmitRevived)
 		})
 	}
 }
@@ -1190,7 +1185,6 @@ func TestDroppedIsRejudgedOnAFreshReadBeforeItIsAudited(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.r.rows = nil
-	f.k.expiredAfter, f.k.expiredAfterInc = time.Unix(1, 0), f.writer.incarnation() // an incarnation older than any identity
 	other := newSignedTransfer(t, 0)
 	f.admit(other, uuid.New(), uuid.New(), 0)
 	f.tick()

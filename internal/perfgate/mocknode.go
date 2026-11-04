@@ -220,6 +220,65 @@ func (m *MockNode) Restart(dropPool bool) {
 	}
 }
 
+// Crash models a node crash that loses its newest lost blocks (not final and
+// not yet written: Reth's persistence threshold): a new boot id, an empty
+// identity registry and pool, and those blocks' transactions are no longer
+// on any chain, so the node answers them as a definitive miss until they are
+// submitted again. Returns the transactions the lost blocks held.
+func (m *MockNode) Crash(lost int) []string {
+	return m.loseBlocks(lost, true)
+}
+
+// LoseBlocks drops the newest lost blocks (not final) and forgets their
+// transactions' identities and pool entries without a restart (same boot):
+// the same-boot form of a definitive miss.
+func (m *MockNode) LoseBlocks(lost int) []string {
+	return m.loseBlocks(lost, false)
+}
+
+func (m *MockNode) loseBlocks(lost int, restart bool) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	finalized := m.finalizedLocked()
+	var gone []string
+	for removed := 0; removed < lost && len(m.blocks) > 1; removed++ {
+		block := m.blocks[len(m.blocks)-1]
+		if finalized != nil && block.Number <= finalized.Number {
+			break
+		}
+		for _, hash := range block.Transactions {
+			tx := m.txs[hash]
+			tx.block, tx.index = nil, 0
+			m.includedCount--
+			account := m.accounts[tx.sender]
+			account.confirmed = min(account.confirmed, tx.nonce)
+			gone = append(gone, hash)
+		}
+		m.blocks = m.blocks[:len(m.blocks)-1]
+	}
+	m.salt++
+	if !restart {
+		m.epoch++
+		for _, hash := range gone {
+			m.txs[hash].identity = false
+		}
+		return gone
+	}
+	m.bootID = newBootID()
+	m.epoch = 0
+	for _, tx := range m.txs {
+		if tx.block == nil {
+			tx.identity = false
+		}
+	}
+	for sender, account := range m.accounts {
+		m.pooledCount -= int64(len(account.pooled))
+		account.pooled = map[uint64]*mockTx{}
+		delete(m.dirty, sender)
+	}
+	return gone
+}
+
 // Evict drops a pooled transaction from the pool (same boot); its identity
 // stays registered. Reports whether it was pooled.
 func (m *MockNode) Evict(hash string) bool {
@@ -427,6 +486,16 @@ func poolRejected(reason string) *rpcError {
 
 // errRejected is the node's opaque -32000.
 var errRejected = &rpcError{Code: -32000, Message: "private execution request rejected"}
+
+// errNotFound is the N7 definitive canonical miss of ops_transactionStatus.
+var errNotFound = &rpcError{Code: -32014, Message: "transaction not found"}
+
+// missLocked: no canonical block holds hash and no identity is registered
+// for it (N7, transaction_not_found_v1). The mock's lookups never fail.
+func (m *MockNode) missLocked(hash string) bool {
+	tx := m.txs[hash]
+	return tx == nil || (tx.block == nil && !tx.identity)
+}
 
 func (e *rpcError) Error() string { return e.Message }
 
@@ -948,7 +1017,7 @@ func (m *MockNode) privateMethods() map[string]handlerFunc {
 // Capabilities mirrors nodepolicy.RequiredCapabilities plus the optional
 // fact_wait_v1 (RD-1411). The compatibility test in internal/nodepolicy
 // fails if they drift.
-var Capabilities = []string{"per_frame_a5", "signed_identity_v1", "fact_stream_v1", "simulation_v1", "archive_v1", "candidate_simulation_v1", "scoped_diagnostics_v1", "finalized_status_v1", "boot_id_v1", "fact_wait_v1", "transaction_statuses_v1"}
+var Capabilities = []string{"per_frame_a5", "signed_identity_v1", "fact_stream_v1", "simulation_v1", "archive_v1", "candidate_simulation_v1", "scoped_diagnostics_v1", "finalized_status_v1", "boot_id_v1", "fact_wait_v1", "transaction_statuses_v1", "transaction_not_found_v1"}
 
 type network struct {
 	ChainID      uint64 `json:"chain_id"`
@@ -1143,6 +1212,9 @@ func (m *MockNode) transactionStatus(params []json.RawMessage, _ *callInfo) (any
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	status := m.statusLocked(strings.ToLower(hash), m.finalizedLocked())
+	if status == nil && m.missLocked(strings.ToLower(hash)) {
+		return nil, errNotFound
+	}
 	if status == nil {
 		return nil, errRejected
 	}
@@ -1198,11 +1270,13 @@ func (m *MockNode) transactionStatuses(params []json.RawMessage, _ *callInfo) (a
 	if finalized != nil && finalized.Number == 0 {
 		finalized = nil // only genesis is final: no finality to report
 	}
-	out := make([]*batchedEntry, len(hashes))
+	out := make([]any, len(hashes))
 	for i, hash := range hashes {
 		if status := m.statusLocked(hash, finalized); status != nil {
 			tx := m.txs[hash]
 			out[i] = &batchedEntry{transactionStatus: status, Pooled: tx.block == nil && m.accounts[tx.sender].pooled[tx.nonce] == tx}
+		} else if m.missLocked(hash) {
+			out[i] = "not_found" // N7: definitive canonical miss
 		}
 	}
 	var head *finalizedHead
@@ -1210,10 +1284,10 @@ func (m *MockNode) transactionStatuses(params []json.RawMessage, _ *callInfo) (a
 		head = &finalizedHead{Number: finalized.Number, Hash: finalized.Hash, Timestamp: max(finalized.Time.Unix(), 1)}
 	}
 	type batch struct {
-		BootID         string          `json:"boot_id"`
-		Finalized      *finalizedHead  `json:"finalized"`
-		CanonicalEpoch uint64          `json:"canonical_epoch"`
-		Statuses       []*batchedEntry `json:"statuses"`
+		BootID         string         `json:"boot_id"`
+		Finalized      *finalizedHead `json:"finalized"`
+		CanonicalEpoch uint64         `json:"canonical_epoch"`
+		Statuses       []any          `json:"statuses"`
 	}
 	answer := batch{m.bootID, head, m.epoch, out}
 	if senders == nil {

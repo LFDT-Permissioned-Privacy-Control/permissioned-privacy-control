@@ -283,8 +283,21 @@ func TestMockNodeBatchedStatus(t *testing.T) {
 			t.Fatalf("row %d %v", i, row)
 		}
 	}
-	if string(rows[3]) != "null" {
-		t.Fatalf("unknown row %s", rows[3])
+	if string(rows[3]) != `"not_found"` {
+		t.Fatalf("unknown row %s, want the N7 definitive miss", rows[3])
+	}
+	// A crash loses the newest block: its transactions are a definitive
+	// miss until submitted again (N7).
+	lost := node.Crash(1)
+	if len(lost) != 3 {
+		t.Fatalf("crash lost %d transactions, want 3", len(lost))
+	}
+	r = call(t, private.URL, "private-token-0123456789", "ops_transactionStatuses", hashes)
+	if r.Error != nil || json.Unmarshal(r.Result, &batch) != nil || string(batch.Statuses[0]) != `"not_found"` {
+		t.Fatalf("after a crash: %s %v", r.Result, r.Error)
+	}
+	if r := call(t, private.URL, "private-token-0123456789", "ops_transactionStatus", hashes[0]); r.Error == nil || r.Error.Code != -32014 {
+		t.Fatalf("single-call miss %+v", r.Error)
 	}
 	tooMany := make([]string, 257)
 	for i := range tooMany {

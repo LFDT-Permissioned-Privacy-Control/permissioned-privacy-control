@@ -222,3 +222,69 @@ func TestPublisherNeverAcknowledgesMismatchedOrUncommittedState(t *testing.T) {
 		})
 	}
 }
+
+// statusCountingNode counts the node status reads a publisher makes.
+type statusCountingNode struct {
+	*memoryNode
+	statusReads int
+}
+
+func (n *statusCountingNode) PolicyStatus(ctx context.Context) (NodeStatus, error) {
+	n.statusReads++
+	return n.memoryNode.PolicyStatus(ctx)
+}
+
+// A fact change right after the node acknowledged a publication goes out as
+// a delta on that base without another status read, and no heartbeat
+// follows a publication within a second; a stale acknowledgement, or a
+// refused publication, reads the status again (P7 L5, finding F8).
+func TestPublisherPublishesAFreshChangeWithoutAStatusRead(t *testing.T) {
+	_, s, mem, now := publisherFixture(t)
+	n := &statusCountingNode{memoryNode: mem}
+	p, err := NewPublisher(PublisherConfig{Network: identityFixture().Network, ConsumerID: "producer", Signer: testSigner(), Source: s, Node: n, Lifetime: time.Minute, Now: func() time.Time { return *now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	change := func() {
+		s.snapshot.Version++
+		s.snapshot.Principals[0].Banned = !s.snapshot.Principals[0].Banned
+	}
+	if err := p.Tick(ctx); err != nil || n.statusReads != 1 || mem.kinds[0] != "snapshot" {
+		t.Fatalf("bootstrap: reads %d kinds %v %v", n.statusReads, mem.kinds, err)
+	}
+	change()
+	*now = now.Add(500 * time.Millisecond)
+	if err := p.Tick(ctx); err != nil || n.statusReads != 1 || mem.kinds[1] != "delta" {
+		t.Fatalf("fresh change: reads %d kinds %v %v", n.statusReads, mem.kinds, err)
+	}
+	*now = now.Add(500 * time.Millisecond)
+	if err := p.Tick(ctx); err != nil || len(mem.kinds) != 2 {
+		t.Fatalf("a heartbeat right after a publication: kinds %v %v", mem.kinds, err)
+	}
+	*now = now.Add(heartbeatSkip)
+	if err := p.Tick(ctx); err != nil || n.statusReads != 2 || mem.kinds[2] != "heartbeat" {
+		t.Fatalf("heartbeat: reads %d kinds %v %v", n.statusReads, mem.kinds, err)
+	}
+	*now = now.Add(ackFresh)
+	change()
+	if err := p.Tick(ctx); err != nil || n.statusReads != 3 || mem.kinds[3] != "delta" {
+		t.Fatalf("change after a stale acknowledgement: reads %d kinds %v %v", n.statusReads, mem.kinds, err)
+	}
+	// The node lost its facts (restarted empty) right after acknowledging:
+	// the delta on the acknowledged base is refused, and the next tick reads
+	// the status and republishes in full.
+	mem.feed = Feed{}
+	change()
+	*now = now.Add(100 * time.Millisecond)
+	if err := p.Tick(ctx); err == nil {
+		t.Fatal("a delta to a node without its base was accepted")
+	}
+	if err := p.Tick(ctx); err != nil || mem.kinds[len(mem.kinds)-1] != "snapshot" {
+		t.Fatalf("recovery: kinds %v %v", mem.kinds, err)
+	}
+	status, _ := mem.PolicyStatus(ctx)
+	if status.Version != s.snapshot.Version {
+		t.Fatalf("node at %d, want %d", status.Version, s.snapshot.Version)
+	}
+}

@@ -170,9 +170,11 @@ type nodeReconciler struct {
 	canonical     uint64
 	canonicalBoot string
 	canonicalSeen bool
-	// batched reports whether the node advertises the batched status call.
-	batched func() bool
-	keeper  *nodeKeeper
+	// batched reports whether the node advertises the batched status call;
+	// notFound whether it advertises the definitive canonical miss (N7).
+	batched  func() bool
+	notFound func() bool
+	keeper   *nodeKeeper
 	// alert counts an anomaly by kind (nil: not counted).
 	alert func(kind string)
 }
@@ -380,6 +382,10 @@ type observation struct {
 	// pooled: the batched answer's pool flag for a not-included transaction
 	// (nil: unknown, the single call does not report it).
 	pooled *bool
+	// notFound: the node's definitive canonical miss (N7), from a node that
+	// advertises it; boot is the answering boot when known (batched).
+	notFound bool
+	boot     string
 }
 
 // due reports whether a row is polled this tick. Provisional rows are polled
@@ -442,6 +448,10 @@ func (r *nodeReconciler) poll(ctx context.Context) []observation {
 			request, cancel := context.WithTimeout(ctx, reconcileStatusWait)
 			defer cancel()
 			status, err := r.node.TransactionStatus(request, t.hashHex)
+			if err != nil && nodepolicy.NodeNotFound(err) && r.notFound != nil && r.notFound() {
+				out[i] = observation{tracked: t, notFound: true}
+				return
+			}
 			if err == nil {
 				err = status.Validate()
 			}
@@ -511,10 +521,11 @@ func (r *nodeReconciler) pollBatched(ctx context.Context, client batchedOutcomeC
 				// Every answered entry invalid (two or more): the node and
 				// OPS disagree on the protocol, not about one transaction.
 				answered, invalid := 0, 0
+				notFound := r.notFound != nil && r.notFound()
 				for _, entry := range batch.Statuses {
 					if entry != nil {
 						answered++
-						if entry.Err != nil {
+						if entry.Err != nil || (entry.NotFound && !notFound) {
 							invalid++
 						}
 					}
@@ -533,6 +544,10 @@ func (r *nodeReconciler) pollBatched(ctx context.Context, client batchedOutcomeC
 						o.err = nodepolicy.ErrNodeRejected // unknown to the node
 					case entry.Err != nil:
 						o.err = entry.Err // this hash alone: quarantined
+					case entry.NotFound && (r.notFound == nil || !r.notFound()):
+						o.err = nodepolicy.ErrInvalidStatus // a form the node does not advertise
+					case entry.NotFound:
+						o.notFound, o.boot = true, batch.BootID
 					case entry.Status.PrincipalID != t.row.PrincipalID.String() || entry.Status.OrgID != t.row.OrgID.String():
 						o.err = errForeignOutcome
 					default:
@@ -579,6 +594,12 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 	for i := range observations {
 		o := &observations[i]
 		t := o.tracked
+		if o.notFound {
+			if tr, ok := r.definitiveMiss(t, o, now); ok {
+				transitions = append(transitions, tr)
+			}
+			continue
+		}
 		if o.err != nil {
 			switch {
 			case errors.Is(o.err, nodepolicy.ErrInvalidStatus):
@@ -671,6 +692,12 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 				if transitions[i].To == db.TrackPending {
 					t.keepAt = time.Time{} // reorged out: the keeper reconsiders it
 				}
+				if transitions[i].Undelivered {
+					// The keeper reconsiders it now; its fresh read decides
+					// whether a delivery claim still holds it.
+					t.row.DeliveredGeneration, t.row.DeliveredBoot = nil, uuid.Nil
+					t.row.ClaimOwner, t.row.ClaimBoot, t.row.ClaimExpires = uuid.Nil, uuid.Nil, nil
+				}
 			} else {
 				r.refresh(ctx, t)
 			}
@@ -682,6 +709,38 @@ func (r *nodeReconciler) apply(ctx context.Context, observations []observation) 
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// definitiveMiss handles the node's definitive canonical miss for a row (N7):
+// no canonical block holds it and the node holds no identity for it, so it
+// cannot execute now (typically its block was lost by a node crash). A
+// provisional row goes back to pending, undelivered, and the keeper renews
+// and redelivers the same signed transaction (quota as a reorg back: +1,
+// allowed over the limit); a pending row delivered to the answering boot was
+// lost by it and is renewed as evicted. It is never final and never dropped
+// evidence; a null answer is no evidence at all.
+func (r *nodeReconciler) definitiveMiss(t *trackedRow, o *observation, now time.Time) (db.TrackTransition, bool) {
+	t.failures, t.quarantine, t.forcePoll = 0, 0, false
+	switch t.row.State {
+	case db.TrackProvisional:
+		t.backoff, t.nextPoll = 0, now.Add(reconcileTick)
+		// After a restart (another boot answered) the keeper renews it as
+		// node_restarted anyway; the same boot losing it clears the delivery
+		// record, so it is renewed as undelivered.
+		boot, err := uuid.Parse(o.boot)
+		sameBoot := err != nil || t.row.DeliveredBoot == uuid.Nil || boot == t.row.DeliveredBoot
+		return db.TrackTransition{Hash: t.row.Hash, From: db.TrackProvisional, To: db.TrackPending, Undelivered: sameBoot}, true
+	case db.TrackPending:
+		t.backoff = min(max(2*t.backoff, 2*time.Second), reconcileMaxBackoff)
+		t.nextPoll = now.Add(t.backoff)
+		if boot, err := uuid.Parse(o.boot); err == nil && t.row.DeliveredTo(boot) && now.Sub(t.row.CreatedAt) > keeperEvictAfter && !t.evictAt.After(now) {
+			t.evictAt = now.Add(keeperEvictAfter)
+			r.markEvicted(t)
+		}
+	case db.TrackRenewalStopped:
+		r.slowLane(t, now)
+	}
+	return db.TrackTransition{}, false
 }
 
 // markEvicted flags a pending row the node's pool no longer holds: the keeper

@@ -131,30 +131,6 @@ type nodeKeeper struct {
 	seenRead uint64
 	// auditPausedUntil: renewals wait after the audit buffer refused.
 	auditPausedUntil time.Time
-	// expiredAfter: the tracking incarnation's creation plus the longest
-	// identity lifetime the node accepts, and the incarnation it was read
-	// for. An identity issued under an earlier incarnation (lost with it) has
-	// expired by then; no lease-expiry verdict is taken before it.
-	expiredAfter    time.Time
-	expiredAfterInc uuid.UUID
-}
-
-// maxIdentityLifetime is the longest identity lease the node accepts
-// (expires_at − issued_at ≤ 600 s) plus its issue-time tolerance (5 s).
-const maxIdentityLifetime = 605 * time.Second
-
-// incarnationFloor is expiredAfter for r's incarnation (read once per
-// incarnation); ok is false while it cannot be read.
-func (k *nodeKeeper) incarnationFloor(ctx context.Context, r *nodeReconciler) (time.Time, bool) {
-	if k.expiredAfterInc == r.inc && !k.expiredAfter.IsZero() {
-		return k.expiredAfter, true
-	}
-	meta, err := r.tracking.store.TrackingMeta(ctx)
-	if err != nil || meta.Incarnation != r.inc || meta.CreatedAt.IsZero() {
-		return time.Time{}, false
-	}
-	k.expiredAfter, k.expiredAfterInc = meta.CreatedAt.Add(maxIdentityLifetime), r.inc
-	return k.expiredAfter, true
 }
 
 // margin is R = TTL/4 (plan §4.8.2): a renewal must land before a lease has
@@ -971,30 +947,25 @@ func (k *nodeKeeper) droppedDue(r *nodeReconciler, now time.Time, perSigner int)
 	return bySigner
 }
 
-// dropVerdict is the final one evidence read supports for a stopped binding
-// (reason 0: none); expiresBy is the finalized block's timestamp a lease-
-// expiry verdict rests on.
+// dropVerdict is the final nonce-consumption verdict supported by an
+// evidence read (reason 0: none).
 type dropVerdict struct {
-	reason    int16
-	expiresBy *time.Time
+	reason int16
 	// foreignOnly: a canonical block holds the hash; only the private
 	// status (final under another submission) can still make it a verdict.
 	foreignOnly bool
 }
 
-// judgeDrop is the verdict of one read for t: receipt (a canonical block
-// holds the hash), the finalized block's timestamp and the signer's nonce at
-// it (nonceKnown false: not read). A lease-expiry verdict also needs the
-// finalized block past floor (every identity of an earlier tracking
-// incarnation has expired; zero: unknown, no verdict).
-func judgeDrop(t *trackedRow, receipt bool, finalizedAt time.Time, nonce uint64, nonceKnown bool, floor time.Time) dropVerdict {
+// judgeDrop requires finalized nonce consumption. Expiry of every identity
+// issued so far cannot make the raw transaction permanently unexecutable:
+// a fresh identity could still execute its unused nonce. The stopped binding
+// must survive status retention and keep refusing a different principal.
+func judgeDrop(t *trackedRow, receipt bool, nonce uint64, nonceKnown bool) dropVerdict {
 	switch {
 	case receipt:
 		return dropVerdict{}
 	case nonceKnown && nonce > t.row.Nonce:
 		return dropVerdict{reason: db.TrackReasonNonceConsumed}
-	case !floor.IsZero() && !finalizedAt.Before(t.row.MaxExpiresAt) && !finalizedAt.Before(floor):
-		return dropVerdict{reason: db.TrackReasonFinalizedLeaseExpiry, expiresBy: &finalizedAt}
 	}
 	return dropVerdict{}
 }
@@ -1040,14 +1011,14 @@ func (k *nodeKeeper) droppedFromNode(ctx, transport context.Context, r *nodeReco
 	if err != nil {
 		return err
 	}
-	floor, _ := k.incarnationFloor(ctx, r)
 	var confirmed []*trackedRow
 	var evidence []dropEvidence
 	for i, t := range candidates {
 		entry := batch.Statuses[i]
-		if entry != nil && entry.Err != nil {
-			// An invalid status answer for this hash says nothing; the
-			// receipt and nonce below are read independently of it.
+		if entry != nil && (entry.Err != nil || entry.NotFound) {
+			// An invalid status answer, or a definitive miss (the node holds
+			// no identity), says nothing about finality; the receipt and
+			// nonce below are read independently of it.
 			entry = nil
 		}
 		if entry != nil && (entry.Status.Execution.Status == "included" || entry.Status.Execution.Status == "reverted") {
@@ -1075,7 +1046,7 @@ func (k *nodeKeeper) droppedFromNode(ctx, transport context.Context, r *nodeReco
 			nonce = batch.SenderNonces[senderIndex["0x"+hex.EncodeToString(t.row.Signer)]]
 		}
 		finalizedAt := time.Unix(batch.Finalized.Timestamp, 0)
-		verdict := judgeDrop(t, *receipt, finalizedAt, nonce, batch.SenderNonces != nil, floor)
+		verdict := judgeDrop(t, *receipt, nonce, batch.SenderNonces != nil)
 		if observeDrop(t, verdict.reason != 0, now) {
 			confirmed = append(confirmed, t)
 			evidence = append(evidence, dropEvidence{source: "private_node", verdict: verdict, block: batch.Finalized.Number, hash: batch.Finalized.Hash, timestamp: finalizedAt, nonce: nonce, nonceKnown: batch.SenderNonces != nil, firstSeen: t.dropSeen})
@@ -1109,7 +1080,6 @@ func (k *nodeKeeper) droppedFromChain(ctx, transport context.Context, r *nodeRec
 	verdicts := map[*trackedRow]dropVerdict{}
 	var finalizedAt time.Time
 	var failures []error
-	floor, _ := k.incarnationFloor(ctx, r)
 	for signer, rows := range k.droppedDue(r, now, maxChainBatch-2) {
 		if transport.Err() != nil {
 			break // the tick's budget is spent; the rest wait for the next tick
@@ -1130,7 +1100,7 @@ func (k *nodeKeeper) droppedFromChain(ctx, transport context.Context, r *nodeRec
 		}
 		finalizedAt = evidence.Timestamp
 		for _, t := range rows {
-			verdict := judgeDrop(t, evidence.Receipts[t.hashHex], evidence.Timestamp, evidence.Nonce, true, floor)
+			verdict := judgeDrop(t, evidence.Receipts[t.hashHex], evidence.Nonce, true)
 			if evidence.Receipts[t.hashHex] {
 				// Included: possibly under another submission, which the
 				// private status below decides.
@@ -1166,8 +1136,10 @@ func (k *nodeKeeper) droppedFromChain(ctx, transport context.Context, r *nodeRec
 			foreign = true // final under another submission
 		case verdicts[t].foreignOnly:
 			continue // included, but the private node does not say under whom
-		case err != nil && !nodepolicy.NodeRefused(err):
-			continue // no definitive answer (unavailable, internal, limited): no decision
+		case err != nil && !nodepolicy.NodeNotFound(err) && (!nodepolicy.NodeRefused(err) || (r.notFound != nil && r.notFound())):
+			// No definitive answer (unavailable, internal, limited; and for a
+			// node that reports misses, its opaque -32000): no decision.
+			continue
 		}
 		if observeDrop(t, true, now) {
 			confirmed = append(confirmed, t)
@@ -1184,7 +1156,7 @@ func (k *nodeKeeper) droppedFromChain(ctx, transport context.Context, r *nodeRec
 // finalizeDropped audits and records confirmed dropped decisions (only for
 // bindings still stopped), each with its evidence in the audit event. The
 // decision is re-judged on a fresh read first (state, generation, admission
-// and the longest recorded lease), so no event is appended for a final the
+// and admission), so no event is appended for a final the
 // database fences would refuse.
 func (k *nodeKeeper) finalizeDropped(ctx context.Context, r *nodeReconciler, confirmed []*trackedRow, evidence []dropEvidence, failures []error) error {
 	if len(confirmed) == 0 {
@@ -1209,8 +1181,7 @@ func (k *nodeKeeper) finalizeDropped(ctx context.Context, r *nodeReconciler, con
 		switch {
 		case !ok:
 			r.refresh(ctx, t) // final or released meanwhile
-		case row.AdmitXid != t.row.AdmitXid || row.State != db.TrackRenewalStopped || row.Generation != t.row.Generation ||
-			(e.verdict.expiresBy != nil && row.MaxExpiresAt.After(*e.verdict.expiresBy)):
+		case row.AdmitXid != t.row.AdmitXid || row.State != db.TrackRenewalStopped || row.Generation != t.row.Generation:
 			if row.AdmitXid == t.row.AdmitXid {
 				t.row = row
 				if row.State != db.TrackRenewalStopped {
@@ -1239,10 +1210,7 @@ func (k *nodeKeeper) finalizeDropped(ctx context.Context, r *nodeReconciler, con
 		if !e.timestamp.IsZero() {
 			extra["finalized_block_timestamp"] = e.timestamp.UTC().Format(time.RFC3339)
 		}
-		if e.verdict.reason == db.TrackReasonFinalizedLeaseExpiry {
-			extra["max_expires_at"] = t.row.MaxExpiresAt.UTC().Format(time.RFC3339)
-			extra["receipt"] = false
-		}
+
 		if e.foreign {
 			extra["executed_by_another_submission"] = true
 		}
@@ -1253,10 +1221,10 @@ func (k *nodeKeeper) finalizeDropped(ctx context.Context, r *nodeReconciler, con
 	}
 	finals := make([]db.TrackFinal, len(confirmed))
 	for i, t := range confirmed {
-		// Fenced under the row lock by the generation the evidence was read
-		// for and, for a lease expiry, by the longest recorded lease.
+		// Fenced under the row lock by the generation the nonce evidence
+		// was read for, so a concurrent revival cannot be finalized.
 		finals[i] = db.TrackFinal{Hash: t.row.Hash, State: db.TrackDropped, Reason: evidence[i].verdict.reason, PrincipalID: t.row.PrincipalID, OrgID: t.row.OrgID, AdmitXid: t.row.AdmitXid,
-			RequireStopped: true, Generation: t.row.Generation, ExpiresBy: evidence[i].verdict.expiresBy}
+			RequireStopped: true, Generation: t.row.Generation}
 	}
 	applied, err := r.tracking.store.FinalizeBatch(ctx, r.inc, finals)
 	if err != nil {

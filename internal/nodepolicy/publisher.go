@@ -52,7 +52,24 @@ type Publisher struct {
 	// anchorRequested: this publisher found the node holding facts it did not
 	// publish itself (a restart or failover) and asked for a full export.
 	anchorRequested bool
+	// status is the node's last status read; acked/ackedAt the node's last
+	// acknowledgement of a publication and when it arrived.
+	status  NodeStatus
+	acked   AppliedState
+	ackedAt time.Time
 }
+
+// ackFresh: a fact change published within this long after the node's last
+// acknowledgement is sent as a delta on that acknowledged base without first
+// reading the node's status (one round trip less per change, F8). The node
+// refuses a delta whose base it does not hold (-32011), which falls back to a
+// full export; heartbeats always read the status.
+const ackFresh = 2 * time.Second
+
+// heartbeatSkip: no heartbeat is sent while the node acknowledged the
+// current version this recently (a publication extended the facts' lease
+// just now), so a heartbeat never delays the next change's publication.
+const heartbeatSkip = time.Second
 
 // ErrFactDivergence means the facts published incrementally differ from a
 // full export of the same generation. The publisher requests a full
@@ -91,9 +108,19 @@ func (p *Publisher) Tick(ctx context.Context) error {
 	if version == 0 {
 		return ErrSnapshot
 	}
-	status, err := c.Node.PolicyStatus(ctx)
-	if err != nil {
-		return err
+	if p.last != nil && version == p.last.Version && p.acked.Version == version && p.acked.Digest == p.lastDigest && c.Now().Sub(p.ackedAt) < heartbeatSkip {
+		return nil
+	}
+	var status NodeStatus
+	if p.last != nil && version > p.last.Version && p.acked.Version == p.last.Version && p.acked.Digest == p.lastDigest && c.Now().Sub(p.ackedAt) < ackFresh {
+		// A change on the base the node just acknowledged.
+		status = p.status
+		status.Version, status.Digest, status.ExpiresAt = p.acked.Version, p.acked.Digest, p.acked.ExpiresAt
+	} else {
+		if status, err = c.Node.PolicyStatus(ctx); err != nil {
+			return err
+		}
+		p.status = status
 	}
 	if status.ProtocolVersion != ProtocolVersion || status.Network != c.Network || !slices.Contains(status.Capabilities, "fact_stream_v1") {
 		return ErrNodeResponse
@@ -213,11 +240,14 @@ func (p *Publisher) Tick(ctx context.Context) error {
 		ack, err = c.Node.ApplyPolicy(ctx, wire)
 	}
 	if err != nil {
+		p.ackedAt = time.Time{} // read the node's status again first
 		return err
 	}
 	if ack.Version != expected.Version || ack.Digest != expected.Digest || ack.ExpiresAt < expected.ExpiresAt {
+		p.ackedAt = time.Time{}
 		return ErrNodeResponse
 	}
+	p.acked, p.ackedAt = ack, c.Now()
 	if err := c.Source.AcknowledgeNodePolicy(ctx, c.ConsumerID, ack); err != nil {
 		return err
 	}

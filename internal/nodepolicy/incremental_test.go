@@ -541,6 +541,7 @@ func TestNewPublisherReanchorsANodeItDidNotPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
+		now = now.Add(heartbeatSkip) // a heartbeat interval passes between ticks
 		if err := restarted.Tick(context.Background()); err != nil {
 			t.Fatal(err)
 		}

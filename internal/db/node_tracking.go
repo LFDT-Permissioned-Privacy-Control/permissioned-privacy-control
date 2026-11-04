@@ -239,8 +239,8 @@ const (
 	// AdmitKept: the same principal's in-flight binding holds an envelope that
 	// dominates or equals this one (it was signed earlier, or is the same):
 	// the stored generation stays current and meets this attempt's floor.
-	// Sending this envelope is safe (the node answers a dominated attempt as
-	// success), but its delivery acknowledges nothing.
+	// The caller may send this envelope only if it meets the returned stored
+	// MinVersion too; otherwise it must re-read the clock and sign again.
 	AdmitKept
 	// AdmitIncomparable: neither envelope dominates the other (only after a
 	// database clock step): the stored one is kept and nothing about this
@@ -270,6 +270,9 @@ type AdmitResult struct {
 	// ContextID is the binding's current context after the write (the
 	// winner): this admission's own when it was written.
 	ContextID uuid.UUID
+	// MinVersion is the winner's fact floor, including when the stored
+	// identity dominates this attempt and survives it.
+	MinVersion uint64
 }
 
 // Written reports whether the admission's identity was recorded.
@@ -489,7 +492,7 @@ func (e *ExecDB) AdmitBatch(ctx context.Context, inc uuid.UUID, limits TrackLimi
 					continue
 				}
 				row := written[i]
-				results[i] = AdmitResult{Outcome: AdmitResubmitted, Generation: row.generation, State: row.state, ContextID: row.context}
+				results[i] = AdmitResult{Outcome: AdmitResubmitted, Generation: row.generation, State: row.state, ContextID: row.context, MinVersion: row.minVersion}
 				switch {
 				case !row.prev.Valid:
 					results[i].Outcome = AdmitInserted
@@ -516,6 +519,7 @@ type admitRow struct {
 	state      int16
 	generation int32
 	context    uuid.UUID
+	minVersion uint64
 	// replaced: this admission's envelope is now the binding's (inserted,
 	// revived or dominating); incomparable: kept because neither envelope
 	// dominates the other.
@@ -767,6 +771,7 @@ func upsertRound(ctx context.Context, tx *sql.Tx, inc uuid.UUID, bucket int16, b
 			return nil, err
 		}
 		a := byHash[string(hash)]
+		row.minVersion = uint64(minVersion)
 		row.replaced = row.context == a.ContextID
 		// Kept: the stored envelope covers the attempt (equal or dominating),
 		// or neither covers the other (incomparable: re-sign).
@@ -956,6 +961,10 @@ type TrackTransition struct {
 	// lease ran out or the pool lost the transaction.
 	Boot      uuid.UUID
 	ContextID uuid.UUID
+	// Undelivered (provisional → pending only): the node answered a
+	// definitive canonical miss (a block lost by a crash, N7): the delivery
+	// record is cleared, so the lease keeper redelivers the transaction.
+	Undelivered bool
 }
 
 func allowedTransition(from, to int16) bool {
@@ -981,7 +990,7 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 	byHash := map[string]int{}
 	var hashes [][]byte
 	for i, t := range transitions {
-		if len(t.Hash) != 32 || !allowedTransition(t.From, t.To) || (t.BlockNumber != nil && *t.BlockNumber > 1<<63-1) {
+		if len(t.Hash) != 32 || !allowedTransition(t.From, t.To) || (t.BlockNumber != nil && *t.BlockNumber > 1<<63-1) || (t.Undelivered && (t.From != TrackProvisional || t.To != TrackPending)) {
 			return nil, fmt.Errorf("invalid tracking transition")
 		}
 		if _, dup := byHash[string(t.Hash)]; dup {
@@ -1007,6 +1016,7 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 		var tos, reasons []int64
 		var blocks []sql.NullInt64
 		var boots, executed []sql.NullString
+		var undelivered []bool
 		var stopped []int
 		for hash, row := range locked {
 			i := byHash[hash]
@@ -1032,6 +1042,7 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
 				ctx = sql.NullString{String: t.ContextID.String(), Valid: true}
 			}
 			executed = append(executed, ctx)
+			undelivered = append(undelivered, t.Undelivered)
 			if t.To == TrackRenewalStopped {
 				stopped = append(stopped, i)
 			}
@@ -1047,10 +1058,10 @@ func (e *ExecDB) ApplyTransitions(ctx context.Context, inc uuid.UUID, transition
    state = v.st,
    reason = v.r,
    block_number = CASE WHEN v.st = 2 THEN v.blk WHEN v.st = 1 THEN NULL ELSE b.block_number END,
-   delivered_generation = CASE WHEN v.st = 2 AND (v.ctx IS NULL OR v.ctx = b.context_id) THEN b.generation ELSE b.delivered_generation END,
-   delivered_boot = CASE WHEN v.st = 2 AND (v.ctx IS NULL OR v.ctx = b.context_id) THEN coalesce(v.boot, b.delivered_boot) ELSE b.delivered_boot END
- FROM unnest($1::bytea[], $2::smallint[], $3::smallint[], $4::bigint[], $5::uuid[], $6::uuid[]) AS v(h, st, r, blk, boot, ctx)
- WHERE b.tx_hash = v.h`, hs, tos, reasons, nullInts(blocks), boots, executed); err != nil {
+   delivered_generation = CASE WHEN v.st = 2 AND (v.ctx IS NULL OR v.ctx = b.context_id) THEN b.generation WHEN v.und THEN NULL ELSE b.delivered_generation END,
+   delivered_boot = CASE WHEN v.st = 2 AND (v.ctx IS NULL OR v.ctx = b.context_id) THEN coalesce(v.boot, b.delivered_boot) WHEN v.und THEN NULL ELSE b.delivered_boot END
+ FROM unnest($1::bytea[], $2::smallint[], $3::smallint[], $4::bigint[], $5::uuid[], $6::uuid[], $7::bool[]) AS v(h, st, r, blk, boot, ctx, und)
+ WHERE b.tx_hash = v.h`, hs, tos, reasons, nullInts(blocks), boots, executed, undelivered); err != nil {
 			return err
 		}
 		if len(stopped) > 0 {
@@ -1153,7 +1164,7 @@ func (e *ExecDB) FinalizeBatch(ctx context.Context, inc uuid.UUID, finals []Trac
 	byHash := map[string]int{}
 	var hashes [][]byte
 	for i, f := range finals {
-		if len(f.Hash) != 32 || f.State < TrackIncluded || f.State > TrackDropped || (f.BlockNumber != nil && *f.BlockNumber > 1<<63-1) {
+		if len(f.Hash) != 32 || f.State < TrackIncluded || f.State > TrackDropped || (f.BlockNumber != nil && *f.BlockNumber > 1<<63-1) || (f.State == TrackDropped && f.Reason == TrackReasonFinalizedLeaseExpiry) {
 			return nil, fmt.Errorf("invalid tracking final")
 		}
 		if _, dup := byHash[string(f.Hash)]; dup {

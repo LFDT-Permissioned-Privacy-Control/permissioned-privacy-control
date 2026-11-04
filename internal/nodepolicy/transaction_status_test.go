@@ -151,3 +151,38 @@ func TestCreatedContractsBoundIsTheNodesFrameLimit(t *testing.T) {
 		}
 	}
 }
+
+// N7 (final wire): a batched entry may be the string "not_found", the node's
+// definitive canonical miss; any other string is that entry's invalid answer.
+// With senders a miss must come with receipts[i] == false. The single call's
+// miss is -32014 (P7 §4.1, finding F7).
+func TestBatchedStatusDecodesTheDefinitiveMiss(t *testing.T) {
+	hashes := []string{"0x" + strings.Repeat("11", 32), "0x" + strings.Repeat("22", 32), "0x" + strings.Repeat("33", 32)}
+	s := rpcServer(t, func(method string, params []json.RawMessage) (any, string) {
+		if method == "ops_transactionStatus" {
+			return nil, `{"code":-32014,"message":"transaction not found"}`
+		}
+		result := map[string]any{"boot_id": testBootID, "finalized": nil, "canonical_epoch": 0, "statuses": []any{"not_found", "missing", nil}}
+		if len(params) == 2 {
+			result["receipts"], result["sender_nonces"] = []any{false, false, true}, nil
+			result["statuses"] = []any{"not_found", nil, "not_found"} // the last has a receipt: invalid
+		}
+		return result, ""
+	})
+	defer s.Close()
+	c, err := NewClient(s.URL, "private-test-token", identityFixture().Network, s.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := c.TransactionStatuses(context.Background(), hashes)
+	if err != nil || batch.Statuses[0] == nil || !batch.Statuses[0].NotFound || batch.Statuses[1] == nil || !errors.Is(batch.Statuses[1].Err, ErrInvalidStatus) || batch.Statuses[2] != nil {
+		t.Fatalf("batch %+v %v", batch, err)
+	}
+	evidence, err := c.TransactionEvidence(context.Background(), hashes, []string{"0x" + strings.Repeat("aa", 20)})
+	if err != nil || !evidence.Statuses[0].NotFound || evidence.Statuses[1] != nil || evidence.Statuses[2] == nil || !errors.Is(evidence.Statuses[2].Err, ErrInvalidStatus) {
+		t.Fatalf("evidence %+v %v", evidence, err)
+	}
+	if _, err := c.TransactionStatus(context.Background(), hashes[0]); !NodeNotFound(err) || NodeRefused(err) {
+		t.Fatalf("single-call miss: %v", err)
+	}
+}

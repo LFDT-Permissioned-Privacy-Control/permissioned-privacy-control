@@ -123,7 +123,13 @@ database session and publishes at once. Notifications that arrive while it is
 publishing collapse into one more publication. The one-second publication
 interval remains as the heartbeat and the fallback when the subscription is
 lost; a resubscription publishes at once, because changes may have been
-missed meanwhile. The publisher exports only the keys changed since the
+missed meanwhile. A change published within two seconds of the node's last
+acknowledgement goes out as a delta on that acknowledged base without first
+reading the node's status (the node refuses a delta whose base it does not
+hold, and the publisher then reads the status and republishes in full), and no
+heartbeat is sent within a second of an acknowledgement, so a heartbeat never
+delays a change. The acknowledgement also updates the publishing instance's
+cached node status at once. The publisher exports only the keys changed since the
 generation the node acknowledged, in one consistent database snapshot,
 including active policy artifacts. It reads every fact again when the change
 log cannot describe the gap (it was pruned past that generation, a fact table
@@ -178,8 +184,10 @@ required snapshot version, so a revocation committed before the request always
 binds it, and the clock is the issue time, so identities from every OPS
 instance are ordered by one clock. A later identity for the same transaction
 replaces the stored one only if it dominates it (floor and expiry both at
-least as high); an earlier one is still sent, and the node answers it as a
-duplicate. Readiness comes from a cached
+least as high). An earlier attempt can be sent only if it meets the stored
+fact floor; otherwise OPS signs again at the current clock, or refuses the
+attempt if that floor is unavailable. A restarted node therefore never gets
+a delayed attempt below the durable winner's floor. Readiness comes from a cached
 node status (refreshed every second and on every acknowledgement), not a node
 call per request. If the node is ready but has not applied that version yet,
 OPS hands the request on when the node advertises `fact_wait_v1`: the node
@@ -187,6 +195,9 @@ holds the request, without a worker, until publication brings that version or
 its bounded wait ends (default one second, at most 32 requests at once), then
 admits it or answers -32012, which OPS returns as 503 with `Retry-After: 1` and
 reason `publication_pending`; stale or missing facts are refused at once. OPS
+hands at most 16 requests per instance to that wait; further ones wait in OPS
+for the cached status to reach the version, within the same lag budget,
+instead of being refused at once. OPS
 refuses the same way itself once it has seen the node behind for longer than
 that wait, or at once for a node without the capability. A configuration being
 active in PostgreSQL and applied on Reth are separate states, exposed by
@@ -302,7 +313,11 @@ sequenceDiagram
   most half of the transaction identity lifetime left and a renewal would
   extend it (congestion). A reorg back to pending keeps the delivery record of
   the boot that observed the inclusion: that node process holds the identity
-  until finality.
+  until finality. A provisional transaction the node answers as a definitive
+  canonical miss (`not_found`, `transaction_not_found_v1`: its block was lost
+  by a crash before it was written, and the node holds no identity for it)
+  goes back to pending with its delivery record cleared, so it is renewed and
+  redelivered; a `null` answer never moves it.
 - **Budget and limits.** Renewals of every trigger are spent within the
   renewal budget, earliest expiry first; re-checks start only in the first two
   seconds of a tick, each bounded on its own, so a slow checker defers
@@ -325,29 +340,19 @@ sequenceDiagram
   appended to the durable audit buffer before it is recorded, and recorded
   before the identity is sent. A failed send of a recorded generation is
   retried unchanged while the node keeps its boot.
-- **Final failure.** `dropped` is written only for a stopped binding that can
-  no longer execute, on two reads at least 30 seconds apart: its signer's nonce
-  at the finalized block has passed its own nonce with no own receipt
-  (`nonce_consumed`); its hash is final under another submission
-  (`nonce_consumed`); or the finalized block's timestamp is at or past the
-  longest lease of any identity recorded for it (`max_expires_at`), and past
-  the tracking incarnation's creation plus the longest lifetime the node
-  accepts (an identity issued before a tracking-database loss), and no
-  canonical block holds it (`finalized_lease_expiry`: the node validates an
-  identity at the block timestamp, timestamps increase, and stopped bindings
-  get no new identity). The decision is re-judged on a fresh read before it is
-  audited, and the final is fenced under the row lock by the generation and,
-  for a lease expiry, by `max_expires_at`; a dropped hash is refused to every
-  principal while its status row is kept. After that a
-  `finalized_lease_expiry` hash, whose nonce is still free, is a fresh
-  admission again (the shared-signer residual of a tracking-database loss). A node with
-  `transaction_statuses_v1` answers in the batched status call, at its own
-  finalized block; otherwise OPS reads the evidence from the public RPC by the
-  node-reported finalized block's hash and confirms with a definitive private
-  status answer. A lookup the node could not answer is never evidence, and a
-  finalized own receipt beats a stop. Stopped bindings count toward their
-  principal's and organization's limits until final, and are polled on a slow
-  lane after every pending and provisional row.
+- **Final failure.** `dropped` requires finalized nonce consumption, confirmed
+  on two reads at least 30 seconds apart: the signer's finalized nonce has
+  passed the transaction's nonce without its own receipt, or the same hash is
+  finalized under another submission. A finalized own receipt beats a stop.
+  Lease expiry alone is non-final: a fresh identity could execute an unused
+  nonce. The stopped binding therefore remains the immutable anti-rebinding
+  tombstone independently of status retention, while its raw payload follows
+  the bounded payload-ring retention. Its original principal may revive it
+  through full admission; another principal sharing the signer is refused.
+  Stopped bindings count toward their owner's limits and run on the slow lane
+  after pending/provisional work. The decision is re-read and fenced by its
+  generation before audit and finalization. A missing/failed lookup is never
+  evidence of nonce consumption.
 - **Option A reconciliation.** Where the node advertises
   `transaction_statuses_v1`, the reconciler polls up to 256 transactions per
   call and up to 16,384 per tick; a change of the node's canonical epoch

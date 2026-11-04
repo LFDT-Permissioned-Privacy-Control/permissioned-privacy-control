@@ -31,9 +31,7 @@ export function describeStatus(progress: Pick<ProgressView,'status'|'reconciliat
     case 'renewal_stopped': return `renewal_stopped: will not be renewed; may still settle${note}`;
     case 'included': return `included: executed in a finalized block${note}`;
     case 'reverted': return `reverted: reverted in a finalized block${note}`;
-    case 'dropped': return progress.reconciliation_note==='finalized_lease_expiry'
-      ? `dropped: will not execute as submitted; renewal had stopped and its last identity expired before a finalized block; its nonce is still free, so replace it at the same nonce${note}`
-      : `dropped: can never execute; a finalized transaction used its nonce${note}`;
+    case 'dropped': return `dropped: can never execute; a finalized transaction used its nonce${note}`;
     default: return `unknown status ${String(progress.status)}`;
   }
 }

@@ -136,6 +136,10 @@ type BatchedStatus struct {
 	Status TransactionStatus
 	Pooled bool
 	Err    error
+	// NotFound: the node's definitive canonical miss for this hash (the
+	// string "not_found", CapabilityTransactionNotFound; Status is empty).
+	// Act on it only for a node that advertises the capability.
+	NotFound bool
 }
 
 // TransactionStatusBatch is the answer of ops_transactionStatuses: one entry
@@ -224,6 +228,13 @@ func (c *Client) TransactionEvidence(ctx context.Context, hashes, senders []stri
 		return TransactionStatusBatch{}, err
 	}
 	out.Receipts = receipts
+	for i, entry := range out.Statuses {
+		// A definitive miss has no receipt by definition; anything else is
+		// an invalid answer for that hash.
+		if entry != nil && entry.NotFound && (receipts[i] == nil || *receipts[i]) {
+			out.Statuses[i] = &BatchedStatus{Err: ErrInvalidStatus}
+		}
+	}
 	if wire.SenderNonces != nil {
 		var nonces []*uint64 // a null entry is a protocol error, never 0
 		if out.Finalized == nil || json.Unmarshal(*wire.SenderNonces, &nonces) != nil || len(nonces) != len(senders) {
@@ -267,6 +278,10 @@ func decodeBatch(wire batchWire, hashes []string) (TransactionStatusBatch, error
 	// only, never for the transactions answered with it.
 	for i, entry := range entries {
 		if string(entry) == "null" {
+			continue
+		}
+		if string(entry) == `"not_found"` {
+			out.Statuses[i] = &BatchedStatus{NotFound: true}
 			continue
 		}
 		status, pooled, err := decodeBatchEntry(entry, hashes[i], wire.BootID)

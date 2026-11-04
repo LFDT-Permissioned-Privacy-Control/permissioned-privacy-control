@@ -196,7 +196,7 @@ func newCongestionSim(t *testing.T) *congestionSim {
 	s.checker = &fakeRechecker{refuse: map[uuid.UUID]int16{}, fail: map[uuid.UUID]error{}, checked: map[uuid.UUID]int{}}
 	s.signer = nodepolicy.Signer{KeyID: "ops-a", PrivateKey: ed25519.NewKeyFromSeed(make([]byte, 32))}
 	s.r = newNodeReconciler(s.writer, &plainEffects{}, s.client, s.audit, keeperNetwork)
-	s.r.batched = func() bool { return true }
+	s.r.batched, s.r.notFound = func() bool { return true }, func() bool { return true }
 	s.r.now = s.clock.now
 	s.r.keeper = &nodeKeeper{node: s.client, checker: s.checker, clock: simIssuing{clock: s.clock, version: 9}, signer: s.signer, network: keeperNetwork,
 		ttl: plan.TTL, maxAge: plan.MaxAge, budget: plan.Budget, now: s.clock.now,
@@ -454,7 +454,7 @@ func TestCongestionRenewalSimulation(t *testing.T) {
 	// stops at the maximum age (not final), the limit frees up, and once
 	// blocks are finalized again every stopped transaction becomes final:
 	// dropped with nonce_consumed where a finalized competitor used its
-	// nonce, with finalized_lease_expiry where a finalized block is past its
+	// nonce; lease expiry alone keeps an immutable non-final binding past its
 	// last identity's expiry (no stopped row is kept for ever, finding 2).
 	var stoppedAfter int
 	for second := 0; second < 30; second++ {
