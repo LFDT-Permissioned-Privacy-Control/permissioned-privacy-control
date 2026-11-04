@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -39,6 +40,7 @@ type nodeEvidence interface {
 // @Failure 404 {object} apimodels.APIError
 // @Failure 409 {object} apimodels.APIError "the deployment is older than the recovery window (replay floor)"
 // @Failure 429 {object} apimodels.APIError
+// @Failure 500 {object} apimodels.APIError "ownership recovery failed"
 // @Failure 503 {object} apimodels.APIError
 // @Security BearerAuth
 // @Router /api/v1/admin/orgs/{org_id}/execution/ownership-recovery [post]
@@ -83,6 +85,7 @@ func (s *Server) recoverNodeOwnership(c *gin.Context) {
 	notFound := func() { fail(http.StatusNotFound, "finalized deployment not found") }
 	status, err := s.nodeOwnershipEvidence.TransactionStatus(ctx, req.TransactionHash)
 	if err != nil && !nodepolicy.NodeRefused(err) {
+		slog.Warn("ownership recovery: the node's transaction status could not be read", "org_id", org, "error", err)
 		fail(http.StatusServiceUnavailable, "ownership recovery unavailable") // no answer: nothing is known
 		return
 	}
@@ -101,6 +104,7 @@ func (s *Server) recoverNodeOwnership(c *gin.Context) {
 		fail(http.StatusConflict, "the deployment is older than the ownership recovery window")
 		return
 	case err != nil:
+		slog.Error("ownership recovery: applying the deployment's ownership failed", "org_id", org, "error", err)
 		fail(http.StatusInternalServerError, "ownership recovery failed")
 		return
 	case result.Note == "organization_deleted":

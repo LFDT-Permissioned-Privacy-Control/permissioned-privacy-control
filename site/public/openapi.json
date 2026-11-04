@@ -15161,6 +15161,16 @@
                         },
                         "description": "Too Many Requests"
                     },
+                    "500": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "ownership recovery failed"
+                    },
                     "503": {
                         "content": {
                             "application/json": {
@@ -23813,7 +23823,7 @@
                                 }
                             }
                         },
-                        "description": "runtime-trace, standard-profile trace-access (debug_traceTransaction for a non-participant or a missing transaction) or compliance denial"
+                        "description": "runtime-trace, standard-profile trace-access (debug_traceTransaction for a non-participant or a missing transaction) or compliance denial, or in Reth policy mode a request the execution node rejected"
                     },
                     "404": {
                         "content": {
@@ -23824,6 +23834,16 @@
                             }
                         },
                         "description": "method not allowed for the caller (denials are masked as method not found), or a strict-profile mined trace unavailable to the caller"
+                    },
+                    "409": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "in Reth policy mode, the signed transaction conflicts with an earlier submission, or its nonce is already used or held by another pending transaction"
                     },
                     "413": {
                         "content": {
@@ -23881,10 +23901,10 @@
                                 }
                             }
                         },
-                        "description": "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, or when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds); a transaction already recorded is never refused for the limit",
+                        "description": "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds; a transaction already recorded is never refused for the limit), or when a transaction was recorded but its delivery to the node failed (it may still execute: check its status or resend it unchanged)",
                         "headers": {
                             "Retry-After": {
-                                "description": "seconds before the same request may succeed (set when publication of policy facts is pending or the pending-work limit is reached)",
+                                "description": "seconds before the same request may succeed (set when publication of policy facts is pending, the pending-work limit is reached, or a recorded transaction's delivery failed)",
                                 "schema": {
                                     "type": "integer"
                                 }
@@ -23975,7 +23995,7 @@
                                 }
                             }
                         },
-                        "description": "runtime-trace, standard-profile trace-access (debug_traceTransaction for a non-participant or a missing transaction) or compliance denial"
+                        "description": "runtime-trace, standard-profile trace-access (debug_traceTransaction for a non-participant or a missing transaction) or compliance denial, or in Reth policy mode a request the execution node rejected"
                     },
                     "404": {
                         "content": {
@@ -23986,6 +24006,16 @@
                             }
                         },
                         "description": "method not allowed for the caller (denials are masked as method not found), or a strict-profile mined trace unavailable to the caller"
+                    },
+                    "409": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "in Reth policy mode, the signed transaction conflicts with an earlier submission, or its nonce is already used or held by another pending transaction"
                     },
                     "413": {
                         "content": {
@@ -24043,10 +24073,10 @@
                                 }
                             }
                         },
-                        "description": "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, or when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds); a transaction already recorded is never refused for the limit",
+                        "description": "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds; a transaction already recorded is never refused for the limit), or when a transaction was recorded but its delivery to the node failed (it may still execute: check its status or resend it unchanged)",
                         "headers": {
                             "Retry-After": {
-                                "description": "seconds before the same request may succeed (set when publication of policy facts is pending or the pending-work limit is reached)",
+                                "description": "seconds before the same request may succeed (set when publication of policy facts is pending, the pending-work limit is reached, or a recorded transaction's delivery failed)",
                                 "schema": {
                                     "type": "integer"
                                 }

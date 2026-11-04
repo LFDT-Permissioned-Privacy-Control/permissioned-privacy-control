@@ -231,12 +231,12 @@ refused:
 | 503, `Retry-After: 1`, reason `pending_limit` | Nothing was kept: the deployment's pending transactions are at the pending-work limit | Resend it unchanged after the delay |
 | 429, `Retry-After: 1`, reason `principal_pending_limit` | Nothing was kept: your own pending transactions are at the per-principal limit | Resend it once some of your transactions are included |
 | 429, `Retry-After: 1`, reason `org_pending_limit` | Nothing was kept: your organization's pending transactions are at the per-organization limit | Resend it once some of your organization's transactions are included |
-
-A transaction refused for one of these limits has already passed the
-compliance check: resend the same signed transaction, which reuses its
-travel-rule record; a newly signed transaction needs a record of its own.
 | 409, "nonce is already used or held by another pending transaction" | The node's pool refused its nonce. OPS stops renewing it; it can still settle if the competing transaction disappears | Check its status; replace it at the same nonce if needed |
 | 409, "conflicts with an earlier submission" | The signed transaction is bound to another submission | Do not retry |
+
+A transaction refused for one of the pending-work limits has already passed
+the compliance check: resend the same signed transaction, which reuses its
+travel-rule record; a newly signed transaction needs a record of its own.
 
 The owner can follow a transaction at `GET /api/v1/me/transactions/{hash}/execution`:
 

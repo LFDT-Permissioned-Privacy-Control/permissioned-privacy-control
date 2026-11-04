@@ -1460,14 +1460,15 @@ const MaxRequestBodySize = 1 << 20 // 1MB
 // @Success      200 {object} apimodels.JSONRPCResponseEnvelope "JSON-RPC response; may carry a JSON-RPC-level error member"
 // @Failure      400 {object} apimodels.APIError "unreadable body, malformed, ambiguous (duplicate or case-variant members) or batch JSON-RPC, invalid visibleTo, or an unsupported tracer/config (a tracer other than callTracer, withLog or malformed trace params)"
 // @Failure      401 {object} apimodels.APIError "identity required but unresolved on a trace method (debug_traceCall / debug_traceTransaction)"
-// @Failure      403 {object} apimodels.APIError "runtime-trace, standard-profile trace-access (debug_traceTransaction for a non-participant or a missing transaction) or compliance denial"
+// @Failure      403 {object} apimodels.APIError "runtime-trace, standard-profile trace-access (debug_traceTransaction for a non-participant or a missing transaction) or compliance denial, or in Reth policy mode a request the execution node rejected"
 // @Failure      404 {object} apimodels.APIError "method not allowed for the caller (denials are masked as method not found), or a strict-profile mined trace unavailable to the caller"
 // @Failure      413 {object} apimodels.APIError "request body too large"
 // @Failure      429 {object} apimodels.APIError "concurrency limit, signed-approval simulation budget, upstream rate limit, or in Reth policy mode the pending transactions of the caller, or of the caller's organization, at their limit (retry after Retry-After seconds, once some are included)"
 // @Failure      500 {object} apimodels.APIError "trace-validation or compliance-check error"
 // @Failure      502 {object} apimodels.APIError "failed to forward to the upstream node"
-// @Failure      503 {object} apimodels.APIError "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, or when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds); a transaction already recorded is never refused for the limit"
-// @Header       503 {integer} Retry-After "seconds before the same request may succeed (set when publication of policy facts is pending or the pending-work limit is reached)"
+// @Failure      409 {object} apimodels.APIError "in Reth policy mode, the signed transaction conflicts with an earlier submission, or its nonce is already used or held by another pending transaction"
+// @Failure      503 {object} apimodels.APIError "execution service unavailable; in Reth policy mode also when the node has not yet applied the policy facts the request needs, when the deployment's pending transactions are at the pending-work limit (retry after Retry-After seconds; a transaction already recorded is never refused for the limit), or when a transaction was recorded but its delivery to the node failed (it may still execute: check its status or resend it unchanged)"
+// @Header       503 {integer} Retry-After "seconds before the same request may succeed (set when publication of policy facts is pending, the pending-work limit is reached, or a recorded transaction's delivery failed)"
 // @Header       429 {integer} Retry-After "seconds before the same request may succeed (set at the per-principal or per-organization pending-work limit)"
 // @Security     BearerAuth
 // @Router       /rpc [post]
