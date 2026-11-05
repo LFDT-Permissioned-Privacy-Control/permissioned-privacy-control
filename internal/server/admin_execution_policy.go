@@ -123,6 +123,7 @@ func (s *Server) getExecutionPolicyContext(c *gin.Context) {
 
 	out := apimodels.ExecutionPolicyContext{
 		OrgID:        orgID,
+		Capabilities: s.executionPolicyCapabilities(),
 		BaseRevision: base,
 		APIVersion:   policydsl.APIVersion,
 		Kind:         policydsl.Kind,
@@ -386,6 +387,7 @@ func (s *Server) getExecutionPolicyRevision(c *gin.Context) {
 // @Failure      404 {object} apimodels.APIError "no such revision in this organization"
 // @Failure      409 {object} apimodels.APIError "the revision is not a draft or its authoring base is stale"
 // @Failure      500 {object} apimodels.APIError
+// @Failure 503 {object} apimodels.APIError "no configured runtime can enforce execution policies"
 // @Security     BearerAuth
 // @Router       /api/v1/admin/orgs/{org_id}/execution-policy/revisions/{revision_id}/activate [post]
 func (s *Server) activateExecutionPolicyRevision(c *gin.Context) {
@@ -431,6 +433,33 @@ func (s *Server) activateExecutionPolicyRevision(c *gin.Context) {
 	if err != nil {
 		respondInternalErrorAndLog(c, "failed to read the active policy",
 			"admin_execution_policy: GetActiveExecutionPolicy failed", "org_id", orgID, "err", err)
+		return
+	}
+
+	if !s.executionPolicyCapabilities().ActivationSupported {
+		// Retain existing author/status/base refusals before reporting a missing
+		// consumer. Capable deployments still recheck them under the DB lock.
+		if candidate.Status != db.PolicyStatusDraft {
+			respondConflict(c, db.ErrPolicyNotDraft.Error())
+			return
+		}
+		if candidate.CreatedBy == nil || strings.TrimSpace(*candidate.CreatedBy) == "" {
+			respondForbidden(c, db.ErrPolicyActorRequired.Error())
+			return
+		}
+		if strings.EqualFold(*candidate.CreatedBy, *actor) {
+			respondForbidden(c, db.ErrPolicySelfApproval.Error())
+			return
+		}
+		var base int64
+		if previous != nil {
+			base = previous.Revision
+		}
+		if candidate.BaseRevision == nil || *candidate.BaseRevision != base {
+			respondConflict(c, db.ErrPolicyStaleBase.Error())
+			return
+		}
+		configurationError(c, executionPolicyConsumerError())
 		return
 	}
 

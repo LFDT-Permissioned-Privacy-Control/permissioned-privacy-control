@@ -1,6 +1,6 @@
 ---
 name: ops
-description: Operate an Open Privacy Suite deployment — create organizations and groups, grant RPC access, onboard users by DID, choose between the admin and operator tokens, connect MetaMask through the JWT injector, and drive the admin API from an agent via the bundled MCP server. Use when the user asks how to set up a tenant, why a user cannot call anything, which token to use, how to connect a wallet, or how to configure the MCP server.
+description: Operate an Open Privacy Suite deployment — prepare and independently approve configuration revisions, inspect execution capabilities, create organizations and groups, grant RPC access, onboard users by DID, choose credentials, connect MetaMask, and drive the named-principal SDK or bundled MCP server. Use for tenant setup, configuration review, access diagnosis, credentials, wallets or agent workflows.
 ---
 
 # Operating Open Privacy Suite
@@ -25,6 +25,62 @@ covered below, read the source rather than guessing — the admin handlers live 
 | Environment variables and secrets | `site/src/app/docs/configuration/page.mdx` |
 | Why a call was denied | `site/src/app/docs/troubleshooting/page.mdx` |
 | Every MCP tool, with arguments | `docs/mcp.md` |
+| Named-principal SDK, exact configuration source and separate approval | `docs/implementation/headless-sdk.md` |
+
+## Reviewed configuration workflow
+
+Use versioned configuration for declarative `groups`, `contract-registry`,
+`execution-rules`, `compliance`, `approvers` and `platform` streams. Keep operational
+membership, onboarding, ban and address-link actions on their existing endpoints.
+An active reviewed stream owns its projection: direct legacy writers return 409;
+do not work around that guard or edit projection tables.
+
+The SDK examples preserve context → draft submission → review in one invocation:
+
+```sh
+cd sdk
+node examples/prepare.mjs --kind groups --org <organization-uuid> > context.json
+# Edit a copy of context.source, preserving reviewed dependency requirements.
+node examples/prepare.mjs groups.json > review.json
+```
+
+Supply a named session using `OPS_ACCESS_TOKEN`, or a configured Azure service
+credential using `OPS_AZURE_ACCESS_TOKEN`; never both. Preparation with a source
+file infers its explicitly declared recognized kind and scope and submits the
+original bytes. There is no execution-rules default or cross-tenant search.
+Explicit flags/environment must match source. Ambiguous or duplicate routing
+metadata is refused, and the server still validates the complete document.
+Context-only export needs explicit selection. Platform source/context uses
+platform scope without `OPS_ORG_ID` / `--org` and requires named platform authority.
+
+Review the exact source, artifact, preserved drift, dependency digests and sibling
+revision IDs. Activation is a separate invocation by a different eligible human
+or an independently configured trusted CI approver:
+
+```sh
+node examples/activate.mjs --prepared review.json
+node examples/activate.mjs --prepared review.json signed-ci-approval.json
+```
+
+The example re-reads context and re-reviews the selected scope, exact IDs and
+digests before activation. ID-only activation instead needs explicit kind/scope.
+Do not rewrite source/dependencies, approve on the author's behalf, fabricate CI
+claims, relax author separation, or retry a mutation automatically. After a lost
+activation response, read the exact revisions and activation evidence before
+deciding what to do next; the commit may have succeeded.
+
+Check `context.capabilities.executionPolicy` (old execution-policy context:
+`capabilities`; admin status: `execution.policyCapabilities`). A configured
+consumer of `none` supports candidate/artifact review and old reference simulation,
+but cannot activate execution policies or offer node preview/status/recovery.
+OPS Guard v1 remains separate producer enforcement of RBAC/preflight fingerprints;
+it does not consume execution-rule revisions. Experimental `guarded-reth` supports
+activation and node actions; the old described-frame reference route is unavailable
+there. Support is separate from current readiness and compiler availability.
+Missing capability information must not enable sensitive execution actions or
+disable ordinary non-execution configuration workflows. Evidence compilation and
+simulation do not prove live enforcement, and an active desired revision does not
+prove node application or final execution.
 
 ## 1. Standing up a tenant — the order matters
 
@@ -76,9 +132,10 @@ log in once first and then find them with `resolve_user`.
 Both tier-1 credentials are sent in the `X-Admin-Token` header; which value you
 send decides what you may do.
 
-**Full admin token** (`ADMIN_API_TOKEN`) — unrestricted across the admin plane:
-it reads and writes every tenant's configuration through the admin API. Hold it
-only inside your own trust boundary. It is not a blanket override, though — the
+**Full admin token** (`ADMIN_API_TOKEN`) — an operational admin credential across
+tenants, subject to the endpoint's identity, managed-writer and deployment gates.
+It does not replace a named revision author or independent approver. Hold it only
+inside your own trust boundary. It is not a blanket override — the
 dry-run endpoint rejects **both** tier-1 tokens, because evaluating a request as
 a user means reading tenant data as that user, which neither may do. That needs
 a tier-2 org-admin JWT.

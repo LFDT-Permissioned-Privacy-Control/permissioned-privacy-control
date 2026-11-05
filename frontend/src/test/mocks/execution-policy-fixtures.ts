@@ -11,6 +11,28 @@ import type {
   ExecutionPolicyRevisionDetail,
   ExecutionPolicySimulateResult,
 } from '@/types/executionPolicy';
+import type { ExecutionPolicyCapabilities } from '@/types/configuration';
+
+export const mockLegacyPolicyCapabilities: ExecutionPolicyCapabilities = {
+  configuredConsumer: 'none',
+  activationSupported: false,
+  candidateReviewSupported: true,
+  referenceSimulationSupported: true,
+  nodePreviewSupported: false,
+  nodeTransactionStatusSupported: false,
+  nodeOwnershipRecoverySupported: false,
+  unavailableReason: 'execution_consumer_unavailable',
+};
+
+export const mockGuardedPolicyCapabilities: ExecutionPolicyCapabilities = {
+  configuredConsumer: 'guarded-reth',
+  activationSupported: true,
+  candidateReviewSupported: true,
+  referenceSimulationSupported: false,
+  nodePreviewSupported: true,
+  nodeTransactionStatusSupported: true,
+  nodeOwnershipRecoverySupported: true,
+};
 
 export const mockPolicyCompiler = {
   version: '0.8.35+commit.47b9dedd',
@@ -93,6 +115,7 @@ export const mockDraftRevisionDetail: ExecutionPolicyRevisionDetail = {
 };
 
 export const mockPolicyContext: ExecutionPolicyContext = {
+  capabilities: mockLegacyPolicyCapabilities,
   org_id: 'org-1',
   base_revision: 3,
   api_version: 'privacy.gateway.fm/v1alpha1',

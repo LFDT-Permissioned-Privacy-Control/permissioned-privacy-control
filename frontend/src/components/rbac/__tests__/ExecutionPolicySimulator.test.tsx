@@ -115,8 +115,9 @@ describe('ExecutionPolicySimulator', () => {
     await fillAndRun(user);
 
     const alarm = await screen.findByTestId('simulate-disagreement');
-    expect(alarm).toHaveTextContent('The reviewed policy and the enforced policy disagree');
-    expect(alarm).toHaveTextContent('Do not activate this revision');
+    expect(alarm).toHaveTextContent('The reference policy and compiled artifact disagree');
+    expect(alarm).toHaveTextContent('Keep this candidate unapproved');
+    expect(screen.getByText(/Live enforcement requires a configured policy consumer/)).toBeInTheDocument();
     expect(alarm).toHaveAttribute('role', 'alert');
   });
 

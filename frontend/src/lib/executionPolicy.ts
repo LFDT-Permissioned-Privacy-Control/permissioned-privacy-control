@@ -1,4 +1,30 @@
 import type { ExecutionPolicyContext, PolicyDocument } from '@/types/executionPolicy';
+import type { ExecutionPolicyCapabilities } from '@/types/configuration';
+
+export function supportsExecutionActivation(capabilities?: ExecutionPolicyCapabilities): boolean {
+  return capabilities?.configuredConsumer === 'guarded-reth' && capabilities.activationSupported === true;
+}
+
+export function supportsNodePreview(capabilities?: ExecutionPolicyCapabilities): boolean {
+  return capabilities?.configuredConsumer === 'guarded-reth' && capabilities.nodePreviewSupported === true;
+}
+
+export function supportsReferenceSimulation(capabilities?: ExecutionPolicyCapabilities): boolean {
+  // The old described-frame endpoint stays closed in guarded-Reth mode.
+  return capabilities?.configuredConsumer === 'none' && capabilities.referenceSimulationSupported === true;
+}
+
+export function executionPolicySupportMessage(capabilities?: ExecutionPolicyCapabilities): string {
+  if (capabilities?.configuredConsumer === 'none') {
+    return 'No execution-policy consumer is configured. You can draft and review policies, but cannot activate them here.';
+  }
+  if (capabilities?.configuredConsumer === 'guarded-reth') {
+    return capabilities.activationSupported === true
+      ? 'Configured policy consumer: guarded Reth. Approval selects a desired revision; node application is reported separately.'
+      : 'Execution-policy activation is unavailable on this deployment.';
+  }
+  return 'Execution-policy support could not be confirmed. Activation and node preview are unavailable.';
+}
 
 /**
  * Shape of an error response from the admin API. Every handler answers a

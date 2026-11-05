@@ -150,8 +150,8 @@ export default function ExecutionPolicyEditor({
       </div>
 
       <p className="text-sm text-neutral-500">
-        A submitted candidate is stored as a <strong>draft</strong> and enforces nothing. It has
-        to be activated before it decides anything. Every rule must pin the ABI digest of the
+        A submitted candidate is stored as a <strong>draft</strong> for review and reference
+        simulation. Every rule must pin the ABI digest of the
         contract it names, so that a later ABI change is detected instead of silently
         reinterpreting argument positions.
       </p>
@@ -329,7 +329,7 @@ export default function ExecutionPolicyEditor({
       {created !== null && (
         <div className="flex items-center gap-2 rounded-lg bg-success-light border border-success/30 p-3 text-sm text-success-dark">
           <CheckCircle2 className="w-4 h-4 shrink-0" />
-          Draft revision {created} stored. It enforces nothing until it is activated.
+          Draft revision {created} stored for review.
         </div>
       )}
 

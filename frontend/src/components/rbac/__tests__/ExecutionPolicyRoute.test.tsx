@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse, delay } from 'msw';
 import { server } from '@/test/mocks/server';
 import { renderWithRBACContext } from './test-utils';
+import { mockDraftRevisionDetail, mockGuardedPolicyCapabilities, mockLegacyPolicyCapabilities, mockPolicyContext, mockPolicyRevisions } from '@/test/mocks/execution-policy-fixtures';
 
 // The route's only input besides the server is the signed-in token.
 const auth = vi.hoisted(() => ({ token: 'named-jwt' }));
@@ -49,6 +50,7 @@ function executionRulesContext(seen: { count: number }) {
         approvalModes: ['human'],
         maxDocumentBytes: 1048576,
         compiler: { version: '0.8.35', available: true },
+        executionPolicy: mockGuardedPolicyCapabilities,
       },
     });
   });
@@ -93,6 +95,21 @@ describe('ExecutionPolicyRoute', () => {
     server.use(statusWith({ mode: 'legacy', ready: true }));
     renderWithRBACContext(<ExecutionPolicyRoute />);
     expect(await screen.findByRole('heading', { name: 'Execution Policy' })).toBeInTheDocument();
+  });
+
+  it('does not treat legacy readiness as execution-policy activation support', async () => {
+    server.use(
+      statusWith({ mode: 'legacy', ready: true, policyCapabilities: mockLegacyPolicyCapabilities }),
+      http.get('/api/v1/admin/orgs/:orgId/execution-policy/context', () => HttpResponse.json(mockPolicyContext)),
+      http.get('/api/v1/admin/orgs/:orgId/execution-policy/revisions', () => HttpResponse.json(mockPolicyRevisions)),
+      http.get('/api/v1/admin/orgs/:orgId/execution-policy/revisions/:revisionId', () => HttpResponse.json(mockDraftRevisionDetail)),
+    );
+    const user = userEvent.setup();
+    renderWithRBACContext(<ExecutionPolicyRoute />);
+    await user.click(await screen.findByRole('button', { name: /Review revision 3/i }));
+    expect(await screen.findByRole('button', { name: /Activate…/i })).toBeDisabled();
+    expect(screen.getByLabelText('Execution policy support')).toHaveTextContent('No execution-policy consumer');
+    expect(screen.queryByText(/every execution in this organization is checked/i)).not.toBeInTheDocument();
   });
 
   it('shows the probe state while the server has not answered', async () => {

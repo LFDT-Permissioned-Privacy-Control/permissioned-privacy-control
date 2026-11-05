@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/contexts/AuthContext';
 import { configurationApi } from '@/api/configuration';
-import { extractApiError } from '@/lib/executionPolicy';
+import { executionPolicySupportMessage, extractApiError, supportsExecutionActivation, supportsNodePreview } from '@/lib/executionPolicy';
 import type { ConfigurationContext, ConfigurationKind, ConfigurationReview, ConfigurationRevision, ExecutionReadiness } from '@/types/configuration';
 import { useOrgContext } from './RBACManager';
 import { useAdmin } from '@/components/auth/RequireAdmin';
@@ -104,10 +104,14 @@ function ConfigurationPanel({ token, org, kind }: { token: string; org: string; 
     setReview(response.data);
   });
   const eligible = context?.viewer?.canActivate === true && review?.revisions.every(r => r.createdBy !== context.viewer.principalId) === true;
+  const policySupport = context?.capabilities?.executionPolicy;
+  const executionInBundle = kind === 'execution-rules' || review?.revisions.some(r => r.kind === 'execution-rules') === true;
+  const activationSupported = !executionInBundle || supportsExecutionActivation(policySupport);
+  const nodePreviewSupported = supportsNodePreview(policySupport);
   const activate = () => act(async () => {
-    if (!selected || !review || !reviewedBundle || !eligible) return;
+    if (!selected || !review || !reviewedBundle || !eligible || !activationSupported) return;
     await api.activate(reviewedBundle.id, reviewedBundle.coactivate);
-    setReview(null); setNotice('Revision activated in OPS. Node publication is tracked separately below.');
+    setReview(null); setNotice('Revision activated in OPS.');
     await reload();
     setExecution((await api.status()).data.execution ?? null);
   });
@@ -116,6 +120,7 @@ function ConfigurationPanel({ token, org, kind }: { token: string; org: string; 
     {error && <div role="alert" className="border border-red-300 rounded p-3 text-red-800">{error}</div>}
     {notice && <p role="status">{notice}</p>}
     {context && <>
+      {executionInBundle && <p role="status" aria-label="Execution policy support" className="rounded border p-3 text-sm">{executionPolicySupportMessage(policySupport)}</p>}
       <p className="text-sm">{context.active ? `Active revision ${context.active.revision}.` : 'No revision is active for this stream.'} Base revision is checked again on activation.</p>
       <label className="block text-sm">Configuration source
         <textarea aria-label="Configuration source" rows={16} spellCheck={false} className="block w-full mt-1 rounded border p-3 font-mono text-xs" value={source} onChange={e => setSource(e.target.value)} />
@@ -138,19 +143,21 @@ function ConfigurationPanel({ token, org, kind }: { token: string; org: string; 
         {kind === 'execution-rules' && <section className="space-y-3 rounded border p-3">
           <h4 className="font-medium">Preview candidate execution</h4>
           <p className="text-sm">Uses your linked sender, current facts and current chain state. The active policy must permit execution. A preview does not activate this revision or guarantee later inclusion.</p>
+          {!nodePreviewSupported && <p className="text-sm">Node preview is unavailable on this deployment. Source and configuration review remain available.</p>}
           {context.viewer?.principalKind === 'human' && context.viewer.canActivate && <label className="block text-sm">
-            <input type="checkbox" checked={diagnostic} disabled={busy} onChange={e => { setDiagnostic(e.target.checked); setPreview(null); }} /> Human administrator diagnostic
+            <input type="checkbox" checked={diagnostic} disabled={busy || !nodePreviewSupported} onChange={e => { setDiagnostic(e.target.checked); setPreview(null); }} /> Human administrator diagnostic
             <span className="block text-neutral-600">Allows candidate record getters and bypasses execution rules inside this organization. Requires current full organization authority and is audited.</span>
           </label>}
           <label className="block text-sm">Simulation method
-            <select aria-label="Simulation method" value={previewMethod} onChange={e => { setPreviewMethod(e.target.value); setPreview(null); }} disabled={busy} className="block rounded border p-2">
+            <select aria-label="Simulation method" value={previewMethod} onChange={e => { setPreviewMethod(e.target.value); setPreview(null); }} disabled={busy || !nodePreviewSupported} className="block rounded border p-2">
               {['eth_call', 'eth_estimateGas', 'debug_traceCall'].map(method => <option key={method}>{method}</option>)}
             </select>
           </label>
           <label className="block text-sm">Simulation parameters
-            <textarea aria-label="Simulation parameters" value={previewParams} disabled={busy} onChange={e => { setPreviewParams(e.target.value); setPreview(null); }} rows={5} className="block w-full rounded border p-2 font-mono text-xs" />
+            <textarea aria-label="Simulation parameters" value={previewParams} disabled={busy || !nodePreviewSupported} onChange={e => { setPreviewParams(e.target.value); setPreview(null); }} rows={5} className="block w-full rounded border p-2 font-mono text-xs" />
           </label>
-          <Button variant="outline" disabled={busy || !['draft', 'active'].includes(selected.status)} onClick={() => act(async () => {
+          <Button variant="outline" disabled={busy || !nodePreviewSupported || !['draft', 'active'].includes(selected.status)} onClick={() => act(async () => {
+            if (!nodePreviewSupported) return;
             setPreview(null);
             const params: unknown = JSON.parse(previewParams);
             if (!Array.isArray(params)) throw new Error('Simulation parameters must be a JSON array.');
@@ -161,13 +168,13 @@ function ConfigurationPanel({ token, org, kind }: { token: string; org: string; 
         {review && <>
           <h4 className="font-medium">Reviewed changes and preserved resources</h4>
           <pre aria-label="Configuration review" className="max-h-96 overflow-auto rounded bg-neutral-50 p-3 text-xs">{JSON.stringify(review, null, 2)}</pre>
-          {selected.status === 'draft' && (eligible ? <Button disabled={busy} onClick={activate}>Activate reviewed revision</Button> : <p>A different human administrator with current approval authority must activate this revision.</p>)}
+          {selected.status === 'draft' && (eligible ? <Button disabled={busy || !activationSupported} onClick={activate}>Activate reviewed revision</Button> : <p>A different human administrator with current approval authority must activate this revision.</p>)}
         </>}
         {selected.status === 'draft' && context.viewer?.canActivate && <Button variant="outline" disabled={busy} onClick={() => act(async () => { await api.withdraw(selected.id); setSelected(null); setReview(null); await reload(); setNotice('Draft withdrawn.'); })}>Withdraw draft</Button>}
       </section>}
     </>}
     <section aria-label="Execution publication" className="rounded border p-3 text-sm">
-      {!execution ? <p>Node publication status unavailable. Reload status before testing execution.</p> : execution.mode === 'legacy' ? <p>Legacy execution mode. Enable Reth policy mode to enforce execution revisions in the node.</p> : <>
+      {!execution ? <p>Node publication status unavailable. Approval support is reported by the configuration context.</p> : execution.mode === 'legacy' ? <p>Legacy RPC mode. Node policy publication is not configured.</p> : <>
         <p>{execution.ready ? 'Node ready with current policy facts.' : 'Publication pending or node unavailable; execution remains closed.'}</p>
         <p>Desired facts {execution.desired_version ?? 0}; node has applied {execution.applied_version ?? 0}.</p>
         {execution.reason && <p>{execution.reason}</p>}

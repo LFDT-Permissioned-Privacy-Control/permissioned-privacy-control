@@ -18,8 +18,9 @@ type ExecutionPolicyRevision struct {
 	// BaseRevision identifies the active policy used to author this draft.
 	// Null means legacy provenance is unavailable and activation is refused.
 	BaseRevision *int64 `json:"base_revision"`
-	// Status is draft, active, superseded or withdrawn. Only one revision per
-	// organisation is active, and only an active one decides anything.
+	// Status is draft, active, superseded or withdrawn. Active is the selected
+	// approved revision; configured consumer support and runtime application
+	// determine whether it is enforced. Compilation alone is not enforcement.
 	Status string `json:"status" example:"active"`
 
 	// PolicyDigest identifies the approved document by its meaning, not by its
@@ -29,7 +30,7 @@ type ExecutionPolicyRevision struct {
 	PolicyDigest string `json:"policy_digest"`
 	// SolidityDigest identifies the generated contract source.
 	SolidityDigest string `json:"solidity_digest"`
-	// RuntimeDigest identifies the compiled bytecode that is enforced.
+	// RuntimeDigest identifies this revision's compiled bytecode.
 	RuntimeDigest string `json:"runtime_digest"`
 
 	// Compiler is the exact build the artifact was produced with.
@@ -84,6 +85,8 @@ type ExecutionPolicyContract struct {
 // candidate.
 type ExecutionPolicyContext struct {
 	OrgID string `json:"org_id"`
+	// Capabilities distinguishes reference review from live policy enforcement.
+	Capabilities ExecutionPolicyCapabilities `json:"capabilities"`
 
 	// BaseRevision is the active revision a candidate must declare. Creating
 	// another draft does not move this base. A stale base is refused.
@@ -99,7 +102,8 @@ type ExecutionPolicyContext struct {
 	// Contracts are the organisation's registered contracts.
 	Contracts []ExecutionPolicyContract `json:"contracts"`
 
-	// Active is the policy currently in force, if any.
+	// Active is the selected approved policy, if any; see capabilities and the
+	// runtime status to distinguish selection from actual application.
 	Active *ExecutionPolicyRevision `json:"active,omitempty"`
 }
 

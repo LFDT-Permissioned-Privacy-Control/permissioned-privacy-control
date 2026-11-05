@@ -4,10 +4,12 @@
 // anything: a decision still requires the caller's existing authority, so a
 // document can only narrow what a principal could already do.
 
+import type { ExecutionPolicyCapabilities } from './configuration';
+
 /**
  * Lifecycle of one stored revision. Exactly one revision per organization is
- * `active`, and only an active one decides anything — a `draft` enforces
- * nothing until it is activated.
+ * `active`. That records approved selection; it is not proof that a runtime
+ * has applied the artifact. A draft enforces nothing.
  */
 export type ExecutionPolicyStatus = 'draft' | 'active' | 'superseded' | 'withdrawn';
 
@@ -28,7 +30,7 @@ export interface ExecutionPolicyRevision {
   policy_digest: string;
   /** Identifies the generated contract source. */
   solidity_digest: string;
-  /** Identifies the compiled bytecode that is enforced. */
+  /** Identifies the compiled bytecode retained as review evidence. */
   runtime_digest: string;
   compiler: ExecutionPolicyCompiler;
   created_at: string;
@@ -61,6 +63,8 @@ export interface ExecutionPolicyContract {
 
 /** Everything a policy editor needs before writing a candidate. */
 export interface ExecutionPolicyContext {
+  /** Existing legacy/reference routes have deployment-specific support. */
+  capabilities?: ExecutionPolicyCapabilities;
   org_id: string;
   /**
    * The revision a candidate must declare. A submission written against a
@@ -73,7 +77,7 @@ export interface ExecutionPolicyContext {
   /** Regular groups a policy may bind. Administrator groups are omitted. */
   groups: string[];
   contracts: ExecutionPolicyContract[];
-  /** The policy currently in force, if any. */
+  /** The selected stored policy, if any; runtime application is separate. */
   active?: ExecutionPolicyRevision;
 }
 
@@ -128,8 +132,8 @@ export interface ExecutionPolicySimulateResult {
   compiled_allowed: boolean;
   compiled_code?: string;
   /**
-   * Whether the reference evaluator and the compiled artifact agreed. False
-   * means the reviewed policy and the enforced policy are not the same thing.
+   * Whether the reference evaluator and compiled review artifact agreed.
+   * This comparison does not establish live runtime enforcement.
    */
   agreed: boolean;
   runtime_digest: string;

@@ -76,7 +76,7 @@ describe('ExecutionPolicy under a managed execution-rules stream (RD-1295)', () 
     expect(screen.queryByRole('button', { name: /Withdraw draft/i })).not.toBeInTheDocument();
   });
 
-  it('keeps activate and withdraw while the stream is unmanaged', async () => {
+  it('preserves withdrawal while leaving unsupported legacy activation disabled', async () => {
     const user = userEvent.setup();
     renderWithRBACContext(<ExecutionPolicy />);
 
@@ -85,7 +85,7 @@ describe('ExecutionPolicy under a managed execution-rules stream (RD-1295)', () 
     });
     expect(screen.queryByTestId('managed-stream-notice')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Review revision 3/i }));
-    expect(await screen.findByRole('button', { name: /Activate…/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Withdraw draft/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /Activate…/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Withdraw draft/i })).toBeEnabled();
   });
 });

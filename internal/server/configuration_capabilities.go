@@ -54,6 +54,7 @@ func (s *Server) configurationCapabilities(ctx context.Context) apimodels.Config
 		MaxDocumentBytes: configuration.MaxDocumentBytes,
 		Compiler:         apimodels.ConfigurationCompiler{Version: policydsl.SolidityVersion},
 		PriceFeed:        s.priceFeedCapability(),
+		ExecutionPolicy:  s.executionPolicyCapabilities(),
 	}
 	if s.policyCompiler != nil {
 		result.Compiler.Available = s.compilerProbe.check(ctx, s.policyCompiler, time.Now())

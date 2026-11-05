@@ -567,7 +567,7 @@ func (s *Server) handleReady(c *gin.Context) {
 }
 
 func (s *Server) executionStatus(ctx context.Context) apimodels.ExecutionStatus {
-	result := apimodels.ExecutionStatus{Mode: "legacy", Ready: true}
+	result := apimodels.ExecutionStatus{Mode: "legacy", Ready: true, PolicyCapabilities: s.executionPolicyCapabilities()}
 	if s.config == nil || !s.config.NodePolicy.Enabled() {
 		return result
 	}

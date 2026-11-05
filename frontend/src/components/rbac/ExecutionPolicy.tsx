@@ -26,8 +26,10 @@ import ManagedStreamNotice from './ManagedStreamNotice';
 import { executionPolicyApi } from '@/api/executionPolicy';
 import {
   extractApiError,
+  executionPolicySupportMessage,
   formatPolicyTimestamp,
   shortDigest,
+  supportsReferenceSimulation,
 } from '@/lib/executionPolicy';
 import type {
   ExecutionPolicyContext,
@@ -52,13 +54,13 @@ const STATUS_VARIANT: Record<
 };
 
 const STATUS_MEANING: Record<ExecutionPolicyStatus, string> = {
-  active: 'In force — every execution in this organization is checked against it',
-  draft: 'Enforces nothing — it has never been in force',
-  superseded: 'Was in force until a later revision replaced it',
-  withdrawn: 'Abandoned as a draft — it was never in force',
+  active: 'Selected in stored configuration; runtime application is separate',
+  draft: 'Review candidate — enforces nothing',
+  superseded: 'Previously selected, replaced by a later revision',
+  withdrawn: 'Abandoned as a draft',
 };
 
-type PendingAction = { kind: 'activate' | 'withdraw'; revision: ExecutionPolicyRevision };
+type PendingAction = { kind: 'withdraw'; revision: ExecutionPolicyRevision };
 
 /**
  * ExecutionPolicy is the per-organization policy screen: the revision history,
@@ -69,16 +71,17 @@ export default function ExecutionPolicy() {
   const { selectedOrg } = useOrgContext();
   const { isReadonlyAdmin } = useAdmin();
   const orgId = selectedOrg?.id || '';
-  // Once a reviewed execution-rules document owns this organisation, the
-  // legacy draft/activate/withdraw calls answer 409: the screen keeps showing
-  // the revisions but stops offering those controls.
+  // Managed streams own the old writer. Reth also closes the old submit and
+  // simulation routes, but withdrawal remains available until adoption.
   const { managed, checked } = useManagedStream('execution-rules', orgId);
-  const canEdit = !isReadonlyAdmin && checked && !managed;
 
   const [context, setContext] = useState<ExecutionPolicyContext | null>(null);
   const [revisions, setRevisions] = useState<ExecutionPolicyRevision[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const canWithdraw = !isReadonlyAdmin && checked && !managed;
+  const canDraft = canWithdraw && context?.capabilities?.configuredConsumer !== 'guarded-reth';
+  const referenceSupported = supportsReferenceSimulation(context?.capabilities);
 
   const [selected, setSelected] = useState<ExecutionPolicyRevisionDetail | null>(null);
   const [selectedLoading, setSelectedLoading] = useState(false);
@@ -141,32 +144,18 @@ export default function ExecutionPolicy() {
   };
 
   const runPendingAction = async () => {
-    if (!pending || !orgId) return;
-    const { kind, revision } = pending;
+    if (!pending || !orgId || !canWithdraw) return;
+    const { revision } = pending;
     try {
       setActing(true);
       setDetailError(null);
-      if (kind === 'activate') {
-        await executionPolicyApi.activate(orgId, revision.id);
-        setActionNotice(
-          `Revision ${revision.revision} is now in force. Every execution in this organization is checked against it.`
-        );
-      } else {
-        await executionPolicyApi.withdraw(orgId, revision.id);
-        setActionNotice(`Draft revision ${revision.revision} was withdrawn. It never enforced anything.`);
-      }
+      await executionPolicyApi.withdraw(orgId, revision.id);
+      setActionNotice(`Draft revision ${revision.revision} was withdrawn. The selected policy did not change.`);
       await load();
       await openRevision(revision.id);
     } catch (err) {
       setActionNotice(null);
-      setDetailError(
-        extractApiError(
-          err,
-          kind === 'activate'
-            ? 'Failed to activate the revision.'
-            : 'Failed to withdraw the draft.'
-        ).message
-      );
+      setDetailError(extractApiError(err, 'Failed to withdraw the draft.').message);
     } finally {
       setActing(false);
       setPending(null);
@@ -194,9 +183,8 @@ export default function ExecutionPolicy() {
             Execution Policy
           </h3>
           <p className="mt-1 max-w-3xl text-sm text-neutral-500">
-            A policy restricts what the members of a group may execute. It never grants anything:
-            a caller still needs the access they already had. Revisions are versioned, and
-            exactly one of them is in force at a time.
+            Store execution-policy candidates and review their exact source and compiled evidence.
+            Live enforcement requires a supported policy consumer.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={load}>
@@ -206,6 +194,10 @@ export default function ExecutionPolicy() {
       </div>
 
       {managed && <ManagedStreamNotice subject="Execution rules" />}
+      {context && <p role="status" aria-label="Execution policy support" className="rounded border p-3 text-sm">
+        {executionPolicySupportMessage(context.capabilities)}
+        {context.capabilities?.configuredConsumer === 'guarded-reth' && ' Use configuration revisions to activate execution rules; this older route does not activate policies.'}
+      </p>}
 
       {loadError && (
         <div
@@ -220,32 +212,26 @@ export default function ExecutionPolicy() {
 
       {context && (
         <div
-          className={`rounded-lg border p-3 text-sm ${
-            context.active
-              ? 'bg-success-light border-success/30 text-success-dark'
-              : 'bg-neutral-100 border-neutral-200 text-neutral-500'
-          }`}
+          className="rounded-lg border p-3 text-sm bg-neutral-100 border-neutral-200 text-neutral-600"
           data-testid="active-policy-banner"
         >
           {context.active ? (
             <div className="flex flex-wrap items-center gap-2">
               <CheckCircle2 className="w-4 h-4 shrink-0" />
               <span>
-                <strong>Revision {context.active.revision} is in force</strong> since{' '}
+                <strong>Revision {context.active.revision} is selected in stored configuration</strong> since{' '}
                 {formatPolicyTimestamp(context.active.activated_at)} — runtime digest{' '}
                 <code className="font-mono text-xs" title={context.active.runtime_digest}>
                   {shortDigest(context.active.runtime_digest)}
                 </code>
-                . No other revision decides anything.
+                . This selection alone does not prove runtime application.
               </span>
             </div>
           ) : (
             <div className="flex flex-wrap items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0" />
               <span>
-                <strong>No execution policy is in force.</strong> Nothing is restricted by this
-                layer until a draft is activated; the organization&apos;s other access controls
-                still apply.
+                <strong>No execution policy revision is selected.</strong> Drafts are available for review.
               </span>
             </div>
           )}
@@ -327,8 +313,8 @@ export default function ExecutionPolicy() {
           </Table>
         )}
         <p className="text-xs text-neutral-400">
-          Exactly one revision is active; activating a draft retires the one before it in the same
-          step. A draft — like a superseded or withdrawn revision — enforces nothing.
+          At most one revision is selected as active. Selection alone does not prove runtime
+          application; drafts are review candidates.
         </p>
       </div>
 
@@ -440,13 +426,12 @@ export default function ExecutionPolicy() {
             </pre>
           </details>
 
-          {canEdit && selected.status === 'draft' && (
+          {canWithdraw && selected.status === 'draft' && (
             <div className="flex flex-wrap items-center gap-3 rounded-lg border border-warning/30 bg-warning-light p-3">
               <div className="flex-1 min-w-[240px] text-xs text-warning-dark">
-                This draft enforces nothing. <strong>Activating it puts it in force</strong> for
-                every execution in this organization and retires the revision that is active now.
+                This draft enforces nothing. Activation is unavailable through this older workflow.
               </div>
-              <Button onClick={() => setPending({ kind: 'activate', revision: selected })}>
+              <Button disabled>
                 <ShieldCheck className="w-4 h-4 mr-2" />
                 Activate…
               </Button>
@@ -460,12 +445,12 @@ export default function ExecutionPolicy() {
           )}
 
           <div className="border-t border-neutral-200 pt-4">
-            <ExecutionPolicySimulator
+            {referenceSupported ? <ExecutionPolicySimulator
               key={selected.id}
               orgId={orgId}
               revision={selected}
               groups={context.groups}
-            />
+            /> : <p className="text-sm">Reference simulation is unavailable on this deployment. Source and artifact review remain available.</p>}
           </div>
         </div>
       )}
@@ -476,7 +461,7 @@ export default function ExecutionPolicy() {
             key={orgId}
             orgId={orgId}
             context={context}
-            disabled={!canEdit}
+            disabled={!canDraft}
             onSubmitted={handleSubmitted}
             onReloadContext={load}
           />
@@ -484,29 +469,12 @@ export default function ExecutionPolicy() {
       )}
 
       <ConfirmDialog
-        open={pending?.kind === 'activate'}
-        onOpenChange={open => {
-          if (!open) setPending(null);
-        }}
-        title={`Activate revision ${pending?.revision.revision ?? ''}?`}
-        description={
-          context?.active
-            ? `Activating puts this revision in force immediately: from that moment every execution in this organization is checked against it, and revision ${context.active.revision} — active now — is retired. This is the step that makes a policy enforce.`
-            : 'Activating puts this revision in force immediately: from that moment every execution in this organization is checked against it. This is the step that makes a policy enforce.'
-        }
-        confirmLabel="Activate and enforce"
-        variant="warning"
-        isLoading={acting}
-        onConfirm={runPendingAction}
-      />
-
-      <ConfirmDialog
         open={pending?.kind === 'withdraw'}
         onOpenChange={open => {
           if (!open) setPending(null);
         }}
         title={`Withdraw draft revision ${pending?.revision.revision ?? ''}?`}
-        description="The draft is abandoned and can never be activated. It has never been in force, so nothing that is enforced today changes."
+        description="This abandons the draft without changing the selected policy."
         confirmLabel="Withdraw draft"
         variant="destructive"
         isLoading={acting}

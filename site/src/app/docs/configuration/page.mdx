@@ -170,6 +170,14 @@ Existing grants survive the transfer, including the `privacy_proxy_app` append-o
 
 **Resilience.** Set `AUDIT_BUFFER_DIR` (see above) so a transient audit-database outage does not block request handling: entries are written to a durable local buffer and sealed into the audit database by a background worker when it is reachable again. An outage longer than `AUDIT_SEALING_STALL_LIMIT` (default 30 minutes) makes the instances report not ready until sealing resumes (fail closed: requests keep being audited into the buffer, but none reaches the tamper-evident chain).
 
+### Preparing and activating execution rules
+
+Compiling or reviewing an execution-policy draft does not mean that its rules are being enforced. The policy editor reports whether this deployment has a compatible execution-policy runtime. Without one, you can prepare and review drafts, but activation is refused. A draft can still be withdrawn. Ordinary configuration such as groups and compliance remains available under its existing approval rules.
+
+Signed approvals (OPS Guard v1) are supported separately; enabling them does not enable enforcement of these execution-policy documents. In Reth policy mode, use the configuration revision workflow and node preview. The older described-frame reference simulator remains unavailable in that mode.
+
+Changing to a mode with no compatible execution-policy runtime is refused at startup if active execution policies already exist. Keep a compatible runtime or complete a reviewed migration before changing modes. Do not delete policy history or disable approval controls to bypass this check. A successful activation records the approved selection; runtime readiness and application of that selection are reported separately.
+
 ### Execution-tracking database (Reth mode)
 
 With `OPS_NODE_POLICY_MODE=reth`, the proxy keeps per-transaction execution state — which principal submitted each pending transaction, its delivery and inclusion state, and the final status kept for owner lookups — in its own PostgreSQL database, so no per-transaction write stream reaches the main database. Legacy mode does not use it. Both connection strings are secrets:

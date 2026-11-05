@@ -70,8 +70,8 @@ interface ExecutionPolicySimulatorProps {
  * a described execution.
  *
  * Simulation mutates nothing and runs against a draft as readily as against the
- * active policy, which is the point: it is how a reviewer checks what a policy
- * would do before putting it in force. The response carries two decisions — the
+ * selected policy: it supplies candidate-review evidence, not proof of live
+ * enforcement. The response carries two decisions — the
  * reference evaluator's and the compiled artifact's — and whether they agreed.
  */
 export default function ExecutionPolicySimulator({
@@ -154,6 +154,10 @@ export default function ExecutionPolicySimulator({
         </h4>
         <Badge variant="secondary">Nothing is changed by a simulation</Badge>
       </div>
+      <p className="text-sm text-neutral-500">
+        This simulation supplies candidate-review evidence. Live enforcement requires a
+        configured policy consumer and is not established by this result.
+      </p>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div>
@@ -420,14 +424,13 @@ export default function ExecutionPolicySimulator({
             >
               <div className="flex items-center gap-2 font-semibold">
                 <AlertTriangle className="w-5 h-5 shrink-0" />
-                The reviewed policy and the enforced policy disagree
+                The reference policy and compiled artifact disagree
               </div>
               <p className="mt-1.5">
                 The document evaluated to <strong>{result.allowed ? 'allowed' : 'denied'}</strong>{' '}
-                but the compiled artifact that actually enforces it evaluated to{' '}
-                <strong>{result.compiled_allowed ? 'allowed' : 'denied'}</strong>. What a reviewer
-                reads is therefore not what would be enforced. Do not activate this revision;
-                report the artifact and its runtime digest.
+                but the compiled review artifact evaluated to{' '}
+                <strong>{result.compiled_allowed ? 'allowed' : 'denied'}</strong>. Keep this
+                candidate unapproved and report the artifact and its runtime digest.
               </p>
             </div>
           )}

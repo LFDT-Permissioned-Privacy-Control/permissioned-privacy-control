@@ -790,6 +790,9 @@
                     "compiler": {
                         "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationCompiler"
                     },
+                    "executionPolicy": {
+                        "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyCapabilities"
+                    },
                     "humanOnlyKinds": {
                         "items": {
                             "type": "string"
@@ -1710,6 +1713,40 @@
                 },
                 "type": "object"
             },
+            "privacy-proxy_internal_apimodels.ExecutionPolicyCapabilities": {
+                "description": "Capabilities distinguishes reference review from live policy enforcement.",
+                "properties": {
+                    "activationSupported": {
+                        "type": "boolean"
+                    },
+                    "candidateReviewSupported": {
+                        "type": "boolean"
+                    },
+                    "configuredConsumer": {
+                        "enum": [
+                            "none",
+                            "guarded-reth"
+                        ],
+                        "type": "string"
+                    },
+                    "nodeOwnershipRecoverySupported": {
+                        "type": "boolean"
+                    },
+                    "nodePreviewSupported": {
+                        "type": "boolean"
+                    },
+                    "nodeTransactionStatusSupported": {
+                        "type": "boolean"
+                    },
+                    "referenceSimulationSupported": {
+                        "type": "boolean"
+                    },
+                    "unavailableReason": {
+                        "type": "string"
+                    }
+                },
+                "type": "object"
+            },
             "privacy-proxy_internal_apimodels.ExecutionPolicyCompiler": {
                 "description": "Compiler is the exact build the artifact was produced with.",
                 "properties": {
@@ -1743,6 +1780,9 @@
                         "description": "BaseRevision is the active revision a candidate must declare. Creating\nanother draft does not move this base. A stale base is refused.",
                         "example": 3,
                         "type": "integer"
+                    },
+                    "capabilities": {
+                        "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyCapabilities"
                     },
                     "contracts": {
                         "description": "Contracts are the organisation's registered contracts.",
@@ -1792,7 +1832,7 @@
                 "type": "object"
             },
             "privacy-proxy_internal_apimodels.ExecutionPolicyRevision": {
-                "description": "Active is the policy currently in force, if any.",
+                "description": "Active is the selected approved policy, if any; see capabilities and the\nruntime status to distinguish selection from actual application.",
                 "properties": {
                     "activated_at": {
                         "type": "string"
@@ -1826,7 +1866,7 @@
                         "type": "integer"
                     },
                     "runtime_digest": {
-                        "description": "RuntimeDigest identifies the compiled bytecode that is enforced.",
+                        "description": "RuntimeDigest identifies this revision's compiled bytecode.",
                         "type": "string"
                     },
                     "solidity_digest": {
@@ -1834,7 +1874,7 @@
                         "type": "string"
                     },
                     "status": {
-                        "description": "Status is draft, active, superseded or withdrawn. Only one revision per\norganisation is active, and only an active one decides anything.",
+                        "description": "Status is draft, active, superseded or withdrawn. Active is the selected\napproved revision; configured consumer support and runtime application\ndetermine whether it is enforced. Compilation alone is not enforcement.",
                         "example": "active",
                         "type": "string"
                     }
@@ -1879,7 +1919,7 @@
                         "type": "string"
                     },
                     "runtime_digest": {
-                        "description": "RuntimeDigest identifies the compiled bytecode that is enforced.",
+                        "description": "RuntimeDigest identifies this revision's compiled bytecode.",
                         "type": "string"
                     },
                     "solidity_digest": {
@@ -1895,7 +1935,7 @@
                         "type": "string"
                     },
                     "status": {
-                        "description": "Status is draft, active, superseded or withdrawn. Only one revision per\norganisation is active, and only an active one decides anything.",
+                        "description": "Status is draft, active, superseded or withdrawn. Active is the selected\napproved revision; configured consumer support and runtime application\ndetermine whether it is enforced. Compilation alone is not enforcement.",
                         "example": "active",
                         "type": "string"
                     }
@@ -2019,6 +2059,9 @@
                     },
                     "mode": {
                         "type": "string"
+                    },
+                    "policyCapabilities": {
+                        "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyCapabilities"
                     },
                     "ready": {
                         "type": "boolean"
@@ -8421,6 +8464,16 @@
                             }
                         },
                         "description": "Conflict"
+                    },
+                    "503": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "no configured runtime can enforce execution policies"
                     }
                 },
                 "security": [
@@ -12250,6 +12303,16 @@
                             }
                         },
                         "description": "Conflict"
+                    },
+                    "503": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "no configured runtime can enforce execution policies"
                     }
                 },
                 "security": [
@@ -12354,6 +12417,16 @@
                             }
                         },
                         "description": "Conflict"
+                    },
+                    "503": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "no configured runtime can enforce execution policies"
                     }
                 },
                 "security": [
@@ -14831,6 +14904,16 @@
                             }
                         },
                         "description": "Internal Server Error"
+                    },
+                    "503": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/privacy-proxy_internal_apimodels.APIError"
+                                }
+                            }
+                        },
+                        "description": "no configured runtime can enforce execution policies"
                     }
                 },
                 "security": [

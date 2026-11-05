@@ -23,6 +23,7 @@ import (
 // @Failure 400 {object} apimodels.APIError
 // @Failure 403 {object} apimodels.APIError
 // @Failure 409 {object} apimodels.APIError
+// @Failure 503 {object} apimodels.APIError "no configured runtime can enforce execution policies"
 // @Security BearerAuth
 // @Router /api/v1/admin/orgs/{org_id}/configuration/{kind}/revisions/{revision_id}/activate-ci [post]
 func (s *Server) activateConfigurationCI(c *gin.Context) {
@@ -59,7 +60,7 @@ func (s *Server) activateConfigurationCI(c *gin.Context) {
 		return
 	}
 	actor.CIApproval = request.Approval
-	rows, err := s.db.ActivateConfigurationRevisions(c.Request.Context(), scope, append([]string{revision.ID}, request.Coactivate...), actor, s.authorizeConfigurationActivation)
+	rows, err := s.db.ActivateConfigurationRevisions(c.Request.Context(), scope, append([]string{revision.ID}, request.Coactivate...), actor, s.authorizeConfigurationPolicyActivation)
 	if err != nil {
 		configurationError(c, err)
 		return

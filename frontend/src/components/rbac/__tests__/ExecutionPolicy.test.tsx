@@ -6,6 +6,7 @@ import { server } from '@/test/mocks/server';
 import { renderWithRBACContext } from './test-utils';
 import {
   mockDraftRevisionDetail,
+  mockGuardedPolicyCapabilities,
   mockPolicyContext,
   mockPolicyRevisions,
 } from '@/test/mocks/execution-policy-fixtures';
@@ -64,27 +65,27 @@ describe('ExecutionPolicy', () => {
       expect(screen.getByTestId('revision-row-1')).toHaveTextContent('superseded');
     });
 
-    it('says which revision is in force and that only one can be', async () => {
+    it('distinguishes stored selection from actual runtime application', async () => {
       renderWithRBACContext(<ExecutionPolicy />);
 
       await waitFor(() => {
         expect(screen.getByTestId('active-policy-banner')).toHaveTextContent(
-          'Revision 2 is in force'
+          'Revision 2 is selected in stored configuration'
         );
       });
 
       expect(screen.getByTestId('active-policy-banner')).toHaveTextContent(
-        'No other revision decides anything'
+        'This selection alone does not prove runtime application'
       );
       expect(
-        screen.getByText(/Exactly one revision is active/i)
+        screen.getByText(/At most one revision is selected as active/i)
       ).toBeInTheDocument();
       expect(
-        screen.getByText(/A draft — like a superseded or withdrawn revision — enforces nothing/i)
+        screen.getByText(/drafts are review candidates/i)
       ).toBeInTheDocument();
     });
 
-    it('states that nothing is enforced when no revision is active', async () => {
+    it('reports an absent selected revision without inventing an enforcement state', async () => {
       server.use(
         http.get(CONTEXT_ROUTE, () =>
           HttpResponse.json({ ...mockPolicyContext, active: undefined })
@@ -96,7 +97,7 @@ describe('ExecutionPolicy', () => {
 
       await waitFor(() => {
         expect(screen.getByTestId('active-policy-banner')).toHaveTextContent(
-          'No execution policy is in force'
+          'No execution policy revision is selected'
         );
       });
 
@@ -143,28 +144,55 @@ describe('ExecutionPolicy', () => {
       expect(detail).toHaveTextContent(mockDraftRevisionDetail.runtime_digest);
     });
 
-    it('warns what activation means before it is confirmed', async () => {
+    it('does not send an old activation when legacy has no policy consumer', async () => {
+      let activations = 0;
+      server.use(http.post(`${REVISION_ROUTE}/activate`, () => {
+        activations++; return HttpResponse.json({});
+      }));
       const user = userEvent.setup();
       renderWithRBACContext(<ExecutionPolicy />);
+      await user.click(await screen.findByRole('button', { name: /Review revision 3/i }));
+      const activate = await screen.findByRole('button', { name: /Activate…/i });
+      expect(activate).toBeDisabled();
+      expect(screen.getByLabelText('Execution policy support')).toHaveTextContent('No execution-policy consumer');
+      expect(screen.getByRole('button', { name: 'Run simulation' })).toBeEnabled();
+      await user.click(activate);
+      expect(activations).toBe(0);
+      expect(screen.queryByText('Activate revision 3?')).not.toBeInTheDocument();
+    });
 
-      await waitFor(() => {
-        expect(screen.getByTestId('revision-row-3')).toBeInTheDocument();
-      });
-      await user.click(screen.getByRole('button', { name: /Review revision 3/i }));
-      await screen.findByTestId('revision-detail');
+    it('keeps source review and withdrawal but disables execution actions if capabilities are missing', async () => {
+      server.use(http.get(CONTEXT_ROUTE, () => HttpResponse.json({ ...mockPolicyContext, capabilities: undefined })));
+      const user = userEvent.setup();
+      renderWithRBACContext(<ExecutionPolicy />);
+      await user.click(await screen.findByRole('button', { name: /Review revision 3/i }));
+      expect(await screen.findByTestId('revision-source')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Activate…/i })).toBeDisabled();
+      expect(screen.getByRole('button', { name: /Withdraw draft/i })).toBeEnabled();
+      expect(screen.queryByRole('button', { name: 'Run simulation' })).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Execution policy support')).toHaveTextContent('could not be confirmed');
+    });
 
-      await user.click(screen.getByRole('button', { name: /Activate…/i }));
-
-      expect(await screen.findByText('Activate revision 3?')).toBeInTheDocument();
-      expect(
-        screen.getByText(/puts this revision in force immediately/i)
-      ).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Activate and enforce' })).toBeInTheDocument();
+    it('preserves the old Reth route closure and its unmanaged withdrawal exception', async () => {
+      let withdrawals = 0;
+      server.use(
+        http.get(CONTEXT_ROUTE, () => HttpResponse.json({ ...mockPolicyContext, capabilities: mockGuardedPolicyCapabilities })),
+        http.post(`${REVISION_ROUTE}/withdraw`, () => { withdrawals++; return HttpResponse.json({ ...mockDraftRevisionDetail, status: 'withdrawn' }); }),
+      );
+      const user = userEvent.setup();
+      renderWithRBACContext(<ExecutionPolicy />);
+      await user.click(await screen.findByRole('button', { name: /Review revision 3/i }));
+      expect(await screen.findByRole('button', { name: /Activate…/i })).toBeDisabled();
+      expect(screen.queryByRole('button', { name: 'Run simulation' })).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Execution policy support')).toHaveTextContent('Use configuration revisions');
+      await user.click(screen.getByRole('button', { name: /Withdraw draft…/i }));
+      await user.click(await screen.findByRole('button', { name: 'Withdraw draft' }));
+      await waitFor(() => expect(withdrawals).toBe(1));
     });
 
     it('shows the server refusal verbatim when a revision is no longer a draft', async () => {
       server.use(
-        http.post(`${REVISION_ROUTE}/activate`, () =>
+        http.post(`${REVISION_ROUTE}/withdraw`, () =>
           HttpResponse.json(
             { error: 'policy revision is not a draft' },
             { status: 409 }
@@ -180,8 +208,8 @@ describe('ExecutionPolicy', () => {
       });
       await user.click(screen.getByRole('button', { name: /Review revision 3/i }));
       await screen.findByTestId('revision-detail');
-      await user.click(screen.getByRole('button', { name: /Activate…/i }));
-      await user.click(await screen.findByRole('button', { name: 'Activate and enforce' }));
+      await user.click(screen.getByRole('button', { name: /Withdraw draft…/i }));
+      await user.click(await screen.findByRole('button', { name: 'Withdraw draft' }));
 
       await waitFor(() => {
         expect(screen.getByTestId('execution-policy-action-error')).toHaveTextContent(

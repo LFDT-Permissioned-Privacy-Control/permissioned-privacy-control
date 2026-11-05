@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from '@/test/mocks/server';
 import Configuration, { PlatformConfiguration } from '../Configuration';
+import { mockGuardedPolicyCapabilities, mockLegacyPolicyCapabilities } from '@/test/mocks/execution-policy-fixtures';
 
 vi.mock('../RBACManager', () => ({ useOrgContext: () => ({ selectedOrg: { id: 'org-a', name: 'A' } }) }));
 vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ accessToken: 'named-jwt' }) }));
@@ -43,7 +44,7 @@ describe('Configuration review workflow', () => {
     const executionBase = base.replace('/groups', '/execution-rules');
     const executionRevision = { ...revision, kind: 'execution-rules' };
     server.use(
-      http.get(`${executionBase}/context`, () => HttpResponse.json({ active: null, source, viewer: { principalId: viewerId, principalKind: 'service', canActivate: false } })),
+      http.get(`${executionBase}/context`, () => HttpResponse.json({ active: null, source, capabilities: { executionPolicy: mockGuardedPolicyCapabilities }, viewer: { principalId: viewerId, principalKind: 'service', canActivate: false } })),
       http.get(`${executionBase}/revisions`, () => HttpResponse.json({ revisions: [executionRevision] })),
       http.post(`${executionBase}/revisions/revision-a/simulate`, () => HttpResponse.json({ revisions: [executionRevision], legacyExecution: [] })),
       http.post('/api/v1/admin/orgs/org-a/execution/simulate', async ({ request }) => {
@@ -136,5 +137,65 @@ describe('Configuration review workflow', () => {
     await user.click(await screen.findByRole('button', { name: 'Activate reviewed revision' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('base revision is stale');
     expect(screen.queryByRole('button', { name: 'Activate reviewed revision' })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['legacy', mockLegacyPolicyCapabilities],
+    ['unknown', { ...mockGuardedPolicyCapabilities, configuredConsumer: 'future-consumer' }],
+  ])('keeps execution drafts reviewable but closes activation and node preview for %s support', async (_name, support) => {
+    const executionBase = base.replace('/groups', '/execution-rules');
+    const executionRevision = { ...revision, kind: 'execution-rules' };
+    let previewCalls = 0;
+    server.use(
+      http.get(`${executionBase}/context`, () => HttpResponse.json({ active: null, source, capabilities: { executionPolicy: support }, viewer: { principalId: viewerId, principalKind: 'human', canActivate: true } })),
+      http.get(`${executionBase}/revisions`, () => HttpResponse.json({ revisions: [executionRevision] })),
+      http.post(`${executionBase}/revisions/revision-a/simulate`, () => HttpResponse.json({ revisions: [executionRevision], legacyExecution: [] })),
+      http.post(`${executionBase}/revisions/revision-a/activate`, () => { activationCount++; return HttpResponse.json({}); }),
+      http.post('/api/v1/admin/orgs/org-a/execution/simulate', () => { previewCalls++; return HttpResponse.json({}); }),
+    );
+    const user = userEvent.setup(); render(<Configuration initialKind="execution-rules" />);
+    expect(await screen.findByRole('button', { name: 'Save draft' })).toBeEnabled();
+    expect(screen.getByRole('option', { name: 'Execution rules' })).toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: 'Review revision 1' }));
+    const activate = await screen.findByRole('button', { name: 'Activate reviewed revision' });
+    const preview = screen.getByRole('button', { name: 'Preview candidate in node' });
+    expect(activate).toBeDisabled(); expect(preview).toBeDisabled();
+    await user.click(activate); await user.click(preview);
+    expect(activationCount).toBe(0); expect(previewCalls).toBe(0);
+    expect(screen.getByLabelText('Configuration review')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Withdraw draft' })).toBeEnabled();
+  });
+
+  it('checks execution support for a reviewed sibling even when the primary stream is groups', async () => {
+    const sibling = { ...revision, id: 'execution-sibling', kind: 'execution-rules' };
+    server.use(
+      http.get(`${base}/context`, () => HttpResponse.json({ active: null, source, capabilities: { executionPolicy: mockLegacyPolicyCapabilities }, viewer: { principalId: viewerId, principalKind: 'human', canActivate: true } })),
+      http.post(`${base}/revisions/revision-a/simulate`, () => HttpResponse.json({ revisions: [revision, sibling], legacyExecution: [] })),
+    );
+    const user = userEvent.setup(); render(<Configuration />);
+    await user.type(await screen.findByLabelText('Coactivate revision IDs'), 'execution-sibling');
+    await user.click(await screen.findByRole('button', { name: 'Review revision 1' }));
+    const activate = await screen.findByRole('button', { name: 'Activate reviewed revision' });
+    expect(activate).toBeDisabled();
+    expect(screen.getByLabelText('Execution policy support')).toHaveTextContent('No execution-policy consumer');
+    await user.click(activate); expect(activationCount).toBe(0);
+  });
+
+  it('allows supported execution approval while node application is pending', async () => {
+    const executionBase = base.replace('/groups', '/execution-rules');
+    const executionRevision = { ...revision, kind: 'execution-rules' };
+    server.use(
+      http.get(`${executionBase}/context`, () => HttpResponse.json({ active: null, source, capabilities: { executionPolicy: mockGuardedPolicyCapabilities }, viewer: { principalId: viewerId, principalKind: 'human', canActivate: true } })),
+      http.get(`${executionBase}/revisions`, () => HttpResponse.json({ revisions: [executionRevision] })),
+      http.post(`${executionBase}/revisions/revision-a/simulate`, () => HttpResponse.json({ revisions: [executionRevision], legacyExecution: [] })),
+      http.post(`${executionBase}/revisions/revision-a/activate`, () => { activationCount++; return HttpResponse.json({ revisions: [{ ...executionRevision, status: 'active' }] }); }),
+    );
+    const user = userEvent.setup(); render(<Configuration initialKind="execution-rules" />);
+    await user.click(await screen.findByRole('button', { name: 'Review revision 1' }));
+    const activate = await screen.findByRole('button', { name: 'Activate reviewed revision' });
+    expect(activate).toBeEnabled();
+    expect(screen.getByLabelText('Execution publication')).toHaveTextContent('Publication pending');
+    await user.click(activate); await waitFor(() => expect(activationCount).toBe(1));
   });
 });

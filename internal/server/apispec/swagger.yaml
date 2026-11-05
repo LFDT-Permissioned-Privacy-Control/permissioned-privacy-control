@@ -547,6 +547,8 @@ components:
           uniqueItems: false
         compiler:
           $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ConfigurationCompiler'
+        executionPolicy:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyCapabilities'
         humanOnlyKinds:
           items:
             type: string
@@ -1177,6 +1179,29 @@ components:
           example: address linked successfully
           type: string
       type: object
+    privacy-proxy_internal_apimodels.ExecutionPolicyCapabilities:
+      description: Capabilities distinguishes reference review from live policy enforcement.
+      properties:
+        activationSupported:
+          type: boolean
+        candidateReviewSupported:
+          type: boolean
+        configuredConsumer:
+          enum:
+          - none
+          - guarded-reth
+          type: string
+        nodeOwnershipRecoverySupported:
+          type: boolean
+        nodePreviewSupported:
+          type: boolean
+        nodeTransactionStatusSupported:
+          type: boolean
+        referenceSimulationSupported:
+          type: boolean
+        unavailableReason:
+          type: string
+      type: object
     privacy-proxy_internal_apimodels.ExecutionPolicyCompiler:
       description: Compiler is the exact build the artifact was produced with.
       properties:
@@ -1206,6 +1231,8 @@ components:
             another draft does not move this base. A stale base is refused.
           example: 3
           type: integer
+        capabilities:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyCapabilities'
         contracts:
           description: Contracts are the organisation's registered contracts.
           items:
@@ -1243,7 +1270,9 @@ components:
           type: string
       type: object
     privacy-proxy_internal_apimodels.ExecutionPolicyRevision:
-      description: Active is the policy currently in force, if any.
+      description: |-
+        Active is the selected approved policy, if any; see capabilities and the
+        runtime status to distinguish selection from actual application.
       properties:
         activated_at:
           type: string
@@ -1274,15 +1303,16 @@ components:
           example: 3
           type: integer
         runtime_digest:
-          description: RuntimeDigest identifies the compiled bytecode that is enforced.
+          description: RuntimeDigest identifies this revision's compiled bytecode.
           type: string
         solidity_digest:
           description: SolidityDigest identifies the generated contract source.
           type: string
         status:
           description: |-
-            Status is draft, active, superseded or withdrawn. Only one revision per
-            organisation is active, and only an active one decides anything.
+            Status is draft, active, superseded or withdrawn. Active is the selected
+            approved revision; configured consumer support and runtime application
+            determine whether it is enforced. Compilation alone is not enforcement.
           example: active
           type: string
       type: object
@@ -1320,7 +1350,7 @@ components:
           description: RuntimeBytecode is the compiled code, 0x-prefixed hex.
           type: string
         runtime_digest:
-          description: RuntimeDigest identifies the compiled bytecode that is enforced.
+          description: RuntimeDigest identifies this revision's compiled bytecode.
           type: string
         solidity_digest:
           description: SolidityDigest identifies the generated contract source.
@@ -1333,8 +1363,9 @@ components:
           type: string
         status:
           description: |-
-            Status is draft, active, superseded or withdrawn. Only one revision per
-            organisation is active, and only an active one decides anything.
+            Status is draft, active, superseded or withdrawn. Active is the selected
+            approved revision; configured consumer support and runtime application
+            determine whether it is enforced. Compilation alone is not enforcement.
           example: active
           type: string
       type: object
@@ -1442,6 +1473,8 @@ components:
           type: integer
         mode:
           type: string
+        policyCapabilities:
+          $ref: '#/components/schemas/privacy-proxy_internal_apimodels.ExecutionPolicyCapabilities'
         ready:
           type: boolean
         reason:
@@ -5950,6 +5983,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
           description: Conflict
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: no configured runtime can enforce execution policies
       security:
       - BearerAuth: []
       summary: Activate a reviewed platform configuration revision
@@ -8473,6 +8512,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
           description: Conflict
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: no configured runtime can enforce execution policies
       security:
       - BearerAuth: []
       summary: Activate reviewed configuration revisions atomically
@@ -8535,6 +8580,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
           description: Conflict
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: no configured runtime can enforce execution policies
       security:
       - BearerAuth: []
       summary: Activate exact externally reviewed configuration from trusted CI
@@ -10121,6 +10172,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
           description: Internal Server Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/privacy-proxy_internal_apimodels.APIError'
+          description: no configured runtime can enforce execution policies
       security:
       - BearerAuth: []
       summary: Activate an execution-policy revision

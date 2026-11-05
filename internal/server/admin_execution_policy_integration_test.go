@@ -50,6 +50,8 @@ type testServerExecutionPolicy struct {
 	// vault is unique per test: contract addresses are globally unique, so a
 	// shared fixture address would make these tests collide with each other.
 	vault string
+	// reviewer is used only to seed historical approved images in read-side tests.
+	reviewer string
 }
 
 func setupTestServerForExecutionPolicy(t *testing.T) *testServerExecutionPolicy {
@@ -137,7 +139,7 @@ func setupTestServerForExecutionPolicy(t *testing.T) *testServerExecutionPolicy 
 	}
 	srv.registerRBACRoutes(router.Group("/api/v1/admin"))
 
-	return &testServerExecutionPolicy{Server: srv, router: router, orgID: org.ID, group: group.ID, vault: strings.ToLower(vault)}
+	return &testServerExecutionPolicy{Server: srv, router: router, orgID: org.ID, group: group.ID, vault: strings.ToLower(vault), reviewer: reviewer}
 }
 
 func (s *testServerExecutionPolicy) do(t *testing.T, method, path string, body any) *httptest.ResponseRecorder {
@@ -195,7 +197,20 @@ func epTransferCalldata(t *testing.T, to common.Address, amount int64) string {
 	return "0x" + common.Bytes2Hex(data)
 }
 
-// TestExecutionPolicy_Lifecycle walks the whole feature over HTTP.
+// seedHistoricalActivePolicy prepares an old approved image for read/immutability
+// checks. New legacy HTTP activation is deliberately unavailable, and production
+// startup over such an image requires a capable consumer. The supported live
+// activation path is covered through the configuration API separately.
+func (s *testServerExecutionPolicy) seedHistoricalActivePolicy(t *testing.T, id string) *db.ExecutionPolicyRevision {
+	t.Helper()
+	revision, err := s.db.ActivateExecutionPolicyRevision(t.Context(), s.orgID, id, &s.reviewer)
+	require.NoError(t, err)
+	require.NotNil(t, revision)
+	return revision
+}
+
+// TestExecutionPolicy_Lifecycle exercises candidate review and historical-image
+// readback. Legacy mode can prepare evidence but cannot newly activate it.
 func TestExecutionPolicy_Lifecycle(t *testing.T) {
 	s := setupTestServerForExecutionPolicy(t)
 	signer := common.HexToAddress("0xAAAA000000000000000000000000000000000001")
@@ -293,17 +308,18 @@ func TestExecutionPolicy_Lifecycle(t *testing.T) {
 	require.True(t, agreed)
 	require.Equal(t, "argument_constraint", code)
 
-	// Activating puts it in force.
+	// Compiled/reference evidence alone cannot authorize live activation.
 	rec = s.do(t, http.MethodPost, s.base()+"/revisions/"+draft.ID+"/activate", nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), executionConsumerUnavailable)
+	before, err := s.db.GetActiveExecutionPolicy(t.Context(), s.orgID)
+	require.NoError(t, err)
+	require.Nil(t, before)
 
-	var active struct {
-		Status      string `json:"status"`
-		ActivatedAt string `json:"activated_at"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &active))
+	// Seed historical state explicitly to preserve its read-side invariants.
+	active := s.seedHistoricalActivePolicy(t, draft.ID)
 	require.Equal(t, "active", active.Status)
-	require.NotEmpty(t, active.ActivatedAt)
+	require.NotNil(t, active.ActivatedAt)
 
 	// Activating the same revision twice is a conflict, not a silent success.
 	rec = s.do(t, http.MethodPost, s.base()+"/revisions/"+draft.ID+"/activate", nil)
@@ -338,7 +354,8 @@ func TestExecutionPolicy_Lifecycle(t *testing.T) {
 	require.Equal(t, int64(2), second.Revision)
 
 	rec = s.do(t, http.MethodPost, s.base()+"/revisions/"+second.ID+"/activate", nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	s.seedHistoricalActivePolicy(t, second.ID)
 
 	rec = s.do(t, http.MethodGet, s.base()+"/revisions", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -357,9 +374,9 @@ func TestExecutionPolicy_Lifecycle(t *testing.T) {
 	}
 	require.Equal(t, 1, activeCount, "exactly one revision may be in force")
 
-	// The tighter bound is now the one enforced.
+	// The second historical artifact retains its tighter reference bound.
 	allowed, _, _ = simulate(second.ID, signer, 50)
-	require.False(t, allowed, "the newly activated revision lowered the bound to 10")
+	require.False(t, allowed, "the second historical artifact has the lower bound of 10")
 }
 
 // TestExecutionPolicy_RejectsInvalidCandidates checks that a bad document is
@@ -443,7 +460,8 @@ func TestExecutionPolicy_StaleBaseIsRefused(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &draft))
 	rec = s.do(t, http.MethodPost, s.base()+"/revisions/"+draft.ID+"/activate", nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	s.seedHistoricalActivePolicy(t, draft.ID)
 
 	// A second author still believes active revision zero is current.
 	rec = s.do(t, http.MethodPost, s.base()+"/revisions", map[string]any{
@@ -515,7 +533,8 @@ func TestExecutionPolicy_WithdrawOnlyAffectsDrafts(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &second))
 
 	rec = s.do(t, http.MethodPost, s.base()+"/revisions/"+second.ID+"/activate", nil)
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	s.seedHistoricalActivePolicy(t, second.ID)
 
 	rec = s.do(t, http.MethodPost, s.base()+"/revisions/"+second.ID+"/withdraw", nil)
 	require.Equal(t, http.StatusNotFound, rec.Code, "an activated revision is part of the record and stays")
@@ -656,7 +675,8 @@ func TestExecutionPolicy_AuthenticatedReviewBoundary(t *testing.T) {
 				require.Equal(t, http.StatusForbidden, rec.Code, "service and legacy tokens cannot approve as a human")
 			}
 			rec = request(otherAdmin, s.base()+"/revisions/"+draft.ID+"/activate", nil)
-			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+			require.Contains(t, rec.Body.String(), executionConsumerUnavailable)
 		}
 	}
 	rec := request(readonly, "/api/v1/admin/orgs/"+s.orgID+"/memberships/by-did", map[string]any{})

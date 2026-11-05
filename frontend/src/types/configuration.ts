@@ -15,6 +15,17 @@ export interface ConfigurationRevision {
   activatedAt: string | null;
   artifact?: unknown;
 }
+/** Configured policy support; live readiness and compiler availability are separate. */
+export interface ExecutionPolicyCapabilities {
+  configuredConsumer: 'none' | 'guarded-reth';
+  activationSupported: boolean;
+  candidateReviewSupported: boolean;
+  referenceSimulationSupported: boolean;
+  nodePreviewSupported: boolean;
+  nodeTransactionStatusSupported: boolean;
+  nodeOwnershipRecoverySupported: boolean;
+  unavailableReason?: string;
+}
 export interface ConfigurationCapabilities {
   apiVersion: string;
   kinds: ConfigurationKind[];
@@ -22,6 +33,8 @@ export interface ConfigurationCapabilities {
   approvalModes: string[];
   maxDocumentBytes: number;
   compiler: { version: string; available: boolean };
+  /** Absent on an older server: do not enable execution actions from absence. */
+  executionPolicy?: ExecutionPolicyCapabilities;
   /** Whether a price feed declared in the platform document is polled here. */
   priceFeed?: { available: boolean; reason?: string };
 }
@@ -58,4 +71,5 @@ export interface ExecutionReadiness {
   desired_version?: number;
   applied_version?: number;
   expires_at?: number;
+  policyCapabilities?: ExecutionPolicyCapabilities;
 }

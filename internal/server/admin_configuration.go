@@ -145,6 +145,7 @@ func (s *Server) simulatePlatformConfigurationRevision(c *gin.Context) {
 // @Failure 403 {object} apimodels.APIError
 // @Failure 404 {object} apimodels.APIError
 // @Failure 409 {object} apimodels.APIError
+// @Failure 503 {object} apimodels.APIError "no configured runtime can enforce execution policies"
 // @Security BearerAuth
 // @Router /api/v1/admin/configuration/platform/revisions/{revision_id}/activate [post]
 func (s *Server) activatePlatformConfigurationRevision(c *gin.Context) {
@@ -539,6 +540,7 @@ func (s *Server) simulateConfigurationRevision(c *gin.Context) {
 // @Success 200 {object} apimodels.ConfigurationRevisionList
 // @Failure 403 {object} apimodels.APIError
 // @Failure 409 {object} apimodels.APIError
+// @Failure 503 {object} apimodels.APIError "no configured runtime can enforce execution policies"
 // @Security BearerAuth
 // @Router /api/v1/admin/orgs/{org_id}/configuration/{kind}/revisions/{revision_id}/activate [post]
 func (s *Server) activateConfigurationRevision(c *gin.Context) {
@@ -549,7 +551,7 @@ func (s *Server) activateConfigurationRevision(c *gin.Context) {
 	if !ok {
 		return
 	}
-	rows, err := s.db.ActivateConfigurationRevisions(c.Request.Context(), scope, ids, actor, s.authorizeConfigurationActivation)
+	rows, err := s.db.ActivateConfigurationRevisions(c.Request.Context(), scope, ids, actor, s.authorizeConfigurationPolicyActivation)
 	if err != nil {
 		configurationError(c, err)
 		return

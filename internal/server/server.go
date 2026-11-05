@@ -432,9 +432,21 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 	if cfg.NodePolicy.Enabled() && (os.Getenv("OPS_APPROVAL_TARGETS") != "" || os.Getenv("OPS_APPROVAL_TARGET") != "") {
 		return nil, fmt.Errorf("cannot combine OPS_NODE_POLICY_MODE=reth with OPS_APPROVAL_TARGETS or OPS_APPROVAL_TARGET; select one node execution protocol")
 	}
+	// Validate the selected implementation before opening/migrating databases
+	// or starting any other service. An unknown mode is never legacy fallback.
+	if err := cfg.NodePolicy.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid node policy configuration: %w", err)
+	}
 	database, err := db.New(cfg.DatabaseURL, db.WithPool(cfg.DBMaxOpenConns, cfg.DBMaxIdleConns, cfg.DBConnMaxLifetime))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database: %w", err)
+	}
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), executionPolicyStartupTimeout)
+	err = validateExecutionPolicyStartup(startupCtx, cfg.NodePolicy, database)
+	cancelStartup()
+	if err != nil {
+		database.Close()
+		return nil, err
 	}
 	warnIfPoolExceedsServer(database, "DATABASE_URL")
 

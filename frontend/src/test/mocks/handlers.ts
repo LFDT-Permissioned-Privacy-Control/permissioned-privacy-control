@@ -1,4 +1,5 @@
 import { http, HttpResponse } from 'msw';
+import { mockLegacyPolicyCapabilities } from './execution-policy-fixtures';
 import type {
   AuthRequestResponse,
   AuthTokenResponse,
@@ -470,7 +471,7 @@ export const handlers = [
       // The server always reports the execution mode; legacy is its default
       // (internal/server/node_policy.go executionStatus). Reth-mode tests
       // override this per case.
-      execution: { mode: 'legacy', ready: true },
+      execution: { mode: 'legacy', ready: true, policyCapabilities: mockLegacyPolicyCapabilities },
     });
   }),
 

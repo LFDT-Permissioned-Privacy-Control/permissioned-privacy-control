@@ -21,12 +21,13 @@ type ReadinessResponse struct {
 }
 
 type ExecutionStatus struct {
-	Mode           string `json:"mode"`
-	Ready          bool   `json:"ready"`
-	Reason         string `json:"reason,omitempty"`
-	DesiredVersion uint64 `json:"desired_version,omitempty"`
-	AppliedVersion uint64 `json:"applied_version,omitempty"`
-	ExpiresAt      int64  `json:"expires_at,omitempty"`
+	PolicyCapabilities ExecutionPolicyCapabilities `json:"policyCapabilities"`
+	Mode               string                      `json:"mode"`
+	Ready              bool                        `json:"ready"`
+	Reason             string                      `json:"reason,omitempty"`
+	DesiredVersion     uint64                      `json:"desired_version,omitempty"`
+	AppliedVersion     uint64                      `json:"applied_version,omitempty"`
+	ExpiresAt          int64                       `json:"expires_at,omitempty"`
 }
 
 // MethodsStatus exposes available RPC methods to the admin frontend.

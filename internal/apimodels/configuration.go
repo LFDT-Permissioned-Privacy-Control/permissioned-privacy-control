@@ -48,13 +48,29 @@ type ConfigurationContext struct {
 // execution-rules artifacts right now. It describes the API, not the caller's
 // authority; see ConfigurationViewer for that.
 type ConfigurationCapabilities struct {
-	APIVersion       string                 `json:"apiVersion"`
-	Kinds            []string               `json:"kinds"`
-	HumanOnlyKinds   []string               `json:"humanOnlyKinds"`
-	ApprovalModes    []string               `json:"approvalModes"`
-	MaxDocumentBytes int                    `json:"maxDocumentBytes"`
-	Compiler         ConfigurationCompiler  `json:"compiler"`
-	PriceFeed        ConfigurationPriceFeed `json:"priceFeed"`
+	APIVersion       string                      `json:"apiVersion"`
+	Kinds            []string                    `json:"kinds"`
+	HumanOnlyKinds   []string                    `json:"humanOnlyKinds"`
+	ApprovalModes    []string                    `json:"approvalModes"`
+	MaxDocumentBytes int                         `json:"maxDocumentBytes"`
+	Compiler         ConfigurationCompiler       `json:"compiler"`
+	PriceFeed        ConfigurationPriceFeed      `json:"priceFeed"`
+	ExecutionPolicy  ExecutionPolicyCapabilities `json:"executionPolicy"`
+}
+
+// ExecutionPolicyCapabilities separates preparing a policy from having a runtime
+// which consumes its approved artifacts. Support describes the implementation
+// selected by validated configuration, not the caller's authority, compiler
+// availability, node reachability, or whether a revision has already applied.
+type ExecutionPolicyCapabilities struct {
+	ConfiguredConsumer             string `json:"configuredConsumer" enums:"none,guarded-reth"`
+	ActivationSupported            bool   `json:"activationSupported"`
+	CandidateReviewSupported       bool   `json:"candidateReviewSupported"`
+	ReferenceSimulationSupported   bool   `json:"referenceSimulationSupported"`
+	NodePreviewSupported           bool   `json:"nodePreviewSupported"`
+	NodeTransactionStatusSupported bool   `json:"nodeTransactionStatusSupported"`
+	NodeOwnershipRecoverySupported bool   `json:"nodeOwnershipRecoverySupported"`
+	UnavailableReason              string `json:"unavailableReason,omitempty"`
 }
 
 // ConfigurationPriceFeed reports whether a price feed declared in the platform
