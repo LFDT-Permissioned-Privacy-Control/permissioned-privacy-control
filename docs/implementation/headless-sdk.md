@@ -5,11 +5,37 @@ interfaces as the dashboard. MCP is not required. It has no runtime dependency;
 Node 22+ supplies `fetch`. The checked-in component and operation types are
 generated from the repository's OpenAPI 3.1 artifact.
 
+## Use the skill and helpers from one source release
+
+The OPS skill in `.claude/skills/ops/SKILL.md` instructs the agent to run the SDK
+examples. Supply a complete OPS source checkout or source archive from the same
+explicit release tag/commit as the deployment. It includes the skill, SDK
+source/examples/lockfile, matching OpenAPI artifact and referenced documentation.
+Copying the skill alone does not supply those files. The SDK is excluded from the
+backend image; run its helpers on the operator/agent machine.
+
+With Node 22+ and npm installed, build the client once from that source:
+
 ```sh
-cd sdk
+export OPS_SOURCE_ROOT=/absolute/path/to/ops-source
+cd "$OPS_SOURCE_ROOT/sdk"
 npm ci
-npm test
+npm run check:generated
+npm run build
 ```
+
+These commands make no OPS API calls and need no token. Installation uses the
+lockfile-pinned development compiler and needs registry access unless cached;
+running the built helpers needs no runtime npm dependencies. A generated-type
+mismatch is a source/spec mismatch to investigate; do not mix release files or
+silently regenerate types to bypass it. Run all example commands below from this
+same `sdk` directory.
+
+The package is private: it is supplied with the OPS source, not installed as a
+separately published npm SDK. Its documented skill/helper path is maintained
+with that OPS release. The optional MCP server is a separate Go module in `mcp/`
+with its own setup in `docs/mcp.md`; it is not installed or authenticated by the
+SDK setup.
 
 After `make api-spec`, run `npm run generate` in `sdk/`. `npm run check:generated`
 fails on drift. The generator retains required/optional properties, references,
@@ -153,6 +179,33 @@ exact revisions and their activation evidence first; an active selection is
 not the same as node application or successful execution. A stale or changed
 bundle requires a new explicit review and approval decision.
 
+## Restore previous policy settings
+
+Read current context before preparing a policy rollback. Use the earlier desired
+settings in a new document with the current base, the reviewed dependencies and
+any required explicit deletions; submit, review and independently activate that
+new exact revision. Current authority and execution-consumer capabilities still
+apply. An old revision ID cannot simply be reactivated, and an old source must
+not silently overwrite current dependency choices or operational memberships,
+bans, sessions or deployment observations. Resolve an ambiguous previous commit
+through authenticated revision/activation readback before making another change.
+
+## Bootstrap and operational actions
+
+Initial tenant setup can use the existing tier-1 organization/admin-group/access
+operations while the organization's groups stream is unmanaged. After adoption,
+group definitions and permissions use named-principal document changes; a managed
+writer's 409 or an authorization failure does not permit fallback to legacy
+setters. OPS organization lifecycle is separate from the platform stream's
+allowed Azure tenant registrations/shared infrastructure. Managed platform
+settings use its reviewed, human-authorized workflow.
+
+Onboarding, memberships, bans and address links remain operational API actions.
+They do not require a policy revision. Their existing caller/scope checks still
+apply. A tier-1 bootstrap token is not a named SDK session and cannot substitute
+for the author or independent approver. See `.claude/skills/ops/SKILL.md` for the
+bootstrap sequence and credential roles.
+
 ## Operations, RPC and status
 
 Generated `client.request(operation, input)` provides typed access to the full
@@ -198,6 +251,9 @@ only from finalized node evidence. A status response never exposes raw
 transactions, execution identity envelopes or visibility recipients.
 
 ## Verification
+
+From the prepared SDK source directory, run `npm test` for generated drift,
+build, type and runtime checks. Its HTTP fixtures do not contact a deployment.
 
 Tests cover exact source, named credentials, service
 exchange, refresh serialization, no mutation retries, captured review bundles,

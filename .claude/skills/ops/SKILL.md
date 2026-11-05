@@ -14,6 +14,31 @@ Everything here is behaviour of the code in this repository. When an answer is n
 covered below, read the source rather than guessing — the admin handlers live in
 `internal/server/` and the access engine in `internal/rbac/`.
 
+## Source and helper setup
+
+Use a complete OPS source checkout or source archive from the same explicit
+release tag/commit as the deployment. Keep this skill, `sdk/` and the referenced
+docs together; copying only this file does not install its helpers. Paths below
+are relative to that source root. Do not fill missing files from a different
+release or mutable main.
+
+The helpers need Node 22+ and npm. Build them once from that source:
+
+```sh
+export OPS_SOURCE_ROOT=/absolute/path/to/ops-source
+cd "$OPS_SOURCE_ROOT/sdk"
+npm ci
+npm run check:generated
+npm run build
+```
+
+`npm ci` installs the lockfile-pinned development compiler and needs registry
+access unless it is already cached. The built client has no runtime npm
+dependencies. These setup commands need no OPS token and make no OPS API calls.
+A generated-type mismatch is an error to investigate, not permission to
+regenerate against another release. Run the following helper commands from this
+same `sdk` directory. No separate npm publication or MCP server is required.
+
 ## Where the detail lives
 
 | Topic | Read |
@@ -38,7 +63,7 @@ do not work around that guard or edit projection tables.
 The SDK examples preserve context → draft submission → review in one invocation:
 
 ```sh
-cd sdk
+cd "$OPS_SOURCE_ROOT/sdk"
 node examples/prepare.mjs --kind groups --org <organization-uuid> > context.json
 # Edit a copy of context.source, preserving reviewed dependency requirements.
 node examples/prepare.mjs groups.json > review.json
@@ -69,6 +94,14 @@ claims, relax author separation, or retry a mutation automatically. After a lost
 activation response, read the exact revisions and activation evidence before
 deciding what to do next; the commit may have succeeded.
 
+To restore earlier policy settings, read fresh current context and make a new
+draft with the intended prior settings, the current base and the dependencies
+reviewed for this change. Independently review and activate the new exact
+revision under the current authority and capability checks. An old source file
+is input to that new change; do not reactivate an old revision ID, reset SQL
+pointers or restore old memberships, bans or deployment facts. Resolve an
+ambiguous activation outcome before proposing another activation or rollback.
+
 Check `context.capabilities.executionPolicy` (old execution-policy context:
 `capabilities`; admin status: `execution.policyCapabilities`). A configured
 consumer of `none` supports candidate/artifact review and old reference simulation,
@@ -82,15 +115,26 @@ disable ordinary non-execution configuration workflows. Evidence compilation and
 simulation do not prove live enforcement, and an active desired revision does not
 prove node application or final execution.
 
-## 1. Standing up a tenant — the order matters
+## 1. Initial tenant bootstrap — before reviewed groups
 
-Four steps, in this sequence. Skipping the third is the single most common way a
-new tenant ends up unusable.
+These direct group/access calls are for initial setup while the organization's
+`groups` stream is unmanaged. Once a groups revision is active, even an admin-tier
+token cannot use them to change its projection: use the reviewed workflow above
+with named principals. An authorization error or an unknown managed state does
+not establish that direct writes are allowed.
+
+For a new organization, bootstrap in this order:
 
 1. **Create the organization.** It starts with **no groups at all**.
 2. **Create a group.** For the tenant's own administrators set `is_org_admin`.
 3. **Set that group's access.** This is a separate call and it is *not* optional.
 4. **Add members.**
+
+OPS organization creation/deletion and operational membership actions remain
+their existing separate operations. The platform stream's allowed Azure tenant
+registrations and shared infrastructure are different settings: once managed,
+their legacy setters require reviewed platform changes. Do not confuse those
+Azure tenant registrations with OPS organizations.
 
 ### The trap: an admin group that can call nothing
 
@@ -141,14 +185,18 @@ a user means reading tenant data as that user, which neither may do. That needs
 a tier-2 org-admin JWT.
 
 **Operator token** (`OPERATOR_API_TOKEN`) — a restricted onboarder. It can run the
-whole of section 1: create and delete organizations, create admin-tier groups, set
-their access, and add their first members. It **cannot** read or modify tenant
+initial bootstrap in section 1 while the groups stream is unmanaged: create and
+delete organizations, create admin-tier groups, set their access, and add their
+first members. It **cannot** read or modify tenant
 data — regular groups, members, contracts, grants, audit logs and per-org
 compliance all return `403`.
 
 **If a third party performs onboarding, give them the operator token.** It does
-everything the bootstrap needs while remaining unable to read the tenants it
-creates. Handing over the full admin token grants far more than the job requires.
+the permitted unmanaged bootstrap while remaining unable to read the tenants it
+creates. It is not a named document author/approver or a way around managed-stream
+guards. Use an appropriately authorized named human for approvers/platform
+changes, which services cannot replace. Handing over the full admin token grants
+far more than the job requires.
 
 Tenant administrators do not use either. They log in and act with a session JWT,
 which is scoped to the organizations they administer.
@@ -188,16 +236,22 @@ Denials on the RPC data path are deliberately opaque, so the client is told only
 `method not found`; the real reason is in the access log. Check there first when a
 call fails for a reason the caller cannot see.
 
-## 4. Driving it from an agent
+## 4. Optional MCP tools
 
 The repo ships an MCP server exposing the admin and explorer APIs as tools, so an
-agent can operate the deployment directly. Copy `.mcp.json.example` to `.mcp.json`
-and fill in `PRIVACY_ADMIN_TOKEN` and `PRIVACY_URL`; the proxy must be running.
+agent can use it for supported bootstrap, operations and diagnosis. It is a
+separate Go module in `mcp/`; its Go toolchain/dependencies are described in
+`docs/mcp.md` and are not installed by SDK setup. For that optional source-based
+setup, copy `.mcp.json.example` to `.mcp.json` at the source root and fill in
+`PRIVACY_ADMIN_TOKEN` and `PRIVACY_URL`; the proxy must be running. Keep populated
+credentials, local config and prepared customer reviews out of shared source.
 
 Tools are grouped by domain: organizations, groups, users and memberships,
 contracts and grants, disclosure, explorer reads, compliance, sessions and audit,
-and system health. The setup in section 1 maps to `create_org`, `create_group`,
-`set_group_access` and `add_membership`.
+and system health. The unmanaged bootstrap in section 1 maps to `create_org`,
+`create_group`, `set_group_access` and `add_membership`. Those setter tools are
+not an alternative to named document review/approval for managed configuration;
+use the SDK workflow above for that.
 
 For diagnosis, three tools answer most questions without reading logs by hand:
 `check_access` for whether a specific call would be allowed, `effective_permissions`
