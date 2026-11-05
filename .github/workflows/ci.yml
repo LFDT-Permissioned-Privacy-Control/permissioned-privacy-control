@@ -5,10 +5,12 @@ on:
     branches:
       - master
       - main
+      - release/2.0
   push:
     branches:
       - master
       - main
+      - release/2.0
 
 env:
   # Pinned to the patch release carrying the standard-library advisory fixes
@@ -123,9 +125,9 @@ jobs:
         with:
           persist-credentials: false
           # The schema-name gate in internal/server/apispec reads the baseline as
-          # committed on the base branch, so it needs origin/main in the local
-          # history; the default shallow checkout has neither the ref nor the
-          # common ancestor. The gate fails loudly rather than skipping when the
+          # committed on the selected base branch, so it needs that target ref
+          # and common history locally; the default shallow checkout has neither.
+          # The gate fails loudly rather than skipping when the
           # ref is missing, so dropping this would turn the Go Tests job red.
           fetch-depth: 0
 

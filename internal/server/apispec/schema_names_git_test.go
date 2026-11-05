@@ -28,6 +28,22 @@ type baseLookup struct {
 	found bool
 }
 
+// schemaNameBaseRef follows a PR's trusted target, never its contributor's head
+// name. After release and main diverge, their published schema baselines differ.
+// Local and non-PR runs retain the existing origin/main comparison. In
+// particular this does not add immutable before-push history validation.
+func schemaNameBaseRef(event, target string) (string, error) {
+	if event != "pull_request" {
+		return "origin/main", nil
+	}
+	switch target {
+	case "main", "master", "release/2.0":
+		return "origin/" + target, nil
+	default:
+		return "", fmt.Errorf("schema-name gate: unsupported or missing pull request target %q", target)
+	}
+}
+
 // inGitWorkTree reports whether the tests are running inside a git work tree.
 // Outside one (module cache, source tarball) there is no published history to
 // compare against.

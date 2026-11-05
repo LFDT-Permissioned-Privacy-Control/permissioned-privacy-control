@@ -11,7 +11,7 @@ on:
       - 'go.mod'
       - 'go.sum'
   push:
-    branches: [main]
+    branches: [main, release/2.0]
     paths:
       - 'internal/nodeapproval/**'
       - 'proto/ops/approvals/**'

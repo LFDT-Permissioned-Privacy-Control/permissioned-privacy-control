@@ -56,9 +56,6 @@ const (
 	specPath      = "swagger.json"
 	baselinePath  = "schema_names_baseline.txt"
 	allowlistPath = "schema_names_allowlist.txt"
-
-	// baseRef is the published branch the baseline must not lose names against.
-	baseRef = "origin/main"
 )
 
 func TestSchemaNamesHaveNotDrifted(t *testing.T) {
@@ -106,12 +103,16 @@ func TestSchemaNameBaselineIsAppendOnly(t *testing.T) {
 		t.Skip("not a git work tree, so there is no base revision to compare the baseline against")
 	}
 
+	baseRef, err := schemaNameBaseRef(os.Getenv("GITHUB_EVENT_NAME"), os.Getenv("GITHUB_BASE_REF"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	base, err := readAtBaseRev(baseRef, baselinePath)
 	if err != nil {
 		t.Fatalf("cannot read %s at %s: %v\n"+
 			"This gate needs the base branch in the local history. In CI, check out with\n"+
 			"fetch-depth: 0 (a shallow clone has neither the ref nor the common\n"+
-			"ancestor); locally, run `git fetch origin main`.",
+			"ancestor); fetch the selected base branch before running this gate.",
 			baselinePath, baseRef, err)
 	}
 
