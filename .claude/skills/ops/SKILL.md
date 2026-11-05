@@ -62,6 +62,10 @@ do not work around that guard or edit projection tables.
 
 The SDK examples preserve context → draft submission → review in one invocation:
 
+Context, edited source and review outputs below are local working files. Keep
+them untracked and exclude them from shared source packages. Absolute private
+work-directory paths can be used instead of the example filenames.
+
 ```sh
 cd "$OPS_SOURCE_ROOT/sdk"
 node examples/prepare.mjs --kind groups --org <organization-uuid> > context.json
