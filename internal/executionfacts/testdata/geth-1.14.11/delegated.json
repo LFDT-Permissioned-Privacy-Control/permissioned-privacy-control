@@ -1,0 +1,38 @@
+{
+  "request": {
+    "from": "0x9e0bfe6cac5f114b8b9adee5c6a2402c00867b38",
+    "to": "0x631a8535aeaaa1b3968d3af12d5c60b7eb4d8afa",
+    "data": "0xf3598ad9000000000000000000000000f0e33106213b25aced0358110fcbe887ef1ea9da",
+    "value": "0x7",
+    "gas": "0x7a1200"
+  },
+  "block": "latest",
+  "tracerOptions": {
+    "tracer": "callTracer",
+    "tracerConfig": {
+      "onlyTopCall": false,
+      "withLog": false
+    }
+  },
+  "result": {
+    "from": "0x9e0bfe6cac5f114b8b9adee5c6a2402c00867b38",
+    "gas": "0x7a1200",
+    "gasUsed": "0x649a",
+    "to": "0x631a8535aeaaa1b3968d3af12d5c60b7eb4d8afa",
+    "input": "0xf3598ad9000000000000000000000000f0e33106213b25aced0358110fcbe887ef1ea9da",
+    "calls": [
+      {
+        "from": "0x631a8535aeaaa1b3968d3af12d5c60b7eb4d8afa",
+        "gas": "0x77c9bc",
+        "gasUsed": "0x271",
+        "to": "0xf0e33106213b25aced0358110fcbe887ef1ea9da",
+        "input": "0xc9482a5d",
+        "output": "0x0000000000000000000000009e0bfe6cac5f114b8b9adee5c6a2402c00867b380000000000000000000000000000000000000000000000000000000000000007000000000000000000000000631a8535aeaaa1b3968d3af12d5c60b7eb4d8afa",
+        "value": "0x7",
+        "type": "DELEGATECALL"
+      }
+    ],
+    "value": "0x7",
+    "type": "CALL"
+  }
+}

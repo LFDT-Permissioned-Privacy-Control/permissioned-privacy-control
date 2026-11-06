@@ -19,6 +19,7 @@ import (
 	_ "privacy-proxy/internal/apimodels"
 	_ "privacy-proxy/internal/audit"
 	_ "privacy-proxy/internal/config"
+	_ "privacy-proxy/internal/executionfacts"
 	_ "privacy-proxy/internal/identity"
 	_ "privacy-proxy/internal/netguard"
 	_ "privacy-proxy/internal/policybundle"
@@ -112,6 +113,20 @@ func TestNativePolicyDependencyBoundary(t *testing.T) {
 		} {
 			if strings.HasPrefix(dep, forbidden) {
 				t.Errorf("native policy runtime imports infrastructure dependency %s", dep)
+			}
+		}
+	}
+}
+
+func TestNativeExecutionEvidenceDependencyBoundary(t *testing.T) {
+	const pkg = "privacy-proxy/internal/executionfacts"
+	for dep := range transitiveDeps(t, moduleRoot(t), pkg) {
+		if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg {
+			t.Errorf("execution evidence parser must not import application infrastructure %s", dep)
+		}
+		for _, forbidden := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb"} {
+			if strings.HasPrefix(dep, forbidden) {
+				t.Errorf("execution evidence parser imports storage or execution machinery %s", dep)
 			}
 		}
 	}

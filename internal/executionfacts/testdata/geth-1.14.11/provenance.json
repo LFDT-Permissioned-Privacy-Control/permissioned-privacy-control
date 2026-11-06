@@ -1,0 +1,47 @@
+{
+  "purpose": "Short functional local callTracer fixtures, not OPS runtime or throughput qualification.",
+  "geth_version": "1.14.11-stable darwin/arm64",
+  "solc_version": "0.8.35+commit.47b9dedd",
+  "evm_target": "cancun",
+  "chain_id": "0x539",
+  "fixture_cases": [
+    {
+      "case": "direct",
+      "path": "direct.json",
+      "sha256": "b28de57f501e17a7ae74585147cbe4025647f722115e8dea06ecd6b59f3b102e"
+    },
+    {
+      "case": "delegated",
+      "path": "delegated.json",
+      "sha256": "8e09c74d1776f5bdd7256452d9d619140058966240929344ebcb66619057049d"
+    },
+    {
+      "case": "coded",
+      "path": "coded.json",
+      "sha256": "a912f6a232d5adae1483c22fc9ff1563b32654c314162477a91ab641b71dd5f0"
+    },
+    {
+      "case": "staticCoded",
+      "path": "staticCoded.json",
+      "sha256": "ea9ff5d52b9d4a5e4d1881b7a09684bcd94557278199a6130ad8f2e8ce32e616"
+    },
+    {
+      "case": "caught",
+      "path": "caught.json",
+      "sha256": "ac620d1d2b70727d53693ad7ad9de266e3f31a5a73593c88d892934eb0941541"
+    },
+    {
+      "case": "destroy",
+      "path": "destroy.json",
+      "sha256": "75bc6aaa4ab85398c86ac9edf725c8f984c6bf40b0281aaec3165ccf6a38dbcd"
+    },
+    {
+      "case": "logged",
+      "path": "logged.json",
+      "sha256": "2b4a78fd060c066ca44668fc113e37607959bbc2ffdaa8e02cd3f0b3bd1ed66f"
+    }
+  ],
+  "source_sha256": "e2a78367af8451841c970807d624bf75d34b99275600c68e56c21cefefe82816",
+  "isolated_process_stopped": true,
+  "limits": "Host Geth1.14.11 only. Does not qualify module1.17.8, Anvil, Besu, real OPS auth/privacy or producer enforcement. Source contains deprecated SELFDESTRUCT solely to observe its trace shape."
+}
