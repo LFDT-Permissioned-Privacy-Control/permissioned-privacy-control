@@ -1,9 +1,13 @@
 ---
 name: ops
-description: Operate an Open Privacy Suite deployment — prepare and independently approve configuration revisions, inspect execution capabilities, create organizations and groups, grant RPC access, onboard users by DID, choose credentials, connect MetaMask, and drive the named-principal SDK or bundled MCP server. Use for tenant setup, configuration review, access diagnosis, credentials, wallets or agent workflows.
+description: Operate the OPS V1 managed configuration API and its named-principal SDK or MCP tools for revisions, organizations, users, memberships, access diagnosis and wallets. For Git-reviewed V2 policy-file authoring, use the ops-v2 skill instead.
 ---
 
 # Operating Open Privacy Suite
+
+This workflow targets the V1 managed API. For V2 Git-reviewed policy files, use
+[`ops-v2`](../ops-v2/SKILL.md); V1 SQL revision activation and directory setters
+are not the V2 file-authoring workflow.
 
 This skill is a **map, not a manual**. The reference documentation is already in
 the repo and on the docs site; what follows is the order operations must happen

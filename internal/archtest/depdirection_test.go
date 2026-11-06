@@ -5,6 +5,7 @@
 package archtest
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,10 @@ import (
 	_ "privacy-proxy/internal/identity"
 	_ "privacy-proxy/internal/netguard"
 	_ "privacy-proxy/internal/policybundle"
+	_ "privacy-proxy/internal/policycli"
 	_ "privacy-proxy/internal/policycore"
+	_ "privacy-proxy/internal/policyprofiles"
+	_ "privacy-proxy/internal/rpcmethoddata"
 	_ "privacy-proxy/internal/runtimepolicy"
 	_ "privacy-proxy/internal/server/middleware"
 	_ "privacy-proxy/internal/strictjson"
@@ -190,6 +194,54 @@ func TestRuntimePolicyDependencyBoundary(t *testing.T) {
 			if strings.HasPrefix(dep, prefix) {
 				t.Errorf("runtime policy view imports infrastructure %s", dep)
 			}
+		}
+	}
+}
+
+func TestPolicyAuthoringDependencyBoundary(t *testing.T) {
+	root := moduleRoot(t)
+	// A main package cannot be blank-imported above. Read its source so the
+	// test cache observes command changes as well as the importable packages.
+	command := filepath.Join(root, "cmd", "ops-v2")
+	entries, err := os.ReadDir(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".go") {
+			if _, err := os.ReadFile(filepath.Join(command, entry.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	allowed := map[string]bool{
+		"privacy-proxy/cmd/ops-v2": true, "privacy-proxy/internal/policycli": true,
+		"privacy-proxy/internal/policyprofiles": true, "privacy-proxy/internal/rpcmethoddata": true,
+		"privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/identity": true,
+		"privacy-proxy/internal/policycore": true, "privacy-proxy/internal/strictjson": true,
+	}
+	for _, pkg := range []string{"privacy-proxy/cmd/ops-v2", "privacy-proxy/internal/policycli", "privacy-proxy/internal/policyprofiles", "privacy-proxy/internal/rpcmethoddata"} {
+		for dep := range transitiveDeps(t, root, pkg) {
+			if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
+				t.Errorf("authoring tool imports application infrastructure %s", dep)
+			}
+			for _, prefix := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb"} {
+				if strings.HasPrefix(dep, prefix) {
+					t.Errorf("authoring tool imports storage or execution machinery %s", dep)
+				}
+			}
+		}
+	}
+	const leaf = "privacy-proxy/internal/rpcmethoddata"
+	cmd := exec.Command("go", "list", "-deps", "-f", "{{if not .Standard}}{{.ImportPath}}{{end}}", leaf)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("method data dependency check: %v\n%s", err, out)
+	}
+	for _, dep := range strings.Fields(string(out)) {
+		if dep != leaf {
+			t.Errorf("RPC method seed must use only the standard library: %s", dep)
 		}
 	}
 }

@@ -1,9 +1,7 @@
 package policybundle
 
 import (
-	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"sort"
 	"strings"
 
@@ -30,24 +28,11 @@ func normalizeRegistry(spec *RegistrySpec, org string, limits Limits) ([]eventAd
 			return nil, fail(InvalidSchema, ContractRegistry, org, "contracts", "duplicate contract address")
 		}
 		addresses[c.Address] = true
-		value, err := strictValue(c.ABI, limits.MaxJSONDepth)
+		canonical, parsed, err := parseCanonicalABI(c.ABI, limits, org)
 		if err != nil {
-			return nil, fail(InvalidSchema, ContractRegistry, org, "abi", err.Error())
-		}
-		if err := checkABIBudget(value, limits); err != nil {
-			return nil, fail(LimitExceeded, ContractRegistry, org, "abi", err.Error())
-		}
-		c.ABI, err = json.Marshal(value)
-		if err != nil {
-			return nil, fail(InvalidSchema, ContractRegistry, org, "abi", "cannot normalize ABI")
-		}
-		parsed, err := abi.JSON(bytes.NewReader(c.ABI))
-		if err != nil {
-			return nil, fail(InvalidSchema, ContractRegistry, org, "abi", "invalid contract ABI")
-		}
-		if err := uniqueABIIdentities(value, parsed, org); err != nil {
 			return nil, err
 		}
+		c.ABI = canonical
 		groups := map[string]bool{}
 		for j := range c.ReadGrants {
 			grant := &c.ReadGrants[j]

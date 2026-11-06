@@ -7,73 +7,18 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+
+	"privacy-proxy/internal/rpcmethoddata"
 )
 
 // ReadMethods classifies read-only RPC methods.
 // These methods only read blockchain state and don't modify it.
 // Note: No longer used for claim gating — retained for AllAllowedMethods() and reference.
-var ReadMethods = map[string]bool{
-	// Chain/Network info
-	"eth_chainId":        true,
-	"eth_blockNumber":    true,
-	"net_version":        true,
-	"net_listening":      true,
-	"net_peerCount":      true,
-	"web3_clientVersion": true,
-	"web3_sha3":          true,
-	"eth_syncing":        true,
-	"eth_accounts":       true,
-
-	// Account/Balance queries
-	"eth_getBalance":          true,
-	"eth_getCode":             true,
-	"eth_getStorageAt":        true,
-	"eth_getTransactionCount": true,
-
-	// Block queries
-	"eth_getBlockByHash":                   true,
-	"eth_getBlockByNumber":                 true,
-	"eth_getBlockTransactionCountByHash":   true,
-	"eth_getBlockTransactionCountByNumber": true,
-
-	// Transaction queries
-	"eth_getTransactionByHash":                true,
-	"eth_getTransactionReceipt":               true,
-	"eth_getTransactionByBlockHashAndIndex":   true,
-	"eth_getTransactionByBlockNumberAndIndex": true,
-
-	// Contract calls (read-only)
-	"eth_call":        true,
-	"eth_estimateGas": true,
-
-	// Gas price queries
-	"eth_gasPrice":             true,
-	"eth_maxPriorityFeePerGas": true,
-	"eth_feeHistory":           true,
-
-	// Logs
-	"eth_getLogs": true,
-
-	// Filter methods (used for event polling)
-	"eth_newFilter":                   true,
-	"eth_newBlockFilter":              true,
-	"eth_newPendingTransactionFilter": true,
-	"eth_getFilterChanges":            true,
-	"eth_getFilterLogs":               true,
-	"eth_uninstallFilter":             true,
-}
+var ReadMethods = rpcmethoddata.ReadSet()
 
 // WriteMethods classifies state-modifying RPC methods.
 // Note: No longer used for claim gating — retained for AllAllowedMethods() and reference.
-var WriteMethods = map[string]bool{
-	"eth_sendTransaction":    true,
-	"eth_sendRawTransaction": true,
-	"eth_sign":               true,
-	"eth_signTransaction":    true,
-	"personal_sign":          true,
-	"eth_signTypedData":      true,
-	"eth_signTypedData_v4":   true,
-}
+var WriteMethods = rpcmethoddata.WriteSet()
 
 // TraceMethods are the runtime trace RPC methods. They are valid entries in a
 // group's allowed_methods (and are included in the "*" all-methods expansion),
@@ -82,10 +27,7 @@ var WriteMethods = map[string]bool{
 // in jsonrpc_processor.processDebugTrace), and cross-org leakage is prevented by
 // the TraceValidator content gate. The map name is kept generic to reflect that
 // these are simply allowlist-eligible methods, not claim-bearing ones.
-var TraceMethods = map[string]bool{
-	"debug_traceTransaction": true,
-	"debug_traceCall":        true,
-}
+var TraceMethods = rpcmethoddata.TraceSet()
 
 // DeployMethods is the legacy name for the trace-method set, retained as an
 // alias because external references use it. Tracing no longer requires the
@@ -114,11 +56,7 @@ var canonicalMethodByLower = func() map[string]string {
 // They use the same method-name normalization as the Read/Write/Trace sets.
 // eth_getProof and eth_createAccessList have per-address access checks;
 // eth_getBlockReceipts has a response filter (REDACTION_SPEC section 3.8).
-var canonicalExtraMethods = []string{
-	"eth_getProof",
-	"eth_createAccessList",
-	"eth_getBlockReceipts",
-}
+var canonicalExtraMethods = rpcmethoddata.ExactOnly()
 
 // CanonicalizeMethod normalizes built-in method names for internal dispatch
 // and access checks (RD-1180). Operator method names retain their spelling.
@@ -138,7 +76,7 @@ func CanonicalizeMethod(method string) string {
 // operations that actually need them (contract deployment, proxy upgrade,
 // admin) inside CheckAccess via ClassifyOperation, not here.
 func GetClaimForMethod(method string) Claim {
-	return ""
+	return Claim(rpcmethoddata.RequiredClaim(method))
 }
 
 // IsReadMethod returns true for read-only RPC methods (gated by method allowlist, not claims).

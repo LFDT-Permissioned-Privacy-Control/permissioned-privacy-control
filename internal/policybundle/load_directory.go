@@ -4,9 +4,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"sort"
-
-	"privacy-proxy/internal/identity"
 )
 
 // LoadDirectory reads a materialized read-only regular-file artifact. It has no
@@ -49,57 +46,20 @@ func LoadDirectory(ctx context.Context, selection Selection, options Options) (*
 	if err := checkEntries(ctx, root, entries, options.Limits.MaxDocuments); err != nil {
 		return nil, err
 	}
-	sort.Slice(manifest.Documents, func(i, j int) bool { return manifest.Documents[i].Path < manifest.Documents[j].Path })
-	builder := newCatalogBuilder(manifest, selection.ExpectedManifestDigest, options)
-	builder.snapshot.methods = methods // prepareOptions owns every registry map/slice.
-	total := int64(len(raw))
-	for _, ref := range manifest.Documents {
-		if err := canceled(ctx); err != nil {
-			return nil, err
-		}
-		budget := min(options.Limits.MaxDocumentBytes, options.Limits.MaxBundleBytes-total)
-		if budget <= 0 {
-			return nil, fail(LimitExceeded, ref.Kind, ref.OrganizationID, ref.Path, "bundle byte budget exceeded")
-		}
-		raw, err := readRegular(ctx, root, ref.Path, budget)
-		if err != nil {
-			return nil, err
-		}
-		total += int64(len(raw)) // readRegular bounded this by the remaining total.
-		if RawDigest(raw) != ref.SHA256 {
-			return nil, fail(IntegrityFailure, ref.Kind, ref.OrganizationID, ref.Path, "document digest does not match exact bytes")
-		}
-		wire, spec, err := decodeDocument(raw, ref, options.Limits)
-		if err != nil {
-			return nil, err
-		}
-		if err := builder.add(wire, spec, ref, methods, options.Limits); err != nil {
-			return nil, err
-		}
-	}
-	if ref := manifest.IdentityCatalog; ref != nil {
-		budget := min(options.Limits.MaxDocumentBytes, int64(options.IdentityLimits.MaxIdentityDocumentBytes), options.Limits.MaxBundleBytes-total)
-		if budget <= 0 {
-			return nil, fail(LimitExceeded, "", "", "identityCatalog", "identity file exceeds remaining byte budget")
-		}
-		raw, err := readRegular(ctx, root, ref.Path, budget)
-		if err != nil {
-			return nil, err
-		}
-		if RawDigest(raw) != ref.SHA256 {
-			return nil, fail(IntegrityFailure, "", "", "identityCatalog", "identity file digest does not match exact bytes")
-		}
-		source, err := identity.Decode(raw, options.IdentityLimits)
-		if err != nil {
-			return nil, fail(InvalidSchema, "", "", "identityCatalog", err.Error())
-		}
-		builder.identitySource = &source
-		builder.identityRef = ref
-	}
-	if err := canceled(ctx); err != nil {
+	snapshot, err := compileSourceSet(ctx, manifest, selection.ExpectedManifestDigest, int64(len(raw)), options, methods, func(name string, budget int64) ([]byte, error) {
+		return readRegular(ctx, root, name, budget)
+	})
+	if err != nil {
 		return nil, err
 	}
-	return builder.finish(ctx, manifest.RequiredCapabilities)
+	inferred := make(map[string]bool, len(snapshot.requirements.Capabilities))
+	for _, name := range snapshot.requirements.Capabilities {
+		inferred[name] = true
+	}
+	if err := compareCapabilities(manifest.RequiredCapabilities, inferred); err != nil {
+		return nil, err
+	}
+	return snapshot, nil
 }
 
 func canceled(ctx context.Context) error {
@@ -143,7 +103,11 @@ func readRegular(ctx context.Context, root *os.Root, name string, limit int64) (
 }
 
 func checkEntries(ctx context.Context, root *os.Root, refs []DocumentRef, maxDocuments int) error {
-	want := map[string]bool{"manifest.json": true}
+	return checkEntriesNamed(ctx, root, refs, maxDocuments, "manifest.json")
+}
+
+func checkEntriesNamed(ctx context.Context, root *os.Root, refs []DocumentRef, maxDocuments int, selectionFile string) error {
+	want := map[string]bool{selectionFile: true}
 	for _, ref := range refs {
 		want[ref.Path] = true
 	}
