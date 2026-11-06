@@ -66,6 +66,32 @@ public trust, source profiles and same-bundle group mappings are described in
 `catalog-foundation/v1` rejects this extension. Neither profile switches the
 production server's configuration or authentication source.
 
+The explicit validation-only `catalog-native-v2/v1` profile requires identity
+and uses evaluator `policycore/native-v1alpha2`. Execution source must select
+`privacy.gateway.fm/v1alpha2`; the two older profiles remain v1-only. This profile
+keeps the same static rule restrictions and additionally accepts `minDepth`.
+Either depth bound requires `inputs.depth`. It does not enable ownership or
+classification providers, live record getters or new server behavior.
+
+Native v2 uses inclusive `minDepth`/`maxDepth` integers in `0..2147483647`, with
+minimum no greater than maximum. Omitted minimum means zero; explicit null is
+invalid. `policycore.ParseNativeV2` and `ValidateNativeV2` select that grammar;
+legacy `Parse`/`Validate` keep v1 semantics and reject any `minDepth` field.
+The shared prepared program preserves the version and copied bounds. The
+optional EVM backend explicitly rejects v2 before compiler lookup; it cannot
+silently compile a policy without the lower bound. Legacy HTTP/SDK schemas
+remain unchanged.
+
+`ImportLegacyNativeV2` takes an explicitly initialized `LegacyAdmissionProfile`
+containing the verified intra-org tracing setting. Generated shared defaults
+start at depth one. An unscoped ordinary group additionally receives a nested
+org fallback for all four call kinds, without upgrade authority; scoped groups
+retain their explicit targets. True org-admin and explicit selector/argument
+rules retain their separate authority. A bounded conversion report identifies
+the unscoped indirect-upgrade limitation and operational qualification still
+required for deployment, history and privacy. This does not change the original
+`ImportLegacy` output or establish complete migration parity.
+
 Capabilities and scoped RPC credential references are inferred from actual
 usage. The manifest capability set must match exactly: declarations cannot
 enable unsupported features or conceal missing inputs. Secret references name

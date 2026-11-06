@@ -21,6 +21,9 @@ type ArtifactSet struct {
 }
 
 func (c *Compiler) BuildSet(ctx context.Context, v *policycore.Validated) (*ArtifactSet, error) {
+	if err := checkSupportedPolicy(v); err != nil {
+		return nil, err
+	}
 	groups, err := c.BuildPerGroup(ctx, v)
 	if err != nil {
 		return nil, err

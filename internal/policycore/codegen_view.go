@@ -51,6 +51,7 @@ type CodegenRule struct {
 	Args          []CodegenArgument
 	MaxValue      *big.Int
 	MaxDepth      *int64
+	MinDepth      *int
 	Caller        *common.Address
 	Exceptions    []DeployerException
 	HasRecordRead bool
@@ -132,6 +133,10 @@ func (v *Validated) CodegenView() (CodegenProgram, error) {
 				if rule.maxDepth != nil {
 					value := *rule.maxDepth
 					item.MaxDepth = &value
+				}
+				if rule.minDepth != nil {
+					value := *rule.minDepth
+					item.MinDepth = &value
 				}
 				if rule.caller != nil {
 					value := *rule.caller

@@ -24,16 +24,18 @@ package policycore
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
-// APIVersion is the only schema version this build accepts.
-//
-// A document carrying any other value is rejected rather than reinterpreted.
-// Introducing a new version means adding a converter into this canonical model,
-// never silently changing what an existing document means.
+// APIVersion identifies the legacy source accepted by Parse and Validate.
 const APIVersion = "privacy.gateway.fm/v1alpha1"
+
+// NativeV2APIVersion adds minimum depth for the native evaluator only. It must
+// be selected explicitly through ParseNativeV2 and ValidateNativeV2.
+const NativeV2APIVersion = "privacy.gateway.fm/v1alpha2"
 
 // Kind is the only document kind this package understands.
 const Kind = "ContractExecutionPolicy"
@@ -160,6 +162,9 @@ type FrameRule struct {
 	// MaxDepth bounds frame depth inclusively. Nil means unbounded; zero permits
 	// the top-level frame only. The node supplies depth with the root at zero.
 	MaxDepth *int64 `json:"maxDepth,omitempty"`
+	// MinDepth is native-v2 only. The legacy API and EVM backend do not accept
+	// this field; it is excluded from their public source schema.
+	MinDepth *int `json:"minDepth,omitempty" swaggerignore:"true"`
 	// CallerAddress optionally requires the immediate EVM caller, not the signer.
 	CallerAddress string `json:"callerAddress,omitempty"`
 }
@@ -182,7 +187,7 @@ func (r *FrameRule) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("frame rule field must be a string")
 		}
 		switch name {
-		case "storageAddress", "codeAddress", "selector", "abiDigest", "callTypes", "args", "maxValue", "maxDepth", "callerAddress", "targetClass", "allowUpgrade", "except":
+		case "storageAddress", "codeAddress", "selector", "abiDigest", "callTypes", "args", "maxValue", "maxDepth", "minDepth", "callerAddress", "targetClass", "allowUpgrade", "except":
 		default:
 			return fmt.Errorf("unknown frame rule field %q", name)
 		}
@@ -198,7 +203,7 @@ func (r *FrameRule) UnmarshalJSON(data []byte) error {
 	if _, err := fields.Token(); err != nil {
 		return err
 	}
-	for _, name := range []string{"maxValue", "maxDepth", "callerAddress", "targetClass", "allowUpgrade", "except"} {
+	for _, name := range []string{"maxValue", "maxDepth", "minDepth", "callerAddress", "targetClass", "allowUpgrade", "except"} {
 		if value, ok := present[name]; ok && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return fmt.Errorf("frame constraint %s must not be null", name)
 		}
@@ -276,6 +281,10 @@ func (p *Policy) clone() *Policy {
 				depth := *r.MaxDepth
 				nr.MaxDepth = &depth
 			}
+			if r.MinDepth != nil {
+				depth := *r.MinDepth
+				nr.MinDepth = &depth
+			}
 			nr.CallTypes = append([]CallType(nil), r.CallTypes...)
 			nr.Args = make([]ArgConstraint, len(r.Args))
 
@@ -340,11 +349,72 @@ func (a *ArgConstraint) UnmarshalJSON(data []byte) error {
 // validation; call Validate for that.
 // A non-nil error is a *ValidationError.
 func Parse(data []byte) (*Policy, error) {
+	// Inspect every key before decoding: encoding/json can otherwise discard a
+	// shadowed binding containing this native-only field. Other legacy duplicate
+	// and case-folding behavior deliberately remains with the existing decoder.
+	if err := rejectLegacyMinDepth(json.NewDecoder(bytes.NewReader(data))); errors.Is(err, errLegacyMinDepth) {
+		return nil, validationError(err)
+	}
 	v0, err := parsePolicy(data)
 	if err != nil {
 		return v0, validationError(err)
 	}
 	return v0, nil
+}
+
+// ParseNativeV2 decodes the explicitly selected native-v2 source. Semantic
+// validation still requires ValidateNativeV2.
+func ParseNativeV2(data []byte) (*Policy, error) {
+	p, err := parsePolicy(data)
+	if err == nil && p.APIVersion != NativeV2APIVersion {
+		err = fmt.Errorf("policy: unsupported native apiVersion %q, expected %q", p.APIVersion, NativeV2APIVersion)
+	}
+	if err != nil {
+		return nil, validationError(err)
+	}
+	return p, nil
+}
+
+var errLegacyMinDepth = errors.New("policy: minDepth requires native-v2 source")
+
+func rejectLegacyMinDepth(d *json.Decoder) error {
+	return scanLegacyMinDepth(d, 0)
+}
+
+func scanLegacyMinDepth(d *json.Decoder, depth int) error {
+	// Match encoding/json's nesting ceiling. Token-based scanning must not
+	// recurse without a bound before the original decoder checks the input.
+	if depth > 10000 {
+		return fmt.Errorf("policy: JSON nesting limit exceeded")
+	}
+	token, err := d.Token()
+	if err != nil {
+		return err
+	}
+	switch token {
+	case json.Delim('{'):
+		for d.More() {
+			key, err := d.Token()
+			if err != nil {
+				return err
+			}
+			if name, ok := key.(string); ok && strings.EqualFold(name, "minDepth") {
+				return errLegacyMinDepth
+			}
+			if err := scanLegacyMinDepth(d, depth+1); err != nil {
+				return err
+			}
+		}
+		_, err = d.Token()
+	case json.Delim('['):
+		for d.More() {
+			if err := scanLegacyMinDepth(d, depth+1); err != nil {
+				return err
+			}
+		}
+		_, err = d.Token()
+	}
+	return err
 }
 
 // parsePolicy is Parse before its error is typed.

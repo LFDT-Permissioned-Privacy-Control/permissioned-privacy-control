@@ -71,6 +71,7 @@ type compiledRule struct {
 	args         []compiledArg
 	maxValue     *big.Int
 	maxDepth     *int64
+	minDepth     *int
 	caller       *common.Address
 	exceptions   []DeployerException
 }
@@ -224,20 +225,29 @@ var defaultCallTypes = map[CallType]struct{}{
 // reviewer believed were constrained.
 // A non-nil error is a *ValidationError.
 func Validate(p *Policy, cat Catalog) (*Validated, error) {
-	v0, err := validatePolicy(p, cat)
+	v0, err := validatePolicy(p, cat, APIVersion)
 	if err != nil {
 		return v0, validationError(err)
 	}
 	return v0, nil
 }
 
+// ValidateNativeV2 compiles only the explicitly versioned native-v2 source.
+func ValidateNativeV2(p *Policy, cat Catalog) (*Validated, error) {
+	v, err := validatePolicy(p, cat, NativeV2APIVersion)
+	if err != nil {
+		return nil, validationError(err)
+	}
+	return v, nil
+}
+
 // validatePolicy is Validate before its error is typed.
-func validatePolicy(p *Policy, cat Catalog) (*Validated, error) {
+func validatePolicy(p *Policy, cat Catalog, version string) (*Validated, error) {
 	if p == nil {
 		return nil, fmt.Errorf("policy: document is missing")
 	}
-	if p.APIVersion != APIVersion {
-		return nil, fmt.Errorf("policy: unsupported apiVersion %q, this build accepts only %q", p.APIVersion, APIVersion)
+	if p.APIVersion != version {
+		return nil, fmt.Errorf("policy: unsupported apiVersion %q, this build accepts only %q", p.APIVersion, version)
 	}
 	if p.Kind != Kind {
 		return nil, fmt.Errorf("policy: unsupported kind %q, expected %q", p.Kind, Kind)
@@ -273,9 +283,16 @@ func validatePolicy(p *Policy, cat Catalog) (*Validated, error) {
 
 		index := make(map[frameKey][]*compiledRule, len(b.Allow))
 		for ri, r := range b.Allow {
+			if err := validateDepthVersion(r, version); err != nil {
+				return nil, fmt.Errorf("policy: binding %d, rule %d: %w", bi, ri, err)
+			}
 			key, rule, err := compileRule(r, cat, parsedABIs)
 			if err != nil {
 				return nil, fmt.Errorf("policy: binding %d (group %q), rule %d: %w", bi, b.Group, ri, err)
+			}
+			if r.MinDepth != nil {
+				depth := *r.MinDepth
+				rule.minDepth = &depth
 			}
 			// Two rules on the same contract, code account and selector would be
 			// combined with OR, so the looser one decides and the tighter one is
@@ -290,6 +307,26 @@ func validatePolicy(p *Policy, cat Catalog) (*Validated, error) {
 	}
 
 	return v, nil
+}
+
+func validateDepthVersion(r FrameRule, version string) error {
+	if version == APIVersion {
+		if r.MinDepth != nil {
+			return fmt.Errorf("minDepth requires native-v2 source")
+		}
+		return nil
+	}
+	const maxDepth = 1<<31 - 1
+	if r.MinDepth != nil && (*r.MinDepth < 0 || *r.MinDepth > maxDepth) {
+		return fmt.Errorf("minDepth must be an integer in 0..2147483647")
+	}
+	if r.MaxDepth != nil && (*r.MaxDepth < 0 || *r.MaxDepth > maxDepth) {
+		return fmt.Errorf("maxDepth must be an integer in 0..2147483647")
+	}
+	if r.MinDepth != nil && r.MaxDepth != nil && int64(*r.MinDepth) > *r.MaxDepth {
+		return fmt.Errorf("minDepth must not exceed maxDepth")
+	}
+	return nil
 }
 
 // compileRule validates one frame rule and prepares its decoder.

@@ -146,8 +146,8 @@ type solcOutput struct {
 // returned, because publishing part of a policy would leave frames
 // decided by rules nobody approved together.
 func (c *Compiler) BuildPerGroup(ctx context.Context, v *policycore.Validated) (map[string]*Artifact, error) {
-	if v == nil || v.Policy() == nil {
-		return nil, fmt.Errorf("policydsl: no validated policy to compile")
+	if err := checkSupportedPolicy(v); err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, ArtifactSetBuildTimeout)
 	defer cancel()
@@ -170,6 +170,9 @@ func (c *Compiler) BuildPerGroup(ctx context.Context, v *policycore.Validated) (
 // The compiler is checked before use: a build that silently used a different
 // solc would produce bytecode nobody reviewed.
 func (c *Compiler) Build(ctx context.Context, v *policycore.Validated) (*Artifact, error) {
+	if err := checkSupportedPolicy(v); err != nil {
+		return nil, err
+	}
 	if err := c.Available(ctx); err != nil {
 		return nil, err
 	}

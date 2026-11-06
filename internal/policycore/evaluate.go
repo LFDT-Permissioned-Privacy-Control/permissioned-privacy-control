@@ -180,7 +180,13 @@ func (v *Validated) matchFrame(ctx Context, f Frame) (DenialCode, error) {
 				if _, ok := rule.callTypes[f.CallType]; !ok {
 					continue
 				}
-				code, err := rule.checkAuthority(ctx, f, f.GroupClaims[group], key)
+				var code DenialCode
+				var err error
+				if rule.minDepth != nil && f.Depth < uint64(*rule.minDepth) {
+					code, err = DenialDepth, fmt.Errorf("frame depth is below the rule's bound")
+				} else {
+					code, err = rule.checkAuthority(ctx, f, f.GroupClaims[group], key)
+				}
 				if err == nil {
 					code, err = rule.checkArgs(ctx, f)
 				}
