@@ -13,6 +13,9 @@
 //
 // The tool fails loudly when a target schema/property disappears, so a model
 // rename cannot silently drop a patch.
+// It also preserves the established policy component names across internal
+// package moves, rejecting conflicting alias definitions rather than changing
+// the published schema or silently choosing one definition.
 package main
 
 import (
@@ -79,6 +82,9 @@ func patchJSON(path string) error {
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	if err := normalizePolicySchemaNames(doc); err != nil {
 		return err
 	}
 
@@ -149,6 +155,10 @@ func patchYAML(path string) error {
 		return err
 	}
 	lines := strings.Split(string(raw), "\n")
+	lines, err = normalizePolicySchemaNamesYAML(lines)
+	if err != nil {
+		return err
+	}
 
 	for schemaName, props := range nullableProperties {
 		for _, propName := range props {

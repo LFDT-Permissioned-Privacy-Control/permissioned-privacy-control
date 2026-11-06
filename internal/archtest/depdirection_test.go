@@ -20,6 +20,7 @@ import (
 	_ "privacy-proxy/internal/audit"
 	_ "privacy-proxy/internal/config"
 	_ "privacy-proxy/internal/netguard"
+	_ "privacy-proxy/internal/policycore"
 	_ "privacy-proxy/internal/server/middleware"
 )
 
@@ -86,6 +87,28 @@ func TestDependencyDirection(t *testing.T) {
 				t.Errorf("%s must not depend on %s (dependency-direction invariant, RD-1255); "+
 					"run `go list -deps %s` to find the import chain",
 					rule.pkg, forbidden, rule.pkg)
+			}
+		}
+	}
+}
+
+// TestNativePolicyDependencyBoundary keeps the native runtime independent of
+// the compatibility facade, optional VM backend and application infrastructure.
+// Standard SQL Scanner/Valuer support in Ethereum primitive types is allowed;
+// connecting storage clients and node execution machinery are not.
+func TestNativePolicyDependencyBoundary(t *testing.T) {
+	const pkg = "privacy-proxy/internal/policycore"
+	deps := transitiveDeps(t, moduleRoot(t), pkg)
+	for dep := range deps {
+		if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg {
+			t.Errorf("native policy runtime must not import application package %s", dep)
+		}
+		for _, forbidden := range []string{
+			"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/",
+			"github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb",
+		} {
+			if strings.HasPrefix(dep, forbidden) {
+				t.Errorf("native policy runtime imports infrastructure dependency %s", dep)
 			}
 		}
 	}

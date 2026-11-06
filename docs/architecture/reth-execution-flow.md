@@ -608,7 +608,7 @@ included outcome stays provisional and can return to pending after a reorg.
 | --- | --- |
 | V2 dispatch and admission | [`jsonrpc_node_policy.go`](../../internal/server/jsonrpc_node_policy.go), [`admission.go`](../../internal/rbac/admission.go) |
 | Identity readiness, signing and durable submission | [`node_policy.go`](../../internal/server/node_policy.go) |
-| Policy schema and Solidity generation | [`policy.go`](../../internal/policydsl/policy.go), [`generate.go`](../../internal/policydsl/generate.go), [`compile.go`](../../internal/policydsl/compile.go) |
+| Policy schema, native evaluation and optional Solidity backend | [`policy.go`](../../internal/policycore/policy.go), [`evaluate.go`](../../internal/policycore/evaluate.go), [`generate.go`](../../internal/policybackend/evm/generate.go), [`compile.go`](../../internal/policybackend/evm/compile.go) |
 | Catalog validation, artifact review and activation | [`configuration_revision_execution.go`](../../internal/db/configuration_revision_execution.go) |
 | Database facts and publication | [`node_policy_export.go`](../../internal/db/node_policy_export.go), [`publisher.go`](../../internal/nodepolicy/publisher.go) |
 | Reth fact resolution and actual frame checks | [`facts.rs`](../../node/reth/src/facts.rs), [`policy.rs`](../../node/reth/src/policy.rs) |

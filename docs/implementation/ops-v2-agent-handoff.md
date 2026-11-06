@@ -96,9 +96,16 @@ Important invariants for future changes:
 
 Paths below are relative to the worktree root.
 
+The policy model, validation and native evaluator live in `internal/policycore`.
+The Solidity compiler, generator and offline VM adapter are preserved in
+`internal/policybackend/evm`. `internal/policydsl` is the compatibility facade
+used by existing callers; it still imports that optional backend. Consumers
+requiring only native evaluation import `policycore` directly.
+
 | Concern | Main implementation | Regression entry points |
 |---|---|---|
-| Compiler, set encoding and digest binding | `internal/policydsl/{validate,generate,compile,artifact_set}.go` | `per_group_test.go`, `per_group_vectors_test.go`, `testdata/per-group-v1.json` |
+| Native validation and evaluation | `internal/policycore/{validate,evaluate,codegen_view}.go` | Native tests and prepared-view isolation/provenance tests |
+| Compiler, set encoding and digest binding | `internal/policybackend/evm/{generate,compile,artifact_set}.go`, `internal/policycore/digest.go` | Backend `per_group_test.go`, `per_group_vectors_test.go`; shared `internal/policydsl/testdata/per-group-v1.json` |
 | Review and atomic activation | `internal/configuration/execution.go`, `internal/db/configuration_revision_execution.go` | `internal/db/execution_artifact_set_test.go` |
 | Storage and feed export | `internal/db/migrations/083_execution_artifact_sets.sql`, `execution_policy_store.go`, `node_policy_export.go` | Database execution/export tests |
 | Signed wire, deltas and simulation | `internal/nodepolicy/{envelope,feed,state,simulation,client}.go` | `internal/nodepolicy/group_artifacts_test.go` |
@@ -115,10 +122,11 @@ Run commands from this worktree. Compiler tests require pinned native
 must already be cached for `--offline`. See the linked runbooks for toolchain
 and sibling-repository prerequisites.
 
-Focused compiler/protocol and node checks used during review:
+Focused native, compiler/protocol and node checks:
 
 ```sh
-go test ./internal/policydsl ./internal/nodepolicy \
+go test ./internal/policycore -count=1
+go test ./internal/policybackend/evm ./internal/nodepolicy \
   -run 'Test(PerGroupVectors|GroupArtifact|GroupCandidate|DeploymentOwnershipClassesAndMembershipExceptions)' \
   -count=1 -timeout=5m
 cargo test --offline --locked --manifest-path node/reth/Cargo.toml \
