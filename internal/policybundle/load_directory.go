@@ -51,6 +51,7 @@ func LoadDirectory(ctx context.Context, selection Selection, options Options) (*
 	}
 	sort.Slice(manifest.Documents, func(i, j int) bool { return manifest.Documents[i].Path < manifest.Documents[j].Path })
 	builder := newCatalogBuilder(manifest, selection.ExpectedManifestDigest, options)
+	builder.snapshot.methods = methods // prepareOptions owns every registry map/slice.
 	total := int64(len(raw))
 	for _, ref := range manifest.Documents {
 		if err := canceled(ctx); err != nil {

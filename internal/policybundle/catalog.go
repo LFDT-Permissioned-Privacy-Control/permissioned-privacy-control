@@ -22,6 +22,7 @@ type CatalogSnapshot struct {
 	execution     map[string]*policycore.Validated
 	requirements  Requirements
 	identity      *identity.Catalog
+	methods       methodIndex
 }
 
 func (s *CatalogSnapshot) Metadata() BundleMetadata {
