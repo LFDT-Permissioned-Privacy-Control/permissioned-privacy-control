@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"sort"
+
+	"privacy-proxy/internal/identity"
 )
 
 // LoadDirectory reads a materialized read-only regular-file artifact. It has no
@@ -40,7 +42,11 @@ func LoadDirectory(ctx context.Context, selection Selection, options Options) (*
 	if err := validateManifest(manifest, selection, options); err != nil {
 		return nil, err
 	}
-	if err := checkEntries(ctx, root, manifest.Documents, options.Limits.MaxDocuments); err != nil {
+	entries := append([]DocumentRef(nil), manifest.Documents...)
+	if manifest.IdentityCatalog != nil {
+		entries = append(entries, DocumentRef{Path: manifest.IdentityCatalog.Path})
+	}
+	if err := checkEntries(ctx, root, entries, options.Limits.MaxDocuments); err != nil {
 		return nil, err
 	}
 	sort.Slice(manifest.Documents, func(i, j int) bool { return manifest.Documents[i].Path < manifest.Documents[j].Path })
@@ -69,6 +75,25 @@ func LoadDirectory(ctx context.Context, selection Selection, options Options) (*
 		if err := builder.add(wire, spec, ref, methods, options.Limits); err != nil {
 			return nil, err
 		}
+	}
+	if ref := manifest.IdentityCatalog; ref != nil {
+		budget := min(options.Limits.MaxDocumentBytes, int64(options.IdentityLimits.MaxIdentityDocumentBytes), options.Limits.MaxBundleBytes-total)
+		if budget <= 0 {
+			return nil, fail(LimitExceeded, "", "", "identityCatalog", "identity file exceeds remaining byte budget")
+		}
+		raw, err := readRegular(ctx, root, ref.Path, budget)
+		if err != nil {
+			return nil, err
+		}
+		if RawDigest(raw) != ref.SHA256 {
+			return nil, fail(IntegrityFailure, "", "", "identityCatalog", "identity file digest does not match exact bytes")
+		}
+		source, err := identity.Decode(raw, options.IdentityLimits)
+		if err != nil {
+			return nil, fail(InvalidSchema, "", "", "identityCatalog", err.Error())
+		}
+		builder.identitySource = &source
+		builder.identityRef = ref
 	}
 	if err := canceled(ctx); err != nil {
 		return nil, err

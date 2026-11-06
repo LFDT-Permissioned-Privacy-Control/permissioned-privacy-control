@@ -19,6 +19,7 @@ import (
 	_ "privacy-proxy/internal/apimodels"
 	_ "privacy-proxy/internal/audit"
 	_ "privacy-proxy/internal/config"
+	_ "privacy-proxy/internal/identity"
 	_ "privacy-proxy/internal/netguard"
 	_ "privacy-proxy/internal/policybundle"
 	_ "privacy-proxy/internal/policycore"
@@ -121,7 +122,7 @@ func TestPolicyBundleDependencyBoundary(t *testing.T) {
 	for _, pkg := range []string{"privacy-proxy/internal/strictjson", "privacy-proxy/internal/policybundle"} {
 		deps := transitiveDeps(t, root, pkg)
 		for dep := range deps {
-			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !(pkg == "privacy-proxy/internal/policybundle" && (dep == "privacy-proxy/internal/policycore" || dep == "privacy-proxy/internal/strictjson")) {
+			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !(pkg == "privacy-proxy/internal/policybundle" && (dep == "privacy-proxy/internal/policycore" || dep == "privacy-proxy/internal/strictjson" || dep == "privacy-proxy/internal/identity")) {
 				t.Errorf("%s imports application infrastructure %s", pkg, dep)
 			}
 			for _, forbidden := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/core", "github.com/ethereum/go-ethereum/triedb"} {
@@ -142,6 +143,22 @@ func TestPolicyBundleDependencyBoundary(t *testing.T) {
 					t.Errorf("strictjson must use only the standard library: %s", dep)
 				}
 			}
+		}
+	}
+}
+
+func TestIdentityDependencyBoundary(t *testing.T) {
+	const pkg = "privacy-proxy/internal/identity"
+	cmd := exec.Command("go", "list", "-deps", "-f", "{{if not .Standard}}{{.ImportPath}}{{end}}", pkg)
+	cmd.Dir = moduleRoot(t)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("identity dependency check: %v\n%s", err, out)
+	}
+	allowed := map[string]bool{pkg: true, "privacy-proxy/internal/strictjson": true, "github.com/golang-jwt/jwt/v5": true}
+	for _, dep := range strings.Fields(string(out)) {
+		if !allowed[dep] {
+			t.Errorf("identity imports dependency outside its pure local verification boundary: %s", dep)
 		}
 	}
 }

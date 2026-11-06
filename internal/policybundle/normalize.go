@@ -75,6 +75,12 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 	if len(m.Organizations) > o.Limits.MaxOrganizations || len(m.Documents) > o.Limits.MaxDocuments {
 		return fail(LimitExceeded, "", "", "manifest", "organization or document budget exceeded")
 	}
+	if (o.Profile.id == FoundationProfileID && m.IdentityCatalog != nil) || (o.Profile.id == IdentityProfileID && m.IdentityCatalog == nil) {
+		return fail(UnsupportedFeature, "", "", "identityCatalog", "identity source is required only under the explicit identity profile")
+	}
+	if m.IdentityCatalog != nil && len(m.Documents) == o.Limits.MaxDocuments {
+		return fail(LimitExceeded, "", "", "identityCatalog", "identity file exceeds document count budget")
+	}
 	orgs, slugs := map[string]bool{}, map[string]bool{}
 	for _, org := range m.Organizations {
 		if !canonicalUUID(org.ID) || orgs[org.ID] || !slugPattern.MatchString(org.Slug) || slugs[org.Slug] || !boundedName(org.Name, 256) {
@@ -101,6 +107,11 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 			if !logical[org+"/"+string(kind)] {
 				return fail(ReferenceFailure, kind, org, "documents", "each organization requires groups, registry and explicit execution source")
 			}
+		}
+	}
+	if ref := m.IdentityCatalog; ref != nil {
+		if len(ref.Path) > 128 || !filePattern.MatchString(ref.Path) || ref.Path == "manifest.json" || paths[ref.Path] || !validDigest(ref.SHA256) {
+			return fail(InvalidSchema, "", "", "identityCatalog", "invalid or colliding global identity file reference")
 		}
 	}
 	return nil

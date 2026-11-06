@@ -42,16 +42,26 @@ type Selection struct {
 }
 
 type Manifest struct {
-	APIVersion           string         `json:"apiVersion"`
-	Kind                 string         `json:"kind"`
-	Environment          string         `json:"environment"`
-	ChainID              string         `json:"chainId"`
-	EvaluatorVersion     string         `json:"evaluatorVersion"`
-	Profile              string         `json:"profile"`
-	SourceRevision       string         `json:"sourceRevision"`
-	Organizations        []Organization `json:"organizations"`
-	RequiredCapabilities []string       `json:"requiredCapabilities"`
-	Documents            []DocumentRef  `json:"documents"`
+	APIVersion           string              `json:"apiVersion"`
+	Kind                 string              `json:"kind"`
+	Environment          string              `json:"environment"`
+	ChainID              string              `json:"chainId"`
+	EvaluatorVersion     string              `json:"evaluatorVersion"`
+	Profile              string              `json:"profile"`
+	SourceRevision       string              `json:"sourceRevision"`
+	Organizations        []Organization      `json:"organizations"`
+	RequiredCapabilities []string            `json:"requiredCapabilities"`
+	Documents            []DocumentRef       `json:"documents"`
+	IdentityCatalog      *IdentityCatalogRef `json:"identityCatalog,omitempty" optional:"true"`
+}
+
+type IdentityCatalogRef struct {
+	Path   string `json:"path"`
+	SHA256 Digest `json:"sha256"`
+}
+type IdentityCatalogIdentity struct {
+	IdentityCatalogRef
+	SemanticDigest Digest
 }
 
 type Organization struct {
@@ -76,6 +86,7 @@ type BundleMetadata struct {
 	MethodCatalogVersion string
 	SourceRevision       string
 	Documents            []DocumentIdentity
+	IdentityCatalog      *IdentityCatalogIdentity
 }
 
 // RawDigest pins the approved file. SemanticDigest identifies its normalized

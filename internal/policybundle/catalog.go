@@ -8,6 +8,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/policycore"
 )
 
@@ -20,14 +21,21 @@ type CatalogSnapshot struct {
 	contracts     map[string]map[common.Address]Contract
 	execution     map[string]*policycore.Validated
 	requirements  Requirements
+	identity      *identity.Catalog
 }
 
 func (s *CatalogSnapshot) Metadata() BundleMetadata {
 	m := s.metadata
 	m.Documents = slices.Clone(m.Documents)
+	if m.IdentityCatalog != nil {
+		copied := *m.IdentityCatalog
+		m.IdentityCatalog = &copied
+	}
 	return m
 }
-func (s *CatalogSnapshot) Organizations() []Organization { return slices.Clone(s.organizations) }
+
+func (s *CatalogSnapshot) Identity() (*identity.Catalog, bool) { return s.identity, s.identity != nil }
+func (s *CatalogSnapshot) Organizations() []Organization       { return slices.Clone(s.organizations) }
 func (s *CatalogSnapshot) Group(org, id string) (Group, bool) {
 	g, ok := s.groups[org][id]
 	return cloneGroup(g), ok
@@ -81,14 +89,17 @@ func cloneContract(c Contract) Contract {
 }
 
 type catalogBuilder struct {
-	snapshot     *CatalogSnapshot
-	policies     map[string]*policycore.Policy
-	capabilities map[string]bool
-	secrets      map[string]bool
-	addresses    map[string]string
-	groupOwners  map[string]string
-	resourceIDs  map[string]bool
-	addressRefs  []eventAddressRef
+	snapshot       *CatalogSnapshot
+	policies       map[string]*policycore.Policy
+	capabilities   map[string]bool
+	secrets        map[string]bool
+	addresses      map[string]string
+	groupOwners    map[string]string
+	resourceIDs    map[string]bool
+	addressRefs    []eventAddressRef
+	identitySource *identity.SourceCatalog
+	identityRef    *IdentityCatalogRef
+	identityLimits identity.Limits
 }
 
 func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
@@ -98,7 +109,7 @@ func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
 		s.groups[org.ID] = map[string]Group{}
 		s.contracts[org.ID] = map[common.Address]Contract{}
 	}
-	return &catalogBuilder{snapshot: s, policies: map[string]*policycore.Policy{}, capabilities: map[string]bool{CapabilityNativeValidate: true}, secrets: map[string]bool{}, addresses: map[string]string{}, groupOwners: map[string]string{}, resourceIDs: map[string]bool{}}
+	return &catalogBuilder{snapshot: s, policies: map[string]*policycore.Policy{}, capabilities: map[string]bool{CapabilityNativeValidate: true}, secrets: map[string]bool{}, addresses: map[string]string{}, groupOwners: map[string]string{}, resourceIDs: map[string]bool{}, identityLimits: o.IdentityLimits}
 }
 
 func (b *catalogBuilder) add(wire wireDocument, spec any, ref DocumentRef, methods methodIndex, limits Limits) error {
@@ -228,6 +239,9 @@ func (b *catalogBuilder) finish(ctx context.Context, declared []string) (*Catalo
 		if !known {
 			return nil, fail(UnsupportedFeature, ContractRegistry, ref.org, "paramRules.must_be", "unregistered EOA literal requires a later operational validation profile")
 		}
+	}
+	if err := b.compileIdentity(); err != nil {
+		return nil, err
 	}
 	if err := compareCapabilities(declared, b.capabilities); err != nil {
 		return nil, err

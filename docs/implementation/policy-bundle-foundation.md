@@ -59,6 +59,13 @@ unregistered EOA event literals and visible-to history flags. These require
 separately implemented profiles; the foundation does not select release cuts.
 The static dynamic-event-payload flag is accepted and recorded as a requirement.
 
+The explicit `catalog-identity/v1` library profile additionally requires one
+global hashed `identityCatalog` file and positive identity limits. Its typed
+public trust, source profiles and same-bundle group mappings are described in
+[the identity foundation](identity-catalog-foundation.md). The original
+`catalog-foundation/v1` rejects this extension. Neither profile switches the
+production server's configuration or authentication source.
+
 Capabilities and scoped RPC credential references are inferred from actual
 usage. The manifest capability set must match exactly: declarations cannot
 enable unsupported features or conceal missing inputs. Secret references name

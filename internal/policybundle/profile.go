@@ -3,10 +3,14 @@ package policybundle
 import (
 	"slices"
 	"sort"
+
+	"privacy-proxy/internal/identity"
 )
 
 const (
 	FoundationProfileID      = "catalog-foundation/v1"
+	IdentityProfileID        = "catalog-identity/v1"
+	CapabilityIdentity       = "identity.claims/v1"
 	NativeEvaluatorVersion   = "policycore/native-v1alpha1"
 	CapabilityNativeValidate = "catalog.native-validate"
 	CapabilityPrincipal      = "inputs.verified-principal"
@@ -22,11 +26,15 @@ const (
 )
 
 // ValidationProfile is opaque: files cannot register validators or enable
-// deferred features. Only the fixed validation-only foundation exists here.
+// deferred features. Both fixed profiles remain validation-only libraries.
 type ValidationProfile struct{ id, evaluatorVersion, methodCatalogVersion string }
 
 func FoundationProfile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{FoundationProfileID, NativeEvaluatorVersion, methodCatalogVersion}
+}
+
+func IdentityProfile(methodCatalogVersion string) ValidationProfile {
+	return ValidationProfile{IdentityProfileID, NativeEvaluatorVersion, methodCatalogVersion}
 }
 
 // MethodCatalog is trusted startup data. Names are exact; aliases carry no
@@ -40,9 +48,10 @@ type MethodCatalog struct {
 }
 
 type Options struct {
-	Limits  Limits
-	Profile ValidationProfile
-	Methods MethodCatalog
+	Limits         Limits
+	Profile        ValidationProfile
+	Methods        MethodCatalog
+	IdentityLimits identity.Limits
 }
 
 type Requirements struct {
@@ -59,7 +68,7 @@ type methodIndex struct {
 
 func prepareOptions(options Options) (methodIndex, error) {
 	p := options.Profile
-	if !options.Limits.valid() || p.id != FoundationProfileID || p.evaluatorVersion != NativeEvaluatorVersion || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
+	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID) || (p.id == IdentityProfileID && !options.IdentityLimits.Valid()) || p.evaluatorVersion != NativeEvaluatorVersion || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
 		return methodIndex{}, fail(InvalidSelection, "", "", "options", "invalid limits or pinned foundation/method profile")
 	}
 	m := methodIndex{map[string]bool{}, map[string]string{}, slices.Clone(options.Methods.Wildcard), map[string]string{}}
