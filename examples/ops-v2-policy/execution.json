@@ -1,0 +1,14 @@
+{
+  "apiVersion": "ops.policy-document/v1alpha1",
+  "kind": "execution-rules",
+  "organizationId": "11111111-1111-1111-1111-111111111111",
+  "spec": {
+    "policy": {
+      "apiVersion": "privacy.gateway.fm/v1alpha1",
+      "kind": "ContractExecutionPolicy",
+      "org": "11111111-1111-1111-1111-111111111111",
+      "nestedCalls": "requireOwnRule",
+      "bindings": []
+    }
+  }
+}

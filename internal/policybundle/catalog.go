@@ -208,7 +208,7 @@ func (b *catalogBuilder) add(wire wireDocument, spec any, ref DocumentRef, metho
 	return nil
 }
 
-func (b *catalogBuilder) finish(ctx context.Context, declared []string) (*CatalogSnapshot, error) {
+func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 	for _, org := range b.snapshot.organizations {
 		if err := canceled(ctx); err != nil {
 			return nil, err
@@ -249,10 +249,10 @@ func (b *catalogBuilder) finish(ctx context.Context, declared []string) (*Catalo
 	if err := b.compileIdentity(); err != nil {
 		return nil, err
 	}
-	if err := compareCapabilities(declared, b.capabilities); err != nil {
-		return nil, err
+	for name := range b.capabilities {
+		b.snapshot.requirements.Capabilities = append(b.snapshot.requirements.Capabilities, name)
 	}
-	b.snapshot.requirements.Capabilities = slices.Clone(declared)
+	sort.Strings(b.snapshot.requirements.Capabilities)
 	for name := range b.secrets {
 		b.snapshot.requirements.SecretRefs = append(b.snapshot.requirements.SecretRefs, name)
 	}

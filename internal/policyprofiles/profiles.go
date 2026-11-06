@@ -1,0 +1,49 @@
+// Package policyprofiles selects compiled policy validation profiles for tools
+// and startup. A source document cannot register a validator or runtime feature.
+package policyprofiles
+
+import (
+	"fmt"
+
+	"privacy-proxy/internal/identity"
+	"privacy-proxy/internal/policybundle"
+	"privacy-proxy/internal/rpcmethoddata"
+)
+
+type Description struct {
+	ID                   string `json:"id"`
+	EvaluatorVersion     string `json:"evaluatorVersion"`
+	MethodCatalogVersion string `json:"methodCatalogVersion"`
+	ValidationOnly       bool   `json:"validationOnly"`
+}
+
+func Supported() []Description {
+	return []Description{
+		{policybundle.FoundationProfileID, policybundle.NativeEvaluatorVersion, rpcmethoddata.Version, true},
+		{policybundle.IdentityProfileID, policybundle.NativeEvaluatorVersion, rpcmethoddata.Version, true},
+		{policybundle.NativeV2ProfileID, policybundle.NativeV2EvaluatorVersion, rpcmethoddata.Version, true},
+	}
+}
+
+func Options(id string) (policybundle.Options, Description, error) {
+	seed := rpcmethoddata.BuiltinCatalog()
+	options := policybundle.Options{Limits: policybundle.DefaultLimits(), Methods: policybundle.MethodCatalog{
+		Version: seed.Version, Assignable: seed.Assignable, Aliases: seed.Aliases,
+		Wildcard: seed.Wildcard, RequiredClaims: seed.RequiredClaims,
+	}}
+	evaluator := policybundle.NativeEvaluatorVersion
+	switch id {
+	case policybundle.FoundationProfileID:
+		options.Profile = policybundle.FoundationProfile(seed.Version)
+	case policybundle.IdentityProfileID:
+		options.Profile = policybundle.IdentityProfile(seed.Version)
+		options.IdentityLimits = identity.DefaultLimits()
+	case policybundle.NativeV2ProfileID:
+		options.Profile = policybundle.NativeV2Profile(seed.Version)
+		options.IdentityLimits = identity.DefaultLimits()
+		evaluator = policybundle.NativeV2EvaluatorVersion
+	default:
+		return policybundle.Options{}, Description{}, fmt.Errorf("unsupported compiled policy profile %q", id)
+	}
+	return options, Description{id, evaluator, seed.Version, true}, nil
+}

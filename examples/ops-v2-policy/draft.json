@@ -1,0 +1,33 @@
+{
+  "apiVersion": "ops.policy-draft/v1alpha1",
+  "kind": "PolicyDraft",
+  "environment": "local",
+  "chainId": "31337",
+  "evaluatorVersion": "policycore/native-v1alpha1",
+  "profile": "catalog-foundation/v1",
+  "sourceRevision": "deny-all-example",
+  "organizations": [
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "slug": "example",
+      "name": "Example"
+    }
+  ],
+  "documents": [
+    {
+      "kind": "groups",
+      "organizationId": "11111111-1111-1111-1111-111111111111",
+      "path": "groups.json"
+    },
+    {
+      "kind": "contract-registry",
+      "organizationId": "11111111-1111-1111-1111-111111111111",
+      "path": "registry.json"
+    },
+    {
+      "kind": "execution-rules",
+      "organizationId": "11111111-1111-1111-1111-111111111111",
+      "path": "execution.json"
+    }
+  ]
+}

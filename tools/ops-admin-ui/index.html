@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>OPS policy files</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <header>
+    <div><span class="brand">OPS</span><span class="eyebrow">Policy files</span></div>
+    <h1>Edit the proposal. Review it in Git.</h1>
+    <p>Open your draft and policy JSON files, make changes, and download the files you edited. The files stay in this browser.</p>
+    <label class="open">Open JSON files<input id="open" type="file" accept=".json,application/json" multiple></label>
+  </header>
+  <main>
+    <p id="error" class="error" role="alert" hidden></p>
+    <div class="layout">
+      <aside aria-label="Source files"><h2>Files</h2><div id="files"></div><p class="muted">Open draft.json and its referenced files together.</p></aside>
+      <section id="empty" class="empty"><h2>Start with your files</h2><p>For a first draft, use the matching source release’s <code>examples/ops-v2-policy</code> folder. Its rules deny all access until you configure them.</p></section>
+      <section id="workspace" hidden>
+        <div class="file-heading"><div><h2 id="filename"></h2><p id="status" class="muted"></p></div><button id="download" type="button">Download this file</button></div>
+        <label class="editor-label" for="editor">Proposed source</label>
+        <textarea id="editor" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off"></textarea>
+        <p id="syntax" class="muted"></p>
+        <details><summary>Compare original and proposed text</summary><div class="comparison"><div><h3>Original</h3><pre id="original"></pre></div><div><h3>Proposed</h3><pre id="proposed"></pre></div></div></details>
+      </section>
+    </div>
+    <section class="next">
+      <h2>Then check and review</h2>
+      <ol>
+        <li>Save the downloaded files into the intended source folder, keeping their referenced filenames.</li>
+        <li>Run the matching OPS tool to prepare and check a new artifact. Use <code>policy profiles</code> to see supported profiles.</li>
+        <li>Review the source changes and exact artifact in Git. Deployment selects the approved image and bundle.</li>
+      </ol>
+      <pre>ops-v2 policy prepare --source ./config --output ./new-artifact --profile PROFILE
+ops-v2 policy check --bundle ./new-artifact --expected-digest DIGEST --environment ENV --chain-id CHAIN --profile PROFILE</pre>
+      <p>Editing or passing a local check does not approve or activate a change. This editor does not connect to OPS or Git.</p>
+    </section>
+  </main>
+</body>
+</html>
