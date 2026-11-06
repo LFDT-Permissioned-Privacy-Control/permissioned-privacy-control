@@ -24,6 +24,7 @@ import (
 	_ "privacy-proxy/internal/netguard"
 	_ "privacy-proxy/internal/policybundle"
 	_ "privacy-proxy/internal/policycore"
+	_ "privacy-proxy/internal/runtimepolicy"
 	_ "privacy-proxy/internal/server/middleware"
 	_ "privacy-proxy/internal/strictjson"
 )
@@ -174,6 +175,21 @@ func TestIdentityDependencyBoundary(t *testing.T) {
 	for _, dep := range strings.Fields(string(out)) {
 		if !allowed[dep] {
 			t.Errorf("identity imports dependency outside its pure local verification boundary: %s", dep)
+		}
+	}
+}
+
+func TestRuntimePolicyDependencyBoundary(t *testing.T) {
+	const pkg = "privacy-proxy/internal/runtimepolicy"
+	allowed := map[string]bool{pkg: true, "privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/policycore": true, "privacy-proxy/internal/strictjson": true}
+	for dep := range transitiveDeps(t, moduleRoot(t), pkg) {
+		if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
+			t.Errorf("runtime policy view imports application infrastructure %s", dep)
+		}
+		for _, prefix := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/core", "github.com/ethereum/go-ethereum/triedb"} {
+			if strings.HasPrefix(dep, prefix) {
+				t.Errorf("runtime policy view imports infrastructure %s", dep)
+			}
 		}
 	}
 }
