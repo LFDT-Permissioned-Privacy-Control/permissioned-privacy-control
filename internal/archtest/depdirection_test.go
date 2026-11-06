@@ -20,8 +20,10 @@ import (
 	_ "privacy-proxy/internal/audit"
 	_ "privacy-proxy/internal/config"
 	_ "privacy-proxy/internal/netguard"
+	_ "privacy-proxy/internal/policybundle"
 	_ "privacy-proxy/internal/policycore"
 	_ "privacy-proxy/internal/server/middleware"
+	_ "privacy-proxy/internal/strictjson"
 )
 
 // TestDependencyDirection locks the dependency-direction invariants
@@ -109,6 +111,36 @@ func TestNativePolicyDependencyBoundary(t *testing.T) {
 		} {
 			if strings.HasPrefix(dep, forbidden) {
 				t.Errorf("native policy runtime imports infrastructure dependency %s", dep)
+			}
+		}
+	}
+}
+
+func TestPolicyBundleDependencyBoundary(t *testing.T) {
+	root := moduleRoot(t)
+	for _, pkg := range []string{"privacy-proxy/internal/strictjson", "privacy-proxy/internal/policybundle"} {
+		deps := transitiveDeps(t, root, pkg)
+		for dep := range deps {
+			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !(pkg == "privacy-proxy/internal/policybundle" && (dep == "privacy-proxy/internal/policycore" || dep == "privacy-proxy/internal/strictjson")) {
+				t.Errorf("%s imports application infrastructure %s", pkg, dep)
+			}
+			for _, forbidden := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/core", "github.com/ethereum/go-ethereum/triedb"} {
+				if strings.HasPrefix(dep, forbidden) {
+					t.Errorf("%s imports infrastructure dependency %s", pkg, dep)
+				}
+			}
+		}
+		if pkg == "privacy-proxy/internal/strictjson" {
+			cmd := exec.Command("go", "list", "-deps", "-f", "{{if not .Standard}}{{.ImportPath}}{{end}}", pkg)
+			cmd.Dir = root
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("strictjson dependency check: %v\n%s", err, out)
+			}
+			for _, dep := range strings.Fields(string(out)) {
+				if dep != pkg {
+					t.Errorf("strictjson must use only the standard library: %s", dep)
+				}
 			}
 		}
 	}
