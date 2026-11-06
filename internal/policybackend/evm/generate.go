@@ -90,6 +90,9 @@ func OrgID(org string) common.Hash {
 // code into the contract. Everything it writes is a comparison against a value
 // the validator has already checked.
 func GenerateSolidity(v *policycore.Validated) (string, error) {
+	if err := checkSupportedPolicy(v); err != nil {
+		return "", err
+	}
 	program, err := v.CodegenView()
 	if err != nil {
 		return "", err

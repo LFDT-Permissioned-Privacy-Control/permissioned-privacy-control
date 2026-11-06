@@ -10,8 +10,10 @@ import (
 const (
 	FoundationProfileID      = "catalog-foundation/v1"
 	IdentityProfileID        = "catalog-identity/v1"
+	NativeV2ProfileID        = "catalog-native-v2/v1"
 	CapabilityIdentity       = "identity.claims/v1"
 	NativeEvaluatorVersion   = "policycore/native-v1alpha1"
+	NativeV2EvaluatorVersion = "policycore/native-v1alpha2"
 	CapabilityNativeValidate = "catalog.native-validate"
 	CapabilityPrincipal      = "inputs.verified-principal"
 	CapabilityFrames         = "inputs.complete-frames"
@@ -26,7 +28,7 @@ const (
 )
 
 // ValidationProfile is opaque: files cannot register validators or enable
-// deferred features. Both fixed profiles remain validation-only libraries.
+// deferred features. The fixed profiles remain validation-only libraries.
 type ValidationProfile struct{ id, evaluatorVersion, methodCatalogVersion string }
 
 func FoundationProfile(methodCatalogVersion string) ValidationProfile {
@@ -35,6 +37,12 @@ func FoundationProfile(methodCatalogVersion string) ValidationProfile {
 
 func IdentityProfile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{IdentityProfileID, NativeEvaluatorVersion, methodCatalogVersion}
+}
+
+// NativeV2Profile validates native-v2 depth bounds with identity and the same
+// bounded static rule matrix. It does not enable operational target classes.
+func NativeV2Profile(methodCatalogVersion string) ValidationProfile {
+	return ValidationProfile{NativeV2ProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
 }
 
 // MethodCatalog is trusted startup data. Names are exact; aliases carry no
@@ -68,7 +76,11 @@ type methodIndex struct {
 
 func prepareOptions(options Options) (methodIndex, error) {
 	p := options.Profile
-	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID) || (p.id == IdentityProfileID && !options.IdentityLimits.Valid()) || p.evaluatorVersion != NativeEvaluatorVersion || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
+	expectedEvaluator := NativeEvaluatorVersion
+	if p.id == NativeV2ProfileID {
+		expectedEvaluator = NativeV2EvaluatorVersion
+	}
+	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
 		return methodIndex{}, fail(InvalidSelection, "", "", "options", "invalid limits or pinned foundation/method profile")
 	}
 	m := methodIndex{map[string]bool{}, map[string]string{}, slices.Clone(options.Methods.Wildcard), map[string]string{}}

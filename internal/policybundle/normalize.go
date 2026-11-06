@@ -75,8 +75,8 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 	if len(m.Organizations) > o.Limits.MaxOrganizations || len(m.Documents) > o.Limits.MaxDocuments {
 		return fail(LimitExceeded, "", "", "manifest", "organization or document budget exceeded")
 	}
-	if (o.Profile.id == FoundationProfileID && m.IdentityCatalog != nil) || (o.Profile.id == IdentityProfileID && m.IdentityCatalog == nil) {
-		return fail(UnsupportedFeature, "", "", "identityCatalog", "identity source is required only under the explicit identity profile")
+	if (o.Profile.id == FoundationProfileID && m.IdentityCatalog != nil) || (o.Profile.id != FoundationProfileID && m.IdentityCatalog == nil) {
+		return fail(UnsupportedFeature, "", "", "identityCatalog", "identity source must match the explicitly selected profile")
 	}
 	if m.IdentityCatalog != nil && len(m.Documents) == o.Limits.MaxDocuments {
 		return fail(LimitExceeded, "", "", "identityCatalog", "identity file exceeds document count budget")

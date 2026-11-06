@@ -90,6 +90,7 @@ func cloneContract(c Contract) Contract {
 }
 
 type catalogBuilder struct {
+	profile        ValidationProfile
 	snapshot       *CatalogSnapshot
 	policies       map[string]*policycore.Policy
 	capabilities   map[string]bool
@@ -110,7 +111,7 @@ func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
 		s.groups[org.ID] = map[string]Group{}
 		s.contracts[org.ID] = map[common.Address]Contract{}
 	}
-	return &catalogBuilder{snapshot: s, policies: map[string]*policycore.Policy{}, capabilities: map[string]bool{CapabilityNativeValidate: true}, secrets: map[string]bool{}, addresses: map[string]string{}, groupOwners: map[string]string{}, resourceIDs: map[string]bool{}, identityLimits: o.IdentityLimits}
+	return &catalogBuilder{profile: o.Profile, snapshot: s, policies: map[string]*policycore.Policy{}, capabilities: map[string]bool{CapabilityNativeValidate: true}, secrets: map[string]bool{}, addresses: map[string]string{}, groupOwners: map[string]string{}, resourceIDs: map[string]bool{}, identityLimits: o.IdentityLimits}
 }
 
 func (b *catalogBuilder) add(wire wireDocument, spec any, ref DocumentRef, methods methodIndex, limits Limits) error {
@@ -220,7 +221,11 @@ func (b *catalogBuilder) finish(ctx context.Context, declared []string) (*Catalo
 			}
 		}
 		catalog, _ := b.snapshot.NativeCatalog(org.ID)
-		v, err := policycore.Validate(b.policies[org.ID], catalog)
+		validate := policycore.Validate
+		if b.profile.id == NativeV2ProfileID {
+			validate = policycore.ValidateNativeV2
+		}
+		v, err := validate(b.policies[org.ID], catalog)
 		if err != nil {
 			return nil, fail(InvalidSchema, ExecutionRules, org.ID, "policy", err.Error())
 		}
@@ -285,7 +290,7 @@ func (b *catalogBuilder) inferNative(p *policycore.Policy, org string) error {
 			if r.MaxValue != nil {
 				b.capabilities[CapabilityValue] = true
 			}
-			if r.MaxDepth != nil {
+			if r.MaxDepth != nil || r.MinDepth != nil {
 				b.capabilities[CapabilityDepth] = true
 			}
 			if r.CallerAddress != "" {
