@@ -15,6 +15,10 @@ func TestAllBackendEntryPointsRejectNativeV3BeforeCompilerLookup(t *testing.T) {
 	testNativeBackendRejection(t, policycore.NativeV3APIVersion)
 }
 
+func TestAllBackendEntryPointsRejectNativeV4BeforeCompilerLookup(t *testing.T) {
+	testNativeBackendRejection(t, policycore.NativeV4APIVersion)
+}
+
 func testNativeBackendRejection(t *testing.T, version string) {
 	// A nonexistent compiler must never mask the source-version error. Include
 	// zero bindings: per-group build must reject before its empty loop can pass.
@@ -25,7 +29,9 @@ func testNativeBackendRejection(t *testing.T, version string) {
 		}
 		var v *policycore.Validated
 		var err error
-		if version == policycore.NativeV3APIVersion {
+		if version == policycore.NativeV4APIVersion {
+			v, err = policycore.ValidateNativeV4(p, testCatalog(t), nil)
+		} else if version == policycore.NativeV3APIVersion {
 			v, err = policycore.ValidateNativeV3(p, testCatalog(t), nil)
 		} else {
 			v, err = policycore.ValidateNativeV2(p, testCatalog(t))

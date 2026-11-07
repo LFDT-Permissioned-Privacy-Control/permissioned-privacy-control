@@ -48,6 +48,8 @@ const nodeHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const now = int64(1800000000)
 
 type fixture struct {
+	lifecycle      bool
+	linkSigner     bool
 	multiOrg       bool
 	bGroups        []policybundle.Group
 	bContracts     []policybundle.Contract
@@ -140,6 +142,18 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 		docs["runtime.json"] = encoded(t, policybundle.RuntimeMultiOrgSource{APIVersion: policybundle.RuntimeMultiOrgAPIVersion, Kind: r.Kind, ReadProfile: r.ReadProfile, IntraOrgGrantTracing: r.IntraOrgGrantTracing, SharedInfrastructure: r.SharedInfrastructure, AddressScopes: r.AddressScopes, NodeEvidenceProfile: r.NodeEvidenceProfile, RawSubmissionMode: f.rawMode})
 		f.capability(policybundle.CapabilityMultiOrg)
 	}
+	if f.lifecycle {
+		if f.rawMode == "" {
+			t.Fatal("lifecycle fixture requires an explicit raw mode")
+		}
+		profileID, profile = policybundle.RuntimeLifecycleProfileID, policybundle.RuntimeLifecycleProfile("rpc/v1")
+		policyVersion, evaluator = policycore.NativeV4APIVersion, policybundle.NativeV4EvaluatorVersion
+		r := f.runtime
+		docs["runtime.json"] = encoded(t, policybundle.RuntimeLifecycleSource{APIVersion: policybundle.RuntimeLifecycleAPIVersion, Kind: r.Kind, ReadProfile: r.ReadProfile, IntraOrgGrantTracing: r.IntraOrgGrantTracing, SharedInfrastructure: r.SharedInfrastructure, AddressScopes: r.AddressScopes, NodeEvidenceProfile: policybundle.RuntimeLifecycleNodeEvidenceProfileID, RawSubmissionMode: f.rawMode})
+		for _, cap := range []string{policybundle.CapabilityMultiOrg, policybundle.CapabilityLifecycle, policybundle.CapabilityTemporalCode, policybundle.CapabilityCreationContext, policybundle.CapabilityLifecycleBeneficiary} {
+			f.capability(cap)
+		}
+	}
 	manifest := policybundle.Manifest{APIVersion: policybundle.BundleAPIVersion, Kind: policybundle.BundleKind, Environment: "test", ChainID: "1", EvaluatorVersion: evaluator, Profile: profileID, SourceRevision: "selected", Organizations: []policybundle.Organization{{ID: orgA, Slug: "a", Name: "A"}, {ID: orgB, Slug: "b", Name: "B"}}, RequiredCapabilities: f.capabilities, IdentityCatalog: &policybundle.IdentityCatalogRef{Path: "identity.json", SHA256: policybundle.RawDigest(docs["identity.json"])}, RuntimeCatalog: &policybundle.RuntimeCatalogRef{Path: "runtime.json", SHA256: policybundle.RawDigest(docs["runtime.json"])}}
 	if f.rawMode != "" {
 		manifest.ComplianceCatalog = &policybundle.ComplianceCatalogRef{Path: "compliance.json", SHA256: policybundle.RawDigest(docs["compliance.json"])}
@@ -210,14 +224,16 @@ func token(t *testing.T, snapshot *policybundle.CatalogSnapshot, roles []string)
 }
 
 type node struct {
-	mu      sync.Mutex
-	methods []string
-	anchors []string
-	mutate  func(map[string]any)
-	onTrace func()
-	onSend  func(string) string
-	code    string
-	codes   map[string]string
+	mu         sync.Mutex
+	methods    []string
+	anchors    []string
+	mutate     func(map[string]any)
+	onTrace    func()
+	onSend     func(string) string
+	code       string
+	codes      map[string]string
+	pre        map[string]any
+	failMethod string
 }
 
 func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +249,10 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.methods = append(n.methods, req.Method)
+	if req.Method == n.failMethod {
+		w.WriteHeader(503)
+		return
+	}
 	var result any
 	switch req.Method {
 	case "eth_chainId":
@@ -276,6 +296,9 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				pre[address] = map[string]any{"code": code}
 			}
 		}
+		for address, account := range n.pre {
+			pre[address] = account
+		}
 		result = map[string]any{"callTracer": frame, "prestateTracer": pre}
 		if n.onTrace != nil {
 			n.onTrace()
@@ -285,6 +308,8 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal(req.Params[1], &block)
 		n.anchors = append(n.anchors, block["blockHash"].(string))
 		result = "0x"
+	case "eth_getTransactionCount":
+		result = "0x0"
 	case "eth_sendRawTransaction":
 		var raw string
 		if n.onSend == nil || len(req.Params) != 1 || json.Unmarshal(req.Params[0], &raw) != nil {

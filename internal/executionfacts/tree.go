@@ -47,6 +47,7 @@ type Record struct {
 	Static              bool
 	AncestorFailed      bool
 	ContextFromExpected bool
+	ContextFromChildren bool  // Lifecycle profile only; raw To remains untouched.
 	Logs                []Log // Non-native-authority metadata, in source order.
 }
 

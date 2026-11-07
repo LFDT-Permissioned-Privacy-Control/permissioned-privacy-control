@@ -28,6 +28,7 @@ func Supported() []Description {
 		{ID: policybundle.RuntimeCallProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "eth_call integration slice; not a complete runtime"},
 		{ID: policybundle.RuntimeRawSendProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "eth_call and raw CALL submission integration; not a complete runtime"},
 		{ID: policybundle.RuntimeMultiOrgProfileID, EvaluatorVersion: policybundle.NativeV3EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "multi-org eth_call and raw CALL integration; not a complete runtime"},
+		{ID: policybundle.RuntimeLifecycleProfileID, EvaluatorVersion: policybundle.NativeV4EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "lifecycle eth_call and signed deployment integration; not a complete runtime"},
 		{ID: policybundle.DisclosureProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 		{ID: policybundle.ComplianceProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 		{ID: policybundle.BrokerProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
@@ -75,6 +76,11 @@ func Options(id string) (policybundle.Options, Description, error) {
 		options.IdentityLimits = identity.DefaultLimits()
 		options.ComplianceLimits = compliancepolicy.DefaultLimits()
 		evaluator = policybundle.NativeV2EvaluatorVersion
+	case policybundle.RuntimeLifecycleProfileID:
+		options.Profile = policybundle.RuntimeLifecycleProfile(seed.Version)
+		options.IdentityLimits = identity.DefaultLimits()
+		options.ComplianceLimits = compliancepolicy.DefaultLimits()
+		evaluator = policybundle.NativeV4EvaluatorVersion
 	case policybundle.BrokerProfileID:
 		options.Profile = policybundle.BrokerProfile(seed.Version)
 		options.IdentityLimits = identity.DefaultLimits()
@@ -91,6 +97,9 @@ func Options(id string) (policybundle.Options, Description, error) {
 	}
 	if id == policybundle.RuntimeMultiOrgProfileID {
 		description.IntegrationScope = "multi-org eth_call and raw CALL integration; not a complete runtime"
+	}
+	if id == policybundle.RuntimeLifecycleProfileID {
+		description.IntegrationScope = "lifecycle eth_call and signed deployment integration; not a complete runtime"
 	}
 	return options, description, nil
 }

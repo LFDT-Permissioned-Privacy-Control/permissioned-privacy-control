@@ -15,8 +15,10 @@ import (
 const RuntimeAPIVersion = "ops.runtime-policy/v1alpha1"
 const RuntimeRawAPIVersion = "ops.runtime-policy/v1alpha2"
 const RuntimeMultiOrgAPIVersion = "ops.runtime-policy/v1alpha3"
+const RuntimeLifecycleAPIVersion = "ops.runtime-policy/v1alpha4"
 const RuntimeKind = "RuntimePolicy"
 const RuntimeNodeEvidenceProfileID = "geth-prague-call/v1"
+const RuntimeLifecycleNodeEvidenceProfileID = "geth-prague-lifecycle-call/v1"
 const RawSubmissionGuardV1 = "guard-v1"
 const RawSubmissionOPSPreflight = "ops-preflight"
 
@@ -77,58 +79,69 @@ type RuntimeMultiOrgSource struct {
 	PriceFeed            *pricefeedpolicy.Source `json:"priceFeed,omitempty" optional:"true"`
 }
 
+// RuntimeLifecycleSource keeps the same closed fields under a distinct v4 tag.
+// It is never exposed through an older source accessor.
+type RuntimeLifecycleSource RuntimeMultiOrgSource
+
 func positiveChain64(raw string) bool {
 	n, err := strconv.ParseUint(raw, 10, 64)
 	return err == nil && n > 0 && strconv.FormatUint(n, 10) == raw
 }
 
-func decodeRuntimeSource(raw []byte, depth int) (*RuntimeSource, *RuntimeRawSource, *RuntimeMultiOrgSource, error) {
+func decodeRuntimeSource(raw []byte, depth int) (*RuntimeSource, *RuntimeRawSource, *RuntimeMultiOrgSource, *RuntimeLifecycleSource, error) {
 	value, err := strictValue(raw, depth)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	object, ok := value.(map[string]any)
 	if !ok {
-		return nil, nil, nil, fail(InvalidSchema, "", "", "runtimeCatalog", "runtime source must be an object")
+		return nil, nil, nil, nil, fail(InvalidSchema, "", "", "runtimeCatalog", "runtime source must be an object")
 	}
 	switch object["apiVersion"] {
 	case RuntimeAPIVersion:
 		var source RuntimeSource
 		if err := decodeSource(raw, &source, depth); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		return &source, nil, nil, nil
+		return &source, nil, nil, nil, nil
 	case RuntimeRawAPIVersion:
 		var source RuntimeRawSource
 		if err := decodeSource(raw, &source, depth); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		return nil, &source, nil, nil
+		return nil, &source, nil, nil, nil
 	case RuntimeMultiOrgAPIVersion:
 		var source RuntimeMultiOrgSource
 		if err := decodeSource(raw, &source, depth); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		return nil, nil, &source, nil
+		return nil, nil, &source, nil, nil
+	case RuntimeLifecycleAPIVersion:
+		var source RuntimeLifecycleSource
+		if err := decodeSource(raw, &source, depth); err != nil {
+			return nil, nil, nil, nil, err
+		}
+		return nil, nil, nil, &source, nil
 	default:
-		return nil, nil, nil, fail(InvalidSchema, "", "", "apiVersion", "unsupported runtime source version")
+		return nil, nil, nil, nil, fail(InvalidSchema, "", "", "apiVersion", "unsupported runtime source version")
 	}
 }
 
 // RuntimeCatalog is approved immutable source. Its static scopes never enter
 // the registered-contract/native execution or operational ownership indexes.
 type RuntimeCatalog struct {
-	source         RuntimeSource
-	rawSource      *RuntimeRawSource
-	multiOrgSource *RuntimeMultiOrgSource
-	feedDefinition pricefeedpolicy.Definition
-	feedPlan       pricefeedpolicy.Plan
-	digest         Digest
+	source          RuntimeSource
+	rawSource       *RuntimeRawSource
+	multiOrgSource  *RuntimeMultiOrgSource
+	lifecycleSource *RuntimeLifecycleSource
+	feedDefinition  pricefeedpolicy.Definition
+	feedPlan        pricefeedpolicy.Plan
+	digest          Digest
 }
 
 // Source returns only detached v1; v2/v3 catalogs return zero, preserving tags.
 func (r *RuntimeCatalog) Source() RuntimeSource {
-	if r == nil || r.rawSource != nil || r.multiOrgSource != nil {
+	if r == nil || r.rawSource != nil || r.multiOrgSource != nil || r.lifecycleSource != nil {
 		return RuntimeSource{}
 	}
 	s := r.source
@@ -172,6 +185,20 @@ func (r *RuntimeCatalog) MultiOrgSource() (RuntimeMultiOrgSource, bool) {
 	return s, true
 }
 
+func (r *RuntimeCatalog) LifecycleSource() (RuntimeLifecycleSource, bool) {
+	if r == nil || r.lifecycleSource == nil {
+		return RuntimeLifecycleSource{}, false
+	}
+	s := *r.lifecycleSource
+	s.SharedInfrastructure = cloneShared(s.SharedInfrastructure)
+	s.AddressScopes = slices.Clone(s.AddressScopes)
+	if s.PriceFeed != nil {
+		feed := r.feedDefinition.Source()
+		s.PriceFeed = &feed
+	}
+	return s, true
+}
+
 func (r *RuntimeCatalog) PriceFeed() (pricefeedpolicy.Definition, pricefeedpolicy.Plan, bool) {
 	if r == nil || !r.feedDefinition.Valid() || !r.feedPlan.Valid() {
 		return pricefeedpolicy.Definition{}, pricefeedpolicy.Plan{}, false
@@ -180,6 +207,9 @@ func (r *RuntimeCatalog) PriceFeed() (pricefeedpolicy.Definition, pricefeedpolic
 }
 
 func (r *RuntimeCatalog) RawSubmissionMode() string {
+	if r != nil && r.lifecycleSource != nil {
+		return r.lifecycleSource.RawSubmissionMode
+	}
 	if r != nil && r.multiOrgSource != nil {
 		return r.multiOrgSource.RawSubmissionMode
 	}
@@ -189,6 +219,9 @@ func (r *RuntimeCatalog) RawSubmissionMode() string {
 	return r.rawSource.RawSubmissionMode
 }
 func (r *RuntimeCatalog) SharedInfrastructure() []SharedInfrastructure {
+	if r.lifecycleSource != nil {
+		return cloneShared(r.lifecycleSource.SharedInfrastructure)
+	}
 	if r.multiOrgSource != nil {
 		return cloneShared(r.multiOrgSource.SharedInfrastructure)
 	}
@@ -199,6 +232,9 @@ func (r *RuntimeCatalog) SharedInfrastructure() []SharedInfrastructure {
 }
 func (r *RuntimeCatalog) Digest() Digest { return r.digest }
 func (r *RuntimeCatalog) NodeEvidenceProfile() string {
+	if r.lifecycleSource != nil {
+		return r.lifecycleSource.NodeEvidenceProfile
+	}
 	if r.multiOrgSource != nil {
 		return r.multiOrgSource.NodeEvidenceProfile
 	}
@@ -209,6 +245,9 @@ func (r *RuntimeCatalog) NodeEvidenceProfile() string {
 }
 
 func (r *RuntimeCatalog) IntraOrgGrantTracing() bool {
+	if r.lifecycleSource != nil {
+		return r.lifecycleSource.IntraOrgGrantTracing
+	}
 	if r.multiOrgSource != nil {
 		return r.multiOrgSource.IntraOrgGrantTracing
 	}
@@ -219,6 +258,9 @@ func (r *RuntimeCatalog) IntraOrgGrantTracing() bool {
 }
 
 func (r *RuntimeCatalog) ReadProfile() string {
+	if r.lifecycleSource != nil {
+		return r.lifecycleSource.ReadProfile
+	}
 	if r.multiOrgSource != nil {
 		return r.multiOrgSource.ReadProfile
 	}
@@ -230,15 +272,26 @@ func (r *RuntimeCatalog) ReadProfile() string {
 func (s *CatalogSnapshot) Runtime() (*RuntimeCatalog, bool) { return s.runtime, s.runtime != nil }
 
 func (b *catalogBuilder) compileRuntime(limits Limits) error {
-	if b.runtimeSource == nil && b.runtimeRawSource == nil && b.runtimeMultiOrgSource == nil {
+	if b.runtimeSource == nil && b.runtimeRawSource == nil && b.runtimeMultiOrgSource == nil && b.runtimeLifecycleSource == nil {
 		return nil
 	}
 	bad := func(field, message string) error { return fail(InvalidSchema, "", "", field, message) }
 	var s RuntimeSource
 	var feed pricefeedpolicy.Definition
-	if b.runtimeMultiOrgSource != nil {
-		r := b.runtimeMultiOrgSource
-		if b.runtimeSource != nil || b.runtimeRawSource != nil || b.profile.id != RuntimeMultiOrgProfileID || r.APIVersion != RuntimeMultiOrgAPIVersion || (r.RawSubmissionMode != RawSubmissionGuardV1 && r.RawSubmissionMode != RawSubmissionOPSPreflight) {
+	modern := b.runtimeMultiOrgSource
+	lifecycle := b.runtimeLifecycleSource != nil
+	expectedProfile, expectedVersion, expectedEvidence := RuntimeMultiOrgProfileID, RuntimeMultiOrgAPIVersion, RuntimeNodeEvidenceProfileID
+	if lifecycle {
+		if modern != nil {
+			return bad("runtimeCatalog", "multiple runtime source variants")
+		}
+		view := RuntimeMultiOrgSource(*b.runtimeLifecycleSource)
+		modern = &view
+		expectedProfile, expectedVersion, expectedEvidence = RuntimeLifecycleProfileID, RuntimeLifecycleAPIVersion, RuntimeLifecycleNodeEvidenceProfileID
+	}
+	if modern != nil {
+		r := modern
+		if b.runtimeSource != nil || b.runtimeRawSource != nil || b.profile.id != expectedProfile || r.APIVersion != expectedVersion || (r.RawSubmissionMode != RawSubmissionGuardV1 && r.RawSubmissionMode != RawSubmissionOPSPreflight) {
 			return bad("runtimeCatalog", "unsupported runtime source/profile or raw mode")
 		}
 		if r.PriceFeed != nil {
@@ -261,7 +314,7 @@ func (b *catalogBuilder) compileRuntime(limits Limits) error {
 		}
 		s = *b.runtimeSource
 	}
-	if s.APIVersion != RuntimeAPIVersion || s.Kind != RuntimeKind || (s.ReadProfile != "standard" && s.ReadProfile != "strict") || s.NodeEvidenceProfile != RuntimeNodeEvidenceProfileID {
+	if s.APIVersion != RuntimeAPIVersion || s.Kind != RuntimeKind || (s.ReadProfile != "standard" && s.ReadProfile != "strict") || s.NodeEvidenceProfile != expectedEvidence {
 		return bad("runtimeCatalog", "unsupported runtime schema/profile")
 	}
 	if len(s.SharedInfrastructure) > min(4096, limits.MaxContractsPerOrg) || len(s.AddressScopes) > min(4096, limits.MaxContractsPerOrg) {
@@ -314,8 +367,8 @@ func (b *catalogBuilder) compileRuntime(limits Limits) error {
 	sort.Slice(s.AddressScopes, func(i, j int) bool { return s.AddressScopes[i].Address < s.AddressScopes[j].Address })
 	raw, _ := json.Marshal(s)
 	catalog := &RuntimeCatalog{source: s}
-	if b.runtimeMultiOrgSource != nil {
-		r := &RuntimeMultiOrgSource{APIVersion: RuntimeMultiOrgAPIVersion, Kind: s.Kind, ReadProfile: s.ReadProfile, IntraOrgGrantTracing: s.IntraOrgGrantTracing, SharedInfrastructure: s.SharedInfrastructure, AddressScopes: s.AddressScopes, NodeEvidenceProfile: s.NodeEvidenceProfile, RawSubmissionMode: b.runtimeMultiOrgSource.RawSubmissionMode}
+	if modern != nil {
+		r := &RuntimeMultiOrgSource{APIVersion: expectedVersion, Kind: s.Kind, ReadProfile: s.ReadProfile, IntraOrgGrantTracing: s.IntraOrgGrantTracing, SharedInfrastructure: s.SharedInfrastructure, AddressScopes: s.AddressScopes, NodeEvidenceProfile: s.NodeEvidenceProfile, RawSubmissionMode: modern.RawSubmissionMode}
 		if feed.Valid() {
 			normalized := feed.Source()
 			r.PriceFeed = &normalized
@@ -325,7 +378,13 @@ func (b *catalogBuilder) compileRuntime(limits Limits) error {
 				b.secrets[normalized.Credential.FromEnv] = true
 			}
 		}
-		catalog.source, catalog.multiOrgSource = RuntimeSource{}, r
+		catalog.source = RuntimeSource{}
+		if lifecycle {
+			owned := RuntimeLifecycleSource(*r)
+			catalog.lifecycleSource = &owned
+		} else {
+			catalog.multiOrgSource = r
+		}
 		raw, _ = json.Marshal(r)
 	} else if b.runtimeRawSource != nil {
 		r := &RuntimeRawSource{RuntimeRawAPIVersion, s.Kind, s.ReadProfile, s.IntraOrgGrantTracing, s.SharedInfrastructure, s.AddressScopes, s.NodeEvidenceProfile, b.runtimeRawSource.RawSubmissionMode}

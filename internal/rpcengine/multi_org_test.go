@@ -73,6 +73,13 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	t.Cleanup(walletStore.Close)
 	namespace, _ := binding.Namespace()
 	walletState := walletops.ExpectedState{Generation: walletGen, Coverage: walletsql.EmptyCoverage()}
+	if f.linkSigner {
+		service, err := walletops.New(walletops.Config{Snapshot: snapshot, Clock: clock, Binding: binding, State: walletState, Store: walletStore})
+		if err != nil {
+			t.Fatal(err)
+		}
+		operationalLink(t, service, token(t, snapshot, f.roles), signedValue(t, 9).Signer())
+	}
 	resolver, err := walletadapter.New(walletStore, namespace, walletState, clock)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +88,15 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	if f.rawMode == policybundle.RawSubmissionGuardV1 {
 		profile = rpcexecution.GuardRetainedProfileID
 	}
-	financial, err := admission.New(admission.Config{Snapshot: snapshot, Clock: clock, NetworkBinding: network, ExpectedState: admission.ExpectedState{Generation: gen, Coverage: admissionsql.EmptyCoverage()}, Store: store, ExpectedEvidenceProfile: profile})
+	callProfile := rpcexecution.NodeProfileID
+	if f.lifecycle {
+		callProfile = rpcexecution.LifecycleCallProfileID
+		profile = rpcexecution.LifecycleSignedProfileID
+		if f.rawMode == policybundle.RawSubmissionGuardV1 {
+			profile = rpcexecution.LifecycleGuardProfileID
+		}
+	}
+	financial, err := admission.New(admission.Config{Snapshot: snapshot, Clock: clock, NetworkBinding: network, ExpectedState: admission.ExpectedState{Generation: gen, Coverage: admissionsql.EmptyCoverage()}, Store: store, ExpectedEvidenceProfile: profile, CursorKeyring: admission.CursorKeyring{Active: admission.CursorKey{ID: "test", Key: bytes.Repeat([]byte{8}, 32)}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +114,7 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	t.Cleanup(nodeServer.Close)
 	clients := map[string]*rpcexecution.Client{}
 	for _, org := range []string{orgA, orgB} {
-		client, err := rpcexecution.NewClient(nodeServer.Client().Transport, rpcexecution.NodeBinding{OrganizationID: org, URL: nodeServer.URL, ChainID: "1", Profile: rpcexecution.NodeProfileID, PragueStartInclusive: 10, PragueEndExclusive: 20, AllowUnauthenticated: true}, rpcexecution.DefaultLimits())
+		client, err := rpcexecution.NewClient(nodeServer.Client().Transport, rpcexecution.NodeBinding{OrganizationID: org, URL: nodeServer.URL, ChainID: "1", Profile: callProfile, PragueStartInclusive: 10, PragueEndExclusive: 20, AllowUnauthenticated: true}, rpcexecution.DefaultLimits())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -126,6 +141,12 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 			t.Fatal("old RPC constructor accepted v3")
 		}
 		constructor = rpcengine.NewMultiOrg
+	}
+	if f.lifecycle {
+		if _, err := rpcengine.NewMultiOrg(snapshot, options); err == nil {
+			t.Fatal("old RPC constructor accepted native-v4")
+		}
+		constructor = rpcengine.NewLifecycle
 	}
 	e, err := constructor(snapshot, options)
 	if err != nil {

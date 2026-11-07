@@ -18,6 +18,7 @@ import (
 type Engine struct {
 	raw             bool
 	multiOrg        bool
+	lifecycle       bool
 	metadata        policybundle.BundleMetadata
 	runtime         *policybundle.RuntimeCatalog
 	owners          map[common.Address]string
@@ -39,6 +40,10 @@ func NewMultiOrg(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (
 	return newEngine(snapshot, clock, policybundle.RuntimeMultiOrgProfileID)
 }
 
+func NewLifecycle(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
+	return newEngine(snapshot, clock, policybundle.RuntimeLifecycleProfileID)
+}
+
 func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, expectedProfile string) (*Engine, error) {
 	if snapshot == nil || clock == nil {
 		return nil, errors.New("invalid native admission snapshot")
@@ -49,10 +54,13 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, exp
 	if expectedProfile == policybundle.RuntimeMultiOrgProfileID {
 		expectedEvaluator = policybundle.NativeV3EvaluatorVersion
 	}
+	if expectedProfile == policybundle.RuntimeLifecycleProfileID {
+		expectedEvaluator = policybundle.NativeV4EvaluatorVersion
+	}
 	if !ok || metadata.Profile != expectedProfile || metadata.EvaluatorVersion != expectedEvaluator || metadata.RuntimeCatalog == nil || metadata.RuntimeCatalog.SemanticDigest != runtime.Digest() {
 		return nil, errors.New("invalid native admission snapshot")
 	}
-	n := &Engine{raw: expectedProfile != policybundle.RuntimeCallProfileID, multiOrg: expectedProfile == policybundle.RuntimeMultiOrgProfileID, metadata: metadata, runtime: runtime, owners: map[common.Address]string{}, shared: map[common.Address]*common.Hash{}, work: map[string]map[string]ruleWork{}, associationWork: map[common.Address]uint64{}}
+	n := &Engine{raw: expectedProfile != policybundle.RuntimeCallProfileID, multiOrg: expectedProfile == policybundle.RuntimeMultiOrgProfileID || expectedProfile == policybundle.RuntimeLifecycleProfileID, lifecycle: expectedProfile == policybundle.RuntimeLifecycleProfileID, metadata: metadata, runtime: runtime, owners: map[common.Address]string{}, shared: map[common.Address]*common.Hash{}, work: map[string]map[string]ruleWork{}, associationWork: map[common.Address]uint64{}}
 	for _, org := range snapshot.Organizations() {
 		catalog, ok := snapshot.NativeCatalog(org.ID)
 		if !ok {
@@ -158,8 +166,14 @@ func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOr
 		switch runtime.RawSubmissionMode() {
 		case policybundle.RawSubmissionGuardV1:
 			expectedEvidence = rpcexecution.GuardRetainedProfileID
+			if n.lifecycle {
+				expectedEvidence = rpcexecution.LifecycleGuardProfileID
+			}
 		case policybundle.RawSubmissionOPSPreflight:
 			expectedEvidence = rpcexecution.SignedCallProfileID
+			if n.lifecycle {
+				expectedEvidence = rpcexecution.LifecycleSignedProfileID
+			}
 		default:
 			return invalid()
 		}
@@ -225,8 +239,21 @@ func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOr
 	if !valid {
 		return invalid()
 	}
+	if n.lifecycle {
+		qualification := execution.QualificationWork()
+		if qualification == 0 {
+			return invalid()
+		}
+		work, valid = add(work, qualification)
+		if !valid || work > MaxAdmissionWork {
+			return invalid()
+		}
+	}
 	if ctx.Err() != nil {
 		return invalid()
+	}
+	if n.lifecycle {
+		return n.checkLifecycle(ctx, view, selectedOrg, execution, wallets, signer, work)
 	}
 	if n.multiOrg {
 		return n.checkMultiOrg(ctx, view, selectedOrg, execution, wallets, signer, work)

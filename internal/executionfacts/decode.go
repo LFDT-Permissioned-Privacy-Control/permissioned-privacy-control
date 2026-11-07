@@ -16,6 +16,7 @@ type wireRecord struct {
 	Record
 	valuePresent bool
 	children     int
+	recovered    Address
 }
 
 type decoder struct {
@@ -28,7 +29,7 @@ type decoder struct {
 	logBytes  int
 }
 
-// Parse accepts only the two fixed Geth callTracer profiles. It checks the tree
+// Parse accepts only the fixed Geth callTracer profiles. It checks the tree
 // against independently supplied root inputs and returns no partial tree.
 // Parsing is incremental: record/depth/input budgets are checked while reading,
 // before appending children or decoding their byte strings.
@@ -75,7 +76,7 @@ func (p *decoder) node(parent, depth int) error {
 		if err != nil || !ok {
 			return fail(InvalidTrace, index, "json", "invalid object key")
 		}
-		if !knownField(key) && !(key == "logs" && p.profile.id == WithLogsProfileID) {
+		if !knownField(key) && !(key == "logs" && p.profile.withLogs()) {
 			return fail(InvalidTrace, index, "object", "unsupported field")
 		}
 		if seen[key] {
@@ -257,11 +258,19 @@ func parseAddress(value string) (common.Address, bool) {
 func knownAddress(value common.Address) Address { return Address{value, true} }
 
 func buildTree(wire []wireRecord, expected ExpectedRoot, profile Profile) (*Tree, error) {
+	if profile.id == LifecycleWithLogsProfileID {
+		if err := recoverCreationContexts(wire); err != nil {
+			return nil, err
+		}
+	}
 	root := wire[0]
 	if root.Kind != expected.Kind || root.From != expected.From || !bytes.Equal(root.Input, expected.Input) || root.Value.Cmp(expected.Value) != 0 ||
 		(expected.Kind == Call && root.To != expected.To) ||
 		(expected.Kind == Create && root.To.Known && expected.CreatedAddress.Known && root.To != expected.CreatedAddress) {
 		return nil, fail(RootMismatch, 0, "root", "trace does not match independent request inputs")
+	}
+	if root.recovered.Known && expected.CreatedAddress.Known && root.recovered != expected.CreatedAddress {
+		return nil, fail(RootMismatch, 0, "root", "child context differs from independent creation destination")
 	}
 	tree := &Tree{profile: profile.id, records: make([]Record, len(wire))}
 	for index, w := range wire {
@@ -297,7 +306,11 @@ func buildTree(wire []wireRecord, expected ExpectedRoot, profile Profile) (*Tree
 			tree.requirements.Creation = true
 			r.CallerAddress = knownAddress(r.From)
 			r.StorageAddress, r.NominalCodeAddress = r.To, r.To
-			if index == 0 && !r.To.Known && expected.CreatedAddress.Known {
+			if !r.To.Known && w.recovered.Known {
+				r.StorageAddress, r.NominalCodeAddress = w.recovered, w.recovered
+				r.ContextFromChildren = true
+			}
+			if index == 0 && !r.StorageAddress.Known && expected.CreatedAddress.Known {
 				r.StorageAddress, r.NominalCodeAddress = expected.CreatedAddress, expected.CreatedAddress
 				r.ContextFromExpected = true
 			}

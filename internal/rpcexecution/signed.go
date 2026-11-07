@@ -27,8 +27,11 @@ func signedChain(tx transactioninput.VerifiedTransaction, chain string) bool {
 func signedCall(tx transactioninput.VerifiedTransaction) Call {
 	to, _ := tx.Destination()
 	chain, _ := new(big.Int).SetString(tx.ChainID(), 10)
-	call := Call{from: tx.Signer(), to: to, fromSupplied: true, input: tx.Input(), value: tx.Value(), chainID: chain}
+	call := Call{from: tx.Signer(), to: to, fromSupplied: true, input: tx.Input(), value: tx.Value(), chainID: chain, creation: tx.Creation(), signedInput: true, signedNonce: tx.Nonce()}
 	call.wire = map[string]any{"from": call.from.Hex(), "to": to.Hex(), "input": "0x" + common.Bytes2Hex(call.input), "value": "0x" + call.value.Text(16), "gas": "0x" + strconv.FormatUint(tx.Gas(), 16), "nonce": "0x" + strconv.FormatUint(tx.Nonce(), 16), "chainId": "0x" + chain.Text(16), "type": "0x" + strconv.FormatUint(uint64(tx.Type()), 16)}
+	if call.creation {
+		delete(call.wire, "to")
+	}
 	if tx.Type() == 0 || tx.Type() == 1 {
 		call.wire["gasPrice"] = "0x" + tx.GasPrice().Text(16)
 	} else {
@@ -72,7 +75,7 @@ func (c *Client) AcquireSigned(ctx context.Context, tx transactioninput.Verified
 // BroadcastRaw invokes the selected node exactly once. Any error can be an
 // ambiguous submission and must never cause automatic resubmission.
 func (c *Client) BroadcastRaw(ctx context.Context, tx transactioninput.VerifiedTransaction) (common.Hash, error) {
-	if c == nil || !c.selected || (c.binding.Profile != SignedCallProfileID && c.binding.Profile != GuardRetainedProfileID) || !signedChain(tx, c.binding.ChainID) {
+	if c == nil || !c.selected || (c.binding.Profile != SignedCallProfileID && c.binding.Profile != GuardRetainedProfileID && c.binding.Profile != LifecycleSignedProfileID && c.binding.Profile != LifecycleGuardProfileID) || !signedChain(tx, c.binding.ChainID) {
 		return common.Hash{}, failure(InvalidBinding)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)

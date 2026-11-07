@@ -2,7 +2,6 @@ package admission
 
 import (
 	"context"
-	"encoding/hex"
 	"strconv"
 	"time"
 
@@ -30,9 +29,9 @@ func (s *Service) FinancialPreview(ctx context.Context, token, org string, req P
 	if err != nil {
 		return nil, ErrInvalid
 	}
-	to, hasTo := tx.Destination()
-	if !hasTo {
-		return nil, ErrInvalid
+	to, financialData, err := financialProjection(tx, s.evidenceProfile)
+	if err != nil {
+		return nil, err
 	}
 	quotes, err := s.captureQuotes(ctx)
 	if err != nil {
@@ -52,7 +51,7 @@ func (s *Service) FinancialPreview(ctx context.Context, token, org string, req P
 		if err != nil {
 			return ErrInvalid
 		}
-		result, err = checker.CheckPreview(ctx, request.checkRequest(tx.Hash().Hex(), AddressString(tx.Signer()), AddressString(to), "0x"+hex.EncodeToString(tx.Input()), "0x"+tx.Value().Text(16), req.Renewal))
+		result, err = checker.CheckPreview(ctx, request.checkRequest(tx.Hash().Hex(), AddressString(tx.Signer()), AddressString(to), financialData, "0x"+tx.Value().Text(16), req.Renewal))
 		if err != nil {
 			return err
 		}

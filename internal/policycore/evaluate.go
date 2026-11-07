@@ -48,7 +48,15 @@ type Frame struct {
 	StorageShared   bool
 	StorageDeployer bool
 	StoragePending  bool
-	CallerAddress   common.Address
+	// Native-v4 facts describe qualified execution-local contexts, never owners.
+	CreationUnresolved bool
+	// CreationNamespace is routed attempt authority, even for an unresolved
+	// leaf; it never supplies storage/code epoch or observed account facts.
+	CreationNamespace          string
+	StorageDeploymentNamespace string
+	CodeDeploymentNamespace    string
+	StorageRuntimeHasCode      bool
+	CallerAddress              common.Address
 	// Nil Value is zero native value. Depth is zero for the top-level frame.
 	Value *big.Int
 	Depth uint64
@@ -75,6 +83,9 @@ type Context struct {
 	// LinkedAddresses are the accounts linked to the authenticated principal.
 	LinkedAddresses []common.Address
 	Claims          uint8
+	// GroupSourceClaims are the routed organisation's per-group upper bounds.
+	// Only native-v4 deployment/context paths consume these source masks.
+	GroupSourceClaims map[string]uint8
 	// ReadRecord is an offline reference-oracle dependency. Production execution
 	// runs generated STATICCALLs inside the node's live candidate state instead.
 	// A missing reader denies record-party constraints.
@@ -161,7 +172,7 @@ func (v *Validated) matchFrame(ctx Context, f Frame) (DenialCode, error) {
 	if f.CodeKind > CodePrecompile {
 		return DenialInvalidFacts, fmt.Errorf("unknown code kind")
 	}
-	if v.policy.APIVersion == NativeV3APIVersion && f.CodeShared && (f.CallType == CallTypeDelegateCall || f.CallType == CallTypeCallCode) {
+	if (v.policy.APIVersion == NativeV3APIVersion || v.policy.APIVersion == NativeV4APIVersion) && f.CodeShared && (f.CallType == CallTypeDelegateCall || f.CallType == CallTypeCallCode) {
 		return DenialOwnership, fmt.Errorf("shared code cannot execute against private storage")
 	}
 	var selector [4]byte
@@ -173,7 +184,11 @@ func (v *Validated) matchFrame(ctx Context, f Frame) (DenialCode, error) {
 	for _, group := range ctx.Groups {
 		index := v.byGroup[group]
 		for _, key := range sortedFrameKeys(index) {
-			if !key.matchesTarget(ctx.Org, f) {
+			matches := key.matchesTarget(ctx.Org, f)
+			if v.policy.APIVersion == NativeV4APIVersion {
+				matches = key.matchesTargetV4(ctx.Org, f)
+			}
+			if !matches {
 				continue
 			}
 			if key.selectorMode == selectorExact && (len(f.Calldata) < 4 || key.selector != selector) {
@@ -191,7 +206,11 @@ func (v *Validated) matchFrame(ctx Context, f Frame) (DenialCode, error) {
 				if rule.minDepth != nil && f.Depth < uint64(*rule.minDepth) {
 					code, err = DenialDepth, fmt.Errorf("frame depth is below the rule's bound")
 				} else {
-					code, err = rule.checkAuthority(ctx, f, f.GroupClaims[group], key)
+					if v.policy.APIVersion == NativeV4APIVersion {
+						code, err = rule.checkAuthorityV4(ctx, f, f.GroupClaims[group], ctx.GroupSourceClaims[group], key)
+					} else {
+						code, err = rule.checkAuthority(ctx, f, f.GroupClaims[group], key)
+					}
 				}
 				if err == nil {
 					code, err = rule.checkArgs(ctx, f)

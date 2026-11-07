@@ -263,6 +263,17 @@ func ValidateNativeV3(p *Policy, cat Catalog, references CodeReferenceCatalog) (
 	return v, nil
 }
 
+func ValidateNativeV4(p *Policy, cat Catalog, references CodeReferenceCatalog) (*Validated, error) {
+	if err := validateCodeReferences(cat, references); err != nil {
+		return nil, validationError(err)
+	}
+	v, err := validatePolicy(p, cat, NativeV4APIVersion, references)
+	if err != nil {
+		return nil, validationError(err)
+	}
+	return v, nil
+}
+
 // validatePolicy is Validate before its error is typed.
 func validatePolicy(p *Policy, cat Catalog, version string, references CodeReferenceCatalog) (*Validated, error) {
 	if p == nil {
@@ -295,8 +306,8 @@ func validatePolicy(p *Policy, cat Catalog, version string, references CodeRefer
 	// as parsedABIs memoizes method parsing. Many rules must not reparse one
 	// large ABI, and unused global references need no ABI-buffer copies.
 	var refs *codeReferences
-	if version == NativeV3APIVersion {
-		refs = &codeReferences{catalog: references, canonical: make(map[string]bool)}
+	if version == NativeV3APIVersion || version == NativeV4APIVersion {
+		refs = &codeReferences{catalog: references, canonical: make(map[string]bool), version: version}
 	}
 
 	for bi, b := range p.Bindings {
@@ -518,6 +529,10 @@ func compileRule(r FrameRule, cat Catalog, parsedABIs map[string]map[string]abi.
 // resolveCallTypes checks the declared frame kinds and their relationship to
 // CodeAddress. The two fields constrain each other, so they are checked together.
 func resolveCallTypes(r FrameRule) (map[CallType]struct{}, error) {
+	return resolveCallTypesWithContext(r, false)
+}
+
+func resolveCallTypesWithContext(r FrameRule, contextClass bool) (map[CallType]struct{}, error) {
 	if len(r.CallTypes) == 0 {
 		if r.CodeAddress != "" {
 			return nil, fmt.Errorf("codeAddress is set but callTypes is empty; code and storage differ only for delegatecall or callcode, so name the call type explicitly")
@@ -546,10 +561,10 @@ func resolveCallTypes(r FrameRule) (map[CallType]struct{}, error) {
 		}
 	}
 
-	if borrowsStorage && r.CodeAddress == "" && r.TargetClass != "org" {
+	if borrowsStorage && r.CodeAddress == "" && r.TargetClass != "org" && !contextClass {
 		return nil, fmt.Errorf("callTypes permits delegatecall or callcode, so codeAddress must name the account whose code may run against this storage")
 	}
-	if !borrowsStorage && r.CodeAddress != "" {
+	if !borrowsStorage && r.CodeAddress != "" && !contextClass {
 		return nil, fmt.Errorf("codeAddress is set but callTypes permits only call or staticcall, where code and storage are the same account; remove one of the two")
 	}
 

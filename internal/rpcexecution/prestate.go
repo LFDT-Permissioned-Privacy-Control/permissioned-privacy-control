@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"privacy-proxy/internal/policycore"
 )
 
 // CodeInfo is presence-aware owned code. Its byte accessor copies; cheap
@@ -17,6 +18,10 @@ type CodeInfo struct {
 	code       []byte
 	hash       common.Hash
 	precompile bool
+	origin     CodeOrigin
+	creation   int
+	nonce      uint64
+	nonceKnown bool
 }
 
 func (c CodeInfo) Bytes() []byte     { return bytes.Clone(c.code) }
@@ -24,6 +29,34 @@ func (c CodeInfo) Hash() common.Hash { return c.hash }
 func (c CodeInfo) HasCode() bool     { return len(c.code) > 0 }
 func (c CodeInfo) Precompile() bool  { return c.precompile }
 func (c CodeInfo) Delegated() bool   { return delegation(c.code) }
+
+type CodeOrigin string
+
+const (
+	AnchoredRuntime    CodeOrigin = "anchored-runtime"
+	ConstructorAttempt CodeOrigin = "constructor-attempt"
+	CreatedRuntime     CodeOrigin = "created-runtime"
+	PrecompileOrigin   CodeOrigin = "precompile"
+)
+
+func (c CodeInfo) Origin() CodeOrigin {
+	if c.origin != "" {
+		return c.origin
+	}
+	if c.precompile {
+		return PrecompileOrigin
+	}
+	return AnchoredRuntime
+}
+func (c CodeInfo) CreationRecordIndex() (int, bool) {
+	return c.creation, c.origin == CreatedRuntime || c.origin == ConstructorAttempt
+}
+
+// FreshnessNonce reports initial same-execution account nonce evidence or the
+// reservation of 1 for a freshly created account. It supports zero-vs-nonzero
+// creation freshness checks, not an exact nonce at every later frame: creator
+// increments are not interpreted. Never derive creation addresses from it.
+func (c CodeInfo) FreshnessNonce() (uint64, bool) { return c.nonce, c.nonceKnown }
 
 func closedRawObject(raw []byte, maxFields int) (map[string]json.RawMessage, error) {
 	d := json.NewDecoder(bytes.NewReader(raw))
@@ -127,6 +160,7 @@ func decodePrestateProfile(raw []byte, l Limits, guard bool) (map[common.Address
 			return nil, 0, e
 		}
 		var code []byte
+		var nonce uint64 // A PRESENT full-state account omits only a known zero.
 		var declaredHash *common.Hash
 		for name, value := range fields {
 			switch name {
@@ -171,7 +205,9 @@ func decodePrestateProfile(raw []byte, l Limits, guard bool) (map[common.Address
 						return nil, 0, failure(InvalidEvidence)
 					}
 				}
-				if _, err := strconv.ParseUint(s, 10, 64); err != nil {
+				var err error
+				nonce, err = strconv.ParseUint(s, 10, 64)
+				if err != nil {
 					return nil, 0, failure(InvalidEvidence)
 				}
 			default:
@@ -186,7 +222,7 @@ func decodePrestateProfile(raw []byte, l Limits, guard bool) (map[common.Address
 			return nil, 0, failure(EvidenceLimit)
 		}
 		total += len(code)
-		accounts[a] = CodeInfo{code: code, hash: h, precompile: precompile(a)}
+		accounts[a] = CodeInfo{code: code, hash: h, precompile: precompile(a), nonce: nonce, nonceKnown: true}
 	}
 	if _, err = d.Token(); err != nil {
 		return nil, 0, failure(InvalidEvidence)
@@ -198,12 +234,7 @@ func decodePrestateProfile(raw []byte, l Limits, guard bool) (map[common.Address
 }
 
 func precompile(a common.Address) bool {
-	for _, b := range a[:19] {
-		if b != 0 {
-			return false
-		}
-	}
-	return a[19] >= 1 && a[19] <= 17
+	return policycore.IsPraguePrecompile(a)
 }
 
 func delegation(code []byte) bool {

@@ -12,6 +12,7 @@ import (
 type codeReferences struct {
 	catalog   CodeReferenceCatalog
 	canonical map[string]bool
+	version   string
 }
 
 func validateCodeReferences(owned Catalog, refs CodeReferenceCatalog) error {

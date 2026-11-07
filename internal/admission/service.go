@@ -2,7 +2,6 @@ package admission
 
 import (
 	"context"
-	"encoding/hex"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -52,7 +51,7 @@ func (s *Service) Metadata() Metadata {
 }
 func (s *Service) AdminReady() bool { return s != nil && s.cursors != nil }
 func New(c Config) (*Service, error) {
-	if c.Snapshot == nil || c.Clock == nil || c.Store == nil || !c.ExpectedState.Valid() || (c.ExpectedEvidenceProfile != rpcexecution.GuardRetainedProfileID && c.ExpectedEvidenceProfile != SignedEvidenceProfile) {
+	if c.Snapshot == nil || c.Clock == nil || c.Store == nil || !c.ExpectedState.Valid() || !supportedEvidenceProfile(c.ExpectedEvidenceProfile) {
 		return nil, ErrInvalid
 	}
 	key, err := c.NetworkBinding.Key()
@@ -221,9 +220,9 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 	if !hashKnown || !signerKnown || txHash != input.Transaction.Hash() || signer != input.Transaction.Signer() || anchor.ChainID != s.network.ChainID || anchor.OrganizationID != input.OrganizationID || anchor.Profile != s.evidenceProfile || anchor.Hash == (common.Hash{}) {
 		return nil, ErrInvalid
 	}
-	to, hasTo := input.Transaction.Destination()
-	if !hasTo || input.Transaction.Creation() {
-		return nil, ErrInvalid
+	to, financialData, err := financialProjection(input.Transaction, s.evidenceProfile)
+	if err != nil {
+		return nil, err
 	}
 	audience, audienceDigest, err := NormalizeRecipients(input.Audience)
 	if err != nil {
@@ -237,7 +236,7 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 			return nil, ErrInvalid
 		}
 	}
-	if len(audience) > 0 && !qualified {
+	if len(audience) > 0 && (!qualified || input.Transaction.Creation()) {
 		return nil, ErrForbidden
 	}
 	if registered, found := input.View.Contract(to); found && registered.OwnerOrg() != input.OrganizationID {
@@ -282,7 +281,7 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 		if err != nil {
 			return 0, ErrInvalid
 		}
-		checked, err := checker.Check(ctx, request.checkRequest(txHash.Hex(), AddressString(signer), AddressString(to), "0x"+hex.EncodeToString(input.Transaction.Input()), "0x"+input.Transaction.Value().Text(16), false))
+		checked, err := checker.Check(ctx, request.checkRequest(txHash.Hex(), AddressString(signer), AddressString(to), financialData, "0x"+input.Transaction.Value().Text(16), false))
 		if err != nil {
 			return 0, err
 		}

@@ -18,10 +18,11 @@ import (
 )
 
 type Pair struct {
-	service  *nodeapproval.Service
-	client   *rpcexecution.Client
-	timeout  time.Duration
-	delivery bool
+	service   *nodeapproval.Service
+	client    *rpcexecution.Client
+	timeout   time.Duration
+	delivery  bool
+	lifecycle bool
 }
 
 type QualifiedPrepared struct {
@@ -79,6 +80,20 @@ func (p *Pair) Close() {
 }
 
 func (p *Pair) AcquireSigned(ctx context.Context, tx transactioninput.VerifiedTransaction) (*QualifiedPrepared, error) {
+	if p == nil || p.lifecycle {
+		return nil, errors.New("invalid Guard transaction scope")
+	}
+	return p.acquireSigned(ctx, tx)
+}
+
+func (p *Pair) AcquireLifecycleSigned(ctx context.Context, tx transactioninput.VerifiedTransaction) (*QualifiedPrepared, error) {
+	if p == nil || !p.lifecycle {
+		return nil, errors.New("invalid Guard transaction scope")
+	}
+	return p.acquireSigned(ctx, tx)
+}
+
+func (p *Pair) acquireSigned(ctx context.Context, tx transactioninput.VerifiedTransaction) (*QualifiedPrepared, error) {
 	if p == nil || p.service == nil || p.client == nil || !tx.Valid() || (tx.Type() != 0 && tx.Type() != 2) || tx.ChainID() != p.client.Metadata().ChainID {
 		return nil, errors.New("invalid Guard transaction")
 	}
@@ -96,7 +111,11 @@ func (p *Pair) qualify(ctx context.Context, prepared *nodeapproval.Prepared, tx 
 	if !ok {
 		return nil, errors.New("unqualified Guard evidence")
 	}
-	execution, err := p.client.QualifyTrustedGuardEvidence(ctx, tx, rpcexecution.TrustedGuardEvidence{Profile: e.Profile(), Calls: e.Calls(), Prestate: e.Prestate(), ChainID: e.ChainID(), TransactionHash: e.TransactionHash(), Fingerprint: e.Fingerprint(), HashMode: e.HashMode(), HeaderHash: e.HeaderHash(), HeaderNumber: e.HeaderNumber(), HeaderTimestamp: e.HeaderTimestamp(), HeaderPresent: true})
+	qualify := p.client.QualifyTrustedGuardEvidence
+	if p.lifecycle {
+		qualify = p.client.QualifyTrustedGuardLifecycleEvidence
+	}
+	execution, err := qualify(ctx, tx, rpcexecution.TrustedGuardEvidence{Profile: e.Profile(), Calls: e.Calls(), Prestate: e.Prestate(), ChainID: e.ChainID(), TransactionHash: e.TransactionHash(), Fingerprint: e.Fingerprint(), HashMode: e.HashMode(), HeaderHash: e.HeaderHash(), HeaderNumber: e.HeaderNumber(), HeaderTimestamp: e.HeaderTimestamp(), HeaderPresent: true})
 	if err != nil {
 		return nil, errors.New("unqualified Guard evidence")
 	}
@@ -109,6 +128,19 @@ func NewDeliveryPair(binding rpcexecution.NodeBinding, credentialRef string, tra
 	if binding.Profile != rpcexecution.GuardRetainedProfileID {
 		return nil, errors.New("invalid Guard pair configuration")
 	}
+	return newDeliveryPair(binding, credentialRef, transport, hashMode, limits, options, false)
+}
+
+// NewLifecycleDeliveryPair retains the original physical Guard service and
+// approval format; only the independently qualified consumer scope changes.
+func NewLifecycleDeliveryPair(binding rpcexecution.NodeBinding, credentialRef string, transport http.RoundTripper, hashMode uint8, limits rpcexecution.Limits, options nodeapproval.BoundDeliveryOptions) (*Pair, error) {
+	if binding.Profile != rpcexecution.LifecycleGuardProfileID {
+		return nil, errors.New("invalid Guard pair configuration")
+	}
+	return newDeliveryPair(binding, credentialRef, transport, hashMode, limits, options, true)
+}
+
+func newDeliveryPair(binding rpcexecution.NodeBinding, credentialRef string, transport http.RoundTripper, hashMode uint8, limits rpcexecution.Limits, options nodeapproval.BoundDeliveryOptions, lifecycle bool) (*Pair, error) {
 	client, err := rpcexecution.NewClient(transport, binding, limits)
 	if err != nil {
 		return nil, err
@@ -126,7 +158,7 @@ func NewDeliveryPair(binding rpcexecution.NodeBinding, credentialRef string, tra
 	if err != nil {
 		return nil, err
 	}
-	return &Pair{service: service, client: client, timeout: limits.AcquisitionTimeout, delivery: true}, nil
+	return &Pair{service: service, client: client, timeout: limits.AcquisitionTimeout, delivery: true, lifecycle: lifecycle}, nil
 }
 
 func (p *Pair) Metadata() rpcexecution.BindingMetadata {

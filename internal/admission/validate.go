@@ -7,7 +7,6 @@ import (
 	"unicode/utf8"
 
 	"privacy-proxy/internal/compliance"
-	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/strictjson"
 )
 
@@ -34,7 +33,7 @@ func NormalizePII(raw []byte) (json.RawMessage, error) {
 	return out, nil
 }
 func (w Witness) Valid() bool {
-	return w.ID == w.Digest() && w.AnchorHash != ([32]byte{}) && (w.EvidenceProfile == rpcexecution.GuardRetainedProfileID || w.EvidenceProfile == SignedEvidenceProfile) && w.WalletVersion != (Digest{}) && !w.DecisionAt.IsZero() && !w.WalletEvidenceAt.IsZero() && w.ManifestDigest != (Digest{}) && w.ComplianceDigest != (Digest{})
+	return w.ID == w.Digest() && w.AnchorHash != ([32]byte{}) && supportedEvidenceProfile(w.EvidenceProfile) && w.WalletVersion != (Digest{}) && !w.DecisionAt.IsZero() && !w.WalletEvidenceAt.IsZero() && w.ManifestDigest != (Digest{}) && w.ComplianceDigest != (Digest{})
 }
 func (o Origin) Valid() bool {
 	return validActor(o.Actor) && ValidUUID(o.Organization) && !o.FirstAdmittedAt.IsZero() && o.Hash != ([32]byte{}) && o.Primary.Valid()
@@ -55,7 +54,7 @@ func slicesEqual(a, b []string) bool {
 	return true
 }
 func (e Event) Valid() bool {
-	if !e.Scope.Valid() || e.DecisionAt.IsZero() || e.PolicyDigest == (Digest{}) || !text(e.Reason, 2048, true) || (e.Decision != "allowed" && e.Decision != "denied") || e.Anchor.Hash == ([32]byte{}) || (e.Anchor.Profile != rpcexecution.GuardRetainedProfileID && e.Anchor.Profile != SignedEvidenceProfile) {
+	if !e.Scope.Valid() || e.DecisionAt.IsZero() || e.PolicyDigest == (Digest{}) || !text(e.Reason, 2048, true) || (e.Decision != "allowed" && e.Decision != "denied") || e.Anchor.Hash == ([32]byte{}) || !supportedEvidenceProfile(e.Anchor.Profile) {
 		return false
 	}
 	if e.Kind == "admission_only" {

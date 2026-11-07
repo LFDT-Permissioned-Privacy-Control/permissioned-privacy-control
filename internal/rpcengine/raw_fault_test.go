@@ -77,6 +77,13 @@ func rawFaultSetup(t *testing.T, f fixture, wallet *boundedWalletFacts, tweaks .
 	if f.rawMode == policybundle.RawSubmissionGuardV1 {
 		evidenceProfile = rpcexecution.GuardRetainedProfileID
 	}
+	callProfile := rpcexecution.NodeProfileID
+	if f.lifecycle {
+		callProfile, evidenceProfile = rpcexecution.LifecycleCallProfileID, rpcexecution.LifecycleSignedProfileID
+		if f.rawMode == policybundle.RawSubmissionGuardV1 {
+			evidenceProfile = rpcexecution.LifecycleGuardProfileID
+		}
+	}
 	snapshot := f.load(t)
 	x := &rawFaultFixture{node: &node{}, store: &unavailableAdmission{}, wallet: wallet, clock: &atomic.Int64{}, snapshot: snapshot}
 	x.clock.Store(now)
@@ -107,7 +114,7 @@ func rawFaultSetup(t *testing.T, f fixture, wallet *boundedWalletFacts, tweaks .
 				}
 			}
 		}
-		c, err := rpcexecution.NewClient(server.Client().Transport, rpcexecution.NodeBinding{OrganizationID: org, URL: server.URL, ChainID: "1", Profile: rpcexecution.NodeProfileID, PragueStartInclusive: 10, PragueEndExclusive: 20, AllowUnauthenticated: true, Credentials: refs}, rpcexecution.DefaultLimits())
+		c, err := rpcexecution.NewClient(server.Client().Transport, rpcexecution.NodeBinding{OrganizationID: org, URL: server.URL, ChainID: "1", Profile: callProfile, PragueStartInclusive: 10, PragueEndExclusive: 20, AllowUnauthenticated: true, Credentials: refs}, rpcexecution.DefaultLimits())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -133,7 +140,11 @@ func rawFaultSetup(t *testing.T, f fixture, wallet *boundedWalletFacts, tweaks .
 	for _, tweak := range tweaks {
 		tweak(&x.options)
 	}
-	x.engine, err = rpcengine.NewRaw(snapshot, x.options)
+	constructor := rpcengine.NewRaw
+	if f.lifecycle {
+		constructor = rpcengine.NewLifecycle
+	}
+	x.engine, err = constructor(snapshot, x.options)
 	if err != nil {
 		t.Fatal(err)
 	}

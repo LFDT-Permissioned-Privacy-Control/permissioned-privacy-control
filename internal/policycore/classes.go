@@ -3,6 +3,7 @@ package policycore
 import (
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -22,6 +23,7 @@ const (
 func compileClassRule(r FrameRule, cat Catalog, references *codeReferences) (frameKey, *compiledRule, error) {
 	var key frameKey
 	var foreignOrg string
+	lifecycle := references != nil && references.version == NativeV4APIVersion
 	if r.Selector != "*" && r.Selector != "0x" {
 		return key, nil, fmt.Errorf("target classes require selector * or 0x")
 	}
@@ -33,7 +35,7 @@ func compileClassRule(r FrameRule, cat Catalog, references *codeReferences) (fra
 	if r.Selector == "0x" {
 		key.selectorMode = selectorEmpty
 	}
-	if r.TargetClass != "" && (r.StorageAddress != "" || r.CodeAddress != "") {
+	if r.TargetClass != "" && (r.StorageAddress != "" || (r.CodeAddress != "" && !(lifecycle && r.TargetClass == "deployment-context"))) {
 		return key, nil, fmt.Errorf("targetClass and literal addresses are mutually exclusive")
 	}
 	switch r.TargetClass {
@@ -61,6 +63,29 @@ func compileClassRule(r FrameRule, cat Catalog, references *codeReferences) (fra
 		}
 		foreignOrg = owner
 	case "org", "shared", "precompile":
+		if lifecycle && r.TargetClass == "precompile" && r.AllowUpgrade {
+			return key, nil, fmt.Errorf("precompile rules do not grant upgrades")
+		}
+	case "deployment-context":
+		if !lifecycle || len(r.CallTypes) == 0 {
+			return key, nil, fmt.Errorf("deployment-context requires native-v4 and explicit callTypes")
+		}
+		if r.CodeAddress != "" {
+			if len(r.CodeAddress) != 42 || r.CodeAddress != strings.ToLower(r.CodeAddress) || !common.IsHexAddress(r.CodeAddress) || common.HexToAddress(r.CodeAddress) == (common.Address{}) {
+				return key, nil, fmt.Errorf("deployment-context codeAddress must be a canonical nonzero address")
+			}
+			key.code = common.HexToAddress(r.CodeAddress)
+			if IsPraguePrecompile(key.code) && r.AllowUpgrade {
+				return key, nil, fmt.Errorf("precompile code does not grant upgrades")
+			}
+			if _, known := references.catalog[r.CodeAddress]; known {
+				_, owner, err := resolveCodeReference("", r.CodeAddress, cat, references)
+				if err != nil {
+					return key, nil, err
+				}
+				foreignOrg = owner
+			}
+		}
 	case "deployer", "pending":
 		if r.AllowUpgrade || r.Selector != "*" {
 			return key, nil, fmt.Errorf("deployer/pending rules require selector * and do not grant upgrades")
@@ -90,15 +115,15 @@ func compileClassRule(r FrameRule, cat Catalog, references *codeReferences) (fra
 		}
 	} else {
 		var err error
-		kinds, err = resolveCallTypes(r)
+		kinds, err = resolveCallTypesWithContext(r, lifecycle && (r.TargetClass == "deployment-context" || r.TargetClass == "precompile"))
 		if err != nil {
 			return key, nil, err
 		}
 		for kind := range kinds {
-			if r.TargetClass != "" && r.TargetClass != "org" && (kind == CallTypeDelegateCall || kind == CallTypeCallCode) {
+			if r.TargetClass != "" && r.TargetClass != "org" && !(lifecycle && (r.TargetClass == "deployment-context" || r.TargetClass == "precompile")) && (kind == CallTypeDelegateCall || kind == CallTypeCallCode) {
 				return key, nil, fmt.Errorf("shared, eoa and precompile classes permit only call/staticcall")
 			}
-			if key.code != key.storage && (kind == CallTypeCall || kind == CallTypeStaticCall) {
+			if r.TargetClass == "" && key.code != key.storage && (kind == CallTypeCall || kind == CallTypeStaticCall) {
 				return key, nil, fmt.Errorf("code differs from storage for call/staticcall")
 			}
 		}

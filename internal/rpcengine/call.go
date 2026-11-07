@@ -68,6 +68,9 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpce
 	if expectedProfile == policybundle.RuntimeMultiOrgProfileID {
 		newNative = nativeadmission.NewMultiOrg
 	}
+	if expectedProfile == policybundle.RuntimeLifecycleProfileID {
+		newNative = nativeadmission.NewLifecycle
+	}
 	native, err := newNative(snapshot, clock)
 	if err != nil {
 		return nil, errors.New("invalid RPC engine configuration")
@@ -222,7 +225,11 @@ func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawReq
 	if ctx.Err() != nil || view.RequireLive() != nil {
 		return denied(req.id)
 	}
-	execution, err := client.AcquireCall(ctx, req.call, req.block)
+	acquire := client.AcquireCall
+	if e.snapshot.Metadata().Profile == policybundle.RuntimeLifecycleProfileID {
+		acquire = client.AcquireLifecycleCall
+	}
+	execution, err := acquire(ctx, req.call, req.block)
 	if err != nil {
 		return responseError(req.id, -32002, "execution unavailable")
 	}

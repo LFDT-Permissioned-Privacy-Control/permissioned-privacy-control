@@ -20,6 +20,9 @@ type Call struct {
 	input          []byte
 	value, chainID *big.Int
 	wire           map[string]any
+	creation       bool
+	signedInput    bool
+	signedNonce    uint64
 }
 
 func (c Call) From() common.Address { return c.from }

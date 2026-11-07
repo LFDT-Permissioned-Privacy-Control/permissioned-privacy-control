@@ -138,32 +138,33 @@ func cloneContract(c Contract) Contract {
 }
 
 type catalogBuilder struct {
-	profile               ValidationProfile
-	snapshot              *CatalogSnapshot
-	policies              map[string]*policycore.Policy
-	capabilities          map[string]bool
-	secrets               map[string]bool
-	addresses             map[string]string
-	groupOwners           map[string]string
-	resourceIDs           map[string]bool
-	addressRefs           []eventAddressRef
-	identitySource        *identity.SourceCatalog
-	identityRef           *IdentityCatalogRef
-	identityLimits        identity.Limits
-	disclosureSource      *disclosurepolicy.Source
-	disclosureRef         *DisclosureCatalogRef
-	disclosureLimits      disclosurepolicy.Limits
-	complianceSource      *compliancepolicy.Source
-	complianceRef         *ComplianceCatalogRef
-	complianceLimits      compliancepolicy.Limits
-	authSource            *brokerpolicy.Source
-	authRef               *AuthCatalogRef
-	runtimeSource         *RuntimeSource
-	runtimeRawSource      *RuntimeRawSource
-	runtimeMultiOrgSource *RuntimeMultiOrgSource
-	runtimeRef            *RuntimeCatalogRef
-	runtimeScopes         map[string]string
-	limits                Limits
+	profile                ValidationProfile
+	snapshot               *CatalogSnapshot
+	policies               map[string]*policycore.Policy
+	capabilities           map[string]bool
+	secrets                map[string]bool
+	addresses              map[string]string
+	groupOwners            map[string]string
+	resourceIDs            map[string]bool
+	addressRefs            []eventAddressRef
+	identitySource         *identity.SourceCatalog
+	identityRef            *IdentityCatalogRef
+	identityLimits         identity.Limits
+	disclosureSource       *disclosurepolicy.Source
+	disclosureRef          *DisclosureCatalogRef
+	disclosureLimits       disclosurepolicy.Limits
+	complianceSource       *compliancepolicy.Source
+	complianceRef          *ComplianceCatalogRef
+	complianceLimits       compliancepolicy.Limits
+	authSource             *brokerpolicy.Source
+	authRef                *AuthCatalogRef
+	runtimeSource          *RuntimeSource
+	runtimeRawSource       *RuntimeRawSource
+	runtimeMultiOrgSource  *RuntimeMultiOrgSource
+	runtimeLifecycleSource *RuntimeLifecycleSource
+	runtimeRef             *RuntimeCatalogRef
+	runtimeScopes          map[string]string
+	limits                 Limits
 }
 
 func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
@@ -184,8 +185,13 @@ func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
 			b.capabilities[capability] = true
 		}
 	}
-	if o.Profile.id == RuntimeMultiOrgProfileID {
+	if multiOrgRuntimeProfile(o.Profile.id) {
 		b.capabilities[CapabilityMultiOrg] = true
+	}
+	if o.Profile.id == RuntimeLifecycleProfileID {
+		for _, name := range []string{CapabilityLifecycle, CapabilityTemporalCode, CapabilityCreationContext, CapabilityLifecycleBeneficiary} {
+			b.capabilities[name] = true
+		}
 	}
 	return b
 }
@@ -289,7 +295,7 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 		return nil, err
 	}
 	var references policycore.CodeReferenceCatalog
-	if b.profile.id == RuntimeMultiOrgProfileID {
+	if multiOrgRuntimeProfile(b.profile.id) {
 		references = b.snapshot.NativeCodeReferences()
 	}
 	for _, org := range b.snapshot.organizations {
@@ -310,7 +316,9 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 		}
 		var v *policycore.Validated
 		var err error
-		if b.profile.id == RuntimeMultiOrgProfileID {
+		if b.profile.id == RuntimeLifecycleProfileID {
+			v, err = policycore.ValidateNativeV4(b.policies[org.ID], catalog, references)
+		} else if b.profile.id == RuntimeMultiOrgProfileID {
 			v, err = policycore.ValidateNativeV3(b.policies[org.ID], catalog, references)
 		} else {
 			v, err = validate(b.policies[org.ID], catalog)
@@ -380,7 +388,7 @@ func (b *catalogBuilder) inferNative(p *policycore.Policy, org string) error {
 			b.capabilities[CapabilityFrames] = true
 		}
 		for _, r := range binding.Allow {
-			if b.profile.id == RuntimeMultiOrgProfileID && r.CodeAddress != "" {
+			if multiOrgRuntimeProfile(b.profile.id) && r.CodeAddress != "" {
 				if owner, registered := b.addresses[addressKey(r.CodeAddress)]; registered && owner != org {
 					b.capabilities[CapabilityForeignCode] = true
 				}
@@ -394,6 +402,10 @@ func (b *catalogBuilder) inferNative(p *policycore.Policy, org string) error {
 				}
 				switch r.TargetClass {
 				case "org", "shared", "eoa", "precompile":
+				case "create", "deployment-context":
+					if b.profile.id != RuntimeLifecycleProfileID {
+						return unsupported("targetClass", "deployment/lifecycle qualification ("+r.TargetClass+")")
+					}
 				default:
 					return unsupported("targetClass", "deployment/lifecycle qualification ("+r.TargetClass+")")
 				}
@@ -408,7 +420,7 @@ func (b *catalogBuilder) inferNative(p *policycore.Policy, org string) error {
 				b.capabilities[CapabilityUpgradeFacts] = true
 			}
 			for _, ct := range r.CallTypes {
-				if ct != policycore.CallTypeCall && ct != policycore.CallTypeStaticCall && !(runtime && (ct == policycore.CallTypeDelegateCall || ct == policycore.CallTypeCallCode)) {
+				if ct != policycore.CallTypeCall && ct != policycore.CallTypeStaticCall && !(runtime && (ct == policycore.CallTypeDelegateCall || ct == policycore.CallTypeCallCode)) && !(b.profile.id == RuntimeLifecycleProfileID && r.TargetClass == "create" && (ct == policycore.CallTypeCreate || ct == policycore.CallTypeCreate2)) {
 					return unsupported("callTypes", "inputs.frame-kind ("+string(ct)+")")
 				}
 			}

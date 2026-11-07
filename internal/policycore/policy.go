@@ -41,6 +41,9 @@ const NativeV2APIVersion = "privacy.gateway.fm/v1alpha2"
 // Policy wire fields remain identical to native-v2; code access is a runtime fact.
 const NativeV3APIVersion = "privacy.gateway.fm/v1alpha3"
 
+// NativeV4APIVersion adds explicit same-execution deployment contexts.
+const NativeV4APIVersion = "privacy.gateway.fm/v1alpha4"
+
 // Kind is the only document kind this package understands.
 const Kind = "ContractExecutionPolicy"
 
@@ -166,7 +169,7 @@ type FrameRule struct {
 	// MaxDepth bounds frame depth inclusively. Nil means unbounded; zero permits
 	// the top-level frame only. The node supplies depth with the root at zero.
 	MaxDepth *int64 `json:"maxDepth,omitempty"`
-	// MinDepth is native-v2 only. The legacy API and EVM backend do not accept
+	// MinDepth requires native-v2 or later. The legacy API and EVM backend do not accept
 	// this field; it is excluded from their public source schema.
 	MinDepth *int `json:"minDepth,omitempty" swaggerignore:"true"`
 	// CallerAddress optionally requires the immediate EVM caller, not the signer.
@@ -375,6 +378,10 @@ func ParseNativeV2(data []byte) (*Policy, error) {
 // ParseNativeV3 selects the native-v3 semantics explicitly.
 func ParseNativeV3(data []byte) (*Policy, error) {
 	return parseNative(data, NativeV3APIVersion)
+}
+
+func ParseNativeV4(data []byte) (*Policy, error) {
+	return parseNative(data, NativeV4APIVersion)
 }
 
 func parseNative(data []byte, version string) (*Policy, error) {

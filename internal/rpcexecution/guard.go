@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	"privacy-proxy/internal/executionfacts"
 	"privacy-proxy/internal/transactioninput"
@@ -33,7 +34,21 @@ type TrustedGuardEvidence struct {
 }
 
 func (c *Client) QualifyTrustedGuardEvidence(ctx context.Context, tx transactioninput.VerifiedTransaction, e TrustedGuardEvidence) (*CallExecution, error) {
-	if c == nil || !c.selected || c.binding.Profile != GuardRetainedProfileID || e.Profile != GuardRetainedProfileID || !tx.Valid() {
+	if c == nil || !c.selected || c.binding.Profile != GuardRetainedProfileID {
+		return nil, failure(InvalidBinding)
+	}
+	return c.qualifyGuard(ctx, tx, e, false)
+}
+
+func (c *Client) QualifyTrustedGuardLifecycleEvidence(ctx context.Context, tx transactioninput.VerifiedTransaction, e TrustedGuardEvidence) (*CallExecution, error) {
+	if c == nil || !c.selected || c.binding.Profile != LifecycleGuardProfileID {
+		return nil, failure(InvalidBinding)
+	}
+	return c.qualifyGuard(ctx, tx, e, true)
+}
+
+func (c *Client) qualifyGuard(ctx context.Context, tx transactioninput.VerifiedTransaction, e TrustedGuardEvidence, lifecycle bool) (*CallExecution, error) {
+	if e.Profile != GuardRetainedProfileID || !tx.Valid() {
 		return nil, failure(InvalidBinding)
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.limits.AcquisitionTimeout)
@@ -42,7 +57,7 @@ func (c *Client) QualifyTrustedGuardEvidence(ctx context.Context, tx transaction
 		return nil, failure(NodeFailure)
 	}
 	to, hasTo := tx.Destination()
-	if tx.Creation() || !hasTo || (tx.Type() != 0 && tx.Type() != 2) {
+	if ((!hasTo || tx.Creation()) && !lifecycle) || (tx.Type() != 0 && tx.Type() != 2) {
 		return nil, failure(UnsupportedEvidence)
 	}
 	if tx.ChainID() != c.binding.ChainID || strconv.FormatUint(e.ChainID, 10) != tx.ChainID() || e.TransactionHash != tx.Hash() || e.Fingerprint == (common.Hash{}) || (e.HashMode != 0 && e.HashMode != 3) || !e.HeaderPresent || e.HeaderHash == (common.Hash{}) {
@@ -54,12 +69,23 @@ func (c *Client) QualifyTrustedGuardEvidence(ctx context.Context, tx transaction
 	if len(e.Calls) == 0 || len(e.Prestate) == 0 || len(e.Calls) > 16<<20 || len(e.Prestate) > 16<<20 || int64(len(e.Calls)) > c.limits.MaxMuxBytes || int64(len(e.Prestate)) > c.limits.MaxMuxBytes {
 		return nil, failure(EvidenceLimit)
 	}
+	if lifecycle && int64(len(e.Calls))+int64(len(e.Prestate))+32 > c.limits.MaxMuxBytes {
+		return nil, failure(EvidenceLimit)
+	}
 	// Own bytes before parsing. The DTO remains caller-owned trusted input;
 	// callers must not mutate it concurrently during this invocation.
 	calls, pre := bytes.Clone(e.Calls), bytes.Clone(e.Prestate)
 	call := signedCall(tx)
 	expected := executionfacts.ExpectedRoot{Kind: executionfacts.Call, From: call.from, To: executionfacts.Address{Value: to, Known: true}, Input: call.input, Value: call.value}
-	tree, err := executionfacts.Parse(calls, expected, executionfacts.GethCallTracerWithLogsProfile(), c.limits.Trace)
+	profile := executionfacts.GethCallTracerWithLogsProfile()
+	if lifecycle {
+		profile = executionfacts.GethLifecycleWithLogsProfile()
+		if tx.Creation() {
+			expected.Kind, expected.To = executionfacts.Create, executionfacts.Address{}
+			expected.CreatedAddress = executionfacts.Address{Value: crypto.CreateAddress(tx.Signer(), tx.Nonce()), Known: true}
+		}
+	}
+	tree, err := executionfacts.Parse(calls, expected, profile, c.limits.Trace)
 	if err != nil {
 		return nil, failure(InvalidEvidence)
 	}
@@ -68,11 +94,19 @@ func (c *Client) QualifyTrustedGuardEvidence(ctx context.Context, tx transaction
 		return nil, err
 	}
 	anchor := Anchor{ChainID: tx.ChainID(), Hash: e.HeaderHash, Number: e.HeaderNumber, Timestamp: e.HeaderTimestamp, Profile: GuardRetainedProfileID, OrganizationID: c.binding.OrganizationID}
+	if lifecycle {
+		anchor.Profile = LifecycleGuardProfileID
+	}
 	raw := append([]byte(`{"callTracer":`), calls...)
 	raw = append(raw, []byte(`,"prestateTracer":`)...)
 	raw = append(raw, pre...)
 	raw = append(raw, '}')
-	execution, err := c.finishEvidence(ctx, call, anchor, tree, codes, total, raw)
+	var execution *CallExecution
+	if lifecycle {
+		execution, err = c.finishLifecycle(ctx, call, anchor, tree, codes, total, raw)
+	} else {
+		execution, err = c.finishEvidence(ctx, call, anchor, tree, codes, total, raw)
+	}
 	if err != nil {
 		return nil, err
 	}

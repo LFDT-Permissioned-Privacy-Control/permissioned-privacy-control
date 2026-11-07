@@ -53,7 +53,10 @@ func NewClient(transport Transport, binding NodeBinding, limits Limits) (*Client
 	u, e := url.Parse(binding.URL)
 	id, uuidErr := uuid.Parse(binding.OrganizationID)
 	chain, ok := new(big.Int).SetString(binding.ChainID, 10)
-	if transport == nil || !limits.valid() || e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" || uuidErr != nil || id.String() != binding.OrganizationID || !ok || chain.Sign() < 0 || chain.BitLen() > 256 || chain.String() != binding.ChainID || (binding.Profile != NodeProfileID && binding.Profile != GuardRetainedProfileID && binding.Profile != SignedCallProfileID) || binding.PragueEndExclusive <= binding.PragueStartInclusive {
+	if transport == nil || !limits.valid() || e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" || uuidErr != nil || id.String() != binding.OrganizationID || !ok || chain.Sign() < 0 || chain.BitLen() > 256 || chain.String() != binding.ChainID || (binding.Profile != NodeProfileID && binding.Profile != GuardRetainedProfileID && binding.Profile != SignedCallProfileID && !lifecycleProfile(binding.Profile)) || (lifecycleProfile(binding.Profile) && !lifecycleLimits(limits)) || binding.PragueEndExclusive <= binding.PragueStartInclusive {
+		return nil, failure(InvalidBinding)
+	}
+	if lifecycleProfile(binding.Profile) && (chain.Sign() <= 0 || !chain.IsUint64()) {
 		return nil, failure(InvalidBinding)
 	}
 	owned := make(map[string]Credential, len(binding.Credentials))
@@ -109,6 +112,7 @@ type CallExecution struct {
 	tree        *executionfacts.Tree
 	codes       map[common.Address]CodeInfo
 	raw         []byte
+	timeline    *codeTimeline
 }
 
 func (e *CallExecution) Call() Call                             { return e.call }
@@ -205,6 +209,10 @@ func (c *Client) AcquireCall(ctx context.Context, call Call, block BlockSelector
 }
 
 func (c *Client) acquire(ctx context.Context, call Call, block BlockSelector, overrides map[string]any) (*CallExecution, error) {
+	return c.acquireProfile(ctx, call, block, overrides, false)
+}
+
+func (c *Client) acquireProfile(ctx context.Context, call Call, block BlockSelector, overrides map[string]any, lifecycle bool) (*CallExecution, error) {
 	if call.chainID != nil && call.chainID.String() != c.binding.ChainID {
 		return nil, failure(InvalidCall)
 	}
@@ -276,13 +284,24 @@ func (c *Client) acquire(ctx context.Context, call Call, block BlockSelector, ov
 		return nil, failure(InvalidEvidence)
 	}
 	expected := executionfacts.ExpectedRoot{Kind: executionfacts.Call, From: call.from, To: executionfacts.Address{Value: call.to, Known: true}, Input: call.input, Value: call.value}
-	tree, err := executionfacts.Parse(parts["callTracer"], expected, executionfacts.GethCallTracerWithLogsProfile(), c.limits.Trace)
+	profile := executionfacts.GethCallTracerWithLogsProfile()
+	if lifecycle {
+		profile = executionfacts.GethLifecycleWithLogsProfile()
+		if call.creation {
+			expected.Kind, expected.To = executionfacts.Create, executionfacts.Address{}
+			expected.CreatedAddress = executionfacts.Address{Value: crypto.CreateAddress(call.from, call.signedNonce), Known: true}
+		}
+	}
+	tree, err := executionfacts.Parse(parts["callTracer"], expected, profile, c.limits.Trace)
 	if err != nil {
 		return nil, failure(InvalidEvidence)
 	}
 	codes, total, err := decodePrestate(parts["prestateTracer"], c.limits)
 	if err != nil {
 		return nil, err
+	}
+	if lifecycle {
+		return c.finishLifecycle(ctx, call, anchor, tree, codes, total, mux)
 	}
 	return c.finishEvidence(ctx, call, anchor, tree, codes, total, mux)
 }

@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
+
 	"privacy-proxy/internal/admission"
 	"privacy-proxy/internal/guardbridge"
 	"privacy-proxy/internal/identity"
@@ -121,6 +123,12 @@ func NewMultiOrg(snapshot *policybundle.CatalogSnapshot, options RawOptions) (*E
 	return newRaw(snapshot, options, policybundle.RuntimeMultiOrgProfileID)
 }
 
+// NewLifecycle explicitly selects temporal native-v4 simulations and signed
+// calls/deployments. Earlier constructors retain their original closed scope.
+func NewLifecycle(snapshot *policybundle.CatalogSnapshot, options RawOptions) (*Engine, error) {
+	return newRaw(snapshot, options, policybundle.RuntimeLifecycleProfileID)
+}
+
 func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expectedProfile string) (*Engine, error) {
 	bad := func() (*Engine, error) { return nil, errors.New("invalid raw RPC configuration") }
 	if snapshot == nil || options.Admission == nil || options.Wallets == nil || options.Clock == nil || !options.WalletState.Valid() {
@@ -133,7 +141,8 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 	}
 	_, rawSource := runtime.RawSource()
 	_, multiOrgSource := runtime.MultiOrgSource()
-	if (expectedProfile == policybundle.RuntimeRawSendProfileID && !rawSource) || (expectedProfile == policybundle.RuntimeMultiOrgProfileID && !multiOrgSource) {
+	_, lifecycleSource := runtime.LifecycleSource()
+	if (expectedProfile == policybundle.RuntimeRawSendProfileID && !rawSource) || (expectedProfile == policybundle.RuntimeMultiOrgProfileID && !multiOrgSource) || (expectedProfile == policybundle.RuntimeLifecycleProfileID && !lifecycleSource) {
 		return bad()
 	}
 	compliance, ok := snapshot.Compliance()
@@ -144,6 +153,12 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 	profile := rpcexecution.SignedCallProfileID
 	if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 		profile = rpcexecution.GuardRetainedProfileID
+	}
+	if lifecycleSource {
+		profile = rpcexecution.LifecycleSignedProfileID
+		if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
+			profile = rpcexecution.LifecycleGuardProfileID
+		}
 	}
 	wb := options.WalletBinding
 	network := admission.NetworkBinding{Environment: wb.Environment, ChainID: wb.ChainID, GenesisHash: wb.GenesisHash, DeploymentID: wb.DeploymentID}
@@ -215,7 +230,11 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 		for _, ref := range needed {
 			binding := rawBinding{client: prepared[org][ref]}
 			if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
-				pair, err := guardbridge.NewDeliveryPair(n.Binding, ref, n.Transport, n.HashMode, n.Limits, deliveryOptions(n))
+				newPair := guardbridge.NewDeliveryPair
+				if lifecycleSource {
+					newPair = guardbridge.NewLifecycleDeliveryPair
+				}
+				pair, err := newPair(n.Binding, ref, n.Transport, n.HashMode, n.Limits, deliveryOptions(n))
 				if err != nil {
 					e.Close()
 					return bad()
@@ -289,7 +308,15 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 	}
 	to, hasTo := tx.Destination()
 	if tx.Creation() || !hasTo {
-		return responseError(req.id, -32002, "unavailable")
+		if !tx.Creation() || e.snapshot.Metadata().Profile != policybundle.RuntimeLifecycleProfileID {
+			return responseError(req.id, -32002, "unavailable")
+		}
+		to = crypto.CreateAddress(tx.Signer(), tx.Nonce())
+		// Deployment has no installed root contract to share. Reject before
+		// recipient resolution or any node work, irrespective of wallet proof.
+		if len(entries) > 0 {
+			return denied(req.id)
+		}
 	}
 	orgID, ok := selectedAddressOrganization(view, explicitOrg, to)
 	if !ok {
@@ -329,12 +356,20 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 	var execution *rpcexecution.CallExecution
 	var prepared *guardbridge.QualifiedPrepared
 	if binding.pair != nil {
-		prepared, err = binding.pair.AcquireSigned(ctx, tx)
+		acquire := binding.pair.AcquireSigned
+		if e.snapshot.Metadata().Profile == policybundle.RuntimeLifecycleProfileID {
+			acquire = binding.pair.AcquireLifecycleSigned
+		}
+		prepared, err = acquire(ctx, tx)
 		if err == nil {
 			execution = prepared.Execution()
 		}
 	} else {
-		execution, err = binding.client.AcquireSigned(ctx, tx)
+		acquire := binding.client.AcquireSigned
+		if e.snapshot.Metadata().Profile == policybundle.RuntimeLifecycleProfileID {
+			acquire = binding.client.AcquireLifecycleSigned
+		}
+		execution, err = acquire(ctx, tx)
 	}
 	if err != nil {
 		return responseError(req.id, -32002, "unavailable")

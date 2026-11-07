@@ -7,14 +7,19 @@ package executionfacts
 // accepts. Other tracer formats require explicit qualification.
 const ProfileID = "geth-callTracer/v1"
 const WithLogsProfileID = "geth-callTracer-with-logs/v1"
+const LifecycleWithLogsProfileID = "geth-callTracer-lifecycle-with-logs/v1"
 
 // Profile is selected by the runtime, never by a request or node response.
 type Profile struct{ id string }
 
 func GethCallTracerProfile() Profile         { return Profile{ProfileID} }
 func GethCallTracerWithLogsProfile() Profile { return Profile{WithLogsProfileID} }
+func GethLifecycleWithLogsProfile() Profile  { return Profile{LifecycleWithLogsProfileID} }
 
-func (p Profile) valid() bool { return p.id == ProfileID || p.id == WithLogsProfileID }
+func (p Profile) valid() bool { return p.id == ProfileID || p.withLogs() }
+func (p Profile) withLogs() bool {
+	return p.id == WithLogsProfileID || p.id == LifecycleWithLogsProfileID
+}
 
 type Kind string
 

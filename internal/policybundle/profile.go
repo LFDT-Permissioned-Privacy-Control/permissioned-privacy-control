@@ -10,45 +10,51 @@ import (
 )
 
 const (
-	FoundationProfileID      = "catalog-foundation/v1"
-	IdentityProfileID        = "catalog-identity/v1"
-	NativeV2ProfileID        = "catalog-native-v2/v1"
-	RuntimeCallProfileID     = "catalog-runtime-call/v1"
-	RuntimeRawSendProfileID  = "catalog-runtime-raw-send/v1"
-	RuntimeMultiOrgProfileID = "catalog-runtime-multi-org/v1"
-	DisclosureProfileID      = "catalog-disclosure/v1"
-	ComplianceProfileID      = "catalog-compliance/v1"
-	BrokerProfileID          = "catalog-broker/v1"
-	CapabilityIdentity       = "identity.claims/v1"
-	NativeEvaluatorVersion   = "policycore/native-v1alpha1"
-	NativeV2EvaluatorVersion = "policycore/native-v1alpha2"
-	NativeV3EvaluatorVersion = "policycore/native-v1alpha3"
-	CapabilityNativeValidate = "catalog.native-validate"
-	CapabilityPrincipal      = "inputs.verified-principal"
-	CapabilityFrames         = "inputs.complete-frames"
-	CapabilityCalldata       = "inputs.calldata"
-	CapabilitySigner         = "inputs.verified-signer"
-	CapabilityLinkedWallets  = "inputs.linked-wallets"
-	CapabilityCaller         = "inputs.immediate-caller"
-	CapabilityValue          = "inputs.value"
-	CapabilityDepth          = "inputs.depth"
-	CapabilityRPCCredential  = "secrets.rpc-credential"
-	CapabilityDynamicPayload = "privacy.dynamic-event-payload"
-	CapabilityRuntimeCall    = "runtime.eth-call/v1"
-	CapabilityRuntimeRawSend = "runtime.raw-send/v1"
-	CapabilityAdmission      = "operational.admission/v1"
-	CapabilityWalletProofs   = "operational.wallet-proofs/v1"
-	CapabilityGuardDelivery  = "delivery.guard-v1/v1"
-	CapabilitySignedCall     = "acquisition.signed-call/v1"
-	CapabilityAnchoredCode   = "inputs.anchored-code/v1"
-	CapabilityClassification = "inputs.classification"
-	CapabilityOwnership      = "inputs.ownership"
-	CapabilitySharedCode     = "inputs.shared-code"
-	CapabilityUpgradeFacts   = "inputs.upgrade-facts"
-	CapabilityAddressScopes  = "policy.address-scopes/v1"
-	CapabilityMultiOrg       = "runtime.multi-org-execution/v1"
-	CapabilityForeignCode    = "inputs.foreign-code-access/v1"
-	CapabilityPriceFeed      = "operational.price-feed/v1"
+	FoundationProfileID            = "catalog-foundation/v1"
+	IdentityProfileID              = "catalog-identity/v1"
+	NativeV2ProfileID              = "catalog-native-v2/v1"
+	RuntimeCallProfileID           = "catalog-runtime-call/v1"
+	RuntimeRawSendProfileID        = "catalog-runtime-raw-send/v1"
+	RuntimeMultiOrgProfileID       = "catalog-runtime-multi-org/v1"
+	RuntimeLifecycleProfileID      = "catalog-runtime-lifecycle/v1"
+	DisclosureProfileID            = "catalog-disclosure/v1"
+	ComplianceProfileID            = "catalog-compliance/v1"
+	BrokerProfileID                = "catalog-broker/v1"
+	CapabilityIdentity             = "identity.claims/v1"
+	NativeEvaluatorVersion         = "policycore/native-v1alpha1"
+	NativeV2EvaluatorVersion       = "policycore/native-v1alpha2"
+	NativeV3EvaluatorVersion       = "policycore/native-v1alpha3"
+	NativeV4EvaluatorVersion       = "policycore/native-v1alpha4"
+	CapabilityNativeValidate       = "catalog.native-validate"
+	CapabilityPrincipal            = "inputs.verified-principal"
+	CapabilityFrames               = "inputs.complete-frames"
+	CapabilityCalldata             = "inputs.calldata"
+	CapabilitySigner               = "inputs.verified-signer"
+	CapabilityLinkedWallets        = "inputs.linked-wallets"
+	CapabilityCaller               = "inputs.immediate-caller"
+	CapabilityValue                = "inputs.value"
+	CapabilityDepth                = "inputs.depth"
+	CapabilityRPCCredential        = "secrets.rpc-credential"
+	CapabilityDynamicPayload       = "privacy.dynamic-event-payload"
+	CapabilityRuntimeCall          = "runtime.eth-call/v1"
+	CapabilityRuntimeRawSend       = "runtime.raw-send/v1"
+	CapabilityAdmission            = "operational.admission/v1"
+	CapabilityWalletProofs         = "operational.wallet-proofs/v1"
+	CapabilityGuardDelivery        = "delivery.guard-v1/v1"
+	CapabilitySignedCall           = "acquisition.signed-call/v1"
+	CapabilityAnchoredCode         = "inputs.anchored-code/v1"
+	CapabilityClassification       = "inputs.classification"
+	CapabilityOwnership            = "inputs.ownership"
+	CapabilitySharedCode           = "inputs.shared-code"
+	CapabilityUpgradeFacts         = "inputs.upgrade-facts"
+	CapabilityAddressScopes        = "policy.address-scopes/v1"
+	CapabilityMultiOrg             = "runtime.multi-org-execution/v1"
+	CapabilityForeignCode          = "inputs.foreign-code-access/v1"
+	CapabilityPriceFeed            = "operational.price-feed/v1"
+	CapabilityLifecycle            = "runtime.lifecycle/v1"
+	CapabilityTemporalCode         = "inputs.temporal-code/v1"
+	CapabilityCreationContext      = "inputs.creation-context/v1"
+	CapabilityLifecycleBeneficiary = "inputs.lifecycle-beneficiary/v1"
 )
 
 // ValidationProfile is opaque: files cannot register validators or enable
@@ -87,12 +93,20 @@ func RuntimeMultiOrgProfile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{RuntimeMultiOrgProfileID, NativeV3EvaluatorVersion, methodCatalogVersion}
 }
 
+func RuntimeLifecycleProfile(methodCatalogVersion string) ValidationProfile {
+	return ValidationProfile{RuntimeLifecycleProfileID, NativeV4EvaluatorVersion, methodCatalogVersion}
+}
+
+func multiOrgRuntimeProfile(id string) bool {
+	return id == RuntimeMultiOrgProfileID || id == RuntimeLifecycleProfileID
+}
+
 func runtimeProfile(id string) bool {
 	return id == RuntimeCallProfileID || rawRuntimeProfile(id)
 }
 
 func rawRuntimeProfile(id string) bool {
-	return id == RuntimeRawSendProfileID || id == RuntimeMultiOrgProfileID
+	return id == RuntimeRawSendProfileID || multiOrgRuntimeProfile(id)
 }
 
 // DisclosureProfile validates explicit rules and identity with the native-v2
@@ -148,6 +162,9 @@ func prepareOptions(options Options) (methodIndex, error) {
 	}
 	if p.id == RuntimeMultiOrgProfileID {
 		expectedEvaluator = NativeV3EvaluatorVersion
+	}
+	if p.id == RuntimeLifecycleProfileID {
+		expectedEvaluator = NativeV4EvaluatorVersion
 	}
 	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && !runtimeProfile(p.id) && p.id != DisclosureProfileID && p.id != ComplianceProfileID && p.id != BrokerProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || (p.id == DisclosureProfileID && !options.DisclosureLimits.Valid()) || ((p.id == ComplianceProfileID || rawRuntimeProfile(p.id)) && !options.ComplianceLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
 		return methodIndex{}, fail(InvalidSelection, "", "", "options", "invalid limits or pinned foundation/method profile")
