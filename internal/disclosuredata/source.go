@@ -33,7 +33,7 @@ func population(k SourceKind) string {
 	case HistorySource:
 		return "CURRENT_SCOPED_WALLET_HISTORY"
 	case FinanceSource:
-		return "ADMISSION_DECISIONS_AS_OF_CUT"
+		return "RETAINED_ADMISSION_DECISIONS_AS_OF_SNAPSHOT"
 	case SanctionsSource:
 		return "CURRENT_APPROVED_SANCTIONS"
 	}

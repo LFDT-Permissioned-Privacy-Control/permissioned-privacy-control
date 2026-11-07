@@ -63,7 +63,7 @@ type SourcePlan struct {
 // Immutable references name qualified owned source cuts, never URLs or authority tokens.
 // Activity ref ID names an immutable SEALED audit chain head, excluding buffered/unlogged operations.
 // History ref ID names an immutable coverage/canonical cut incl R; it is not A2 birth proof.
-// Wallet ref ID is exact current snapshot digest; Financial ref ID is exact event/source cut.
+// Wallet ref ID is exact current snapshot digest; Finance ref ID is the exact retained scoped row sample.
 type SourceRef struct {
 	Kind SourceKind
 	ID   Digest

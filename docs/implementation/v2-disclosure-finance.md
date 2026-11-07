@@ -1,0 +1,9 @@
+# Retained financial evidence
+
+The finance disclosure reader borrows the operational admission reader connection pool. It reads the original admission event actor and organization, recorded decision, policy and quote. It reads no travel-rule PII and makes no price-provider or chain request. Its existing SQL reader role retains its established admission-table read permissions; the adapter does not add grants or make that role a database-owner-proof boundary.
+
+The declared population is `RETAINED_ADMISSION_DECISIONS_AS_OF_SNAPSHOT`: all retained rows matching the exact organization, target actors, inclusive time interval and optional from/to address filter in one read-only repeatable-read observation. An admission-only observation has no known addresses and cannot match an explicit address filter. At most 100 matching rows are accepted; larger reports require a narrower request. A zero result means no matching retained rows, not that no operation occurred or that a customer is compliant. Rows describe recorded admission decisions before delivery; they do not establish execution, mining, KYC or legal compliance.
+
+The source reference hashes the entire scoped row set and source state. Event IDs preserve row identity, not commit order. A fresh check recomputes the complete predicate and catches a late commit with a lower ID as well as a scoped append, deletion or change. These are sampled checks: a later change can occur after the check. No transaction or connection is held across rendering or exposure audit.
+
+Retention and owner recovery keep their existing operational semantics. This reader makes no assertion that earlier deleted or missing history was preserved. It creates no table, index, role, grant, retention watermark or background worker. Reports require the other qualified source components and the disclosure case authorization, expiry and exposure-audit checks.
