@@ -33,6 +33,7 @@ import (
 	_ "privacy-proxy/internal/identity"
 	_ "privacy-proxy/internal/identitybroker"
 	_ "privacy-proxy/internal/identitybroker/azure"
+	_ "privacy-proxy/internal/identitybroker/privado"
 	_ "privacy-proxy/internal/identityhttp"
 	_ "privacy-proxy/internal/nativeadmission"
 	_ "privacy-proxy/internal/netguard"
@@ -587,6 +588,27 @@ func TestIdentityBrokerDependencyBoundaries(t *testing.T) {
 			if pkg == "privacy-proxy/internal/brokerpolicy" && (dep == "net/http" || dep == "crypto/tls") {
 				t.Errorf("public broker policy imports I/O %s", dep)
 			}
+		}
+	}
+}
+
+// The real Privado verifier is a provider boundary, not a new Core dependency.
+// Geth ABI/RPC primitive types and the pinned proof SDK are intentional here;
+// they do not authorize SQL drivers, legacy session infrastructure or EVM code.
+func TestPrivadoProviderDependencyBoundary(t *testing.T) {
+	const pkg = "privacy-proxy/internal/identitybroker/privado"
+	allowed := map[string]bool{pkg: true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/netguard": true, "privacy-proxy/internal/strictjson": true}
+	for dep := range transitiveDeps(t, moduleRoot(t), pkg) {
+		if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
+			t.Errorf("Privado provider imports application infrastructure %s", dep)
+		}
+		for _, prefix := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/triedb"} {
+			if strings.HasPrefix(dep, prefix) {
+				t.Errorf("Privado provider imports storage/execution machinery %s", dep)
+			}
+		}
+		if strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/core/") && !transactionPrimitive(dep) {
+			t.Errorf("Privado provider imports EVM/state machinery %s", dep)
 		}
 	}
 }
