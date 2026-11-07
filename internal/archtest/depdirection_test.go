@@ -31,6 +31,7 @@ import (
 	_ "privacy-proxy/internal/nativeadmission"
 	_ "privacy-proxy/internal/netguard"
 	_ "privacy-proxy/internal/operational/disclosuresql"
+	_ "privacy-proxy/internal/operational/walletsql"
 	_ "privacy-proxy/internal/policybundle"
 	_ "privacy-proxy/internal/policycli"
 	_ "privacy-proxy/internal/policycore"
@@ -42,6 +43,10 @@ import (
 	_ "privacy-proxy/internal/server/middleware"
 	_ "privacy-proxy/internal/strictjson"
 	_ "privacy-proxy/internal/transactioninput"
+	_ "privacy-proxy/internal/walletadapter"
+	_ "privacy-proxy/internal/wallethttp"
+	_ "privacy-proxy/internal/walletops"
+	_ "privacy-proxy/internal/walletproof"
 )
 
 // TestDependencyDirection locks the dependency-direction invariants
@@ -335,6 +340,49 @@ func TestDisclosureDependencyBoundaries(t *testing.T) {
 			}
 			if !usesSQL && (strings.HasPrefix(dep, "github.com/jackc/pgx") || strings.HasPrefix(dep, "github.com/jackc/tern")) {
 				t.Errorf("pure disclosure authorization/HTTP imports SQL client %s", dep)
+			}
+		}
+	}
+}
+
+func TestWalletDependencyBoundary(t *testing.T) {
+	root := moduleRoot(t)
+	command := filepath.Join(root, "cmd", "ops-v2-wallet-migrate")
+	entries, err := os.ReadDir(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".go") {
+			if _, err := os.ReadFile(filepath.Join(command, entry.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	allowed := map[string]bool{}
+	for _, name := range []string{"walletproof", "walletops", "wallethttp", "walletadapter", "identity", "runtimepolicy", "policybundle", "policycore", "strictjson", "disclosurepolicy", "compliancepolicy", "compliance", "nativeadmission", "rpcexecution", "executionfacts"} {
+		allowed["privacy-proxy/internal/"+name] = true
+	}
+	for _, pkg := range []string{"privacy-proxy/internal/walletproof", "privacy-proxy/internal/walletops", "privacy-proxy/internal/wallethttp", "privacy-proxy/internal/walletadapter", "privacy-proxy/internal/operational/walletsql", "privacy-proxy/cmd/ops-v2-wallet-migrate"} {
+		usesSQL := pkg == "privacy-proxy/internal/operational/walletsql" || pkg == "privacy-proxy/cmd/ops-v2-wallet-migrate"
+		for dep := range transitiveDeps(t, root, pkg) {
+			adapterPrimitive := pkg == "privacy-proxy/internal/walletadapter" && dep == "privacy-proxy/internal/transactioninput"
+			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !allowed[dep] && !adapterPrimitive && !(usesSQL && dep == "privacy-proxy/internal/operational/walletsql") {
+				t.Errorf("%s imports unapproved application infrastructure %s", pkg, dep)
+			}
+			for _, prefix := range []string{"github.com/ethereum/go-ethereum/core/vm", "github.com/ethereum/go-ethereum/core/state", "github.com/ethereum/go-ethereum/triedb", "github.com/redis/"} {
+				if strings.HasPrefix(dep, prefix) {
+					t.Errorf("%s imports unsupported machinery %s", pkg, dep)
+				}
+			}
+			if !usesSQL && (strings.HasPrefix(dep, "github.com/jackc/pgx") || strings.HasPrefix(dep, "github.com/jackc/tern")) {
+				t.Errorf("%s imports a SQL driver %s", pkg, dep)
+			}
+			if strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/core/") && !(pkg == "privacy-proxy/internal/walletadapter" && transactionPrimitive(dep)) {
+				t.Errorf("%s imports execution types outside the signed adapter primitive %s", pkg, dep)
+			}
+			if pkg == "privacy-proxy/internal/walletproof" && ((strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg) || strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/core/")) {
+				t.Errorf("pure wallet proof imports application/execution types %s", dep)
 			}
 		}
 	}

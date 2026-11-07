@@ -6,10 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/crypto"
+	"privacy-proxy/internal/walletproof"
 )
 
 // GenerateNonce creates a cryptographically secure random nonce for signing
@@ -37,44 +36,13 @@ This signature proves ownership of this Ethereum address.`, did, nonce)
 // HashMessage creates a hash of the message using Ethereum's personal_sign prefix
 // This implements EIP-191: "\x19Ethereum Signed Message:\n" + len(message) + message
 func HashMessage(message string) []byte {
-	return accounts.TextHash([]byte(message))
+	return walletproof.HashMessage(message)
 }
 
 // VerifySignature recovers the Ethereum address from a signed message
 // Returns the recovered address or an error if verification fails
 func VerifySignature(message string, signatureHex string) (common.Address, error) {
-	// Remove 0x prefix if present
-	sig := strings.TrimPrefix(signatureHex, "0x")
-
-	// Decode signature
-	sigBytes, err := hex.DecodeString(sig)
-	if err != nil {
-		return common.Address{}, fmt.Errorf("invalid signature encoding: %w", err)
-	}
-
-	// Signature must be 65 bytes (32 R + 32 S + 1 V)
-	if len(sigBytes) != 65 {
-		return common.Address{}, fmt.Errorf("invalid signature length: expected 65 bytes, got %d", len(sigBytes))
-	}
-
-	// EIP-155: If V is 27 or 28, subtract 27 to get 0 or 1
-	// MetaMask and most wallets use 27/28, while go-ethereum expects 0/1
-	if sigBytes[64] >= 27 {
-		sigBytes[64] -= 27
-	}
-
-	// Hash the message with Ethereum prefix (EIP-191)
-	messageHash := HashMessage(message)
-
-	// Recover the public key from the signature
-	pubKey, err := crypto.SigToPub(messageHash, sigBytes)
-	if err != nil {
-		return common.Address{}, fmt.Errorf("failed to recover public key: %w", err)
-	}
-
-	// Derive the address from the public key
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
-	return recoveredAddr, nil
+	return walletproof.RecoverLegacy(message, signatureHex)
 }
 
 // VerifyAddressOwnership verifies that the signature was created by the claimed address
