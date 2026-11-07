@@ -29,6 +29,7 @@ import (
 	_ "privacy-proxy/internal/disclosuredata"
 	_ "privacy-proxy/internal/disclosurehttp"
 	_ "privacy-proxy/internal/disclosurepolicy"
+	_ "privacy-proxy/internal/disclosuresanctions"
 	_ "privacy-proxy/internal/disclosurewallet"
 	_ "privacy-proxy/internal/executionfacts"
 	_ "privacy-proxy/internal/guardbridge"
@@ -660,6 +661,25 @@ func TestCurrentWalletDataSourceBoundary(t *testing.T) {
 		for _, prefix := range []string{"github.com/jackc/", "github.com/redis/", "github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb"} {
 			if strings.HasPrefix(dep, prefix) {
 				t.Errorf("current wallet data source imports persistence/VM %s", dep)
+			}
+		}
+	}
+}
+
+func TestApprovedSanctionsProjectionBoundary(t *testing.T) {
+	allowed := map[string]bool{}
+	// compliancepolicy already reuses compliance's pure numeric/settings
+	// validation. Persistence and VM dependencies remain forbidden below.
+	for _, name := range []string{"disclosuresanctions", "disclosuredata", "disclosurepolicy", "networkidentity", "identity", "policybundle", "policycore", "strictjson", "compliancepolicy", "compliance", "pricefeedpolicy", "brokerpolicy"} {
+		allowed["privacy-proxy/internal/"+name] = true
+	}
+	for dep := range transitiveDeps(t, moduleRoot(t), "privacy-proxy/internal/disclosuresanctions") {
+		if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
+			t.Errorf("approved sanctions projection imports application machinery %s", dep)
+		}
+		for _, prefix := range []string{"github.com/jackc/", "github.com/redis/", "github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb"} {
+			if strings.HasPrefix(dep, prefix) {
+				t.Errorf("approved sanctions projection imports persistence/VM %s", dep)
 			}
 		}
 	}
