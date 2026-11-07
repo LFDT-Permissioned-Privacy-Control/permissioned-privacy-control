@@ -38,6 +38,7 @@ import (
 	_ "privacy-proxy/internal/disclosurewallet"
 	_ "privacy-proxy/internal/executionfacts"
 	_ "privacy-proxy/internal/guardbridge"
+	_ "privacy-proxy/internal/historynamespace"
 	_ "privacy-proxy/internal/identity"
 	_ "privacy-proxy/internal/identitybroker"
 	_ "privacy-proxy/internal/identitybroker/azure"
@@ -181,6 +182,8 @@ func TestNativeCallRuntimeDependencyBoundary(t *testing.T) {
 		allowed["privacy-proxy/internal/transactioninput"] = true
 		allowed["privacy-proxy/internal/pricefeedpolicy"] = true
 		allowed["privacy-proxy/internal/creationfacts"] = true
+		allowed["privacy-proxy/internal/historynamespace"] = true
+		allowed["privacy-proxy/internal/networkidentity"] = true
 		if pkg != "privacy-proxy/internal/rpcexecution" {
 			allowed["privacy-proxy/internal/runtimepolicy"] = true
 			allowed["privacy-proxy/internal/rpcexecution"] = true
@@ -211,6 +214,8 @@ func TestSignedEvidenceDependencyBoundaries(t *testing.T) {
 	for _, pkg := range []string{"privacy-proxy/internal/transactioninput", "privacy-proxy/internal/guardbridge"} {
 		allowed := map[string]bool{pkg: true}
 		if pkg == "privacy-proxy/internal/guardbridge" {
+			allowed["privacy-proxy/internal/historynamespace"] = true
+			allowed["privacy-proxy/internal/networkidentity"] = true
 			allowed["privacy-proxy/internal/pricefeedpolicy"] = true
 			allowed["privacy-proxy/internal/creationfacts"] = true
 			for _, name := range []string{"transactioninput", "rpcexecution", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate", "executionfacts", "policybundle", "policycore", "identity", "disclosurepolicy", "compliancepolicy", "compliance", "brokerpolicy", "strictjson", "creationfacts"} {
@@ -393,7 +398,7 @@ func TestWalletDependencyBoundary(t *testing.T) {
 		}
 	}
 	allowed := map[string]bool{}
-	for _, name := range []string{"walletproof", "walletops", "wallethttp", "walletadapter", "identity", "runtimepolicy", "policybundle", "policycore", "strictjson", "disclosurepolicy", "compliancepolicy", "compliance", "nativeadmission", "rpcexecution", "executionfacts", "pricefeedpolicy", "brokerpolicy", "creationfacts"} {
+	for _, name := range []string{"walletproof", "walletops", "wallethttp", "walletadapter", "identity", "runtimepolicy", "policybundle", "policycore", "strictjson", "disclosurepolicy", "compliancepolicy", "compliance", "nativeadmission", "rpcexecution", "executionfacts", "pricefeedpolicy", "brokerpolicy", "creationfacts", "historynamespace", "networkidentity"} {
 		allowed["privacy-proxy/internal/"+name] = true
 	}
 	for _, pkg := range []string{"privacy-proxy/internal/walletproof", "privacy-proxy/internal/walletops", "privacy-proxy/internal/wallethttp", "privacy-proxy/internal/walletadapter", "privacy-proxy/internal/operational/walletsql", "privacy-proxy/cmd/ops-v2-wallet-migrate"} {
@@ -510,7 +515,7 @@ func TestNativeAdmissionStorageBoundary(t *testing.T) {
 		}
 	}
 	allowed := map[string]bool{}
-	for _, name := range []string{"networkidentity", "admission", "compliancehttp", "compliance", "compliancepolicy", "disclosurepolicy", "identity", "strictjson", "policybundle", "policycore", "runtimepolicy", "nativeadmission", "rpcexecution", "executionfacts", "transactioninput", "pricefeedpolicy", "brokerpolicy", "creationfacts", "creationcapture"} {
+	for _, name := range []string{"networkidentity", "admission", "compliancehttp", "compliance", "compliancepolicy", "disclosurepolicy", "identity", "strictjson", "policybundle", "policycore", "runtimepolicy", "nativeadmission", "rpcexecution", "executionfacts", "transactioninput", "pricefeedpolicy", "brokerpolicy", "creationfacts", "creationcapture", "historynamespace"} {
 		allowed["privacy-proxy/internal/"+name] = true
 	}
 	for _, pkg := range []string{"privacy-proxy/internal/admission", "privacy-proxy/internal/compliancehttp", "privacy-proxy/internal/operational/admissionsql", "privacy-proxy/cmd/ops-v2-admission-migrate"} {
@@ -534,7 +539,7 @@ func TestNativeAdmissionStorageBoundary(t *testing.T) {
 func TestApprovedPriceFeedDependencyBoundary(t *testing.T) {
 	root := moduleRoot(t)
 	allowed := map[string]bool{}
-	for _, name := range []string{"networkidentity", "pricefeedpolicy", "quotefeed", "admission", "compliance", "compliancepolicy", "disclosurepolicy", "identity", "strictjson", "policybundle", "policycore", "runtimepolicy", "nativeadmission", "rpcexecution", "executionfacts", "transactioninput", "netguard", "brokerpolicy", "creationfacts", "creationcapture"} {
+	for _, name := range []string{"networkidentity", "pricefeedpolicy", "quotefeed", "admission", "compliance", "compliancepolicy", "disclosurepolicy", "identity", "strictjson", "policybundle", "policycore", "runtimepolicy", "nativeadmission", "rpcexecution", "executionfacts", "transactioninput", "netguard", "brokerpolicy", "creationfacts", "creationcapture", "historynamespace"} {
 		allowed["privacy-proxy/internal/"+name] = true
 	}
 	for _, pkg := range []string{"privacy-proxy/internal/pricefeedpolicy", "privacy-proxy/internal/quotefeed"} {
@@ -713,7 +718,7 @@ func TestCreationObservationDependencyBoundaries(t *testing.T) {
 		}
 	}
 	allowed := map[string]bool{}
-	for _, name := range []string{"creationfacts", "creationcapture", "creationobserver", "rpcexecution", "transactioninput", "executionfacts", "nativeadmission", "admission", "policybundle", "policycore", "runtimepolicy", "identity", "strictjson", "disclosurepolicy", "compliancepolicy", "compliance", "pricefeedpolicy", "brokerpolicy", "networkidentity"} {
+	for _, name := range []string{"creationfacts", "creationcapture", "creationobserver", "rpcexecution", "transactioninput", "executionfacts", "nativeadmission", "admission", "policybundle", "policycore", "runtimepolicy", "identity", "strictjson", "disclosurepolicy", "compliancepolicy", "compliance", "pricefeedpolicy", "brokerpolicy", "networkidentity", "historynamespace"} {
 		allowed["privacy-proxy/internal/"+name] = true
 	}
 	for _, pkg := range []string{"privacy-proxy/internal/creationfacts", "privacy-proxy/internal/creationcapture", "privacy-proxy/internal/creationobserver", "privacy-proxy/cmd/ops-creation-observer"} {
