@@ -1,0 +1,1536 @@
+{
+  "Tables": [
+    "legacy_contract_lifetimes",
+    "namespace_cohorts",
+    "namespace_network_state",
+    "namespace_transfers",
+    "revoked_namespace_cohorts"
+  ],
+  "Types": [
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "network_key",
+      "Type": "bytea"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "statement_digest",
+      "Type": "bytea"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "cohort_id",
+      "Type": "uuid"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "address",
+      "Type": "bytea"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "evidence_kind",
+      "Type": "smallint"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "segment_key",
+      "Type": "bytea"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "lifetime_id",
+      "Type": "uuid"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "runtime_hash",
+      "Type": "bytea"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "runtime_length",
+      "Type": "integer"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "initial_kind",
+      "Type": "smallint"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "initial_org",
+      "Type": "uuid"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "physical_kind",
+      "Type": "smallint"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "birth_number",
+      "Type": "bigint"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "birth_hash",
+      "Type": "bytea"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "birth_tx_hash",
+      "Type": "bytea"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "birth_index",
+      "Type": "bigint"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "birth_record",
+      "Type": "integer"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "start_number",
+      "Type": "bigint"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "start_hash",
+      "Type": "bytea"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "start_index",
+      "Type": "bigint"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "end_number",
+      "Type": "bigint"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "end_hash",
+      "Type": "bytea"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "end_index",
+      "Type": "bigint"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "checkpoint_number",
+      "Type": "bigint"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "checkpoint_hash",
+      "Type": "bytea"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "proof_digest",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "network_key",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "cohort_id",
+      "Type": "uuid"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "semantic_digest",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "first_raw_artifact_digest",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "statement_count",
+      "Type": "integer"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "canonical_bytes",
+      "Type": "integer"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "recorded_at",
+      "Type": "timestamp with time zone"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "network_key",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "schema_version",
+      "Type": "smallint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "expected_admission_generation",
+      "Type": "uuid"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "revision",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "ready",
+      "Type": "boolean"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "completeness_digest",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "model_id",
+      "Type": "text"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "era_entry_number",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "era_entry_hash",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "era_entry_timestamp",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "era_end_timestamp_exclusive",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_lifetimes",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_transfers",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_cohorts",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_revoked_cohorts",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_lifetimes_per_address",
+      "Type": "integer"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_transfers_per_segment",
+      "Type": "integer"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "lifetime_count",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "transfer_count",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "cohort_count",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "revoked_cohort_count",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "network_key",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "transfer_digest",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "cohort_id",
+      "Type": "uuid"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "address",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "segment_kind",
+      "Type": "smallint"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "segment_key",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "legacy_basis_digest",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "initial_kind",
+      "Type": "smallint"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "initial_org",
+      "Type": "uuid"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "parent_digest",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "previous_kind",
+      "Type": "smallint"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "previous_org",
+      "Type": "uuid"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "new_kind",
+      "Type": "smallint"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "new_org",
+      "Type": "uuid"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "effective_number",
+      "Type": "bigint"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "effective_hash",
+      "Type": "bytea"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "effective_index",
+      "Type": "bigint"
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "network_key",
+      "Type": "bytea"
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "cohort_id",
+      "Type": "uuid"
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "reason",
+      "Type": "text"
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "recorded_at",
+      "Type": "timestamp with time zone"
+    }
+  ],
+  "Columns": [
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "network_key",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "statement_digest",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "cohort_id",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "address",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "evidence_kind",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "segment_key",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "lifetime_id",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "runtime_hash",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "runtime_length",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "initial_kind",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "initial_org",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "physical_kind",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "birth_number",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "birth_hash",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "birth_tx_hash",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "birth_index",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "birth_record",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "start_number",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "start_hash",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "start_index",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "end_number",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "end_hash",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "end_index",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "checkpoint_number",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "checkpoint_hash",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "proof_digest",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "network_key",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "cohort_id",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "semantic_digest",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "first_raw_artifact_digest",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "statement_count",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "canonical_bytes",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "recorded_at",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "network_key",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "schema_version",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "expected_admission_generation",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "revision",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "ready",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "completeness_digest",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "model_id",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "era_entry_number",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "era_entry_hash",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "era_entry_timestamp",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "era_end_timestamp_exclusive",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_lifetimes",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_transfers",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_cohorts",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_revoked_cohorts",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_lifetimes_per_address",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "max_transfers_per_segment",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "lifetime_count",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "transfer_count",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "cohort_count",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "revoked_cohort_count",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "network_key",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "transfer_digest",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "cohort_id",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "address",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "segment_kind",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "segment_key",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "legacy_basis_digest",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "initial_kind",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "initial_org",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "parent_digest",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "previous_kind",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "previous_org",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "new_kind",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "new_org",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": false
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "effective_number",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "effective_hash",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "effective_index",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "network_key",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "cohort_id",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "reason",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "recorded_at",
+      "Default": "",
+      "Identity": "",
+      "Generated": "",
+      "NotNull": true
+    }
+  ],
+  "Constraints": [
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_address_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(address) = 20)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_birth_hash_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(birth_hash) = 32)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_birth_index_check",
+      "Type": "c",
+      "Definition": "CHECK (birth_index >= 0 AND birth_index <= '4294967295'::bigint)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_birth_number_check",
+      "Type": "c",
+      "Definition": "CHECK (birth_number >= 0)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_birth_record_check",
+      "Type": "c",
+      "Definition": "CHECK (birth_record >= 0 AND birth_record <= 4095)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_birth_tx_hash_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(birth_tx_hash) = 32)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_check",
+      "Type": "c",
+      "Definition": "CHECK (initial_kind = 1 AND initial_org IS NOT NULL OR initial_kind = 2 AND initial_org IS NULL)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_check1",
+      "Type": "c",
+      "Definition": "CHECK (physical_kind = 0 AND evidence_kind = 1 AND lifetime_id IS NOT NULL OR (physical_kind = ANY (ARRAY[1, 2])) AND (evidence_kind = ANY (ARRAY[2, 3])) AND lifetime_id IS NULL)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_check2",
+      "Type": "c",
+      "Definition": "CHECK (physical_kind = 2 AND birth_number IS NOT NULL AND birth_hash IS NOT NULL AND birth_tx_hash IS NOT NULL AND birth_index IS NOT NULL AND birth_record IS NOT NULL OR (physical_kind = ANY (ARRAY[0, 1])) AND birth_number IS NULL AND birth_hash IS NULL AND birth_tx_hash IS NULL AND birth_index IS NULL AND birth_record IS NULL)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_check3",
+      "Type": "c",
+      "Definition": "CHECK ((evidence_kind = ANY (ARRAY[1, 2])) AND start_number IS NOT NULL AND start_hash IS NOT NULL AND start_index IS NOT NULL AND end_number IS NOT NULL AND end_hash IS NOT NULL AND end_index IS NOT NULL AND checkpoint_number IS NULL AND checkpoint_hash IS NULL AND proof_digest IS NULL AND ((ROW(start_number, start_index) < ROW(end_number, end_index))) OR evidence_kind = 3 AND start_number IS NULL AND start_hash IS NULL AND start_index IS NULL AND end_number IS NULL AND end_hash IS NULL AND end_index IS NULL AND checkpoint_number IS NOT NULL AND checkpoint_hash IS NOT NULL AND proof_digest IS NOT NULL)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_checkpoint_hash_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(checkpoint_hash) = 32)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_checkpoint_number_check",
+      "Type": "c",
+      "Definition": "CHECK (checkpoint_number >= 0)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_end_hash_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(end_hash) = 32)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_end_index_check",
+      "Type": "c",
+      "Definition": "CHECK (end_index >= 0 AND end_index <= '4294967295'::bigint)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_end_number_check",
+      "Type": "c",
+      "Definition": "CHECK (end_number >= 0)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_evidence_kind_check",
+      "Type": "c",
+      "Definition": "CHECK (evidence_kind = ANY (ARRAY[1, 2, 3]))"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_initial_kind_check",
+      "Type": "c",
+      "Definition": "CHECK (initial_kind = ANY (ARRAY[1, 2]))"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_network_key_cohort_id_fkey",
+      "Type": "f",
+      "Definition": "FOREIGN KEY (network_key, cohort_id) REFERENCES ops_history_namespace_v1.namespace_cohorts(network_key, cohort_id)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_physical_kind_check",
+      "Type": "c",
+      "Definition": "CHECK (physical_kind = ANY (ARRAY[0, 1, 2]))"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_pkey",
+      "Type": "p",
+      "Definition": "PRIMARY KEY (network_key, statement_digest)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_proof_digest_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(proof_digest) = 32)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_runtime_hash_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(runtime_hash) = 32)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_runtime_length_check",
+      "Type": "c",
+      "Definition": "CHECK (runtime_length >= 1 AND runtime_length <= 1048576)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_segment_key_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(segment_key) = 32)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_start_hash_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(start_hash) = 32)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_start_index_check",
+      "Type": "c",
+      "Definition": "CHECK (start_index >= 0 AND start_index <= '4294967295'::bigint)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_start_number_check",
+      "Type": "c",
+      "Definition": "CHECK (start_number >= 0)"
+    },
+    {
+      "Table": "legacy_contract_lifetimes",
+      "Name": "legacy_contract_lifetimes_statement_digest_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(statement_digest) = 32)"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "namespace_cohorts_canonical_bytes_check",
+      "Type": "c",
+      "Definition": "CHECK (canonical_bytes >= 1 AND canonical_bytes <= 4194304)"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "namespace_cohorts_first_raw_artifact_digest_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(first_raw_artifact_digest) = 32)"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "namespace_cohorts_network_key_fkey",
+      "Type": "f",
+      "Definition": "FOREIGN KEY (network_key) REFERENCES ops_history_namespace_v1.namespace_network_state(network_key)"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "namespace_cohorts_network_key_semantic_digest_key",
+      "Type": "u",
+      "Definition": "UNIQUE (network_key, semantic_digest)"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "namespace_cohorts_pkey",
+      "Type": "p",
+      "Definition": "PRIMARY KEY (network_key, cohort_id)"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "namespace_cohorts_recorded_at_check",
+      "Type": "c",
+      "Definition": "CHECK (isfinite(recorded_at))"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "namespace_cohorts_semantic_digest_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(semantic_digest) = 32)"
+    },
+    {
+      "Table": "namespace_cohorts",
+      "Name": "namespace_cohorts_statement_count_check",
+      "Type": "c",
+      "Definition": "CHECK (statement_count >= 1 AND statement_count <= 4096)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_check",
+      "Type": "c",
+      "Definition": "CHECK (era_end_timestamp_exclusive > era_entry_timestamp)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_check1",
+      "Type": "c",
+      "Definition": "CHECK (lifetime_count >= 0 AND lifetime_count <= max_lifetimes)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_check2",
+      "Type": "c",
+      "Definition": "CHECK (transfer_count >= 0 AND transfer_count <= max_transfers)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_check3",
+      "Type": "c",
+      "Definition": "CHECK (cohort_count >= 0 AND cohort_count <= max_cohorts)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_check4",
+      "Type": "c",
+      "Definition": "CHECK (revoked_cohort_count >= 0 AND revoked_cohort_count <= max_revoked_cohorts)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_check5",
+      "Type": "c",
+      "Definition": "CHECK (NOT ready OR completeness_digest IS NOT NULL)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_completeness_digest_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(completeness_digest) = 32)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_era_entry_hash_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(era_entry_hash) = 32)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_era_entry_number_check",
+      "Type": "c",
+      "Definition": "CHECK (era_entry_number >= 0)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_era_entry_timestamp_check",
+      "Type": "c",
+      "Definition": "CHECK (era_entry_timestamp >= 0)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_max_cohorts_check",
+      "Type": "c",
+      "Definition": "CHECK (max_cohorts >= 1 AND max_cohorts <= 10000)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_max_lifetimes_check",
+      "Type": "c",
+      "Definition": "CHECK (max_lifetimes >= 1 AND max_lifetimes <= 1000000)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_max_lifetimes_per_address_check",
+      "Type": "c",
+      "Definition": "CHECK (max_lifetimes_per_address >= 1 AND max_lifetimes_per_address <= 32)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_max_revoked_cohorts_check",
+      "Type": "c",
+      "Definition": "CHECK (max_revoked_cohorts >= 1 AND max_revoked_cohorts <= 10000)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_max_transfers_check",
+      "Type": "c",
+      "Definition": "CHECK (max_transfers >= 1 AND max_transfers <= 1000000)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_max_transfers_per_segment_check",
+      "Type": "c",
+      "Definition": "CHECK (max_transfers_per_segment >= 1 AND max_transfers_per_segment <= 64)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_model_id_check",
+      "Type": "c",
+      "Definition": "CHECK (model_id = 'prague-ordinary-runtime/v1'::text)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_network_key_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(network_key) = 32)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_network_key_fkey",
+      "Type": "f",
+      "Definition": "FOREIGN KEY (network_key) REFERENCES ops_admission_v2.network_state(network_key)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_pkey",
+      "Type": "p",
+      "Definition": "PRIMARY KEY (network_key)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_revision_check",
+      "Type": "c",
+      "Definition": "CHECK (revision >= 1)"
+    },
+    {
+      "Table": "namespace_network_state",
+      "Name": "namespace_network_state_schema_version_check",
+      "Type": "c",
+      "Definition": "CHECK (schema_version = 1)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_address_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(address) = 20)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_check",
+      "Type": "c",
+      "Definition": "CHECK (parent_digest IS NULL OR parent_digest <> transfer_digest)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_check1",
+      "Type": "c",
+      "Definition": "CHECK (segment_kind = 1 AND legacy_basis_digest IS NOT NULL OR segment_kind = 2 AND legacy_basis_digest IS NULL)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_check2",
+      "Type": "c",
+      "Definition": "CHECK (initial_kind = 1 AND initial_org IS NOT NULL OR initial_kind = 2 AND initial_org IS NULL)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_check3",
+      "Type": "c",
+      "Definition": "CHECK (previous_kind = 1 AND previous_org IS NOT NULL OR previous_kind = 2 AND previous_org IS NULL)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_check4",
+      "Type": "c",
+      "Definition": "CHECK (new_kind = 1 AND new_org IS NOT NULL OR new_kind = 2 AND new_org IS NULL)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_check5",
+      "Type": "c",
+      "Definition": "CHECK (previous_kind <> new_kind OR previous_org IS DISTINCT FROM new_org)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_effective_hash_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(effective_hash) = 32)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_effective_index_check",
+      "Type": "c",
+      "Definition": "CHECK (effective_index >= 0 AND effective_index <= '4294967295'::bigint)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_effective_number_check",
+      "Type": "c",
+      "Definition": "CHECK (effective_number >= 0)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_initial_kind_check",
+      "Type": "c",
+      "Definition": "CHECK (initial_kind = ANY (ARRAY[1, 2]))"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_legacy_basis_digest_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(legacy_basis_digest) = 32)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_network_key_cohort_id_fkey",
+      "Type": "f",
+      "Definition": "FOREIGN KEY (network_key, cohort_id) REFERENCES ops_history_namespace_v1.namespace_cohorts(network_key, cohort_id)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_network_key_legacy_basis_digest_fkey",
+      "Type": "f",
+      "Definition": "FOREIGN KEY (network_key, legacy_basis_digest) REFERENCES ops_history_namespace_v1.legacy_contract_lifetimes(network_key, statement_digest)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_network_key_parent_digest_fkey",
+      "Type": "f",
+      "Definition": "FOREIGN KEY (network_key, parent_digest) REFERENCES ops_history_namespace_v1.namespace_transfers(network_key, transfer_digest)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_new_kind_check",
+      "Type": "c",
+      "Definition": "CHECK (new_kind = ANY (ARRAY[1, 2]))"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_parent_digest_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(parent_digest) = 32)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_pkey",
+      "Type": "p",
+      "Definition": "PRIMARY KEY (network_key, transfer_digest)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_previous_kind_check",
+      "Type": "c",
+      "Definition": "CHECK (previous_kind = ANY (ARRAY[1, 2]))"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_segment_key_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(segment_key) = 32)"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_segment_kind_check",
+      "Type": "c",
+      "Definition": "CHECK (segment_kind = ANY (ARRAY[1, 2]))"
+    },
+    {
+      "Table": "namespace_transfers",
+      "Name": "namespace_transfers_transfer_digest_check",
+      "Type": "c",
+      "Definition": "CHECK (octet_length(transfer_digest) = 32)"
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "revoked_namespace_cohorts_network_key_cohort_id_fkey",
+      "Type": "f",
+      "Definition": "FOREIGN KEY (network_key, cohort_id) REFERENCES ops_history_namespace_v1.namespace_cohorts(network_key, cohort_id)"
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "revoked_namespace_cohorts_pkey",
+      "Type": "p",
+      "Definition": "PRIMARY KEY (network_key, cohort_id)"
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "revoked_namespace_cohorts_reason_check",
+      "Type": "c",
+      "Definition": "CHECK (reason = ANY (ARRAY['source-compromise'::text, 'restore-gap'::text]))"
+    },
+    {
+      "Table": "revoked_namespace_cohorts",
+      "Name": "revoked_namespace_cohorts_recorded_at_check",
+      "Type": "c",
+      "Definition": "CHECK (isfinite(recorded_at))"
+    }
+  ],
+  "Indexes": [
+    {
+      "Name": "legacy_contract_lifetimes_pkey",
+      "Definition": "CREATE UNIQUE INDEX legacy_contract_lifetimes_pkey ON ops_history_namespace_v1.legacy_contract_lifetimes USING btree (network_key, statement_digest)"
+    },
+    {
+      "Name": "namespace_cohorts_network_key_semantic_digest_key",
+      "Definition": "CREATE UNIQUE INDEX namespace_cohorts_network_key_semantic_digest_key ON ops_history_namespace_v1.namespace_cohorts USING btree (network_key, semantic_digest)"
+    },
+    {
+      "Name": "namespace_cohorts_pkey",
+      "Definition": "CREATE UNIQUE INDEX namespace_cohorts_pkey ON ops_history_namespace_v1.namespace_cohorts USING btree (network_key, cohort_id)"
+    },
+    {
+      "Name": "namespace_lifetimes_address",
+      "Definition": "CREATE INDEX namespace_lifetimes_address ON ops_history_namespace_v1.legacy_contract_lifetimes USING btree (network_key, address, statement_digest)"
+    },
+    {
+      "Name": "namespace_lifetimes_segment",
+      "Definition": "CREATE INDEX namespace_lifetimes_segment ON ops_history_namespace_v1.legacy_contract_lifetimes USING btree (network_key, segment_key, statement_digest)"
+    },
+    {
+      "Name": "namespace_network_state_pkey",
+      "Definition": "CREATE UNIQUE INDEX namespace_network_state_pkey ON ops_history_namespace_v1.namespace_network_state USING btree (network_key)"
+    },
+    {
+      "Name": "namespace_transfers_address",
+      "Definition": "CREATE INDEX namespace_transfers_address ON ops_history_namespace_v1.namespace_transfers USING btree (network_key, address, effective_number, effective_index, transfer_digest)"
+    },
+    {
+      "Name": "namespace_transfers_pkey",
+      "Definition": "CREATE UNIQUE INDEX namespace_transfers_pkey ON ops_history_namespace_v1.namespace_transfers USING btree (network_key, transfer_digest)"
+    },
+    {
+      "Name": "namespace_transfers_segment",
+      "Definition": "CREATE INDEX namespace_transfers_segment ON ops_history_namespace_v1.namespace_transfers USING btree (network_key, segment_key, effective_number, effective_index, transfer_digest)"
+    },
+    {
+      "Name": "revoked_namespace_cohorts_pkey",
+      "Definition": "CREATE UNIQUE INDEX revoked_namespace_cohorts_pkey ON ops_history_namespace_v1.revoked_namespace_cohorts USING btree (network_key, cohort_id)"
+    }
+  ]
+}

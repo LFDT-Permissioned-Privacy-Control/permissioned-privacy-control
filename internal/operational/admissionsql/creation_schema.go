@@ -47,6 +47,16 @@ func checkCreationSchema(ctx context.Context, q querier) error {
 }
 
 func checkOperationalCatalog(ctx context.Context, q querier, catalog []byte, tables []string, version int) error {
+	allowed := []string{}
+	for name := range schemaColumns(version) {
+		allowed = append(allowed, name)
+	}
+	return checkCatalogInSchema(ctx, q, "ops_admission_v2", catalog, tables, allowed)
+}
+
+// The admission wrapper retains its existing schema and complete allowed set.
+// Namespace facts use the same exact checks in their separate closed schema.
+func checkCatalogInSchema(ctx context.Context, q querier, schema string, catalog []byte, tables, allowed []string) error {
 	var expected struct {
 		Constraints []struct{ Table, Name, Type, Definition string }
 		Indexes     []struct{ Name, Definition string }
@@ -59,7 +69,7 @@ func checkOperationalCatalog(ctx context.Context, q querier, catalog []byte, tab
 	for _, c := range expected.Columns {
 		columns[c.Table+"/"+c.Name] = c
 	}
-	rows, err := q.Query(ctx, `SELECT c.relname,a.attname,a.attnotnull,COALESCE(pg_get_expr(d.adbin,d.adrelid),''),a.attidentity::text,a.attgenerated::text FROM pg_attribute a JOIN pg_class c ON a.attrelid=c.oid JOIN pg_namespace n ON c.relnamespace=n.oid LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE n.nspname='ops_admission_v2' AND c.relname=ANY($1::text[]) AND a.attnum>0 AND NOT a.attisdropped`, tables)
+	rows, err := q.Query(ctx, `SELECT c.relname,a.attname,a.attnotnull,COALESCE(pg_get_expr(d.adbin,d.adrelid),''),a.attidentity::text,a.attgenerated::text FROM pg_attribute a JOIN pg_class c ON a.attrelid=c.oid JOIN pg_namespace n ON c.relnamespace=n.oid LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE n.nspname=$2 AND c.relname=ANY($1::text[]) AND a.attnum>0 AND NOT a.attisdropped`, tables, schema)
 	if err != nil {
 		return a.ErrUnavailable
 	}
@@ -80,7 +90,7 @@ func checkOperationalCatalog(ctx context.Context, q querier, catalog []byte, tab
 	for _, c := range expected.Constraints {
 		constraints[c.Table+"/"+c.Name] = c.Type + "/" + c.Definition
 	}
-	rows, err = q.Query(ctx, `SELECT r.relname,c.conname,c.contype::text,pg_get_constraintdef(c.oid,true),c.convalidated FROM pg_constraint c JOIN pg_class r ON c.conrelid=r.oid JOIN pg_namespace n ON r.relnamespace=n.oid WHERE n.nspname='ops_admission_v2' AND r.relname=ANY($1::text[])`, tables)
+	rows, err = q.Query(ctx, `SELECT r.relname,c.conname,c.contype::text,pg_get_constraintdef(c.oid,true),c.convalidated FROM pg_constraint c JOIN pg_class r ON c.conrelid=r.oid JOIN pg_namespace n ON r.relnamespace=n.oid WHERE n.nspname=$2 AND r.relname=ANY($1::text[])`, tables, schema)
 	if err != nil {
 		return a.ErrUnavailable
 	}
@@ -102,7 +112,7 @@ func checkOperationalCatalog(ctx context.Context, q querier, catalog []byte, tab
 	for _, i := range expected.Indexes {
 		indexes[i.Name] = i.Definition
 	}
-	rows, err = q.Query(ctx, `SELECT i.relname,pg_get_indexdef(i.oid),x.indisvalid AND x.indisready FROM pg_index x JOIN pg_class i ON x.indexrelid=i.oid JOIN pg_class t ON x.indrelid=t.oid JOIN pg_namespace n ON t.relnamespace=n.oid WHERE n.nspname='ops_admission_v2' AND t.relname=ANY($1::text[])`, tables)
+	rows, err = q.Query(ctx, `SELECT i.relname,pg_get_indexdef(i.oid),x.indisvalid AND x.indisready FROM pg_index x JOIN pg_class i ON x.indexrelid=i.oid JOIN pg_class t ON x.indrelid=t.oid JOIN pg_namespace n ON t.relnamespace=n.oid WHERE n.nspname=$2 AND t.relname=ANY($1::text[])`, tables, schema)
 	if err != nil {
 		return a.ErrUnavailable
 	}
@@ -121,14 +131,10 @@ func checkOperationalCatalog(ctx context.Context, q querier, catalog []byte, tab
 		return a.ErrUnavailable
 	}
 	var unsafe bool
-	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_trigger g JOIN pg_class c ON g.tgrelid=c.oid JOIN pg_namespace n ON c.relnamespace=n.oid WHERE n.nspname='ops_admission_v2' AND c.relname=ANY($1::text[]) AND NOT g.tgisinternal) OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON c.relnamespace=n.oid WHERE n.nspname='ops_admission_v2' AND c.relname=ANY($1::text[]) AND(c.relkind<>'r' OR c.relpersistence<>'p' OR c.relrowsecurity OR c.relforcerowsecurity))`, tables).Scan(&unsafe); err != nil || unsafe {
+	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_trigger g JOIN pg_class c ON g.tgrelid=c.oid JOIN pg_namespace n ON c.relnamespace=n.oid WHERE n.nspname=$2 AND c.relname=ANY($1::text[]) AND NOT g.tgisinternal) OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON c.relnamespace=n.oid WHERE n.nspname=$2 AND c.relname=ANY($1::text[]) AND(c.relkind<>'r' OR c.relpersistence<>'p' OR c.relrowsecurity OR c.relforcerowsecurity))`, tables, schema).Scan(&unsafe); err != nil || unsafe {
 		return a.ErrUnavailable
 	}
-	allowed := []string{}
-	for name := range schemaColumns(version) {
-		allowed = append(allowed, name)
-	}
-	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON c.relnamespace=n.oid WHERE n.nspname='ops_admission_v2' AND c.relkind IN('r','p','v','m','f') AND NOT(c.relname=ANY($1::text[])))`, allowed).Scan(&unsafe); err != nil || unsafe {
+	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON c.relnamespace=n.oid WHERE n.nspname=$2 AND c.relkind IN('r','p','v','m','f') AND NOT(c.relname=ANY($1::text[])))`, allowed, schema).Scan(&unsafe); err != nil || unsafe {
 		return a.ErrUnavailable
 	}
 	return nil
