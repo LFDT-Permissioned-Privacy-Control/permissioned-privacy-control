@@ -17,14 +17,20 @@ func metadataJSON(raw []byte) (any, error) {
 }
 
 func metadataJSONArrays(raw []byte, arrayLimit func(int) int) (any, error) {
+	return readJSONFieldArrays(raw, func(depth int, _ string) int { return arrayLimit(depth) })
+}
+
+// readJSONFieldArrays preserves the shared token and scalar budgets while
+// allowing different collection bounds for fields at the same JSON depth.
+func readJSONFieldArrays(raw []byte, arrayLimit func(int, string) int) (any, error) {
 	if len(raw) > 8<<20 || !utf8.Valid(raw) {
 		return nil, failure(EvidenceLimit)
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
 	nodes, text := 0, 0
-	var read func(int) (any, error)
-	read = func(depth int) (any, error) {
+	var read func(int, string) (any, error)
+	read = func(depth int, field string) (any, error) {
 		nodes++
 		if depth > 32 || nodes > 120000 {
 			return nil, failure(EvidenceLimit)
@@ -50,10 +56,10 @@ func metadataJSONArrays(raw []byte, arrayLimit func(int) int) (any, error) {
 		case '[':
 			items := []any{}
 			for d.More() {
-				if len(items) >= arrayLimit(depth) {
+				if len(items) >= arrayLimit(depth, field) {
 					return nil, failure(EvidenceLimit)
 				}
-				v, err := read(depth + 1)
+				v, err := read(depth+1, field)
 				if err != nil {
 					return nil, err
 				}
@@ -82,7 +88,7 @@ func metadataJSONArrays(raw []byte, arrayLimit func(int) int) (any, error) {
 					return nil, failure(EvidenceLimit)
 				}
 				folds[strings.ToLower(name)] = true
-				value, err := read(depth + 1)
+				value, err := read(depth+1, name)
 				if err != nil {
 					return nil, err
 				}
@@ -97,7 +103,7 @@ func metadataJSONArrays(raw []byte, arrayLimit func(int) int) (any, error) {
 			return nil, failure(InvalidEvidence)
 		}
 	}
-	v, err := read(0)
+	v, err := read(0, "")
 	if err != nil {
 		return nil, err
 	}
