@@ -490,3 +490,24 @@ func (d *strictDrainer) DeleteThrough(through uint64) error {
 		}
 	}
 }
+
+// Metadata returns the immutable selected source binding, without credentials,
+// filesystem paths, clock or mutable configuration.
+func (r *Recorder) Metadata() StoreMetadata {
+	if r == nil {
+		return StoreMetadata{}
+	}
+	return r.run.Binding().Metadata
+}
+func (r *Recorder) Methods() []string {
+	if r == nil {
+		return nil
+	}
+	return slices.Clone(r.cfg.Methods)
+}
+func (r *Recorder) Bounds() Limits {
+	if r == nil {
+		return Limits{}
+	}
+	return r.cfg.Limits
+}

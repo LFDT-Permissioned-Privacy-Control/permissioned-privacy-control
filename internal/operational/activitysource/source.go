@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"net"
 	"slices"
 	"strconv"
 	"time"
@@ -153,7 +154,11 @@ func (s *snapshot) Read(ctx context.Context, scope d.ReadScope, after *d.Positio
 		e := row.Envelope
 		var ip *string
 		if e.IP != "" {
-			v := e.IP
+			parsed := net.ParseIP(e.IP)
+			if parsed == nil {
+				return d.Facts{}, d.ErrUnavailable
+			}
+			v := parsed.String()
 			ip = &v
 		}
 		facts.Activities = append(facts.Activities, d.ActivityFact{Provenance: d.Provenance{Source: s.descriptor.Reference, DataOrganizationID: e.DataOrg, TargetActorIDs: []string{e.ActorID}, Kind: "AUTHENTICATED_RECORDED_REQUEST_DATA_ORG"}, ID: e.RecordID, ProducerID: e.ProducerID, RunID: e.RunID, CompletionOrdinal: d.Count(e.Ordinal), ObservedAt: time.UnixMicro(e.ObservedMicros).UTC(), Method: e.Method, StatusCode: e.Status, TrustedIP: ip})

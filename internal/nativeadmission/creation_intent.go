@@ -13,6 +13,7 @@ import (
 	"privacy-proxy/internal/creationfacts"
 	"privacy-proxy/internal/executionfacts"
 	"privacy-proxy/internal/policybundle"
+	"privacy-proxy/internal/policycore"
 	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/runtimepolicy"
 )
@@ -143,18 +144,35 @@ func (a *ApprovedSignedCheck) RequireMatches(v *runtimepolicy.View, org string, 
 	return nil
 }
 
+// CheckSignedWithCreationPlan retains the original approval/error contract.
 func (n *Engine) CheckSignedWithCreationPlan(ctx context.Context, v *runtimepolicy.View, org string, e *rpcexecution.CallExecution, w WalletSnapshot) (*ApprovedSignedCheck, error) {
+	_, approved, err := n.checkSignedCreation(ctx, v, org, e, w)
+	return approved, err
+}
+
+// CheckSignedWithCreationPlanObserved preserves the actual same-pass native
+// decision for operational classification. The decision is not permission;
+// only the opaque approved check authorizes its exact original request objects.
+func (n *Engine) CheckSignedWithCreationPlanObserved(ctx context.Context, v *runtimepolicy.View, org string, e *rpcexecution.CallExecution, w WalletSnapshot) (policycore.Decision, *ApprovedSignedCheck, error) {
+	decision, approved, err := n.checkSignedCreation(ctx, v, org, e, w)
+	if decision.Allowed && decision.Code != "" {
+		return decision, nil, ErrCreationIntent
+	}
+	return decision, approved, err
+}
+
+func (n *Engine) checkSignedCreation(ctx context.Context, v *runtimepolicy.View, org string, e *rpcexecution.CallExecution, w WalletSnapshot) (policycore.Decision, *ApprovedSignedCheck, error) {
 	if n == nil || !n.creationIntents {
-		return nil, ErrCreationIntent
+		return invalid(), nil, ErrCreationIntent
 	}
 	capture := &creationCapture{}
 	decision := n.check(ctx, v, org, e, w, true, capture)
-	if !decision.Allowed || ctx.Err() != nil || v.RequireLive() != nil {
-		return nil, ErrCreationIntent
+	if !decision.Allowed || ctx.Err() != nil || v == nil || v.RequireLive() != nil {
+		return decision, nil, ErrCreationIntent
 	}
 	ownedWallets := w
 	ownedWallets.addresses = slices.Clone(w.addresses)
-	return &ApprovedSignedCheck{engine: n, view: v, execution: e, org: org, wallets: ownedWallets, plan: capture.plan}, nil
+	return decision, &ApprovedSignedCheck{engine: n, view: v, execution: e, org: org, wallets: ownedWallets, plan: capture.plan}, nil
 }
 
 // captureCreations is called after every native frame and SELF check passed.

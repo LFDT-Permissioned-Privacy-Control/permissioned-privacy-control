@@ -22,6 +22,7 @@ import (
 	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/nodeapproval"
 	"privacy-proxy/internal/policybundle"
+	"privacy-proxy/internal/policycore"
 	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/transactioninput"
 	"privacy-proxy/internal/walletadapter"
@@ -330,35 +331,41 @@ func outcomeUnknown(id json.RawMessage, tx transactioninput.VerifiedTransaction)
 }
 
 func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, raw []byte) Response {
+	return e.submitRaw(ctx, assertion, explicitOrg, raw, nil)
+}
+
+func (e *Engine) submitRaw(ctx context.Context, assertion, explicitOrg string, raw []byte, observation *OperationResult) Response {
 	req, parseError := parseRawRequest(raw)
 	if parseError != nil {
-		return responseError(req.id, parseError.Code, parseError.Message)
+		return observation.failure(InvalidCompletion, responseError(req.id, parseError.Code, parseError.Message))
 	}
+	observation.method(EthSendRawTransaction)
 	if e == nil || e.raw == nil {
 		return responseError(req.id, -32601, "method not found")
 	}
 	// An explicitly empty owned ingress set is read/simulation-only. Reject
 	// every send independently of whether its trace would contain creation.
 	if e.raw.captureGate != nil && !e.raw.sendEnabled {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	if e.raw.readProfile == "strict" && req.present {
-		return responseError(req.id, -32602, "visibleTo is not supported on this network")
+		return observation.failure(InvalidCompletion, responseError(req.id, -32602, "visibleTo is not supported on this network"))
 	}
 	entries, valid := req.entries()
 	if !valid {
-		return responseError(req.id, -32602, "invalid params")
+		return observation.failure(InvalidCompletion, responseError(req.id, -32602, "invalid params"))
 	}
 	if ctx.Err() != nil || e.raw.closed.Load() {
 		return responseError(req.id, -32002, "unavailable")
 	}
 	view, err := e.factory.Build(assertion)
 	if err != nil {
-		return denied(req.id)
+		return observation.failure(UnauthenticatedCompletion, denied(req.id))
 	}
+	observation.accept(view)
 	tx, err := transactioninput.DecodeRaw(req.rawHex, e.snapshot.Metadata().ChainID, transactioninput.ProtectedEVMProfile(), transactioninput.DefaultLimits())
 	if err != nil {
-		return responseError(req.id, -32602, "invalid params")
+		return observation.failure(InvalidCompletion, responseError(req.id, -32602, "invalid params"))
 	}
 	to, hasTo := tx.Destination()
 	if tx.Creation() || !hasTo {
@@ -369,20 +376,21 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 		// Deployment has no installed root contract to share. Reject before
 		// recipient resolution or any node work, irrespective of wallet proof.
 		if len(entries) > 0 {
-			return denied(req.id)
+			return observation.failure(DeniedCompletion, denied(req.id))
 		}
 	}
 	orgID, ok := selectedAddressOrganization(view, explicitOrg, to)
 	if !ok {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
+	observation.selectOrg(orgID)
 	org, _ := view.Org(orgID)
 	if !methodAuthorized(e.snapshot, org, "eth_sendTransaction") {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	ref, err := org.SelectCredentialRef("eth_sendTransaction")
 	if err != nil {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	binding, ok := e.raw.bindings[orgID][ref]
 	if !ok {
@@ -396,16 +404,16 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 		return responseError(req.id, -32002, "unavailable")
 	}
 	if len(entries) > 0 && (!wallet.Contains(tx.Signer()) || len(tx.Input()) == 0) {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	audience, err := e.raw.wallets.ResolveRecipients(ctx, entries)
 	if err != nil {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	actors := audience.Actors()
 	sort.Strings(actors)
 	if ctx.Err() != nil || view.RequireLive() != nil {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	var execution *rpcexecution.CallExecution
 	var prepared *guardbridge.QualifiedPrepared
@@ -430,24 +438,34 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 	}
 	var approvedCheck *nativeadmission.ApprovedSignedCheck
 	if e.snapshot.Metadata().Profile == policybundle.RuntimeCreationIntentProfileID || e.snapshot.Metadata().Profile == policybundle.RuntimeCreationObservedProfileID {
-		approvedCheck, err = e.native.CheckSignedWithCreationPlan(ctx, view, orgID, execution, wallet)
+		if observation == nil {
+			approvedCheck, err = e.native.CheckSignedWithCreationPlan(ctx, view, orgID, execution, wallet)
+		} else {
+			var decision policycore.Decision
+			decision, approvedCheck, err = e.native.CheckSignedWithCreationPlanObserved(ctx, view, orgID, execution, wallet)
+			observation.class(nativeClass(decision))
+			if err != nil && decision.Allowed {
+				observation.class(EvaluationFailedCompletion)
+			}
+		}
 		if err != nil {
 			return denied(req.id)
 		}
+		observation.class(UnavailableCompletion)
 	} else if !e.native.CheckSigned(ctx, view, orgID, execution, wallet).Allowed {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	if len(actors) > 0 {
 		code, known := execution.Code(to)
 		if !known || !code.HasCode() || code.Precompile() || code.Delegated() {
-			return denied(req.id)
+			return observation.failure(DeniedCompletion, denied(req.id))
 		}
 	}
 	input := admission.TrustedRawInput{ApprovedCheck: approvedCheck, View: view, OrganizationID: orgID, Transaction: tx, Execution: execution, WalletSnapshot: wallet, Audience: actors}
 	if e.raw.captureGate != nil {
 		need, err := e.raw.admission.NeedsCreationCapture(ctx, input)
 		if err != nil {
-			return rawFailure(req.id, err)
+			return observation.rawFailure(req.id, err)
 		}
 		switch need {
 		case admission.NeedCapture:
@@ -469,15 +487,16 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 			return responseError(req.id, -32002, "unavailable")
 		}
 	}
+	observation.effect(admissionEffect)
 	result, err := e.raw.admission.CheckAndRecordRaw(ctx, input)
 	if err != nil {
-		return rawFailure(req.id, err)
+		return observation.rawFailure(req.id, err)
 	}
 	if result == nil {
 		return responseError(req.id, -32002, "unavailable")
 	}
 	if !result.Decision().Allowed {
-		return responseError(req.id, -32003, "transaction blocked by compliance policy")
+		return observation.failure(DeniedCompletion, responseError(req.id, -32003, "transaction blocked by compliance policy"))
 	}
 	receipt, ok := result.Receipt()
 	if !ok || !receipt.Matches(input) {
@@ -487,19 +506,23 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 		return responseError(req.id, -32002, "unavailable")
 	}
 	if err := receipt.RequirePublishable(); err != nil {
-		return rawFailure(req.id, err)
+		return observation.rawFailure(req.id, err)
 	}
 	if binding.pair != nil {
+		observation.effect(guardEffect)
 		if err := binding.pair.EnqueueQualified(prepared); err != nil {
 			return responseError(req.id, -32002, "unavailable")
 		}
+		observation.broadcast(tx.Hash().Hex())
 		_, err = binding.pair.BroadcastRaw(ctx, tx)
 	} else {
+		observation.broadcast(tx.Hash().Hex())
 		_, err = binding.client.BroadcastRaw(ctx, tx)
 	}
 	if err != nil {
-		return outcomeUnknown(req.id, tx)
+		return observation.failure(UnconfirmedCompletion, outcomeUnknown(req.id, tx))
 	}
+	observation.class(SuccessfulCompletion)
 	hash := tx.Hash().Hex()
 	return Response{JSONRPC: "2.0", ID: req.id, Result: &hash}
 }

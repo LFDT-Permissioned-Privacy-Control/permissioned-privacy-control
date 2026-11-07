@@ -187,22 +187,28 @@ func methodAuthorized(snapshot *policybundle.CatalogSnapshot, org *runtimepolicy
 }
 
 func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawRequest []byte) Response {
+	return e.call(ctx, assertion, explicitOrg, rawRequest, nil)
+}
+
+func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawRequest []byte, observation *OperationResult) Response {
 	parse := parseRequest
-	if e != nil && simulationProfile(e.snapshot.Metadata().Profile) {
+	if e != nil && e.snapshot != nil && simulationProfile(e.snapshot.Metadata().Profile) {
 		parse = parseSimulationRequest
 	}
 	req, requestError := parse(rawRequest)
 	if requestError != nil {
 		out := responseError(req.id, requestError.Code, requestError.Message)
-		return out
+		return observation.failure(InvalidCompletion, out)
 	}
-	if e == nil || ctx.Err() != nil || (e.raw != nil && e.raw.closed.Load()) {
+	observation.method(EthCall)
+	if e == nil || e.snapshot == nil || ctx.Err() != nil || (e.raw != nil && e.raw.closed.Load()) {
 		return responseError(req.id, -32002, "execution unavailable")
 	}
 	view, err := e.factory.Build(assertion)
 	if err != nil {
-		return denied(req.id)
+		return observation.failure(UnauthenticatedCompletion, denied(req.id))
 	}
+	observation.accept(view)
 	var orgID string
 	var ok bool
 	if req.call.Creation() {
@@ -218,18 +224,19 @@ func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawReq
 		orgID, ok = selectedOrganization(view, explicitOrg, req.call)
 	}
 	if !ok {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
+	observation.selectOrg(orgID)
 	org, _ := view.Org(orgID)
 	if req.block.Historical() && !org.IsOrgAdmin() {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	if !methodAuthorized(e.snapshot, org, "eth_call") {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	ref, err := org.SelectCredentialRef("eth_call")
 	if err != nil {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	client, err := e.clients[orgID].WithCredential(ref)
 	if err != nil {
@@ -238,18 +245,18 @@ func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawReq
 	var wallet nativeadmission.WalletSnapshot
 	if req.call.FromSupplied() || e.needsWallets {
 		if e.wallets == nil {
-			return denied(req.id)
+			return observation.failure(DeniedCompletion, denied(req.id))
 		}
 		wallet, err = e.wallets.Load(ctx, view.ActorID())
 		if err != nil || wallet.ActorID() != view.ActorID() {
-			return denied(req.id)
+			return observation.failure(UnavailableCompletion, denied(req.id))
 		}
 		if req.call.FromSupplied() && !wallet.Contains(req.call.From()) {
-			return denied(req.id)
+			return observation.failure(DeniedCompletion, denied(req.id))
 		}
 	}
 	if ctx.Err() != nil || view.RequireLive() != nil {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	var execution *rpcexecution.CallExecution
 	if simulationProfile(e.snapshot.Metadata().Profile) {
@@ -267,7 +274,7 @@ func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawReq
 	if err != nil {
 		var category *rpcexecution.Error
 		if errors.As(err, &category) && category.Code == rpcexecution.RootScopeDenied {
-			return denied(req.id)
+			return observation.failure(DeniedCompletion, denied(req.id))
 		}
 		return responseError(req.id, -32002, "execution unavailable")
 	}
@@ -278,18 +285,18 @@ func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawReq
 		}
 		actual, matched := selectedAddressOrganization(view, explicitOrg, creation.Address.Value)
 		if !matched || actual != orgID {
-			return denied(req.id)
+			return observation.failure(DeniedCompletion, denied(req.id))
 		}
 	}
 	if view.RequireLive() != nil {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	decision := e.native.Check(ctx, view, orgID, execution, wallet)
 	if !decision.Allowed {
-		return denied(req.id)
+		return observation.failure(nativeClass(decision), denied(req.id))
 	}
 	if ctx.Err() != nil || view.RequireLive() != nil {
-		return denied(req.id)
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	outcome, ok := execution.Tree().Outcome()
 	if !ok {
@@ -299,13 +306,15 @@ func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawReq
 		return responseError(req.id, -32002, "execution unavailable")
 	}
 	if outcome.Error == "execution reverted" {
+		observation.class(EvaluationFailedCompletion)
 		out := responseError(req.id, 3, "execution reverted")
 		out.Error.Data = "0x" + hex.EncodeToString(outcome.Output)
 		return out
 	}
 	if outcome.Error != "" {
-		return responseError(req.id, -32000, "execution failed")
+		return observation.failure(EvaluationFailedCompletion, responseError(req.id, -32000, "execution failed"))
 	}
+	observation.class(SuccessfulCompletion)
 	result := "0x" + hex.EncodeToString(outcome.Output)
 	return Response{JSONRPC: "2.0", ID: req.id, Result: &result}
 }

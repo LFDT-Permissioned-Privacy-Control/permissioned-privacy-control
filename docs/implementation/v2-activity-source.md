@@ -4,8 +4,9 @@
 Pebble audit spool. `internal/operational/activitysql` seals it into the lean
 audit database. `internal/operational/activitysource` supplies the protected-read
 gate with activity pages and method/status summaries from that SQL population.
-These are libraries and an explicit owner CLI; this tree does not mount a Core
-completion hook or a production activity-data endpoint.
+These are libraries and an explicit owner CLI. The concrete native RPC recording
+wrapper is described in [v2-rpc-activity.md](v2-rpc-activity.md); these packages do
+not mount a production activity-data endpoint.
 
 The population is `SEALED_RPC_COMPLETIONS_AS_OF_CHAIN_HEAD`: all matching retained
 SQL completion rows at one committed chain head. It excludes requests that were
@@ -16,8 +17,9 @@ unready; it does not rewrite already sealed SQL history.
 
 ## Metadata and hot path
 
-The future Core caller must supply actor, selected data organization and policy
-digest from the **same** accepted request. B1 does not authenticate this input.
+A caller must supply actor, selected data organization and policy digest from
+the **same** accepted request. The native RPC wrapper captures them from its
+original engine View; the recorder itself does not authenticate this input.
 There is no user lookup, current-wallet inference or after-the-fact organization
 assignment. Unattributed records are allowed but cannot satisfy an attributed
 protected query. Recorded time is the original trusted completion observation,

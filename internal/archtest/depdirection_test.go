@@ -51,6 +51,7 @@ import (
 	_ "privacy-proxy/internal/operational/admissionsql"
 	_ "privacy-proxy/internal/operational/disclosuresql"
 	_ "privacy-proxy/internal/operational/identitysql"
+	_ "privacy-proxy/internal/operational/rpcactivity"
 	_ "privacy-proxy/internal/operational/walletsql"
 	_ "privacy-proxy/internal/policybundle"
 	_ "privacy-proxy/internal/policycli"
@@ -731,6 +732,26 @@ func TestCreationObservationDependencyBoundaries(t *testing.T) {
 			if pkg == "privacy-proxy/internal/creationfacts" && (strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg || dep == "net/http" || dep == "github.com/ethereum/go-ethereum/core/types") {
 				t.Errorf("detached creation metadata imports execution/I/O %s", dep)
 			}
+		}
+	}
+}
+
+func TestRPCActivityOwnedBoundary(t *testing.T) {
+	core := transitiveDeps(t, moduleRoot(t), "privacy-proxy/internal/rpcengine")
+	for dep := range core {
+		if strings.HasPrefix(dep, "privacy-proxy/internal/activitylog") || strings.HasPrefix(dep, "privacy-proxy/internal/audit") || strings.HasPrefix(dep, "privacy-proxy/internal/operational/") || strings.HasPrefix(dep, "github.com/cockroachdb/pebble") || strings.HasPrefix(dep, "github.com/jackc/pgx") {
+			t.Fatalf("Core imports recording/storage boundary %s", dep)
+		}
+	}
+	operational := transitiveDeps(t, moduleRoot(t), "privacy-proxy/internal/operational/rpcactivity")
+	for _, required := range []string{"privacy-proxy/internal/rpcengine", "privacy-proxy/internal/activitylog"} {
+		if !operational[required] {
+			t.Fatal("wrapper lost concrete owned dependency", required)
+		}
+	}
+	for dep := range operational {
+		if strings.HasPrefix(dep, "privacy-proxy/internal/server") || strings.HasPrefix(dep, "privacy-proxy/internal/db") || strings.HasPrefix(dep, "privacy-proxy/internal/operational/admissionsql") || strings.HasPrefix(dep, "github.com/jackc/pgx") {
+			t.Fatal("RPC hook imports legacy handle or SQL adapter", dep)
 		}
 	}
 }
