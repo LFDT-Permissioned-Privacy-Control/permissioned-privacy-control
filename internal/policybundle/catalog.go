@@ -8,6 +8,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"privacy-proxy/internal/brokerpolicy"
 	"privacy-proxy/internal/compliancepolicy"
 	"privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/identity"
@@ -28,6 +29,7 @@ type CatalogSnapshot struct {
 	compliance    *compliancepolicy.Catalog
 	methods       methodIndex
 	runtime       *RuntimeCatalog
+	auth          *brokerpolicy.Catalog
 }
 
 func (s *CatalogSnapshot) Metadata() BundleMetadata {
@@ -53,8 +55,14 @@ func (s *CatalogSnapshot) Metadata() BundleMetadata {
 		copied := *m.ComplianceCatalog
 		m.ComplianceCatalog = &copied
 	}
+	if m.AuthCatalog != nil {
+		copied := *m.AuthCatalog
+		m.AuthCatalog = &copied
+	}
 	return m
 }
+
+func (s *CatalogSnapshot) AuthBroker() (*brokerpolicy.Catalog, bool) { return s.auth, s.auth != nil }
 
 func (s *CatalogSnapshot) Compliance() (*compliancepolicy.Catalog, bool) {
 	return s.compliance, s.compliance != nil
@@ -148,6 +156,8 @@ type catalogBuilder struct {
 	complianceSource      *compliancepolicy.Source
 	complianceRef         *ComplianceCatalogRef
 	complianceLimits      compliancepolicy.Limits
+	authSource            *brokerpolicy.Source
+	authRef               *AuthCatalogRef
 	runtimeSource         *RuntimeSource
 	runtimeRawSource      *RuntimeRawSource
 	runtimeMultiOrgSource *RuntimeMultiOrgSource
@@ -295,7 +305,7 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 		}
 		catalog, _ := b.snapshot.NativeCatalog(org.ID)
 		validate := policycore.Validate
-		if b.profile.id == NativeV2ProfileID || b.profile.id == RuntimeCallProfileID || b.profile.id == RuntimeRawSendProfileID || b.profile.id == DisclosureProfileID || b.profile.id == ComplianceProfileID {
+		if b.profile.id == NativeV2ProfileID || b.profile.id == RuntimeCallProfileID || b.profile.id == RuntimeRawSendProfileID || b.profile.id == DisclosureProfileID || b.profile.id == ComplianceProfileID || b.profile.id == BrokerProfileID {
 			validate = policycore.ValidateNativeV2
 		}
 		var v *policycore.Validated
@@ -340,6 +350,9 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 		return nil, err
 	}
 	if err := b.compileRuntimePriceFeed(); err != nil {
+		return nil, err
+	}
+	if err := b.compileAuth(); err != nil {
 		return nil, err
 	}
 	for name := range b.capabilities {

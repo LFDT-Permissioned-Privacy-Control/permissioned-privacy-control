@@ -30,6 +30,9 @@ func draftFor(f fixture) policybundle.Draft {
 	if f.manifest.ComplianceCatalog != nil {
 		d.ComplianceCatalog = &policybundle.DraftIdentity{Path: f.manifest.ComplianceCatalog.Path}
 	}
+	if f.manifest.AuthCatalog != nil {
+		d.AuthCatalog = &policybundle.DraftIdentity{Path: f.manifest.AuthCatalog.Path}
+	}
 	return d
 }
 

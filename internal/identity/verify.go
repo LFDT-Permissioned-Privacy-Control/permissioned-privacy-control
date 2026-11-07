@@ -169,16 +169,14 @@ func claimBounds(object map[string]any, l Limits) error {
 
 func claimIdentity(c accessClaims, p Profile, l Limits) (string, error) {
 	if p.Kind == AzureHuman || p.Kind == AzureService {
-		if c.IdentityAuthority != p.Issuer || c.SourceTenant == nil || *c.SourceTenant != p.TenantID || !uuid(c.SourceSubject) || c.SourceNotAfter == nil {
+		if c.SourceNotAfter == nil {
 			return "", invalid("source-identity", "token")
 		}
-		return actorID("azure-v2", p.Issuer, p.TenantID, c.SourceSubject, string(c.PrincipalKind)), nil
 	}
-	network, ok := did(c.SourceSubject, l.MaxSourceSubjectBytes)
-	if !ok || network != p.Network || c.SourceTenant != nil || c.IdentityAuthority != "privado" || (p.Kind == PrivadoIdentity && c.SourceNotAfter != nil) {
+	if p.Kind == PrivadoIdentity && c.SourceNotAfter != nil {
 		return "", invalid("source-identity", "token")
 	}
-	return actorID("privado", c.SourceSubject, string(c.PrincipalKind)), nil
+	return sourceActorID(SourceIdentity{ProfileID: c.SourceProfile, Kind: c.PrincipalKind, Authority: c.IdentityAuthority, Subject: c.SourceSubject, Tenant: c.SourceTenant}, p, l)
 }
 
 func claimTimes(c accessClaims, now int64) error {

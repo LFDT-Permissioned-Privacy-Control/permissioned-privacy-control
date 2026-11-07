@@ -56,6 +56,16 @@ type Manifest struct {
 	RuntimeCatalog       *RuntimeCatalogRef    `json:"runtimeCatalog,omitempty" optional:"true"`
 	DisclosureCatalog    *DisclosureCatalogRef `json:"disclosureCatalog,omitempty" optional:"true"`
 	ComplianceCatalog    *ComplianceCatalogRef `json:"complianceCatalog,omitempty" optional:"true"`
+	AuthCatalog          *AuthCatalogRef       `json:"authCatalog,omitempty" optional:"true"`
+}
+
+type AuthCatalogRef struct {
+	Path   string `json:"path"`
+	SHA256 Digest `json:"sha256"`
+}
+type AuthCatalogIdentity struct {
+	AuthCatalogRef
+	SemanticDigest Digest
 }
 
 type DisclosureCatalogRef struct {
@@ -110,6 +120,7 @@ type BundleMetadata struct {
 	RuntimeCatalog       *RuntimeCatalogIdentity
 	DisclosureCatalog    *DisclosureCatalogIdentity
 	ComplianceCatalog    *ComplianceCatalogIdentity
+	AuthCatalog          *AuthCatalogIdentity
 }
 
 // RawDigest pins the approved file. SemanticDigest identifies its normalized

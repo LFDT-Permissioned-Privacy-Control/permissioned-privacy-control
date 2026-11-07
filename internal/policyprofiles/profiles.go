@@ -30,6 +30,7 @@ func Supported() []Description {
 		{ID: policybundle.RuntimeMultiOrgProfileID, EvaluatorVersion: policybundle.NativeV3EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "multi-org eth_call and raw CALL integration; not a complete runtime"},
 		{ID: policybundle.DisclosureProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 		{ID: policybundle.ComplianceProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
+		{ID: policybundle.BrokerProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 	}
 }
 
@@ -73,6 +74,10 @@ func Options(id string) (policybundle.Options, Description, error) {
 		options.Profile = policybundle.ComplianceProfile(seed.Version)
 		options.IdentityLimits = identity.DefaultLimits()
 		options.ComplianceLimits = compliancepolicy.DefaultLimits()
+		evaluator = policybundle.NativeV2EvaluatorVersion
+	case policybundle.BrokerProfileID:
+		options.Profile = policybundle.BrokerProfile(seed.Version)
+		options.IdentityLimits = identity.DefaultLimits()
 		evaluator = policybundle.NativeV2EvaluatorVersion
 	default:
 		return policybundle.Options{}, Description{}, fmt.Errorf("unsupported compiled policy profile %q", id)

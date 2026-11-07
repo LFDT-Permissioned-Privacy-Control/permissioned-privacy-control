@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"privacy-proxy/internal/brokerpolicy"
 	"slices"
 	"sort"
 )
@@ -29,6 +30,7 @@ type Draft struct {
 	RuntimeCatalog    *DraftRuntime   `json:"runtimeCatalog,omitempty" optional:"true"`
 	DisclosureCatalog *DraftIdentity  `json:"disclosureCatalog,omitempty" optional:"true"`
 	ComplianceCatalog *DraftIdentity  `json:"complianceCatalog,omitempty" optional:"true"`
+	AuthCatalog       *DraftIdentity  `json:"authCatalog,omitempty" optional:"true"`
 }
 
 type DraftDocument struct {
@@ -131,6 +133,12 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		}
 		manifest.ComplianceCatalog = &ComplianceCatalogRef{Path: draft.ComplianceCatalog.Path, SHA256: RawDigest(nil)}
 	}
+	if draft.AuthCatalog != nil {
+		if draft.AuthCatalog.Path == "draft.json" {
+			return nil, fail(InvalidSchema, "", "", "authCatalog", "auth source collides with draft.json")
+		}
+		manifest.AuthCatalog = &AuthCatalogRef{Path: draft.AuthCatalog.Path, SHA256: RawDigest(nil)}
+	}
 	if err := validateManifest(manifest, selected, options); err != nil {
 		return nil, err
 	}
@@ -151,6 +159,9 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		}
 		if manifest.ComplianceCatalog != nil && ref.Path == manifest.ComplianceCatalog.Path {
 			budget = min(budget, int64(options.ComplianceLimits.MaxDocumentBytes))
+		}
+		if manifest.AuthCatalog != nil && ref.Path == manifest.AuthCatalog.Path {
+			budget = min(budget, int64(brokerpolicy.MaxSourceBytes))
 		}
 		if budget <= 0 {
 			return nil, fail(LimitExceeded, ref.Kind, ref.OrganizationID, ref.Path, "draft bundle byte budget exceeded")
@@ -175,6 +186,9 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		ref.SHA256 = RawDigest(files[ref.Path])
 	}
 	if ref := manifest.ComplianceCatalog; ref != nil {
+		ref.SHA256 = RawDigest(files[ref.Path])
+	}
+	if ref := manifest.AuthCatalog; ref != nil {
 		ref.SHA256 = RawDigest(files[ref.Path])
 	}
 	snapshot, err := compileSourceSet(ctx, manifest, RawDigest(nil), int64(len(raw)), options, methods, func(name string, budget int64) ([]byte, error) {

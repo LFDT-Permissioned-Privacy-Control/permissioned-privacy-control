@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 
+	"privacy-proxy/internal/brokerpolicy"
 	"privacy-proxy/internal/compliancepolicy"
 	"privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/identity"
@@ -124,6 +125,26 @@ func compileSourceSet(ctx context.Context, manifest Manifest, digest Digest, man
 	}
 	if err := canceled(ctx); err != nil {
 		return nil, err
+	}
+	if ref := manifest.AuthCatalog; ref != nil {
+		budget := min(options.Limits.MaxDocumentBytes, int64(brokerpolicy.MaxSourceBytes), options.Limits.MaxBundleBytes-total)
+		if budget <= 0 {
+			return nil, fail(LimitExceeded, "", "", "authCatalog", "auth file exceeds remaining byte budget")
+		}
+		raw, err := read(ref.Path, budget)
+		if err != nil {
+			return nil, err
+		}
+		total += int64(len(raw))
+		if RawDigest(raw) != ref.SHA256 {
+			return nil, fail(IntegrityFailure, "", "", "authCatalog", "auth digest does not match exact bytes")
+		}
+		source, err := brokerpolicy.Decode(raw)
+		if err != nil {
+			return nil, fail(InvalidSchema, "", "", "authCatalog", err.Error())
+		}
+		builder.authSource = &source
+		builder.authRef = ref
 	}
 	return builder.finish(ctx)
 }

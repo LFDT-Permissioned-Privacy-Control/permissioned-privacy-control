@@ -1,5 +1,11 @@
 package identity
 
+// AccessHeader and AccessClaims share the exact Core wire DTOs with the trusted
+// issuer. Constructing these values grants no identity or authorization; signed
+// output must still pass VerifyAccess against the selected catalog.
+type AccessHeader = accessHeader
+type AccessClaims = accessClaims
+
 type accessHeader struct {
 	Typ string `json:"typ"`
 	Alg string `json:"alg"`

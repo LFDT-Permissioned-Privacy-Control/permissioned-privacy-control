@@ -90,6 +90,9 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 	if rawRuntimeProfile(o.Profile.id) && !positiveChain64(m.ChainID) {
 		return fail(UnsupportedFeature, "", "", "chainId", "raw submission requires a positive uint64 chain")
 	}
+	if (o.Profile.id == BrokerProfileID) != (m.AuthCatalog != nil) {
+		return fail(UnsupportedFeature, "", "", "authCatalog", "auth source must match the explicitly selected profile")
+	}
 	if len(m.Documents) > o.Limits.MaxDocuments-len(globalDocumentRefs(m)) {
 		return fail(LimitExceeded, "", "", "documents", "global files exceed document count budget")
 	}
@@ -142,6 +145,12 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 	if ref := m.ComplianceCatalog; ref != nil {
 		if len(ref.Path) > 128 || !filePattern.MatchString(ref.Path) || ref.Path == "manifest.json" || paths[ref.Path] || !validDigest(ref.SHA256) {
 			return fail(InvalidSchema, "", "", "complianceCatalog", "invalid or colliding global compliance file reference")
+		}
+		paths[ref.Path] = true
+	}
+	if ref := m.AuthCatalog; ref != nil {
+		if len(ref.Path) > 128 || !filePattern.MatchString(ref.Path) || ref.Path == "manifest.json" || paths[ref.Path] || !validDigest(ref.SHA256) {
+			return fail(InvalidSchema, "", "", "authCatalog", "invalid or colliding auth file reference")
 		}
 	}
 	return nil
