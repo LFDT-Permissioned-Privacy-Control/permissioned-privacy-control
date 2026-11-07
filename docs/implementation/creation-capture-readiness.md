@@ -7,9 +7,10 @@ and `operational.creation-capture-coverage/v1`. Earlier profiles keep their
 existing behavior and reject this source. Native source versions, Guard wire,
 fingerprint and approval lifetime are unchanged.
 
-This integration records an approved creation intent and its original capture
-coverage. It does not serve ownership, deployer, pending or historical data
-permissions. Header readiness alone supplies none of those permissions.
+This integration records approved creation intents, their original capture
+coverage, and independently observed ordinary surviving creations. It does not
+serve ownership, deployer, pending or historical data permissions. Header
+readiness alone supplies none of those permissions.
 
 ## What the capture means
 
@@ -43,14 +44,16 @@ corruption; it is never repaired by a later probe or current wallet proof.
 
 ## Worker and fences
 
-`ops-creation-observer run` currently runs the continuous header-readiness
-worker for one explicitly selected network. A process has one active operation
-per worker. The network lease lasts 30 seconds; no session lock or per-job lease
-is used. A Step shares one 15-second parent deadline across at most four reads,
+`ops-creation-observer run` maintains the canonical prefix and processes at most
+one included transaction per Step for one explicitly selected network. There is
+one active operation per worker. The network lease lasts 30 seconds; no session
+lock or per-job lease is used. The header phase shares one 15-second parent
+deadline across at most four reads,
 131 requested selectors and twelve network/sync calls: at most 143 physical
 attempts and less than 3 MiB of bounded response envelopes.
 
-Steady caught-up operation refreshes one heartbeat UPDATE per second. A local
+Steady caught-up operation without due work refreshes one heartbeat UPDATE per
+second. A local
 monotonic ten-second interval only schedules lease renewal; each Step reads the
 actual bounded database lease TTL and renews early if needed for node work and
 SQL publication. Database expiry/CAS remains authoritative. Known node errors,
@@ -82,6 +85,54 @@ and lease expiry. Thus an already valid capture can commit after inclusion or
 ordinary head progress. An exclusive invalidation either precedes that check
 and rejects it, or waits for the actual COMMIT/rollback. App roles retain only
 SELECT on observer state; they gain no UPDATE or row-lock permission.
+
+## Included creation evidence
+
+After releasing its bounded SQL work snapshot, the worker renews the lease and
+acquires the actual included transaction on the same selected reference. The
+separate `reth-prague-included-creations/v1` profile reconstructs protected
+type 0/1/2 signed bytes, hash and signer; checks receipt/status/block/index and
+hash-list membership; and parses `debug_traceTransaction` using the fixed
+callTracer/full-prestate mux. Canonical-height checks bracket acquisition.
+Parent/post-block account state is never substituted for transaction-index
+prestate. Full block hash lists have their own 8 MiB response bound; they are
+not substitutes for the header-only capture and prefix methods.
+
+Only successful ordinary nonempty Prague CREATE/CREATE2 outputs qualify.
+Complete ancestor failure and every committed SELFDESTRUCT source-storage
+record are checked, including delegated and zero-balance SELF. A beneficiary
+is not assumed deleted. Any committed SELF on a candidate excludes it; SELF
+under a reverted ancestor does not. Inclusion-hash code must exactly match the
+constructor output. Empty, EF/designator/precompile, reverted, ambiguous and
+unsupported cases provide no birth authority. Acquisition has one 15-second
+deadline and at most 2,060 physical RPC attempts, with no hidden POST retry.
+
+At most 16 original references/plans and 1 MiB of payload enter one immutable
+work snapshot. An indexed exact tuple match checks address, raw creator, kind,
+initcode hash, value, effective caller and depth, then the complete creation
+ancestry. Preflight record ordinals are diagnostic only. A rolling framed path
+digest preserves ancestry in linear work; composed matching/hash input is
+bounded at two million work units. Factory scope and code pins authenticate the
+captured approved intent. They do not claim every included ordinary CALL path
+or actual factory entry-code was replayed against policy.
+
+Publication requires original covered-v2 references and canonical
+`floor <= A < C <= prefixHead` in one SQL snapshot. It takes shared capture
+fence, the same transaction-hash lock, then observer/work/fact locks and finally
+capacity. Exact lease, recovery epochs, prefix version/head and immutable
+inputs are checked through COMMIT. Revoked original epochs are filtered again
+inside this transaction. A newly appended generation stays due; duplicate
+immutable rows add no facts or counters. Each birth has no winning actor/org.
+Wallet and factory associations append independently. Re-inclusion uses the
+new inclusion hash, preserving the orphan row and counting it toward capacity;
+only canonical joins can make an association eligible.
+
+Up to 2,048 births/associations publish atomically in batches of at most 128 rows,
+under the five-second SQL bound. Capacity/error/cancellation rolls back the
+whole fact batch. Scheduling retries are bounded to 1–60 seconds and never send,
+enqueue, reapprove or resubmit a transaction. An unchanged canonical inclusion
+can acknowledge a new reorg epoch without retracing. A long included operation
+may let capture heartbeat expire; dependent new captures then fail closed.
 
 ## Offline commands
 
@@ -130,9 +181,14 @@ and revocations, rotates epochs, and leaves observer/capture readiness false in
 
 Offline finalization keeps the legacy API's 60-second default. CLI scans default
 to 10 minutes and have a hard 30-minute ceiling; failure leaves readiness false.
-Plans and coverage are scanned in bounded pages without loading the history or
-issuing nested pgx queries on open rows. No full-capacity completion time is
-promised. There is no TTL or automatic pruning for coverage, denies or prefix.
+Plans, coverage and observed associations are scanned in bounded pages without
+loading the history or issuing nested pgx queries on open rows. Recovery
+recomputes retained tuple/qualification digests and exact original
+ref/plan/entry/root/actor links. A proof digest does not reconstruct the actual
+historical CALL ancestry or prove missing facts: original included acquisition,
+trusted worker first insertion and the explicit completeness attestation remain
+the boundary. No full-capacity completion time is promised. There is no TTL or
+automatic pruning for coverage, denies, prefix, births or associations.
 
 ## Storage limits
 

@@ -100,7 +100,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	timeout := fs.Duration("recovery-timeout", 10*time.Minute, "finalize only, positive and <=30m")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
-			fmt.Fprintln(stdout, "ops-creation-observer migrate|bootstrap|status|run|revoke-capture-epochs|finalize-observer; explicit --dsn-env and network/epoch/source options required; run is header-readiness only")
+			fmt.Fprintln(stdout, "ops-creation-observer migrate|bootstrap|status|run|revoke-capture-epochs|finalize-observer; explicit --dsn-env and network/epoch/source options required; run maintains headers and included creation associations")
 			return 0
 		}
 		fmt.Fprintln(stderr, "invalid observer arguments")
@@ -264,7 +264,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	defer store.Close()
-	worker, err := creationobserver.NewHeaderWorker(creationobserver.HeaderOptions{Network: network, State: state, Owner: uuid.NewString(), SourceSet: set, Reference: ref, CaughtUpAssertion: *assertion, Client: client, Store: store})
+	included, err := rpcexecution.NewIncludedClient(transport, ref, credential, rpcexecution.DefaultIncludedLimits())
+	if code := fail(err); code != 0 {
+		return code
+	}
+	worker, err := creationobserver.New(creationobserver.Options{Network: network, State: state, Owner: uuid.NewString(), SourceSet: set, Reference: ref, CaughtUpAssertion: *assertion, HeaderClient: client, IncludedClient: included, Store: store})
 	if code := fail(err); code != 0 {
 		return code
 	}

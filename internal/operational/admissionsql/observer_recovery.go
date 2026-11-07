@@ -78,7 +78,7 @@ func validateRestoredObserver(ctx context.Context, tx pgx.Tx, network a.Digest) 
  OR EXISTS(SELECT 1 FROM ops_admission_v2.creation_capture_coverage c JOIN ops_admission_v2.creation_authority_refs r USING(network_key,tx_hash,seed_digest)WHERE c.network_key=$1 AND r.anchor_number<$2)`, network[:], current.Floor.Number, current.Head.Number).Scan(&bad) != nil || bad {
 		return a.ErrCoverage
 	}
-	return nil
+	return validateRestoredObservedHistory(ctx, tx, network)
 }
 
 // RevokeCaptureEpochs appends a bounded deny-only cohort selection. It requires

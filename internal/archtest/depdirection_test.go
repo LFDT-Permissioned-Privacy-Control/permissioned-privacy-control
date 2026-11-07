@@ -507,7 +507,9 @@ func TestNativeAdmissionStorageBoundary(t *testing.T) {
 	for _, pkg := range []string{"privacy-proxy/internal/admission", "privacy-proxy/internal/compliancehttp", "privacy-proxy/internal/operational/admissionsql", "privacy-proxy/cmd/ops-v2-admission-migrate"} {
 		usesSQL := pkg == "privacy-proxy/internal/operational/admissionsql" || pkg == "privacy-proxy/cmd/ops-v2-admission-migrate"
 		for dep := range transitiveDeps(t, root, pkg) {
-			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !allowed[dep] && !(usesSQL && dep == "privacy-proxy/internal/operational/admissionsql") {
+			// The operational adapter consumes the opaque included proposal;
+			// pure admission/HTTP must not acquire this observer dependency.
+			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !allowed[dep] && !(usesSQL && (dep == "privacy-proxy/internal/operational/admissionsql" || dep == "privacy-proxy/internal/creationobserver")) {
 				t.Errorf("%s imports unapproved application infrastructure %s", pkg, dep)
 			}
 			if !usesSQL && (strings.HasPrefix(dep, "github.com/jackc/pgx") || strings.HasPrefix(dep, "github.com/jackc/tern")) {
