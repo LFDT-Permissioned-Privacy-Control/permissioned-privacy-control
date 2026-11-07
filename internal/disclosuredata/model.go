@@ -61,7 +61,7 @@ type SourcePlan struct {
 }
 
 // Immutable references name qualified owned source cuts, never URLs or authority tokens.
-// Activity ref ID names an immutable complete VECTOR checkpoint in the activity store.
+// Activity ref ID names an immutable SEALED audit chain head, excluding buffered/unlogged operations.
 // History ref ID names an immutable coverage/canonical cut incl R; it is not A2 birth proof.
 // Wallet ref ID is exact current snapshot digest; Financial ref ID is exact event/source cut.
 type SourceRef struct {
@@ -169,7 +169,7 @@ type MethodCount struct {
 }
 type ActivityAggregate struct {
 	Total, Successful, Failed Count
-	Methods                   []MethodCount // sortedunique<=512; includes ALL scoped source rows at vector
+	Methods                   []MethodCount // sortedunique<=512; includes ALL scoped retained SEALED rows at the chain head
 }
 type SanctionMatch struct {
 	Address  [20]byte
