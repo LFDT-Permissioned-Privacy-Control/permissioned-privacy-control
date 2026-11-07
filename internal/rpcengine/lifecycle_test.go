@@ -213,9 +213,17 @@ func signedCreation(t *testing.T, nonce uint64, input []byte) transactioninput.V
 
 func TestLifecycleActualRootCreationUsesOneNativeFinancialProjection(t *testing.T) {
 	d := rawPostgres(t)
-	for _, mode := range []string{policybundle.RawSubmissionOPSPreflight, policybundle.RawSubmissionGuardV1} {
-		t.Run(mode, func(t *testing.T) {
+	for _, scenario := range []struct {
+		mode       string
+		simulation bool
+	}{{policybundle.RawSubmissionOPSPreflight, false}, {policybundle.RawSubmissionGuardV1, false}, {policybundle.RawSubmissionOPSPreflight, true}, {policybundle.RawSubmissionGuardV1, true}} {
+		mode, name := scenario.mode, scenario.mode
+		if scenario.simulation {
+			name += "-simulation"
+		}
+		t.Run(name, func(t *testing.T) {
 			f := lifecycleFixture(mode)
+			f.simulation = scenario.simulation
 			f.groups[0].IsOrgAdmin = true
 			f.groups[0].Claims = []string{}
 			f.linkSigner = true

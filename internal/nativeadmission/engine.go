@@ -44,6 +44,10 @@ func NewLifecycle(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) 
 	return newEngine(snapshot, clock, policybundle.RuntimeLifecycleProfileID)
 }
 
+func NewSimulation(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
+	return newEngine(snapshot, clock, policybundle.RuntimeSimulationProfileID)
+}
+
 func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, expectedProfile string) (*Engine, error) {
 	if snapshot == nil || clock == nil {
 		return nil, errors.New("invalid native admission snapshot")
@@ -51,16 +55,17 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, exp
 	metadata := snapshot.Metadata()
 	runtime, ok := snapshot.Runtime()
 	expectedEvaluator := policybundle.NativeV2EvaluatorVersion
+	lifecycle := expectedProfile == policybundle.RuntimeLifecycleProfileID || expectedProfile == policybundle.RuntimeSimulationProfileID
 	if expectedProfile == policybundle.RuntimeMultiOrgProfileID {
 		expectedEvaluator = policybundle.NativeV3EvaluatorVersion
 	}
-	if expectedProfile == policybundle.RuntimeLifecycleProfileID {
+	if lifecycle {
 		expectedEvaluator = policybundle.NativeV4EvaluatorVersion
 	}
 	if !ok || metadata.Profile != expectedProfile || metadata.EvaluatorVersion != expectedEvaluator || metadata.RuntimeCatalog == nil || metadata.RuntimeCatalog.SemanticDigest != runtime.Digest() {
 		return nil, errors.New("invalid native admission snapshot")
 	}
-	n := &Engine{raw: expectedProfile != policybundle.RuntimeCallProfileID, multiOrg: expectedProfile == policybundle.RuntimeMultiOrgProfileID || expectedProfile == policybundle.RuntimeLifecycleProfileID, lifecycle: expectedProfile == policybundle.RuntimeLifecycleProfileID, metadata: metadata, runtime: runtime, owners: map[common.Address]string{}, shared: map[common.Address]*common.Hash{}, work: map[string]map[string]ruleWork{}, associationWork: map[common.Address]uint64{}}
+	n := &Engine{raw: expectedProfile != policybundle.RuntimeCallProfileID, multiOrg: expectedProfile == policybundle.RuntimeMultiOrgProfileID || lifecycle, lifecycle: lifecycle, metadata: metadata, runtime: runtime, owners: map[common.Address]string{}, shared: map[common.Address]*common.Hash{}, work: map[string]map[string]ruleWork{}, associationWork: map[common.Address]uint64{}}
 	for _, org := range snapshot.Organizations() {
 		catalog, ok := snapshot.NativeCatalog(org.ID)
 		if !ok {

@@ -49,6 +49,9 @@ const now = int64(1800000000)
 
 type fixture struct {
 	lifecycle      bool
+	simulation     bool
+	clock          *atomic.Int64
+	producer       *faultProducer
 	linkSigner     bool
 	multiOrg       bool
 	bGroups        []policybundle.Group
@@ -142,7 +145,7 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 		docs["runtime.json"] = encoded(t, policybundle.RuntimeMultiOrgSource{APIVersion: policybundle.RuntimeMultiOrgAPIVersion, Kind: r.Kind, ReadProfile: r.ReadProfile, IntraOrgGrantTracing: r.IntraOrgGrantTracing, SharedInfrastructure: r.SharedInfrastructure, AddressScopes: r.AddressScopes, NodeEvidenceProfile: r.NodeEvidenceProfile, RawSubmissionMode: f.rawMode})
 		f.capability(policybundle.CapabilityMultiOrg)
 	}
-	if f.lifecycle {
+	if f.lifecycle || f.simulation {
 		if f.rawMode == "" {
 			t.Fatal("lifecycle fixture requires an explicit raw mode")
 		}
@@ -153,6 +156,12 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 		for _, cap := range []string{policybundle.CapabilityMultiOrg, policybundle.CapabilityLifecycle, policybundle.CapabilityTemporalCode, policybundle.CapabilityCreationContext, policybundle.CapabilityLifecycleBeneficiary} {
 			f.capability(cap)
 		}
+	}
+	if f.simulation {
+		profileID, profile = policybundle.RuntimeSimulationProfileID, policybundle.RuntimeSimulationProfile("rpc/v1")
+		r := f.runtime
+		docs["runtime.json"] = encoded(t, policybundle.RuntimeSimulationSource{APIVersion: policybundle.RuntimeSimulationAPIVersion, Kind: r.Kind, ReadProfile: r.ReadProfile, IntraOrgGrantTracing: r.IntraOrgGrantTracing, SharedInfrastructure: r.SharedInfrastructure, AddressScopes: r.AddressScopes, NodeEvidenceProfile: policybundle.RuntimeSimulationNodeEvidenceProfileID, RawSubmissionMode: f.rawMode})
+		f.capability(policybundle.CapabilityUnsignedSimulation)
 	}
 	manifest := policybundle.Manifest{APIVersion: policybundle.BundleAPIVersion, Kind: policybundle.BundleKind, Environment: "test", ChainID: "1", EvaluatorVersion: evaluator, Profile: profileID, SourceRevision: "selected", Organizations: []policybundle.Organization{{ID: orgA, Slug: "a", Name: "A"}, {ID: orgB, Slug: "b", Name: "B"}}, RequiredCapabilities: f.capabilities, IdentityCatalog: &policybundle.IdentityCatalogRef{Path: "identity.json", SHA256: policybundle.RawDigest(docs["identity.json"])}, RuntimeCatalog: &policybundle.RuntimeCatalogRef{Path: "runtime.json", SHA256: policybundle.RawDigest(docs["runtime.json"])}}
 	if f.rawMode != "" {
@@ -229,11 +238,13 @@ type node struct {
 	anchors    []string
 	mutate     func(map[string]any)
 	onTrace    func()
+	onNonce    func()
 	onSend     func(string) string
 	code       string
 	codes      map[string]string
 	pre        map[string]any
 	failMethod string
+	nonce      string
 }
 
 func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +321,12 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = "0x"
 	case "eth_getTransactionCount":
 		result = "0x0"
+		if n.nonce != "" {
+			result = n.nonce
+		}
+		if n.onNonce != nil {
+			n.onNonce()
+		}
 	case "eth_sendRawTransaction":
 		var raw string
 		if n.onSend == nil || len(req.Params) != 1 || json.Unmarshal(req.Params[0], &raw) != nil {

@@ -157,6 +157,9 @@ func (c *Client) rpcBounded(ctx context.Context, method string, params []any, ma
 	if err != nil {
 		return nil, failure(NodeFailure)
 	}
+	// Counted RPC POSTs must not be replayed by Go Transport, even when a
+	// bound credential uses an idempotency header. Preserve the original body.
+	req.GetBody = nil
 	req.Header.Set("Content-Type", "application/json")
 	if c.credential.Header != "" {
 		req.Header.Set(c.credential.Header, c.credential.Value)
@@ -202,7 +205,7 @@ func (c *Client) rpcBounded(ctx context.Context, method string, params []any, ma
 }
 
 func (c *Client) AcquireCall(ctx context.Context, call Call, block BlockSelector) (*CallExecution, error) {
-	if c == nil || !c.selected || c.binding.Profile != NodeProfileID || call.wire == nil || call.value == nil || block.selector == "" {
+	if c == nil || !c.selected || c.binding.Profile != NodeProfileID || call.creation || call.signedInput || call.wire == nil || call.value == nil || block.selector == "" {
 		return nil, failure(InvalidBinding)
 	}
 	return c.acquire(ctx, call, block, nil)
@@ -213,6 +216,10 @@ func (c *Client) acquire(ctx context.Context, call Call, block BlockSelector, ov
 }
 
 func (c *Client) acquireProfile(ctx context.Context, call Call, block BlockSelector, overrides map[string]any, lifecycle bool) (*CallExecution, error) {
+	return c.acquireScopedProfile(ctx, call, block, overrides, lifecycle, nil)
+}
+
+func (c *Client) acquireScopedProfile(ctx context.Context, call Call, block BlockSelector, overrides map[string]any, lifecycle bool, scope RootCreationScopeCheck) (*CallExecution, error) {
 	if call.chainID != nil && call.chainID.String() != c.binding.ChainID {
 		return nil, failure(InvalidCall)
 	}
@@ -268,6 +275,35 @@ func (c *Client) acquireProfile(ctx context.Context, call Call, block BlockSelec
 		}
 	}
 	anchor.ChainID, anchor.Profile, anchor.OrganizationID = c.binding.ChainID, c.binding.Profile, c.binding.OrganizationID
+	lookups := 0
+	if call.creation && !call.signedInput {
+		if c.binding.Profile != SimulationCallProfileID || scope == nil || overrides != nil {
+			return nil, failure(InvalidBinding)
+		}
+		if lookups >= c.limits.MaxAnchoredCodeLookups {
+			return nil, failure(EvidenceLimit)
+		}
+		lookups++ // Shared with every later code/count supplement.
+		rawNonce, err := c.rpcBounded(ctx, "eth_getTransactionCount", []any{call.from.Hex(), map[string]any{"blockHash": anchor.Hash.Hex(), "requireCanonical": false}}, min(c.limits.MaxMuxBytes, int64(1024)))
+		if err != nil {
+			return nil, err
+		}
+		var text string
+		if json.Unmarshal(rawNonce, &text) != nil {
+			return nil, failure(InvalidEvidence)
+		}
+		nonce, valid := quantity(text, 64)
+		if !valid {
+			return nil, failure(InvalidEvidence)
+		}
+		call.creationNonce, call.creationNonceKnown = nonce.Uint64(), true
+		if !scope(crypto.CreateAddress(call.from, call.creationNonce)) {
+			return nil, failure(RootScopeDenied)
+		}
+		if ctx.Err() != nil {
+			return nil, failure(NodeFailure)
+		}
+	}
 	config := map[string]any{"tracer": "muxTracer", "tracerConfig": map[string]any{"callTracer": map[string]any{"onlyTopCall": false, "withLog": true}, "prestateTracer": map[string]any{"diffMode": false, "disableCode": false, "disableStorage": true, "includeEmpty": true}}}
 	if overrides != nil {
 		config["stateOverrides"] = overrides
@@ -288,8 +324,15 @@ func (c *Client) acquireProfile(ctx context.Context, call Call, block BlockSelec
 	if lifecycle {
 		profile = executionfacts.GethLifecycleWithLogsProfile()
 		if call.creation {
+			nonce := call.signedNonce
+			if !call.signedInput {
+				if !call.creationNonceKnown {
+					return nil, failure(InvalidEvidence)
+				}
+				nonce = call.creationNonce
+			}
 			expected.Kind, expected.To = executionfacts.Create, executionfacts.Address{}
-			expected.CreatedAddress = executionfacts.Address{Value: crypto.CreateAddress(call.from, call.signedNonce), Known: true}
+			expected.CreatedAddress = executionfacts.Address{Value: crypto.CreateAddress(call.from, nonce), Known: true}
 		}
 	}
 	tree, err := executionfacts.Parse(parts["callTracer"], expected, profile, c.limits.Trace)
@@ -301,7 +344,12 @@ func (c *Client) acquireProfile(ctx context.Context, call Call, block BlockSelec
 		return nil, err
 	}
 	if lifecycle {
-		return c.finishLifecycle(ctx, call, anchor, tree, codes, total, mux)
+		if call.creationNonceKnown {
+			if sender, present := codes[call.from]; present && (!sender.nonceKnown || sender.nonce != call.creationNonce) {
+				return nil, failure(InvalidEvidence)
+			}
+		}
+		return c.finishLifecycle(ctx, call, anchor, tree, codes, total, mux, lookups)
 	}
 	return c.finishEvidence(ctx, call, anchor, tree, codes, total, mux)
 }

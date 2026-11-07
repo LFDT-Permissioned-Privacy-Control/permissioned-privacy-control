@@ -49,6 +49,9 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	}
 	snapshot := f.load(t)
 	clock := func() time.Time { return time.Unix(now, 0) }
+	if f.clock != nil {
+		clock = func() time.Time { return time.Unix(f.clock.Load(), 0) }
+	}
 	if _, err := nativeadmission.NewRaw(snapshot, clock); multiOrg && err == nil {
 		t.Fatal("old native constructor accepted v3")
 	}
@@ -89,11 +92,14 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 		profile = rpcexecution.GuardRetainedProfileID
 	}
 	callProfile := rpcexecution.NodeProfileID
-	if f.lifecycle {
+	if f.lifecycle || f.simulation {
 		callProfile = rpcexecution.LifecycleCallProfileID
 		profile = rpcexecution.LifecycleSignedProfileID
 		if f.rawMode == policybundle.RawSubmissionGuardV1 {
 			profile = rpcexecution.LifecycleGuardProfileID
+		}
+		if f.simulation {
+			callProfile = rpcexecution.SimulationCallProfileID
 		}
 	}
 	financial, err := admission.New(admission.Config{Snapshot: snapshot, Clock: clock, NetworkBinding: network, ExpectedState: admission.ExpectedState{Generation: gen, Coverage: admissionsql.EmptyCoverage()}, Store: store, ExpectedEvidenceProfile: profile, CursorKeyring: admission.CursorKeyring{Active: admission.CursorKey{ID: "test", Key: bytes.Repeat([]byte{8}, 32)}}})
@@ -127,6 +133,9 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 			t.Fatal(err)
 		}
 		producer := &faultProducer{batches: make(chan []byte, 16)}
+		if f.producer != nil {
+			producer = f.producer
+		}
 		server := grpc.NewServer()
 		approvalpb.RegisterApprovalDeliveryServer(server, producer)
 		go server.Serve(listener)
@@ -147,6 +156,15 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 			t.Fatal("old RPC constructor accepted native-v4")
 		}
 		constructor = rpcengine.NewLifecycle
+	}
+	if f.simulation {
+		if _, err := nativeadmission.NewLifecycle(snapshot, clock); err == nil {
+			t.Fatal("old native lifecycle constructor accepted v5 simulation")
+		}
+		if _, err := rpcengine.NewLifecycle(snapshot, options); err == nil {
+			t.Fatal("old lifecycle RPC constructor accepted v5 simulation source")
+		}
+		constructor = rpcengine.NewSimulation
 	}
 	e, err := constructor(snapshot, options)
 	if err != nil {

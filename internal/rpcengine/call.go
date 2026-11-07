@@ -71,6 +71,9 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpce
 	if expectedProfile == policybundle.RuntimeLifecycleProfileID {
 		newNative = nativeadmission.NewLifecycle
 	}
+	if expectedProfile == policybundle.RuntimeSimulationProfileID {
+		newNative = nativeadmission.NewSimulation
+	}
 	native, err := newNative(snapshot, clock)
 	if err != nil {
 		return nil, errors.New("invalid RPC engine configuration")
@@ -178,7 +181,11 @@ func methodAuthorized(snapshot *policybundle.CatalogSnapshot, org *runtimepolicy
 }
 
 func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawRequest []byte) Response {
-	req, requestError := parseRequest(rawRequest)
+	parse := parseRequest
+	if e != nil && e.snapshot.Metadata().Profile == policybundle.RuntimeSimulationProfileID {
+		parse = parseSimulationRequest
+	}
+	req, requestError := parse(rawRequest)
 	if requestError != nil {
 		out := responseError(req.id, requestError.Code, requestError.Message)
 		return out
@@ -190,7 +197,20 @@ func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawReq
 	if err != nil {
 		return denied(req.id)
 	}
-	orgID, ok := selectedOrganization(view, explicitOrg, req.call)
+	var orgID string
+	var ok bool
+	if req.call.Creation() {
+		orgID = explicitOrg
+		if orgID == "" {
+			ids := view.OrgIDs()
+			if len(ids) == 1 {
+				orgID = ids[0]
+			}
+		}
+		_, ok = view.Org(orgID)
+	} else {
+		orgID, ok = selectedOrganization(view, explicitOrg, req.call)
+	}
 	if !ok {
 		return denied(req.id)
 	}
@@ -225,13 +245,35 @@ func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawReq
 	if ctx.Err() != nil || view.RequireLive() != nil {
 		return denied(req.id)
 	}
-	acquire := client.AcquireCall
-	if e.snapshot.Metadata().Profile == policybundle.RuntimeLifecycleProfileID {
-		acquire = client.AcquireLifecycleCall
+	var execution *rpcexecution.CallExecution
+	if e.snapshot.Metadata().Profile == policybundle.RuntimeSimulationProfileID {
+		execution, err = client.AcquireSimulationCall(ctx, req.call, req.block, func(destination common.Address) bool {
+			actual, matched := selectedAddressOrganization(view, explicitOrg, destination)
+			return matched && actual == orgID && ctx.Err() == nil && view.RequireLive() == nil
+		})
+	} else {
+		acquire := client.AcquireCall
+		if e.snapshot.Metadata().Profile == policybundle.RuntimeLifecycleProfileID {
+			acquire = client.AcquireLifecycleCall
+		}
+		execution, err = acquire(ctx, req.call, req.block)
 	}
-	execution, err := acquire(ctx, req.call, req.block)
 	if err != nil {
+		var category *rpcexecution.Error
+		if errors.As(err, &category) && category.Code == rpcexecution.RootScopeDenied {
+			return denied(req.id)
+		}
 		return responseError(req.id, -32002, "execution unavailable")
+	}
+	if req.call.Creation() {
+		creation, known := execution.CreationContext(0)
+		if !known || !creation.Address.Known {
+			return responseError(req.id, -32002, "execution unavailable")
+		}
+		actual, matched := selectedAddressOrganization(view, explicitOrg, creation.Address.Value)
+		if !matched || actual != orgID {
+			return denied(req.id)
+		}
 	}
 	if view.RequireLive() != nil {
 		return denied(req.id)

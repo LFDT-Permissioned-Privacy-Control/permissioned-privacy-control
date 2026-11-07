@@ -75,13 +75,14 @@ func compileSourceSet(ctx context.Context, manifest Manifest, digest Digest, man
 		if RawDigest(raw) != ref.SHA256 {
 			return nil, fail(IntegrityFailure, "", "", "runtimeCatalog", "runtime file digest does not match exact bytes")
 		}
-		ordinary, signed, multiOrg, lifecycle, err := decodeRuntimeSource(raw, options.Limits.MaxJSONDepth)
+		ordinary, signed, multiOrg, lifecycle, simulation, err := decodeRuntimeSource(raw, options.Limits.MaxJSONDepth)
 		if err != nil {
 			return nil, fail(InvalidSchema, "", "", "runtimeCatalog", err.Error())
 		}
 		builder.runtimeSource, builder.runtimeRawSource = ordinary, signed
 		builder.runtimeMultiOrgSource = multiOrg
 		builder.runtimeLifecycleSource = lifecycle
+		builder.runtimeSimulationSource = simulation
 		builder.runtimeRef = ref
 	}
 	if ref := manifest.DisclosureCatalog; ref != nil {

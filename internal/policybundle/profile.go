@@ -17,6 +17,7 @@ const (
 	RuntimeRawSendProfileID        = "catalog-runtime-raw-send/v1"
 	RuntimeMultiOrgProfileID       = "catalog-runtime-multi-org/v1"
 	RuntimeLifecycleProfileID      = "catalog-runtime-lifecycle/v1"
+	RuntimeSimulationProfileID     = "catalog-runtime-simulation/v1"
 	DisclosureProfileID            = "catalog-disclosure/v1"
 	ComplianceProfileID            = "catalog-compliance/v1"
 	BrokerProfileID                = "catalog-broker/v1"
@@ -55,6 +56,7 @@ const (
 	CapabilityTemporalCode         = "inputs.temporal-code/v1"
 	CapabilityCreationContext      = "inputs.creation-context/v1"
 	CapabilityLifecycleBeneficiary = "inputs.lifecycle-beneficiary/v1"
+	CapabilityUnsignedSimulation   = "runtime.unsigned-create-simulation/v1"
 )
 
 // ValidationProfile is opaque: files cannot register validators or enable
@@ -97,8 +99,16 @@ func RuntimeLifecycleProfile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{RuntimeLifecycleProfileID, NativeV4EvaluatorVersion, methodCatalogVersion}
 }
 
+func RuntimeSimulationProfile(methodCatalogVersion string) ValidationProfile {
+	return ValidationProfile{RuntimeSimulationProfileID, NativeV4EvaluatorVersion, methodCatalogVersion}
+}
+
+func lifecycleRuntimeProfile(id string) bool {
+	return id == RuntimeLifecycleProfileID || id == RuntimeSimulationProfileID
+}
+
 func multiOrgRuntimeProfile(id string) bool {
-	return id == RuntimeMultiOrgProfileID || id == RuntimeLifecycleProfileID
+	return id == RuntimeMultiOrgProfileID || lifecycleRuntimeProfile(id)
 }
 
 func runtimeProfile(id string) bool {
@@ -163,7 +173,7 @@ func prepareOptions(options Options) (methodIndex, error) {
 	if p.id == RuntimeMultiOrgProfileID {
 		expectedEvaluator = NativeV3EvaluatorVersion
 	}
-	if p.id == RuntimeLifecycleProfileID {
+	if lifecycleRuntimeProfile(p.id) {
 		expectedEvaluator = NativeV4EvaluatorVersion
 	}
 	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && !runtimeProfile(p.id) && p.id != DisclosureProfileID && p.id != ComplianceProfileID && p.id != BrokerProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || (p.id == DisclosureProfileID && !options.DisclosureLimits.Valid()) || ((p.id == ComplianceProfileID || rawRuntimeProfile(p.id)) && !options.ComplianceLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {

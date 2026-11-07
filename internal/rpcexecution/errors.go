@@ -11,6 +11,7 @@ const (
 	InvalidEvidence     ErrorCode = "invalid_execution_evidence"
 	UnsupportedEvidence ErrorCode = "unsupported_execution_evidence"
 	EvidenceLimit       ErrorCode = "execution_evidence_limit"
+	RootScopeDenied     ErrorCode = "root_scope_denied"
 )
 
 // Error carries only a stable safe category, never node text or credentials.

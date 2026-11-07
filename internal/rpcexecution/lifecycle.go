@@ -20,7 +20,7 @@ const (
 )
 
 func lifecycleProfile(profile string) bool {
-	return profile == LifecycleCallProfileID || profile == LifecycleSignedProfileID || profile == LifecycleGuardProfileID
+	return profile == LifecycleCallProfileID || profile == LifecycleSignedProfileID || profile == LifecycleGuardProfileID || profile == SimulationCallProfileID
 }
 
 func lifecycleLimits(l Limits) bool {
@@ -55,8 +55,10 @@ func (c *Client) AcquireLifecycleSigned(ctx context.Context, tx transactioninput
 	return e, nil
 }
 
-func (c *Client) finishLifecycle(ctx context.Context, call Call, anchor Anchor, tree *executionfacts.Tree, codes map[common.Address]CodeInfo, total int, raw []byte) (*CallExecution, error) {
-	lookups := 0
+func (c *Client) finishLifecycle(ctx context.Context, call Call, anchor Anchor, tree *executionfacts.Tree, codes map[common.Address]CodeInfo, total int, raw []byte, lookups int) (*CallExecution, error) {
+	if lookups < 0 || lookups > c.limits.MaxAnchoredCodeLookups {
+		return nil, failure(EvidenceLimit)
+	}
 	query := func(method string, a common.Address) (json.RawMessage, error) {
 		if lookups >= c.limits.MaxAnchoredCodeLookups {
 			return nil, failure(EvidenceLimit)
@@ -87,6 +89,9 @@ func (c *Client) finishLifecycle(ctx context.Context, call Call, anchor Anchor, 
 		}
 		if delegation(code.code) {
 			return CodeInfo{}, failure(UnsupportedEvidence)
+		}
+		if call.creationNonceKnown && a == call.from && !present {
+			code.nonce, code.nonceKnown = call.creationNonce, true
 		}
 		if needNonce && !code.nonceKnown {
 			if call.signedInput && a == call.from {

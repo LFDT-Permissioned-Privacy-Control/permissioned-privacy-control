@@ -15,19 +15,22 @@ import (
 
 // Call is an owned normalized simulation. Its From is never a verified signer.
 type Call struct {
-	from, to       common.Address
-	fromSupplied   bool
-	input          []byte
-	value, chainID *big.Int
-	wire           map[string]any
-	creation       bool
-	signedInput    bool
-	signedNonce    uint64
+	from, to           common.Address
+	fromSupplied       bool
+	input              []byte
+	value, chainID     *big.Int
+	wire               map[string]any
+	creation           bool
+	signedInput        bool
+	signedNonce        uint64
+	creationNonce      uint64
+	creationNonceKnown bool
 }
 
 func (c Call) From() common.Address { return c.from }
 func (c Call) To() common.Address   { return c.to }
 func (c Call) FromSupplied() bool   { return c.fromSupplied }
+func (c Call) Creation() bool       { return c.creation }
 func (c Call) Input() []byte        { return bytes.Clone(c.input) }
 func (c Call) Value() *big.Int {
 	if c.value == nil {
@@ -104,6 +107,16 @@ func quantity(s string, bits int) (*big.Int, bool) {
 // NormalizeCall rejects ambiguous aliases, overrides and unsupported envelopes.
 // The complete supported call object is retained for the node's execution.
 func NormalizeCall(raw []byte) (Call, error) {
+	return normalizeCall(raw, false)
+}
+
+// NormalizeSimulationCall permits only absent or null to as unsigned creation.
+// Explicit zero remains a rejected CALL. No signer or account nonce is proved.
+func NormalizeSimulationCall(raw []byte) (Call, error) {
+	return normalizeCall(raw, true)
+}
+
+func normalizeCall(raw []byte, simulation bool) (Call, error) {
 	bad := func() (Call, error) { return Call{}, failure(InvalidCall) }
 	if len(raw) > MaxCallBytes {
 		return bad()
@@ -121,6 +134,10 @@ func NormalizeCall(raw []byte) (Call, error) {
 		s, isString := value.(string)
 		switch name {
 		case "from", "to":
+			if simulation && name == "to" && value == nil {
+				c.wire[name] = nil
+				continue
+			}
 			if !isString {
 				return bad()
 			}
@@ -205,7 +222,10 @@ func NormalizeCall(raw []byte) (Call, error) {
 			return bad()
 		}
 	}
-	if c.to == (common.Address{}) {
+	to, toPresent := m["to"]
+	if simulation && (!toPresent || to == nil) {
+		c.creation = true
+	} else if c.to == (common.Address{}) {
 		return bad()
 	}
 	input, hasInput := c.wire["input"].(string)

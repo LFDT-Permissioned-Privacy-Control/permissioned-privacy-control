@@ -129,6 +129,14 @@ func NewLifecycle(snapshot *policybundle.CatalogSnapshot, options RawOptions) (*
 	return newRaw(snapshot, options, policybundle.RuntimeLifecycleProfileID)
 }
 
+func NewSimulation(snapshot *policybundle.CatalogSnapshot, options RawOptions) (*Engine, error) {
+	return newRaw(snapshot, options, policybundle.RuntimeSimulationProfileID)
+}
+
+func lifecycleProfile(id string) bool {
+	return id == policybundle.RuntimeLifecycleProfileID || id == policybundle.RuntimeSimulationProfileID
+}
+
 func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expectedProfile string) (*Engine, error) {
 	bad := func() (*Engine, error) { return nil, errors.New("invalid raw RPC configuration") }
 	if snapshot == nil || options.Admission == nil || options.Wallets == nil || options.Clock == nil || !options.WalletState.Valid() {
@@ -142,7 +150,8 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 	_, rawSource := runtime.RawSource()
 	_, multiOrgSource := runtime.MultiOrgSource()
 	_, lifecycleSource := runtime.LifecycleSource()
-	if (expectedProfile == policybundle.RuntimeRawSendProfileID && !rawSource) || (expectedProfile == policybundle.RuntimeMultiOrgProfileID && !multiOrgSource) || (expectedProfile == policybundle.RuntimeLifecycleProfileID && !lifecycleSource) {
+	_, simulationSource := runtime.SimulationSource()
+	if (expectedProfile == policybundle.RuntimeRawSendProfileID && !rawSource) || (expectedProfile == policybundle.RuntimeMultiOrgProfileID && !multiOrgSource) || (expectedProfile == policybundle.RuntimeLifecycleProfileID && !lifecycleSource) || (expectedProfile == policybundle.RuntimeSimulationProfileID && !simulationSource) {
 		return bad()
 	}
 	compliance, ok := snapshot.Compliance()
@@ -154,7 +163,7 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 	if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 		profile = rpcexecution.GuardRetainedProfileID
 	}
-	if lifecycleSource {
+	if lifecycleSource || simulationSource {
 		profile = rpcexecution.LifecycleSignedProfileID
 		if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 			profile = rpcexecution.LifecycleGuardProfileID
@@ -231,7 +240,7 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 			binding := rawBinding{client: prepared[org][ref]}
 			if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 				newPair := guardbridge.NewDeliveryPair
-				if lifecycleSource {
+				if lifecycleSource || simulationSource {
 					newPair = guardbridge.NewLifecycleDeliveryPair
 				}
 				pair, err := newPair(n.Binding, ref, n.Transport, n.HashMode, n.Limits, deliveryOptions(n))
@@ -308,7 +317,7 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 	}
 	to, hasTo := tx.Destination()
 	if tx.Creation() || !hasTo {
-		if !tx.Creation() || e.snapshot.Metadata().Profile != policybundle.RuntimeLifecycleProfileID {
+		if !tx.Creation() || !lifecycleProfile(e.snapshot.Metadata().Profile) {
 			return responseError(req.id, -32002, "unavailable")
 		}
 		to = crypto.CreateAddress(tx.Signer(), tx.Nonce())
@@ -357,7 +366,7 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 	var prepared *guardbridge.QualifiedPrepared
 	if binding.pair != nil {
 		acquire := binding.pair.AcquireSigned
-		if e.snapshot.Metadata().Profile == policybundle.RuntimeLifecycleProfileID {
+		if lifecycleProfile(e.snapshot.Metadata().Profile) {
 			acquire = binding.pair.AcquireLifecycleSigned
 		}
 		prepared, err = acquire(ctx, tx)
@@ -366,7 +375,7 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 		}
 	} else {
 		acquire := binding.client.AcquireSigned
-		if e.snapshot.Metadata().Profile == policybundle.RuntimeLifecycleProfileID {
+		if lifecycleProfile(e.snapshot.Metadata().Profile) {
 			acquire = binding.client.AcquireLifecycleSigned
 		}
 		execution, err = acquire(ctx, tx)

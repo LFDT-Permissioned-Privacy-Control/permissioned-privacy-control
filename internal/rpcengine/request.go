@@ -18,6 +18,14 @@ type request struct {
 }
 
 func parseRequest(raw []byte) (request, *RPCError) {
+	return parseRequestMode(raw, false)
+}
+
+func parseSimulationRequest(raw []byte) (request, *RPCError) {
+	return parseRequestMode(raw, true)
+}
+
+func parseRequestMode(raw []byte, simulation bool) (request, *RPCError) {
 	bad := func(code int, message string) (request, *RPCError) {
 		return request{}, &RPCError{Code: code, Message: message}
 	}
@@ -66,7 +74,11 @@ func parseRequest(raw []byte) (request, *RPCError) {
 		return request{id: id}, &RPCError{Code: -32602, Message: "invalid params"}
 	}
 	callRaw, _ := json.Marshal(params[0])
-	call, err := rpcexecution.NormalizeCall(callRaw)
+	normalize := rpcexecution.NormalizeCall
+	if simulation {
+		normalize = rpcexecution.NormalizeSimulationCall
+	}
+	call, err := normalize(callRaw)
 	if err != nil {
 		return request{id: id}, &RPCError{Code: -32602, Message: "invalid params"}
 	}

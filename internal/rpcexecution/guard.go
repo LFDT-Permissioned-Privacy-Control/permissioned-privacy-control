@@ -103,7 +103,7 @@ func (c *Client) qualifyGuard(ctx context.Context, tx transactioninput.VerifiedT
 	raw = append(raw, '}')
 	var execution *CallExecution
 	if lifecycle {
-		execution, err = c.finishLifecycle(ctx, call, anchor, tree, codes, total, raw)
+		execution, err = c.finishLifecycle(ctx, call, anchor, tree, codes, total, raw, 0)
 	} else {
 		execution, err = c.finishEvidence(ctx, call, anchor, tree, codes, total, raw)
 	}
