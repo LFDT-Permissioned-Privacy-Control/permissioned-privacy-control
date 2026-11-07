@@ -77,6 +77,9 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpce
 	if expectedProfile == policybundle.RuntimeCreationIntentProfileID {
 		newNative = nativeadmission.NewCreationIntents
 	}
+	if expectedProfile == policybundle.RuntimeCreationObservedProfileID {
+		newNative = nativeadmission.NewCreationObserved
+	}
 	native, err := newNative(snapshot, clock)
 	if err != nil {
 		return nil, errors.New("invalid RPC engine configuration")

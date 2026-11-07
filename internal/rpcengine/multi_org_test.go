@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -16,6 +17,8 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"privacy-proxy/internal/admission"
+	"privacy-proxy/internal/creationcapture"
+	"privacy-proxy/internal/creationfacts"
 	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/nodeapproval"
 	"privacy-proxy/internal/nodeapproval/approvalpb"
@@ -44,7 +47,7 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	if f.rawMode == "" {
 		f.rawMode = policybundle.RawSubmissionOPSPreflight
 	}
-	if !slices.Contains(f.groups[0].AllowedMethods, "eth_sendTransaction") {
+	if !f.readOnly && !slices.Contains(f.groups[0].AllowedMethods, "eth_sendTransaction") {
 		f.groups[0].AllowedMethods = append(slices.Clone(f.groups[0].AllowedMethods), "eth_sendTransaction")
 	}
 	if f.creationAttribution != nil {
@@ -57,6 +60,11 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 				t.Fatal(err)
 			}
 		}
+		if f.creationObserved && version != 3 {
+			if err := admissionsql.MigrateCreationObserver(t.Context(), d.ownerDSN, "raw_app", "raw_reader", "raw_retention", "raw_observer", "raw_facts"); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	snapshot := f.load(t)
 	clock := func() time.Time { return time.Unix(now, 0) }
@@ -66,7 +74,12 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	if _, err := nativeadmission.NewRaw(snapshot, clock); multiOrg && err == nil {
 		t.Fatal("old native constructor accepted v3")
 	}
-	binding := walletops.ServiceBinding{ServiceOrigin: "https://ops.test", Environment: "test", ChainID: "1", GenesisHash: nodeHash, DeploymentID: "multi-" + uuid.NewString()}
+	genesisHash := nodeHash
+	if f.creationObserved {
+		n.enableCaptureHeaders()
+		genesisHash = n.genesisHeader.Hash().Hex()
+	}
+	binding := walletops.ServiceBinding{ServiceOrigin: "https://ops.test", Environment: "test", ChainID: "1", GenesisHash: genesisHash, DeploymentID: "multi-" + uuid.NewString()}
 	network := admission.NetworkBinding{Environment: binding.Environment, ChainID: binding.ChainID, GenesisHash: binding.GenesisHash, DeploymentID: binding.DeploymentID}
 	gen, walletGen := uuid.NewString(), uuid.NewString()
 	if err := admissionsql.BootstrapEmpty(t.Context(), d.ownerDSN, network, gen); err != nil {
@@ -128,11 +141,53 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	if f.creationAttribution != nil {
 		newFinancial = admission.NewCreationIntents
 	}
+	if f.creationObserved {
+		newFinancial = admission.NewCreationObserved
+	}
+	nodeServer := httptest.NewServer(n)
+	t.Cleanup(nodeServer.Close)
+	var captureGate *creationcapture.Gate
+	if f.creationObserved {
+		key, _ := network.Key()
+		state := creationfacts.State{Generation: gen, Coverage: creationfacts.Digest(admissionsql.EmptyCoverage())}
+		net := creationfacts.Network{Key: creationfacts.Digest(key), Environment: network.Environment, ChainID: network.ChainID, Genesis: common.HexToHash(network.GenesisHash), Deployment: network.DeploymentID}
+		ref := creationfacts.Source{Network: net, URL: nodeServer.URL, Profile: "reth-prague-included-creations/v1", PragueStart: 10, PragueEnd: 20}
+		sources := []creationfacts.Source{}
+		if !f.readOnly {
+			source := ref
+			source.Organization = orgA
+			source.Profile = profile
+			sources = append(sources, source)
+		}
+		captureGate, err = creationcapture.New(creationcapture.Options{Network: net, State: state, Reference: ref, Sources: sources, CaughtUpAssertion: creationfacts.CaughtUpAssertion, Store: store})
+		if err != nil {
+			t.Fatal(err)
+		}
+		floor := creationfacts.Header{Number: 1, Hash: n.anchorHeader.Hash(), Parent: n.genesisHeader.Hash(), Timestamp: 10}
+		if err := admissionsql.BootstrapCreationObserver(t.Context(), d.ownerDSN, network, admission.ExpectedState{Generation: gen, Coverage: admissionsql.EmptyCoverage()}, captureGate.Metadata(), floor); err != nil {
+			t.Fatal(err)
+		}
+		u, _ := url.Parse(d.ownerDSN)
+		u.User = url.UserPassword("raw_observer", "raw-test-only")
+		worker, err := admissionsql.OpenObserver(t.Context(), u.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer worker.Close()
+		m := captureGate.Metadata()
+		lease, err := worker.AcquireObserverLease(t.Context(), net.Key, state, uuid.NewString(), m.SourceSet, m.Reference)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := worker.PublishObserverHeaders(t.Context(), creationfacts.HeaderUpdate{Before: lease, Common: floor, Tip: floor}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var financialStore admission.Store = store
 	if len(creationOptions) > 0 && creationOptions[0].wrap != nil {
 		financialStore = creationOptions[0].wrap(store)
 	}
-	financial, err := newFinancial(admission.Config{Snapshot: snapshot, Clock: clock, NetworkBinding: network, ExpectedState: admission.ExpectedState{Generation: gen, Coverage: admissionsql.EmptyCoverage()}, Store: financialStore, ExpectedEvidenceProfile: profile, CursorKeyring: admission.CursorKeyring{Active: admission.CursorKey{ID: "test", Key: bytes.Repeat([]byte{8}, 32)}}})
+	financial, err := newFinancial(admission.Config{Snapshot: snapshot, Clock: clock, NetworkBinding: network, ExpectedState: admission.ExpectedState{Generation: gen, Coverage: admissionsql.EmptyCoverage()}, Store: financialStore, ExpectedEvidenceProfile: profile, CursorKeyring: admission.CursorKeyring{Active: admission.CursorKey{ID: "test", Key: bytes.Repeat([]byte{8}, 32)}}, CaptureGate: captureGate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,8 +201,6 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 			return tx.Hash().Hex()
 		}
 	}
-	nodeServer := httptest.NewServer(n)
-	t.Cleanup(nodeServer.Close)
 	clients := map[string]*rpcexecution.Client{}
 	for _, org := range []string{orgA, orgB} {
 		client, err := rpcexecution.NewClient(nodeServer.Client().Transport, rpcexecution.NodeBinding{OrganizationID: org, URL: nodeServer.URL, ChainID: "1", Profile: callProfile, PragueStartInclusive: 10, PragueEndExclusive: 20, AllowUnauthenticated: true}, rpcexecution.DefaultLimits())
@@ -173,7 +226,11 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 		rawNode.HashMode, rawNode.Seed, rawNode.KeyID, rawNode.MaxBatch = nodeapproval.HashCalls, bytes.Repeat([]byte{7}, 32), "pair-key", 32
 		rawNode.Delivery = nodeapproval.DeliveryOptions{Targets: []string{listener.Addr().String()}, Timeout: time.Second, MaxInFlight: 1, RetainMax: 32}
 	}
-	options := rpcengine.RawOptions{CallClients: clients, RawNodes: map[string]rpcengine.RawNodeOptions{orgA: rawNode}, Wallets: resolver, WalletBinding: binding, WalletState: walletState, Admission: financial, Clock: clock}
+	rawNodes := map[string]rpcengine.RawNodeOptions{orgA: rawNode}
+	if f.readOnly {
+		rawNodes = map[string]rpcengine.RawNodeOptions{}
+	}
+	options := rpcengine.RawOptions{CallClients: clients, RawNodes: rawNodes, Wallets: resolver, WalletBinding: binding, WalletState: walletState, Admission: financial, Clock: clock, CaptureGate: captureGate}
 	constructor := rpcengine.NewRaw
 	if multiOrg {
 		if _, err := rpcengine.NewRaw(snapshot, options); err == nil {
@@ -198,6 +255,9 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	}
 	if f.creationAttribution != nil {
 		constructor = rpcengine.NewCreationIntents
+	}
+	if f.creationObserved {
+		constructor = rpcengine.NewCreationObserved
 	}
 	e, err := constructor(snapshot, options)
 	if err != nil {

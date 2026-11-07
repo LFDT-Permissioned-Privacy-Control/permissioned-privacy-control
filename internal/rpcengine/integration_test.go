@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/golang-jwt/jwt/v5"
 
 	"privacy-proxy/internal/compliancepolicy"
@@ -48,6 +50,8 @@ const nodeHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const now = int64(1800000000)
 
 type fixture struct {
+	creationObserved    bool
+	readOnly            bool
 	lifecycle           bool
 	creationAttribution *policybundle.CreationAttribution
 	simulation          bool
@@ -170,6 +174,12 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 		docs["runtime.json"] = encoded(t, policybundle.RuntimeCreationIntentSource{APIVersion: policybundle.RuntimeCreationIntentAPIVersion, Kind: r.Kind, ReadProfile: r.ReadProfile, IntraOrgGrantTracing: r.IntraOrgGrantTracing, SharedInfrastructure: r.SharedInfrastructure, AddressScopes: r.AddressScopes, NodeEvidenceProfile: policybundle.RuntimeSimulationNodeEvidenceProfileID, RawSubmissionMode: f.rawMode, CreationAttribution: *f.creationAttribution})
 		f.capability(policybundle.CapabilityCreationIntents)
 	}
+	if f.creationObserved {
+		profileID, profile = policybundle.RuntimeCreationObservedProfileID, policybundle.RuntimeCreationObservedProfile("rpc/v1")
+		r := f.runtime
+		docs["runtime.json"] = encoded(t, policybundle.RuntimeCreationObservedSource{APIVersion: policybundle.RuntimeCreationObservedAPIVersion, Kind: r.Kind, ReadProfile: r.ReadProfile, IntraOrgGrantTracing: r.IntraOrgGrantTracing, SharedInfrastructure: r.SharedInfrastructure, AddressScopes: r.AddressScopes, NodeEvidenceProfile: policybundle.RuntimeSimulationNodeEvidenceProfileID, RawSubmissionMode: f.rawMode, CreationAttribution: *f.creationAttribution, CaptureReadinessProfile: "same-node-caught-up/v1"})
+		f.capability(policybundle.CapabilityCreationCoverage)
+	}
 	manifest := policybundle.Manifest{APIVersion: policybundle.BundleAPIVersion, Kind: policybundle.BundleKind, Environment: "test", ChainID: "1", EvaluatorVersion: evaluator, Profile: profileID, SourceRevision: "selected", Organizations: []policybundle.Organization{{ID: orgA, Slug: "a", Name: "A"}, {ID: orgB, Slug: "b", Name: "B"}}, RequiredCapabilities: f.capabilities, IdentityCatalog: &policybundle.IdentityCatalogRef{Path: "identity.json", SHA256: policybundle.RawDigest(docs["identity.json"])}, RuntimeCatalog: &policybundle.RuntimeCatalogRef{Path: "runtime.json", SHA256: policybundle.RawDigest(docs["runtime.json"])}}
 	if f.rawMode != "" {
 		manifest.ComplianceCatalog = &policybundle.ComplianceCatalogRef{Path: "compliance.json", SHA256: policybundle.RawDigest(docs["compliance.json"])}
@@ -245,18 +255,28 @@ func tokenSubject(t *testing.T, snapshot *policybundle.CatalogSnapshot, roles []
 }
 
 type node struct {
-	mu         sync.Mutex
-	methods    []string
-	anchors    []string
-	mutate     func(map[string]any)
-	onTrace    func()
-	onNonce    func()
-	onSend     func(string) string
-	code       string
-	codes      map[string]string
-	pre        map[string]any
-	failMethod string
-	nonce      string
+	mu                          sync.Mutex
+	methods                     []string
+	anchors                     []string
+	mutate                      func(map[string]any)
+	onTrace                     func()
+	onNonce                     func()
+	onSend                      func(string) string
+	code                        string
+	codes                       map[string]string
+	pre                         map[string]any
+	failMethod                  string
+	nonce                       string
+	captureMined                bool
+	captureUnavailable          bool
+	genesisHeader, anchorHeader *types.Header
+}
+
+// Only the new covered-capture fixture uses complete hash-qualified headers;
+// earlier partial-acquisition fixtures retain their exact legacy wire shape.
+func (n *node) enableCaptureHeaders() {
+	n.genesisHeader = &types.Header{Number: big.NewInt(0), Difficulty: big.NewInt(0), GasLimit: 30000000, Time: 9, BaseFee: big.NewInt(1)}
+	n.anchorHeader = &types.Header{Number: big.NewInt(1), Difficulty: big.NewInt(0), GasLimit: 30000000, Time: 10, BaseFee: big.NewInt(1), ParentHash: n.genesisHeader.Hash()}
 }
 
 func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -282,6 +302,37 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = "0x1"
 	case "eth_getBlockByNumber", "eth_getBlockByHash", "eth_getHeaderByNumber":
 		result = map[string]any{"hash": nodeHash, "number": "0x1", "timestamp": "0xa"}
+		if n.anchorHeader != nil {
+			result = n.anchorHeader
+		}
+		if req.Method == "eth_getHeaderByNumber" {
+			if n.captureUnavailable {
+				w.WriteHeader(503)
+				return
+			}
+			var selector string
+			_ = json.Unmarshal(req.Params[0], &selector)
+			number := "0x1"
+			if selector == "0x0" {
+				number = "0x0"
+			}
+			if n.anchorHeader != nil {
+				result = n.anchorHeader
+				if selector == "0x0" {
+					result = n.genesisHeader
+				}
+			} else {
+				result = map[string]any{"hash": nodeHash, "number": number, "timestamp": "0xa", "parentHash": nodeHash}
+			}
+		}
+	case "eth_syncing":
+		result = false
+	case "eth_getTransactionReceipt":
+		if n.captureMined {
+			var hash string
+			_ = json.Unmarshal(req.Params[0], &hash)
+			result = map[string]any{"transactionHash": hash, "blockHash": nodeHash, "blockNumber": "0x2", "transactionIndex": "0x0", "status": "0x1"}
+		}
 	case "debug_traceCall":
 		var traceConfig map[string]any
 		json.Unmarshal(req.Params[2], &traceConfig)

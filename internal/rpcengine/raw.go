@@ -13,7 +13,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/ethereum/go-ethereum/common"
 	"privacy-proxy/internal/admission"
+	"privacy-proxy/internal/creationcapture"
+	"privacy-proxy/internal/creationfacts"
 	"privacy-proxy/internal/guardbridge"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/nativeadmission"
@@ -63,6 +66,7 @@ type RawOptions struct {
 	WalletBinding walletops.ServiceBinding
 	WalletState   walletops.ExpectedState
 	Admission     *admission.Service
+	CaptureGate   *creationcapture.Gate
 	Clock         identity.Clock
 }
 
@@ -72,8 +76,10 @@ type rawBinding struct {
 }
 type rawEngine struct {
 	readProfile string
+	sendEnabled bool
 	wallets     *walletadapter.Resolver
 	admission   *admission.Service
+	captureGate *creationcapture.Gate
 	bindings    map[string]map[string]rawBinding
 	once        sync.Once
 	closed      atomic.Bool
@@ -138,8 +144,12 @@ func NewCreationIntents(snapshot *policybundle.CatalogSnapshot, options RawOptio
 	return newRaw(snapshot, options, policybundle.RuntimeCreationIntentProfileID)
 }
 
+func NewCreationObserved(snapshot *policybundle.CatalogSnapshot, options RawOptions) (*Engine, error) {
+	return newRaw(snapshot, options, policybundle.RuntimeCreationObservedProfileID)
+}
+
 func simulationProfile(id string) bool {
-	return id == policybundle.RuntimeSimulationProfileID || id == policybundle.RuntimeCreationIntentProfileID
+	return id == policybundle.RuntimeSimulationProfileID || id == policybundle.RuntimeCreationIntentProfileID || id == policybundle.RuntimeCreationObservedProfileID
 }
 
 func lifecycleProfile(id string) bool {
@@ -161,7 +171,8 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 	_, lifecycleSource := runtime.LifecycleSource()
 	_, simulationSource := runtime.SimulationSource()
 	_, creationIntentSource := runtime.CreationIntentSource()
-	if (expectedProfile == policybundle.RuntimeRawSendProfileID && !rawSource) || (expectedProfile == policybundle.RuntimeMultiOrgProfileID && !multiOrgSource) || (expectedProfile == policybundle.RuntimeLifecycleProfileID && !lifecycleSource) || (expectedProfile == policybundle.RuntimeSimulationProfileID && !simulationSource) || (expectedProfile == policybundle.RuntimeCreationIntentProfileID && !creationIntentSource) {
+	_, creationObservedSource := runtime.CreationObservedSource()
+	if (expectedProfile == policybundle.RuntimeRawSendProfileID && !rawSource) || (expectedProfile == policybundle.RuntimeMultiOrgProfileID && !multiOrgSource) || (expectedProfile == policybundle.RuntimeLifecycleProfileID && !lifecycleSource) || (expectedProfile == policybundle.RuntimeSimulationProfileID && !simulationSource) || (expectedProfile == policybundle.RuntimeCreationIntentProfileID && !creationIntentSource) || (expectedProfile == policybundle.RuntimeCreationObservedProfileID && !creationObservedSource) {
 		return bad()
 	}
 	compliance, ok := snapshot.Compliance()
@@ -169,14 +180,14 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 		return bad()
 	}
 	financial := options.Admission.Metadata()
-	if financial.CreationIntents != creationIntentSource {
+	if financial.CreationIntents != (creationIntentSource || creationObservedSource) || financial.CreationObserved != creationObservedSource || (creationObservedSource && (options.CaptureGate == nil || options.CaptureGate != options.Admission.CaptureGate())) || (!creationObservedSource && options.CaptureGate != nil) {
 		return bad()
 	}
 	profile := rpcexecution.SignedCallProfileID
 	if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 		profile = rpcexecution.GuardRetainedProfileID
 	}
-	if lifecycleSource || simulationSource || creationIntentSource {
+	if lifecycleSource || simulationSource || creationIntentSource || creationObservedSource {
 		profile = rpcexecution.LifecycleSignedProfileID
 		if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 			profile = rpcexecution.LifecycleGuardProfileID
@@ -198,6 +209,8 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 		return bad()
 	}
 	prepared := map[string]map[string]*rpcexecution.Client{}
+	var captureSources []creationfacts.Source
+	captureNetwork := creationfacts.Network{Key: creationfacts.Digest(key), Environment: network.Environment, ChainID: network.ChainID, Genesis: common.HexToHash(network.GenesisHash), Deployment: network.DeploymentID}
 	budget := rawBudget{}
 	for org, needed := range refs {
 		if len(needed) < 1 || len(needed) > MaxRawRefsPerOrg {
@@ -226,6 +239,13 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 				return bad()
 			}
 			prepared[org][ref] = selected
+			if creationObservedSource {
+				source, err := selected.CaptureSource(captureNetwork)
+				if err != nil {
+					return bad()
+				}
+				captureSources = append(captureSources, source)
+			}
 		}
 		if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 			if (n.HashMode != nodeapproval.HashStrict && n.HashMode != nodeapproval.HashCalls) || nodeapproval.ValidateBoundDelivery(deliveryOptions(n)) != nil {
@@ -240,11 +260,18 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 			return bad()
 		}
 	}
+	if creationObservedSource {
+		set, err := creationfacts.SourceSet(captureSources)
+		gm := options.CaptureGate.Metadata()
+		if err != nil || set != gm.SourceSet || gm.Network != captureNetwork {
+			return bad()
+		}
+	}
 	e, err := newEngine(snapshot, options.CallClients, options.Wallets, options.Clock, expectedProfile)
 	if err != nil {
 		return nil, err
 	}
-	e.raw = &rawEngine{readProfile: runtime.ReadProfile(), wallets: options.Wallets, admission: options.Admission, bindings: map[string]map[string]rawBinding{}}
+	e.raw = &rawEngine{readProfile: runtime.ReadProfile(), sendEnabled: len(refs) > 0, wallets: options.Wallets, admission: options.Admission, captureGate: options.CaptureGate, bindings: map[string]map[string]rawBinding{}}
 	// Source bindings and aggregate budgets are checked before producer startup.
 	for org, needed := range refs {
 		n := options.RawNodes[org]
@@ -253,7 +280,7 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 			binding := rawBinding{client: prepared[org][ref]}
 			if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 				newPair := guardbridge.NewDeliveryPair
-				if lifecycleSource || simulationSource || creationIntentSource {
+				if lifecycleSource || simulationSource || creationIntentSource || creationObservedSource {
 					newPair = guardbridge.NewLifecycleDeliveryPair
 				}
 				pair, err := newPair(n.Binding, ref, n.Transport, n.HashMode, n.Limits, deliveryOptions(n))
@@ -309,6 +336,11 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 	}
 	if e == nil || e.raw == nil {
 		return responseError(req.id, -32601, "method not found")
+	}
+	// An explicitly empty owned ingress set is read/simulation-only. Reject
+	// every send independently of whether its trace would contain creation.
+	if e.raw.captureGate != nil && !e.raw.sendEnabled {
+		return denied(req.id)
 	}
 	if e.raw.readProfile == "strict" && req.present {
 		return responseError(req.id, -32602, "visibleTo is not supported on this network")
@@ -397,7 +429,7 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 		return responseError(req.id, -32002, "unavailable")
 	}
 	var approvedCheck *nativeadmission.ApprovedSignedCheck
-	if e.snapshot.Metadata().Profile == policybundle.RuntimeCreationIntentProfileID {
+	if e.snapshot.Metadata().Profile == policybundle.RuntimeCreationIntentProfileID || e.snapshot.Metadata().Profile == policybundle.RuntimeCreationObservedProfileID {
 		approvedCheck, err = e.native.CheckSignedWithCreationPlan(ctx, view, orgID, execution, wallet)
 		if err != nil {
 			return denied(req.id)
@@ -412,6 +444,31 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 		}
 	}
 	input := admission.TrustedRawInput{ApprovedCheck: approvedCheck, View: view, OrganizationID: orgID, Transaction: tx, Execution: execution, WalletSnapshot: wallet, Audience: actors}
+	if e.raw.captureGate != nil {
+		need, err := e.raw.admission.NeedsCreationCapture(ctx, input)
+		if err != nil {
+			return rawFailure(req.id, err)
+		}
+		switch need {
+		case admission.NeedCapture:
+			request := creationcapture.CaptureRequest{Approved: approvedCheck, View: view, Organization: orgID, Transaction: tx, Execution: execution, Wallets: wallet}
+			network := e.raw.captureGate.Metadata().Network
+			probe := func(ctx context.Context, cp creationfacts.Checkpoint) (*rpcexecution.CaptureEvidence, error) {
+				if binding.pair != nil {
+					return binding.pair.ProbeCreationCapture(ctx, tx, prepared, cp, network)
+				}
+				return binding.client.ProbeCreationCapture(ctx, tx, execution, cp, network)
+			}
+			captured, err := e.raw.captureGate.Capture(ctx, request, probe)
+			if err != nil {
+				return responseError(req.id, -32002, "unavailable")
+			}
+			input.CaptureResult = captured
+		case admission.NoEligible:
+		default:
+			return responseError(req.id, -32002, "unavailable")
+		}
+	}
 	result, err := e.raw.admission.CheckAndRecordRaw(ctx, input)
 	if err != nil {
 		return rawFailure(req.id, err)

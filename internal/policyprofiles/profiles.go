@@ -30,6 +30,7 @@ func Supported() []Description {
 		{ID: policybundle.RuntimeMultiOrgProfileID, EvaluatorVersion: policybundle.NativeV3EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "multi-org eth_call and raw CALL integration; not a complete runtime"},
 		{ID: policybundle.RuntimeLifecycleProfileID, EvaluatorVersion: policybundle.NativeV4EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "lifecycle eth_call and signed deployment integration; not a complete runtime"},
 		{ID: policybundle.RuntimeSimulationProfileID, EvaluatorVersion: policybundle.NativeV4EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "unsigned deployment simulation and lifecycle signed integration; not a complete runtime"},
+		{ID: policybundle.RuntimeCreationObservedProfileID, EvaluatorVersion: policybundle.NativeV4EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "covered creation capture; no ownership-serving consumer"},
 		{ID: policybundle.RuntimeCreationIntentProfileID, EvaluatorVersion: policybundle.NativeV4EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "atomic creation intent recording; no observed ownership or pending authority"},
 		{ID: policybundle.DisclosureProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 		{ID: policybundle.ComplianceProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
@@ -88,6 +89,11 @@ func Options(id string) (policybundle.Options, Description, error) {
 		options.IdentityLimits = identity.DefaultLimits()
 		options.ComplianceLimits = compliancepolicy.DefaultLimits()
 		evaluator = policybundle.NativeV4EvaluatorVersion
+	case policybundle.RuntimeCreationObservedProfileID:
+		options.Profile = policybundle.RuntimeCreationObservedProfile(seed.Version)
+		options.IdentityLimits = identity.DefaultLimits()
+		options.ComplianceLimits = compliancepolicy.DefaultLimits()
+		evaluator = policybundle.NativeV4EvaluatorVersion
 	case policybundle.RuntimeCreationIntentProfileID:
 		options.Profile = policybundle.RuntimeCreationIntentProfile(seed.Version)
 		options.IdentityLimits = identity.DefaultLimits()
@@ -118,6 +124,9 @@ func Options(id string) (policybundle.Options, Description, error) {
 	}
 	if id == policybundle.RuntimeCreationIntentProfileID {
 		description.IntegrationScope = "atomic creation intent recording; no observed ownership or pending authority"
+	}
+	if id == policybundle.RuntimeCreationObservedProfileID {
+		description.IntegrationScope = "covered creation capture; no ownership-serving consumer"
 	}
 	return options, description, nil
 }

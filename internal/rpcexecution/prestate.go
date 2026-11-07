@@ -59,6 +59,9 @@ func (c CodeInfo) CreationRecordIndex() (int, bool) {
 func (c CodeInfo) FreshnessNonce() (uint64, bool) { return c.nonce, c.nonceKnown }
 
 func closedRawObject(raw []byte, maxFields int) (map[string]json.RawMessage, error) {
+	return nullableRawObject(raw, maxFields, nil)
+}
+func nullableRawObject(raw []byte, maxFields int, nullable map[string]bool) (map[string]json.RawMessage, error) {
 	d := json.NewDecoder(bytes.NewReader(raw))
 	opening, err := d.Token()
 	if err != nil || opening != json.Delim('{') {
@@ -81,7 +84,7 @@ func closedRawObject(raw []byte, maxFields int) (map[string]json.RawMessage, err
 			return nil, failure(InvalidEvidence)
 		}
 		var value json.RawMessage
-		if err = d.Decode(&value); err != nil || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		if err = d.Decode(&value); err != nil || (bytes.Equal(bytes.TrimSpace(value), []byte("null")) && !nullable[name]) {
 			return nil, failure(InvalidEvidence)
 		}
 		m[name] = value

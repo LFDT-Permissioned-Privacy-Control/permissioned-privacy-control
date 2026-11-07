@@ -46,6 +46,8 @@ func InstalledSchema(ctx context.Context, dsn string) (SchemaInfo, error) {
 		out = SchemaInfo{Version: version, SourceChecksum: SchemaChecksum()}
 		if version == 2 {
 			out.SourceChecksum = CreationSchemaChecksum()
+		} else if version == 3 {
+			out.SourceChecksum = ObserverSchemaChecksum()
 		}
 		return nil
 	})
@@ -87,6 +89,13 @@ func Migrate(ctx context.Context, dsn, appRole, readerRole, retentionRole string
 		}
 		if err := checkSchema(ctx, tx); err != nil {
 			return err
+		}
+		installed, err := schemaVersion(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if installed == 3 {
+			return a.ErrInvalid
 		}
 		app, reader, retention := pgx.Identifier{appRole}.Sanitize(), pgx.Identifier{readerRole}.Sanitize(), pgx.Identifier{retentionRole}.Sanitize()
 		statements := []string{
@@ -175,8 +184,14 @@ func schemaColumns(version int) map[string]map[string]string {
 	for table, cols := range expectedColumns {
 		out[table] = cols
 	}
-	if version == 2 {
+	if version >= 2 {
 		for table, cols := range creationColumns {
+			out[table] = cols
+		}
+	}
+	if version == 3 {
+		observed, _ := observerCatalog()
+		for table, cols := range observed {
 			out[table] = cols
 		}
 	}
@@ -188,7 +203,7 @@ func schemaVersion(ctx context.Context, q querier) (int, error) {
 	if err := q.QueryRow(ctx, `SELECT version,source_checksum,(SELECT count(*) FROM ops_admission_v2.schema_version)FROM ops_admission_v2.schema_version WHERE singleton`).Scan(&version, &checksum, &count); err != nil || count != 1 {
 		return 0, a.ErrUnavailable
 	}
-	if version == 1 && checksum == SchemaChecksum() || version == 2 && checksum == CreationSchemaChecksum() {
+	if version == 1 && checksum == SchemaChecksum() || version == 2 && checksum == CreationSchemaChecksum() || version == 3 && checksum == ObserverSchemaChecksum() {
 		return version, nil
 	}
 	return 0, a.ErrUnavailable
@@ -289,6 +304,9 @@ func checkSchema(ctx context.Context, q querier) error {
 	if err := q.QueryRow(ctx, `SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='ops_admission_v2' AND i.indisvalid AND i.indisready AND c.relname=ANY($1::text[])`, []string{"travel_scoped_used_hash", "travel_unused_lookup", "travel_org_page", "compliance_org_page", "compliance_scoped_record", "shares_recipients", "qualified_tx_origins_pkey", "extra_privacy_witnesses_pkey", "tx_shares_pkey"}).Scan(&indexes); err != nil || indexes != 9 {
 		return a.ErrUnavailable
 	}
+	if version == 3 {
+		return checkObserverSchema(ctx, q)
+	}
 	if version == 2 {
 		return checkCreationSchema(ctx, q)
 	}
@@ -310,6 +328,9 @@ func (s *Store) checkPrivileges(ctx context.Context) error {
 		data := table != "schema_version" && table != "network_state" && table != "creation_capacity"
 		for _, privilege := range []string{"INSERT", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"} {
 			want := s.mode == "app" && (privilege == "INSERT" && data || privilege == "DELETE" && table == "travel_records") || s.mode == "retention" && privilege == "DELETE" && (table == "travel_records" || table == "compliance_events")
+			if s.schemaVersion == 3 {
+				want = s.observerPrivilege(table, "", privilege)
+			}
 			var actual bool
 			if err := s.pool.QueryRow(ctx, `SELECT has_table_privilege(current_user,$1,$2)`, name, privilege).Scan(&actual); err != nil || actual != want {
 				return a.ErrUnavailable
@@ -319,10 +340,21 @@ func (s *Store) checkPrivileges(ctx context.Context) error {
 			selectWant := s.mode != "retention" || table == "schema_version" || table == "network_state" || table == "travel_records" || table == "compliance_events"
 			insertWant := s.mode == "app" && data
 			updateWant := s.mode == "app" && (table == "travel_records" && (col == "used_at" || col == "used_tx_hash") || table == "creation_work" && (col == "generation" || col == "updated_at") || table == "creation_capacity" && col != "network_key")
+			if s.schemaVersion == 3 {
+				selectWant = s.observerPrivilege(table, col, "SELECT")
+				insertWant = s.observerPrivilege(table, col, "INSERT")
+				updateWant = s.observerPrivilege(table, col, "UPDATE")
+			}
 			var sel, ins, upd bool
 			if err := s.pool.QueryRow(ctx, `SELECT has_column_privilege(current_user,$1,$2,'SELECT'),has_column_privilege(current_user,$1,$2,'INSERT'),has_column_privilege(current_user,$1,$2,'UPDATE')`, name, col).Scan(&sel, &ins, &upd); err != nil || sel != selectWant || ins != insertWant || upd != updateWant {
 				return a.ErrUnavailable
 			}
+		}
+	}
+	if s.schemaVersion == 3 && (s.mode == "app" || s.mode == "observer") {
+		var shared, exclusive bool
+		if err := s.pool.QueryRow(ctx, `SELECT has_function_privilege(current_user,'pg_catalog.pg_advisory_xact_lock_shared(bigint)','EXECUTE'),has_function_privilege(current_user,'pg_catalog.pg_advisory_xact_lock(bigint)','EXECUTE')`).Scan(&shared, &exclusive); err != nil || !shared || (s.mode == "observer" && !exclusive) {
+			return a.ErrUnavailable
 		}
 	}
 	var usage, update, select_ bool

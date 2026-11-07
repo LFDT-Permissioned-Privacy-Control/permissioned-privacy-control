@@ -60,7 +60,7 @@ func BootstrapEmpty(ctx context.Context, dsn string, binding a.NetworkBinding, g
 		if err != nil {
 			return err
 		}
-		if version == 2 {
+		if version >= 2 {
 			_, err = tx.Exec(ctx, `INSERT INTO ops_admission_v2.creation_capacity(network_key)VALUES($1)`, key[:])
 			return dbError(err)
 		}
@@ -76,6 +76,15 @@ func BeginRecovery(ctx context.Context, dsn string, binding a.NetworkBinding, ge
 		return a.ErrInvalid
 	}
 	return offline(ctx, dsn, func(ctx context.Context, tx pgx.Tx) error {
+		version, err := schemaVersion(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if version == 3 {
+			if err := captureLock(ctx, tx, key, false); err != nil {
+				return err
+			}
+		}
 		var zero a.Digest
 		tag, err := tx.Exec(ctx, `INSERT INTO ops_admission_v2.network_state(network_key,environment,chain_id,genesis_hash,deployment_id,generation,ready,coverage_digest)VALUES($1,$2,$3,$4,$5,$6::uuid,false,$7)ON CONFLICT(network_key)DO UPDATE SET ready=false,generation=EXCLUDED.generation,coverage_digest=EXCLUDED.coverage_digest WHERE ops_admission_v2.network_state.generation<>EXCLUDED.generation OR NOT ops_admission_v2.network_state.ready`, key[:], binding.Environment, binding.ChainID, genesis, binding.DeploymentID, generation, zero[:])
 		if err != nil {
@@ -84,7 +93,16 @@ func BeginRecovery(ctx context.Context, dsn string, binding a.NetworkBinding, ge
 		if tag.RowsAffected() != 1 {
 			return a.ErrConflict
 		}
-		return verifyBinding(ctx, tx, key, binding, genesis)
+		if err := verifyBinding(ctx, tx, key, binding, genesis); err != nil {
+			return err
+		}
+		if version == 3 {
+			_, err = tx.Exec(ctx, `UPDATE ops_admission_v2.creation_observer_state SET ready=false,capture_ready=false,quarantine=CASE WHEN quarantine IN('none','awaiting-canonical')THEN'awaiting-canonical'ELSE quarantine END,observer_epoch=gen_random_uuid(),capture_epoch=gen_random_uuid(),lease_fence=lease_fence+1,header_version=header_version+1,lease_owner=NULL,lease_expires=NULL,capture_heartbeat_until=NULL WHERE network_key=$1`, key[:])
+			if err != nil {
+				return a.ErrUnavailable
+			}
+		}
+		return nil
 	})
 }
 
@@ -104,11 +122,23 @@ const MaxRecoveryTimeout = 30 * time.Minute
 // It honors an earlier caller deadline. Failure leaves readiness false; a longer
 // budget is not a promise to finish any retained corpus on arbitrary hardware.
 func FinalizeRecoveryWithTimeout(ctx context.Context, dsn string, binding a.NetworkBinding, expected a.ExpectedState, acknowledgeComplete bool, timeout time.Duration) error {
+	return finalizeRecovery(ctx, dsn, binding, expected, acknowledgeComplete, timeout, "")
+}
+func finalizeRecovery(ctx context.Context, dsn string, binding a.NetworkBinding, expected a.ExpectedState, acknowledgeComplete bool, timeout time.Duration, observerEpoch string) error {
 	key, genesis, err := bindingValues(binding)
 	if err != nil || !expected.Valid() || expected.Coverage == (a.Digest{}) || !acknowledgeComplete || timeout <= 0 || timeout > MaxRecoveryTimeout {
 		return a.ErrInvalid
 	}
 	return offlineWithTimeout(ctx, dsn, timeout, func(ctx context.Context, tx pgx.Tx) error {
+		version, err := schemaVersion(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if version == 3 {
+			if err := captureLock(ctx, tx, key, false); err != nil {
+				return err
+			}
+		}
 		if err := verifyBinding(ctx, tx, key, binding, genesis); err != nil {
 			return err
 		}
@@ -118,6 +148,13 @@ func FinalizeRecoveryWithTimeout(ctx context.Context, dsn string, binding a.Netw
 		}
 		if err := validateRestored(ctx, tx, key, expected); err != nil {
 			return err
+		}
+		if version == 3 {
+			if err := resetRestoredObserver(ctx, tx, key, observerEpoch); err != nil {
+				return err
+			}
+		} else if observerEpoch != "" {
+			return a.ErrInvalid
 		}
 		tag, err := tx.Exec(ctx, `UPDATE ops_admission_v2.network_state SET ready=true,coverage_digest=$3 WHERE network_key=$1 AND generation=$2::uuid AND NOT ready`, key[:], expected.Generation, expected.Coverage[:])
 		if err != nil || tag.RowsAffected() != 1 {
@@ -210,8 +247,13 @@ func validateRestored(ctx context.Context, tx pgx.Tx, key a.Digest, expected a.E
 	if err != nil {
 		return err
 	}
-	if version == 2 {
-		return validateRestoredCreations(ctx, tx, key)
+	if version >= 2 {
+		if err := validateRestoredCreations(ctx, tx, key); err != nil {
+			return err
+		}
+		if version == 3 {
+			return validateRestoredObserver(ctx, tx, key)
+		}
 	}
 
 	return nil

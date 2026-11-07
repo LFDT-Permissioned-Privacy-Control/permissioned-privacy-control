@@ -9,7 +9,7 @@ import (
 
 func TestProfilesStayExplicitAndRegistryDataDetached(t *testing.T) {
 	profiles := policyprofiles.Supported()
-	if len(profiles) != 12 {
+	if len(profiles) != 13 {
 		t.Fatal("compiled profiles changed without a registry test")
 	}
 	for _, expected := range profiles {
@@ -31,6 +31,9 @@ func TestProfilesStayExplicitAndRegistryDataDetached(t *testing.T) {
 		}
 		if expected.ID == policybundle.RuntimeCreationIntentProfileID && (actual.EvaluatorVersion != policybundle.NativeV4EvaluatorVersion || actual.IntegrationScope != "atomic creation intent recording; no observed ownership or pending authority") {
 			t.Fatal("intent journal mislabeled as observed or pending authority")
+		}
+		if expected.ID == policybundle.RuntimeCreationObservedProfileID && (actual.EvaluatorVersion != policybundle.NativeV4EvaluatorVersion || actual.IntegrationScope != "covered creation capture; no ownership-serving consumer") {
+			t.Fatal("covered source mislabeled as ownership-serving authority")
 		}
 		if expected.ID == policybundle.RuntimeCallProfileID && actual.IntegrationScope == "" {
 			t.Fatal("runtime slice lacks explicit qualification scope")

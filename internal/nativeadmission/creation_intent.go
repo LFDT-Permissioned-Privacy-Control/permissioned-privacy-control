@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"privacy-proxy/internal/creationfacts"
 	"privacy-proxy/internal/executionfacts"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/rpcexecution"
@@ -17,6 +18,7 @@ import (
 )
 
 const CreationPlanVersion = "ops-creation-plan/v1"
+const CapturedCreationPlanVersion = "ops-creation-plan/v2"
 const MaxCreationEntries = 128
 const MaxCreationPlanBytes = 64 << 10
 
@@ -45,16 +47,17 @@ type CreationFactoryRoot struct {
 }
 
 type CreationPlanData struct {
-	Version      string                            `json:"v"`
-	Hash         common.Hash                       `json:"t"`
-	RootOrg      string                            `json:"o"`
-	Manifest     string                            `json:"m"`
-	Runtime      string                            `json:"r"`
-	Chain        string                            `json:"c"`
-	Evidence     string                            `json:"e"`
-	Entries      []CreationEntry                   `json:"x"`
-	Declarations []policybundle.FactoryAttribution `json:"f"`
-	FactoryRoots []CreationFactoryRoot             `json:"z"`
+	Version        string                            `json:"v"`
+	CaptureProfile string                            `json:"q,omitempty" optional:"true"`
+	Hash           common.Hash                       `json:"t"`
+	RootOrg        string                            `json:"o"`
+	Manifest       string                            `json:"m"`
+	Runtime        string                            `json:"r"`
+	Chain          string                            `json:"c"`
+	Evidence       string                            `json:"e"`
+	Entries        []CreationEntry                   `json:"x"`
+	Declarations   []policybundle.FactoryAttribution `json:"f"`
+	FactoryRoots   []CreationFactoryRoot             `json:"z"`
 }
 
 // CreationPlan is produced only by a complete successful native pass. The
@@ -95,8 +98,14 @@ func (p *CreationPlan) HasFactoryAuthority() bool {
 }
 
 func CreationPlanDigest(encoded []byte) common.Hash {
+	return creationPlanDigest(CreationPlanVersion, encoded)
+}
+func CapturedCreationPlanDigest(encoded []byte) common.Hash {
+	return creationPlanDigest(CapturedCreationPlanVersion, encoded)
+}
+func creationPlanDigest(version string, encoded []byte) common.Hash {
 	h := sha256.New()
-	_, _ = h.Write([]byte(CreationPlanVersion + "\x00"))
+	_, _ = h.Write([]byte(version + "\x00"))
 	_, _ = h.Write(encoded)
 	return common.BytesToHash(h.Sum(nil))
 }
@@ -223,10 +232,14 @@ func (n *Engine) captureCreations(ctx context.Context, v *runtimepolicy.View, or
 		}
 		scopes[i] = scope
 	}
+	if n.creationObserved {
+		d.Version = CapturedCreationPlanVersion
+		d.CaptureProfile = creationfacts.CaptureProfile
+	}
 	encoded, err := json.Marshal(d)
 	if err != nil || len(encoded) > MaxCreationPlanBytes || ctx.Err() != nil || v.RequireLive() != nil {
 		return false
 	}
-	out.plan = &CreationPlan{data: d, encoded: encoded, digest: CreationPlanDigest(encoded)}
+	out.plan = &CreationPlan{data: d, encoded: encoded, digest: creationPlanDigest(d.Version, encoded)}
 	return true
 }

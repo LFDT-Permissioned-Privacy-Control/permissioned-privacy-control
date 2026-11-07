@@ -126,5 +126,5 @@ func (c *Client) finishLifecycle(ctx context.Context, call Call, anchor Anchor, 
 	if ctx.Err() != nil {
 		return nil, failure(NodeFailure)
 	}
-	return &CallExecution{call: call, anchor: anchor, tree: tree, codes: codes, raw: bytes.Clone(raw), recordCount: len(records), timeline: timeline}, nil
+	return &CallExecution{origin: c, call: call, anchor: anchor, tree: tree, codes: codes, raw: bytes.Clone(raw), recordCount: len(records), timeline: timeline}, nil
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"privacy-proxy/internal/compliance"
+	"privacy-proxy/internal/creationcapture"
 	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/runtimepolicy"
@@ -180,6 +181,7 @@ func (s Share) SameBinding(other Share) bool {
 
 type TrustedRawInput struct {
 	ApprovedCheck  *nativeadmission.ApprovedSignedCheck
+	CaptureResult  *creationcapture.Result
 	View           *runtimepolicy.View
 	OrganizationID string
 	Transaction    transactioninput.VerifiedTransaction

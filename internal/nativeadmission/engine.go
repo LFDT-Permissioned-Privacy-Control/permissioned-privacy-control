@@ -16,17 +16,18 @@ import (
 )
 
 type Engine struct {
-	raw             bool
-	multiOrg        bool
-	lifecycle       bool
-	creationIntents bool
-	factories       map[common.Address]policybundle.FactoryAttribution
-	metadata        policybundle.BundleMetadata
-	runtime         *policybundle.RuntimeCatalog
-	owners          map[common.Address]string
-	shared          map[common.Address]*common.Hash
-	work            map[string]map[string]ruleWork
-	associationWork map[common.Address]uint64
+	raw              bool
+	multiOrg         bool
+	lifecycle        bool
+	creationIntents  bool
+	creationObserved bool
+	factories        map[common.Address]policybundle.FactoryAttribution
+	metadata         policybundle.BundleMetadata
+	runtime          *policybundle.RuntimeCatalog
+	owners           map[common.Address]string
+	shared           map[common.Address]*common.Hash
+	work             map[string]map[string]ruleWork
+	associationWork  map[common.Address]uint64
 }
 
 func New(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
@@ -54,6 +55,10 @@ func NewCreationIntents(snapshot *policybundle.CatalogSnapshot, clock identity.C
 	return newEngine(snapshot, clock, policybundle.RuntimeCreationIntentProfileID)
 }
 
+func NewCreationObserved(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
+	return newEngine(snapshot, clock, policybundle.RuntimeCreationObservedProfileID)
+}
+
 func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, expectedProfile string) (*Engine, error) {
 	if snapshot == nil || clock == nil {
 		return nil, errors.New("invalid native admission snapshot")
@@ -61,7 +66,7 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, exp
 	metadata := snapshot.Metadata()
 	runtime, ok := snapshot.Runtime()
 	expectedEvaluator := policybundle.NativeV2EvaluatorVersion
-	lifecycle := expectedProfile == policybundle.RuntimeLifecycleProfileID || expectedProfile == policybundle.RuntimeSimulationProfileID || expectedProfile == policybundle.RuntimeCreationIntentProfileID
+	lifecycle := expectedProfile == policybundle.RuntimeLifecycleProfileID || expectedProfile == policybundle.RuntimeSimulationProfileID || expectedProfile == policybundle.RuntimeCreationIntentProfileID || expectedProfile == policybundle.RuntimeCreationObservedProfileID
 	if expectedProfile == policybundle.RuntimeMultiOrgProfileID {
 		expectedEvaluator = policybundle.NativeV3EvaluatorVersion
 	}
@@ -72,14 +77,23 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, exp
 		return nil, errors.New("invalid native admission snapshot")
 	}
 	n := &Engine{raw: expectedProfile != policybundle.RuntimeCallProfileID, multiOrg: expectedProfile == policybundle.RuntimeMultiOrgProfileID || lifecycle, lifecycle: lifecycle, metadata: metadata, runtime: runtime, owners: map[common.Address]string{}, shared: map[common.Address]*common.Hash{}, work: map[string]map[string]ruleWork{}, associationWork: map[common.Address]uint64{}}
-	n.creationIntents = expectedProfile == policybundle.RuntimeCreationIntentProfileID
+	n.creationObserved = expectedProfile == policybundle.RuntimeCreationObservedProfileID
+	n.creationIntents = expectedProfile == policybundle.RuntimeCreationIntentProfileID || n.creationObserved
 	if n.creationIntents {
 		source, found := runtime.CreationIntentSource()
+		var factories []policybundle.FactoryAttribution
+		if n.creationObserved {
+			observed, ok := runtime.CreationObservedSource()
+			found = ok
+			factories = observed.CreationAttribution.Factories
+		} else {
+			factories = source.CreationAttribution.Factories
+		}
 		if !found {
 			return nil, errors.New("invalid creation intent snapshot")
 		}
 		n.factories = map[common.Address]policybundle.FactoryAttribution{}
-		for _, f := range source.CreationAttribution.Factories {
+		for _, f := range factories {
 			n.factories[common.HexToAddress(f.Address)] = f
 		}
 	}
