@@ -24,6 +24,7 @@ import (
 	_ "privacy-proxy/internal/disclosurehttp"
 	_ "privacy-proxy/internal/disclosurepolicy"
 	_ "privacy-proxy/internal/executionfacts"
+	_ "privacy-proxy/internal/guardbridge"
 	_ "privacy-proxy/internal/identity"
 	_ "privacy-proxy/internal/nativeadmission"
 	_ "privacy-proxy/internal/netguard"
@@ -38,6 +39,7 @@ import (
 	_ "privacy-proxy/internal/runtimepolicy"
 	_ "privacy-proxy/internal/server/middleware"
 	_ "privacy-proxy/internal/strictjson"
+	_ "privacy-proxy/internal/transactioninput"
 )
 
 // TestDependencyDirection locks the dependency-direction invariants
@@ -147,6 +149,7 @@ func TestNativeExecutionEvidenceDependencyBoundary(t *testing.T) {
 func TestNativeCallRuntimeDependencyBoundary(t *testing.T) {
 	for _, pkg := range []string{"privacy-proxy/internal/rpcexecution", "privacy-proxy/internal/nativeadmission", "privacy-proxy/internal/rpcengine"} {
 		allowed := map[string]bool{pkg: true, "privacy-proxy/internal/executionfacts": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/policycore": true, "privacy-proxy/internal/strictjson": true, "privacy-proxy/internal/disclosurepolicy": true}
+		allowed["privacy-proxy/internal/transactioninput"] = true
 		if pkg != "privacy-proxy/internal/rpcexecution" {
 			allowed["privacy-proxy/internal/runtimepolicy"] = true
 			allowed["privacy-proxy/internal/rpcexecution"] = true
@@ -159,7 +162,32 @@ func TestNativeCallRuntimeDependencyBoundary(t *testing.T) {
 				t.Errorf("%s imports unapproved application infrastructure %s", pkg, dep)
 			}
 			for _, prefix := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb"} {
-				if strings.HasPrefix(dep, prefix) {
+				if strings.HasPrefix(dep, prefix) && !transactionPrimitive(dep) {
+					t.Errorf("%s imports storage/VM machinery %s", pkg, dep)
+				}
+			}
+		}
+	}
+}
+
+func transactionPrimitive(dep string) bool {
+	return dep == "github.com/ethereum/go-ethereum/core/types" || dep == "github.com/ethereum/go-ethereum/core/types/bal"
+}
+
+func TestSignedEvidenceDependencyBoundaries(t *testing.T) {
+	for _, pkg := range []string{"privacy-proxy/internal/transactioninput", "privacy-proxy/internal/guardbridge"} {
+		allowed := map[string]bool{pkg: true}
+		if pkg == "privacy-proxy/internal/guardbridge" {
+			for _, name := range []string{"transactioninput", "rpcexecution", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate", "executionfacts", "policybundle", "policycore", "identity", "disclosurepolicy", "strictjson"} {
+				allowed["privacy-proxy/internal/"+name] = true
+			}
+		}
+		for dep := range transitiveDeps(t, moduleRoot(t), pkg) {
+			if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
+				t.Errorf("%s imports unapproved infrastructure %s", pkg, dep)
+			}
+			for _, prefix := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb"} {
+				if strings.HasPrefix(dep, prefix) && !transactionPrimitive(dep) {
 					t.Errorf("%s imports storage/VM machinery %s", pkg, dep)
 				}
 			}

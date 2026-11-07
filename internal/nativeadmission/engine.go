@@ -93,7 +93,7 @@ func (n *Engine) sharedCode(execution *rpcexecution.CallExecution, address commo
 // Check consumes only a paired opaque acquisition and the captured request
 // View. Supplied-from ownership is enforced here as well as before node work.
 func (n *Engine) Check(ctx context.Context, view *runtimepolicy.View, selectedOrg string, execution *rpcexecution.CallExecution, wallets WalletSnapshot) policycore.Decision {
-	if ctx.Err() != nil || n == nil || view == nil || execution == nil || execution.Tree() == nil || view.RequireLive() != nil {
+	if ctx.Err() != nil || n == nil || view == nil || execution == nil || execution.Signed() || execution.Tree() == nil || view.RequireLive() != nil {
 		return invalid()
 	}
 	metadata := view.Metadata()

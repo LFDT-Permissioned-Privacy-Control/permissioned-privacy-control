@@ -49,6 +49,7 @@ func (a Approval) Message() []byte {
 }
 
 type Prepared struct {
+	evidence           *preparedEvidence
 	NoCodeRecipients   map[string]bool `json:"-"`
 	Approval           Approval
 	Trace              *tracer.TraceResult
@@ -232,7 +233,9 @@ func (s *Service) Prepare(ctx context.Context, raw string) (*Prepared, error) {
 		return s.prepareBesu(ctx, raw, &tx, from, uint64(chain))
 	}
 	var block struct {
-		Hash common.Hash `json:"hash"`
+		Hash      common.Hash            `json:"hash"`
+		Number    optionalHeaderQuantity `json:"number"`
+		Timestamp optionalHeaderQuantity `json:"timestamp"`
 	}
 	if err = s.rpc.CallContext(ctx, &block, "eth_getHeaderByNumber", "latest"); err != nil {
 		return nil, err
@@ -282,7 +285,12 @@ func (s *Service) Prepare(ctx context.Context, raw string) (*Prepared, error) {
 	}
 	call := obj(mux["callTracer"])
 	plain := tx.To() != nil && len(tx.Data()) == 0 && len(trace.CallTargets) == 1 && str(call["type"]) == "CALL" && codeHashes[strings.ToLower(tx.To().Hex())] == crypto.Keccak256Hash(nil).Hex()
-	return &Prepared{Approval: Approval{HashMode: mode, ChainID: uint64(chain), TxHash: tx.Hash(), Fingerprint: hash}, Trace: trace, CodeHashes: codeHashes, FreshCreations: fresh, SurvivingCreations: surviving, PlainValueTransfer: plain, NoCodeRecipients: noCode}, nil
+	p := &Prepared{Approval: Approval{HashMode: mode, ChainID: uint64(chain), TxHash: tx.Hash(), Fingerprint: hash}, Trace: trace, CodeHashes: codeHashes, FreshCreations: fresh, SurvivingCreations: surviving, PlainValueTransfer: plain, NoCodeRecipients: noCode}
+	p.evidence = retainPreparedEvidence(s, p.Approval, muxRaw, block.Hash, block.Number.bytes(), block.Timestamp.bytes())
+	if p.evidence != nil {
+		p.evidence.prepared = p
+	}
+	return p, nil
 }
 
 // Enqueue is called only AFTER OPS RBAC, trace and compliance gates have passed.

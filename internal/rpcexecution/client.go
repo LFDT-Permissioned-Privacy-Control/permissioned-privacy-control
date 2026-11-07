@@ -53,7 +53,7 @@ func NewClient(transport Transport, binding NodeBinding, limits Limits) (*Client
 	u, e := url.Parse(binding.URL)
 	id, uuidErr := uuid.Parse(binding.OrganizationID)
 	chain, ok := new(big.Int).SetString(binding.ChainID, 10)
-	if transport == nil || !limits.valid() || e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" || uuidErr != nil || id.String() != binding.OrganizationID || !ok || chain.Sign() < 0 || chain.BitLen() > 256 || chain.String() != binding.ChainID || binding.Profile != NodeProfileID || binding.PragueEndExclusive <= binding.PragueStartInclusive {
+	if transport == nil || !limits.valid() || e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" || uuidErr != nil || id.String() != binding.OrganizationID || !ok || chain.Sign() < 0 || chain.BitLen() > 256 || chain.String() != binding.ChainID || (binding.Profile != NodeProfileID && binding.Profile != GuardRetainedProfileID) || binding.PragueEndExclusive <= binding.PragueStartInclusive {
 		return nil, failure(InvalidBinding)
 	}
 	owned := make(map[string]Credential, len(binding.Credentials))
@@ -99,6 +99,10 @@ func (c *Client) WithCredential(ref string) (*Client, error) {
 }
 
 type CallExecution struct {
+	signed      bool
+	signer      common.Address
+	txHash      common.Hash
+	hashMode    uint8
 	recordCount int
 	call        Call
 	anchor      Anchor
@@ -113,6 +117,25 @@ func (e *CallExecution) Tree() *executionfacts.Tree             { return e.tree 
 func (e *CallExecution) Code(a common.Address) (CodeInfo, bool) { c, ok := e.codes[a]; return c, ok }
 func (e *CallExecution) RawEvidence() []byte                    { return bytes.Clone(e.raw) }
 func (e *CallExecution) RecordCount() int                       { return e.recordCount }
+func (e *CallExecution) Signed() bool                           { return e != nil && e.signed }
+func (e *CallExecution) VerifiedSigner() (common.Address, bool) {
+	if e == nil || !e.signed {
+		return common.Address{}, false
+	}
+	return e.signer, true
+}
+func (e *CallExecution) TransactionHash() (common.Hash, bool) {
+	if e == nil || !e.signed {
+		return common.Hash{}, false
+	}
+	return e.txHash, true
+}
+func (e *CallExecution) HashMode() uint8 {
+	if e == nil {
+		return 0
+	}
+	return e.hashMode
+}
 
 func (c *Client) rpc(ctx context.Context, method string, params []any) (json.RawMessage, error) {
 	id := c.ids.Add(1)
@@ -171,7 +194,7 @@ func (c *Client) rpc(ctx context.Context, method string, params []any) (json.Raw
 }
 
 func (c *Client) AcquireCall(ctx context.Context, call Call, block BlockSelector) (*CallExecution, error) {
-	if c == nil || !c.selected || call.wire == nil || call.value == nil || block.selector == "" {
+	if c == nil || !c.selected || c.binding.Profile != NodeProfileID || call.wire == nil || call.value == nil || block.selector == "" {
 		return nil, failure(InvalidBinding)
 	}
 	if call.chainID != nil && call.chainID.String() != c.binding.ChainID {
@@ -250,6 +273,10 @@ func (c *Client) AcquireCall(ctx context.Context, call Call, block BlockSelector
 	if err != nil {
 		return nil, err
 	}
+	return c.finishEvidence(ctx, call, anchor, tree, codes, total, mux)
+}
+
+func (c *Client) finishEvidence(ctx context.Context, call Call, anchor Anchor, tree *executionfacts.Tree, codes map[common.Address]CodeInfo, total int, raw []byte) (*CallExecution, error) {
 	lookups := 0
 	ensureCode := func(a common.Address) error {
 		code, present := codes[a]
@@ -307,5 +334,5 @@ func (c *Client) AcquireCall(ctx context.Context, call Call, block BlockSelector
 	if ctx.Err() != nil {
 		return nil, failure(NodeFailure)
 	}
-	return &CallExecution{call: call, anchor: anchor, tree: tree, codes: codes, raw: bytes.Clone(mux), recordCount: len(records)}, nil
+	return &CallExecution{call: call, anchor: anchor, tree: tree, codes: codes, raw: bytes.Clone(raw), recordCount: len(records)}, nil
 }

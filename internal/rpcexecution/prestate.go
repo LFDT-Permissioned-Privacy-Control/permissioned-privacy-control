@@ -82,6 +82,10 @@ func decodeCode(raw json.RawMessage, limit int) ([]byte, error) {
 }
 
 func decodePrestate(raw []byte, l Limits) (map[common.Address]CodeInfo, int, error) {
+	return decodePrestateProfile(raw, l, false)
+}
+
+func decodePrestateProfile(raw []byte, l Limits, guard bool) (map[common.Address]CodeInfo, int, error) {
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
 	opening, err := d.Token()
@@ -90,6 +94,7 @@ func decodePrestate(raw []byte, l Limits) (map[common.Address]CodeInfo, int, err
 	}
 	accounts := map[common.Address]CodeInfo{}
 	total := 0
+	storageSlots := 0
 	for d.More() {
 		if len(accounts) >= l.MaxPrestateAccounts {
 			return nil, 0, failure(EvidenceLimit)
@@ -113,7 +118,11 @@ func decodePrestate(raw []byte, l Limits) (map[common.Address]CodeInfo, int, err
 		if d.Decode(&accountRaw) != nil {
 			return nil, 0, failure(InvalidEvidence)
 		}
-		fields, e := closedRawObject(accountRaw, 4)
+		maxFields := 4
+		if guard {
+			maxFields = 5
+		}
+		fields, e := closedRawObject(accountRaw, maxFields)
 		if e != nil {
 			return nil, 0, e
 		}
@@ -121,6 +130,13 @@ func decodePrestate(raw []byte, l Limits) (map[common.Address]CodeInfo, int, err
 		var declaredHash *common.Hash
 		for name, value := range fields {
 			switch name {
+			case "storage":
+				if !guard {
+					return nil, 0, failure(InvalidEvidence)
+				}
+				if e = checkGuardStorage(value, &storageSlots); e != nil {
+					return nil, 0, e
+				}
 			case "code":
 				code, e = decodeCode(value, min(l.MaxCodeBytesPerAccount, l.MaxTotalCodeBytes-total))
 				if e != nil {
