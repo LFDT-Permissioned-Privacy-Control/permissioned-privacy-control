@@ -112,17 +112,28 @@ func deliveryOptions(n RawNodeOptions) nodeapproval.BoundDeliveryOptions {
 // finite source-derived node bindings. It never accepts a preverified principal
 // or an externally constructed approval service/receipt as policy permission.
 func NewRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions) (*Engine, error) {
+	return newRaw(snapshot, options, policybundle.RuntimeRawSendProfileID)
+}
+
+// NewMultiOrg mounts the same simulation/raw consumers with explicitly selected
+// native-v3 authority. It does not activate other RPC methods or lifecycle paths.
+func NewMultiOrg(snapshot *policybundle.CatalogSnapshot, options RawOptions) (*Engine, error) {
+	return newRaw(snapshot, options, policybundle.RuntimeMultiOrgProfileID)
+}
+
+func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expectedProfile string) (*Engine, error) {
 	bad := func() (*Engine, error) { return nil, errors.New("invalid raw RPC configuration") }
 	if snapshot == nil || options.Admission == nil || options.Wallets == nil || options.Clock == nil || !options.WalletState.Valid() {
 		return bad()
 	}
 	meta := snapshot.Metadata()
 	runtime, ok := snapshot.Runtime()
-	if !ok || meta.Profile != policybundle.RuntimeRawSendProfileID {
+	if !ok || meta.Profile != expectedProfile {
 		return bad()
 	}
-	source, ok := runtime.RawSource()
-	if !ok {
+	_, rawSource := runtime.RawSource()
+	_, multiOrgSource := runtime.MultiOrgSource()
+	if (expectedProfile == policybundle.RuntimeRawSendProfileID && !rawSource) || (expectedProfile == policybundle.RuntimeMultiOrgProfileID && !multiOrgSource) {
 		return bad()
 	}
 	compliance, ok := snapshot.Compliance()
@@ -131,7 +142,7 @@ func NewRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions) (*Engine
 	}
 	financial := options.Admission.Metadata()
 	profile := rpcexecution.SignedCallProfileID
-	if source.RawSubmissionMode == policybundle.RawSubmissionGuardV1 {
+	if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 		profile = rpcexecution.GuardRetainedProfileID
 	}
 	wb := options.WalletBinding
@@ -179,7 +190,7 @@ func NewRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions) (*Engine
 			}
 			prepared[org][ref] = selected
 		}
-		if source.RawSubmissionMode == policybundle.RawSubmissionGuardV1 {
+		if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 			if (n.HashMode != nodeapproval.HashStrict && n.HashMode != nodeapproval.HashCalls) || nodeapproval.ValidateBoundDelivery(deliveryOptions(n)) != nil {
 				return bad()
 			}
@@ -192,18 +203,18 @@ func NewRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions) (*Engine
 			return bad()
 		}
 	}
-	e, err := newEngine(snapshot, options.CallClients, options.Wallets, options.Clock, true)
+	e, err := newEngine(snapshot, options.CallClients, options.Wallets, options.Clock, expectedProfile)
 	if err != nil {
 		return nil, err
 	}
-	e.raw = &rawEngine{readProfile: source.ReadProfile, wallets: options.Wallets, admission: options.Admission, bindings: map[string]map[string]rawBinding{}}
+	e.raw = &rawEngine{readProfile: runtime.ReadProfile(), wallets: options.Wallets, admission: options.Admission, bindings: map[string]map[string]rawBinding{}}
 	// Source bindings and aggregate budgets are checked before producer startup.
 	for org, needed := range refs {
 		n := options.RawNodes[org]
 		e.raw.bindings[org] = map[string]rawBinding{}
 		for _, ref := range needed {
 			binding := rawBinding{client: prepared[org][ref]}
-			if source.RawSubmissionMode == policybundle.RawSubmissionGuardV1 {
+			if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 				pair, err := guardbridge.NewDeliveryPair(n.Binding, ref, n.Transport, n.HashMode, n.Limits, deliveryOptions(n))
 				if err != nil {
 					e.Close()

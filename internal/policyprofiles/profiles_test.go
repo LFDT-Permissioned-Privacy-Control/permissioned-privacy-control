@@ -9,7 +9,7 @@ import (
 
 func TestProfilesStayExplicitAndRegistryDataDetached(t *testing.T) {
 	profiles := policyprofiles.Supported()
-	if len(profiles) != 7 {
+	if len(profiles) != 8 {
 		t.Fatal("compiled profiles changed without a registry test")
 	}
 	for _, expected := range profiles {
@@ -19,6 +19,9 @@ func TestProfilesStayExplicitAndRegistryDataDetached(t *testing.T) {
 		}
 		if expected.ID == policybundle.NativeV2ProfileID && actual.EvaluatorVersion != policybundle.NativeV2EvaluatorVersion {
 			t.Fatal("native V2 was labeled with old semantics")
+		}
+		if expected.ID == policybundle.RuntimeMultiOrgProfileID && (actual.EvaluatorVersion != policybundle.NativeV3EvaluatorVersion || actual.IntegrationScope == "") {
+			t.Fatal("multi-org semantics lack an explicit version/scope")
 		}
 		if expected.ID == policybundle.RuntimeCallProfileID && actual.IntegrationScope == "" {
 			t.Fatal("runtime slice lacks explicit qualification scope")

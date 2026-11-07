@@ -9,10 +9,12 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"privacy-proxy/internal/pricefeedpolicy"
 )
 
 const RuntimeAPIVersion = "ops.runtime-policy/v1alpha1"
 const RuntimeRawAPIVersion = "ops.runtime-policy/v1alpha2"
+const RuntimeMultiOrgAPIVersion = "ops.runtime-policy/v1alpha3"
 const RuntimeKind = "RuntimePolicy"
 const RuntimeNodeEvidenceProfileID = "geth-prague-call/v1"
 const RawSubmissionGuardV1 = "guard-v1"
@@ -25,6 +27,10 @@ type RuntimeCatalogRef struct {
 type RuntimeCatalogIdentity struct {
 	RuntimeCatalogRef
 	SemanticDigest Digest
+	PriceFeed      *PriceFeedIdentity `json:",omitempty"`
+}
+type PriceFeedIdentity struct {
+	SourceDigest, PlanDigest, ComplianceDigest string
 }
 type SharedInfrastructure struct {
 	Address  string  `json:"address"`
@@ -57,50 +63,72 @@ type RuntimeRawSource struct {
 	RawSubmissionMode    string                 `json:"rawSubmissionMode"`
 }
 
+// RuntimeMultiOrgSource is the first closed v3 wire shape. An absent feed does
+// not authorize an environment-selected endpoint; explicit null is invalid.
+type RuntimeMultiOrgSource struct {
+	APIVersion           string                  `json:"apiVersion"`
+	Kind                 string                  `json:"kind"`
+	ReadProfile          string                  `json:"readProfile"`
+	IntraOrgGrantTracing bool                    `json:"intraOrgGrantTracing"`
+	SharedInfrastructure []SharedInfrastructure  `json:"sharedInfrastructure"`
+	AddressScopes        []AddressScope          `json:"addressScopes"`
+	NodeEvidenceProfile  string                  `json:"nodeEvidenceProfile"`
+	RawSubmissionMode    string                  `json:"rawSubmissionMode"`
+	PriceFeed            *pricefeedpolicy.Source `json:"priceFeed,omitempty" optional:"true"`
+}
+
 func positiveChain64(raw string) bool {
 	n, err := strconv.ParseUint(raw, 10, 64)
 	return err == nil && n > 0 && strconv.FormatUint(n, 10) == raw
 }
 
-func decodeRuntimeSource(raw []byte, depth int) (*RuntimeSource, *RuntimeRawSource, error) {
+func decodeRuntimeSource(raw []byte, depth int) (*RuntimeSource, *RuntimeRawSource, *RuntimeMultiOrgSource, error) {
 	value, err := strictValue(raw, depth)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	object, ok := value.(map[string]any)
 	if !ok {
-		return nil, nil, fail(InvalidSchema, "", "", "runtimeCatalog", "runtime source must be an object")
+		return nil, nil, nil, fail(InvalidSchema, "", "", "runtimeCatalog", "runtime source must be an object")
 	}
 	switch object["apiVersion"] {
 	case RuntimeAPIVersion:
 		var source RuntimeSource
 		if err := decodeSource(raw, &source, depth); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return &source, nil, nil
+		return &source, nil, nil, nil
 	case RuntimeRawAPIVersion:
 		var source RuntimeRawSource
 		if err := decodeSource(raw, &source, depth); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return nil, &source, nil
+		return nil, &source, nil, nil
+	case RuntimeMultiOrgAPIVersion:
+		var source RuntimeMultiOrgSource
+		if err := decodeSource(raw, &source, depth); err != nil {
+			return nil, nil, nil, err
+		}
+		return nil, nil, &source, nil
 	default:
-		return nil, nil, fail(InvalidSchema, "", "", "apiVersion", "unsupported runtime source version")
+		return nil, nil, nil, fail(InvalidSchema, "", "", "apiVersion", "unsupported runtime source version")
 	}
 }
 
 // RuntimeCatalog is approved immutable source. Its static scopes never enter
 // the registered-contract/native execution or operational ownership indexes.
 type RuntimeCatalog struct {
-	source    RuntimeSource
-	rawSource *RuntimeRawSource
-	digest    Digest
+	source         RuntimeSource
+	rawSource      *RuntimeRawSource
+	multiOrgSource *RuntimeMultiOrgSource
+	feedDefinition pricefeedpolicy.Definition
+	feedPlan       pricefeedpolicy.Plan
+	digest         Digest
 }
 
-// Source returns only the detached v1 source. A v2 catalog returns zero;
-// callers must explicitly inspect RawSource so they cannot lose its mode.
+// Source returns only detached v1; v2/v3 catalogs return zero, preserving tags.
 func (r *RuntimeCatalog) Source() RuntimeSource {
-	if r == nil || r.rawSource != nil {
+	if r == nil || r.rawSource != nil || r.multiOrgSource != nil {
 		return RuntimeSource{}
 	}
 	s := r.source
@@ -129,13 +157,41 @@ func (r *RuntimeCatalog) RawSource() (RuntimeRawSource, bool) {
 	s.AddressScopes = slices.Clone(s.AddressScopes)
 	return s, true
 }
+
+func (r *RuntimeCatalog) MultiOrgSource() (RuntimeMultiOrgSource, bool) {
+	if r == nil || r.multiOrgSource == nil {
+		return RuntimeMultiOrgSource{}, false
+	}
+	s := *r.multiOrgSource
+	s.SharedInfrastructure = cloneShared(s.SharedInfrastructure)
+	s.AddressScopes = slices.Clone(s.AddressScopes)
+	if s.PriceFeed != nil {
+		feed := r.feedDefinition.Source()
+		s.PriceFeed = &feed
+	}
+	return s, true
+}
+
+func (r *RuntimeCatalog) PriceFeed() (pricefeedpolicy.Definition, pricefeedpolicy.Plan, bool) {
+	if r == nil || !r.feedDefinition.Valid() || !r.feedPlan.Valid() {
+		return pricefeedpolicy.Definition{}, pricefeedpolicy.Plan{}, false
+	}
+	return r.feedDefinition, r.feedPlan, true
+}
+
 func (r *RuntimeCatalog) RawSubmissionMode() string {
+	if r != nil && r.multiOrgSource != nil {
+		return r.multiOrgSource.RawSubmissionMode
+	}
 	if r == nil || r.rawSource == nil {
 		return ""
 	}
 	return r.rawSource.RawSubmissionMode
 }
 func (r *RuntimeCatalog) SharedInfrastructure() []SharedInfrastructure {
+	if r.multiOrgSource != nil {
+		return cloneShared(r.multiOrgSource.SharedInfrastructure)
+	}
 	if r.rawSource != nil {
 		return cloneShared(r.rawSource.SharedInfrastructure)
 	}
@@ -143,20 +199,57 @@ func (r *RuntimeCatalog) SharedInfrastructure() []SharedInfrastructure {
 }
 func (r *RuntimeCatalog) Digest() Digest { return r.digest }
 func (r *RuntimeCatalog) NodeEvidenceProfile() string {
+	if r.multiOrgSource != nil {
+		return r.multiOrgSource.NodeEvidenceProfile
+	}
 	if r.rawSource != nil {
 		return r.rawSource.NodeEvidenceProfile
 	}
 	return r.source.NodeEvidenceProfile
 }
+
+func (r *RuntimeCatalog) IntraOrgGrantTracing() bool {
+	if r.multiOrgSource != nil {
+		return r.multiOrgSource.IntraOrgGrantTracing
+	}
+	if r.rawSource != nil {
+		return r.rawSource.IntraOrgGrantTracing
+	}
+	return r.source.IntraOrgGrantTracing
+}
+
+func (r *RuntimeCatalog) ReadProfile() string {
+	if r.multiOrgSource != nil {
+		return r.multiOrgSource.ReadProfile
+	}
+	if r.rawSource != nil {
+		return r.rawSource.ReadProfile
+	}
+	return r.source.ReadProfile
+}
 func (s *CatalogSnapshot) Runtime() (*RuntimeCatalog, bool) { return s.runtime, s.runtime != nil }
 
 func (b *catalogBuilder) compileRuntime(limits Limits) error {
-	if b.runtimeSource == nil && b.runtimeRawSource == nil {
+	if b.runtimeSource == nil && b.runtimeRawSource == nil && b.runtimeMultiOrgSource == nil {
 		return nil
 	}
 	bad := func(field, message string) error { return fail(InvalidSchema, "", "", field, message) }
 	var s RuntimeSource
-	if b.runtimeRawSource != nil {
+	var feed pricefeedpolicy.Definition
+	if b.runtimeMultiOrgSource != nil {
+		r := b.runtimeMultiOrgSource
+		if b.runtimeSource != nil || b.runtimeRawSource != nil || b.profile.id != RuntimeMultiOrgProfileID || r.APIVersion != RuntimeMultiOrgAPIVersion || (r.RawSubmissionMode != RawSubmissionGuardV1 && r.RawSubmissionMode != RawSubmissionOPSPreflight) {
+			return bad("runtimeCatalog", "unsupported runtime source/profile or raw mode")
+		}
+		if r.PriceFeed != nil {
+			var err error
+			feed, err = pricefeedpolicy.Normalize(*r.PriceFeed)
+			if err != nil {
+				return bad("priceFeed", "invalid approved price-feed source")
+			}
+		}
+		s = RuntimeSource{RuntimeAPIVersion, r.Kind, r.ReadProfile, r.IntraOrgGrantTracing, r.SharedInfrastructure, r.AddressScopes, r.NodeEvidenceProfile}
+	} else if b.runtimeRawSource != nil {
 		r := b.runtimeRawSource
 		if b.runtimeSource != nil || b.profile.id != RuntimeRawSendProfileID || r.APIVersion != RuntimeRawAPIVersion || (r.RawSubmissionMode != RawSubmissionGuardV1 && r.RawSubmissionMode != RawSubmissionOPSPreflight) {
 			return bad("runtimeCatalog", "unsupported runtime source/profile or raw mode")
@@ -221,11 +314,26 @@ func (b *catalogBuilder) compileRuntime(limits Limits) error {
 	sort.Slice(s.AddressScopes, func(i, j int) bool { return s.AddressScopes[i].Address < s.AddressScopes[j].Address })
 	raw, _ := json.Marshal(s)
 	catalog := &RuntimeCatalog{source: s}
-	if b.runtimeRawSource != nil {
+	if b.runtimeMultiOrgSource != nil {
+		r := &RuntimeMultiOrgSource{APIVersion: RuntimeMultiOrgAPIVersion, Kind: s.Kind, ReadProfile: s.ReadProfile, IntraOrgGrantTracing: s.IntraOrgGrantTracing, SharedInfrastructure: s.SharedInfrastructure, AddressScopes: s.AddressScopes, NodeEvidenceProfile: s.NodeEvidenceProfile, RawSubmissionMode: b.runtimeMultiOrgSource.RawSubmissionMode}
+		if feed.Valid() {
+			normalized := feed.Source()
+			r.PriceFeed = &normalized
+			catalog.feedDefinition = feed
+			b.capabilities[CapabilityPriceFeed] = true
+			if normalized.Credential != nil {
+				b.secrets[normalized.Credential.FromEnv] = true
+			}
+		}
+		catalog.source, catalog.multiOrgSource = RuntimeSource{}, r
+		raw, _ = json.Marshal(r)
+	} else if b.runtimeRawSource != nil {
 		r := &RuntimeRawSource{RuntimeRawAPIVersion, s.Kind, s.ReadProfile, s.IntraOrgGrantTracing, s.SharedInfrastructure, s.AddressScopes, s.NodeEvidenceProfile, b.runtimeRawSource.RawSubmissionMode}
 		catalog.source, catalog.rawSource = RuntimeSource{}, r
 		raw, _ = json.Marshal(r)
-		if r.RawSubmissionMode == RawSubmissionGuardV1 {
+	}
+	if mode := catalog.RawSubmissionMode(); mode != "" {
+		if mode == RawSubmissionGuardV1 {
 			b.capabilities[CapabilityGuardDelivery] = true
 		} else {
 			b.capabilities[CapabilitySignedCall] = true
@@ -241,5 +349,21 @@ func (b *catalogBuilder) compileRuntime(limits Limits) error {
 	if len(s.AddressScopes) > 0 {
 		b.capabilities[CapabilityAddressScopes] = true
 	}
+	return nil
+}
+
+// BuildPlan runs after compileCompliance against this same private snapshot.
+// No partially normalized catalog is published if either stage fails.
+func (b *catalogBuilder) compileRuntimePriceFeed() error {
+	runtime := b.snapshot.runtime
+	if runtime == nil || !runtime.feedDefinition.Valid() {
+		return nil
+	}
+	plan, err := pricefeedpolicy.BuildPlan(runtime.feedDefinition, b.snapshot.compliance)
+	if err != nil || len(plan.Requests()) == 0 {
+		return fail(InvalidSchema, "", "", "priceFeed", "feed plan does not match approved compliance source")
+	}
+	runtime.feedPlan = plan
+	b.snapshot.metadata.RuntimeCatalog.PriceFeed = &PriceFeedIdentity{SourceDigest: runtime.feedDefinition.Digest(), PlanDigest: plan.Digest(), ComplianceDigest: plan.CatalogDigest()}
 	return nil
 }

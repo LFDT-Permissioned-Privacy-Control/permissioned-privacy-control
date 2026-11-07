@@ -15,11 +15,13 @@ const (
 	NativeV2ProfileID        = "catalog-native-v2/v1"
 	RuntimeCallProfileID     = "catalog-runtime-call/v1"
 	RuntimeRawSendProfileID  = "catalog-runtime-raw-send/v1"
+	RuntimeMultiOrgProfileID = "catalog-runtime-multi-org/v1"
 	DisclosureProfileID      = "catalog-disclosure/v1"
 	ComplianceProfileID      = "catalog-compliance/v1"
 	CapabilityIdentity       = "identity.claims/v1"
 	NativeEvaluatorVersion   = "policycore/native-v1alpha1"
 	NativeV2EvaluatorVersion = "policycore/native-v1alpha2"
+	NativeV3EvaluatorVersion = "policycore/native-v1alpha3"
 	CapabilityNativeValidate = "catalog.native-validate"
 	CapabilityPrincipal      = "inputs.verified-principal"
 	CapabilityFrames         = "inputs.complete-frames"
@@ -43,6 +45,9 @@ const (
 	CapabilitySharedCode     = "inputs.shared-code"
 	CapabilityUpgradeFacts   = "inputs.upgrade-facts"
 	CapabilityAddressScopes  = "policy.address-scopes/v1"
+	CapabilityMultiOrg       = "runtime.multi-org-execution/v1"
+	CapabilityForeignCode    = "inputs.foreign-code-access/v1"
+	CapabilityPriceFeed      = "operational.price-feed/v1"
 )
 
 // ValidationProfile is opaque: files cannot register validators or enable
@@ -73,6 +78,20 @@ func RuntimeCallProfile(methodCatalogVersion string) ValidationProfile {
 // with approved compliance. Deployment and lifecycle inputs remain unsupported.
 func RuntimeRawSendProfile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{RuntimeRawSendProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+}
+
+// RuntimeMultiOrgProfile adds qualified private calls across mapped orgs and
+// approved optional feed definitions. Lifecycle/history still require successors.
+func RuntimeMultiOrgProfile(methodCatalogVersion string) ValidationProfile {
+	return ValidationProfile{RuntimeMultiOrgProfileID, NativeV3EvaluatorVersion, methodCatalogVersion}
+}
+
+func runtimeProfile(id string) bool {
+	return id == RuntimeCallProfileID || rawRuntimeProfile(id)
+}
+
+func rawRuntimeProfile(id string) bool {
+	return id == RuntimeRawSendProfileID || id == RuntimeMultiOrgProfileID
 }
 
 // DisclosureProfile validates explicit rules and identity with the native-v2
@@ -122,7 +141,10 @@ func prepareOptions(options Options) (methodIndex, error) {
 	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID || p.id == RuntimeRawSendProfileID || p.id == DisclosureProfileID || p.id == ComplianceProfileID {
 		expectedEvaluator = NativeV2EvaluatorVersion
 	}
-	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && p.id != RuntimeCallProfileID && p.id != RuntimeRawSendProfileID && p.id != DisclosureProfileID && p.id != ComplianceProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || (p.id == DisclosureProfileID && !options.DisclosureLimits.Valid()) || ((p.id == ComplianceProfileID || p.id == RuntimeRawSendProfileID) && !options.ComplianceLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
+	if p.id == RuntimeMultiOrgProfileID {
+		expectedEvaluator = NativeV3EvaluatorVersion
+	}
+	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && !runtimeProfile(p.id) && p.id != DisclosureProfileID && p.id != ComplianceProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || (p.id == DisclosureProfileID && !options.DisclosureLimits.Valid()) || ((p.id == ComplianceProfileID || rawRuntimeProfile(p.id)) && !options.ComplianceLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
 		return methodIndex{}, fail(InvalidSelection, "", "", "options", "invalid limits or pinned foundation/method profile")
 	}
 	m := methodIndex{map[string]bool{}, map[string]string{}, slices.Clone(options.Methods.Wildcard), map[string]string{}}

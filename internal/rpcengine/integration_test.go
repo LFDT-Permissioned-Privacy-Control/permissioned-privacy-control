@@ -48,6 +48,11 @@ const nodeHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const now = int64(1800000000)
 
 type fixture struct {
+	multiOrg       bool
+	bGroups        []policybundle.Group
+	bContracts     []policybundle.Contract
+	bBindings      []policycore.Binding
+	bMappedGroups  []string
 	rawMode        string
 	complianceHook func(*compliancepolicy.Source)
 	groups         []policybundle.Group
@@ -85,7 +90,17 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 	for i, group := range f.groups {
 		mappings = append(mappings, identity.Mapping{ID: fmt.Sprintf("role-%d", i), ProfileID: "azure", OrganizationID: orgA, PrincipalKind: identity.Human, Fact: identity.Fact{Kind: "azure.role", Value: group.ID}, GroupIDs: []string{group.ID}})
 	}
-	mappings = append(mappings, identity.Mapping{ID: "foreign", ProfileID: "azure", OrganizationID: orgB, PrincipalKind: identity.Human, Fact: identity.Fact{Kind: "azure.role", Value: foreign}, GroupIDs: []string{foreign}})
+	foreignIDs := []string{foreign}
+	if f.bGroups != nil {
+		foreignIDs = make([]string, 0, len(f.bGroups))
+		for _, group := range f.bGroups {
+			foreignIDs = append(foreignIDs, group.ID)
+		}
+	}
+	if f.bMappedGroups != nil {
+		foreignIDs = f.bMappedGroups
+	}
+	mappings = append(mappings, identity.Mapping{ID: "foreign", ProfileID: "azure", OrganizationID: orgB, PrincipalKind: identity.Human, Fact: identity.Fact{Kind: "azure.role", Value: foreign}, GroupIDs: foreignIDs})
 	source := identity.SourceCatalog{APIVersion: identity.APIVersion, Kind: identity.CatalogKind, Issuers: []identity.Issuer{{ID: "ops", Issuer: "https://ops.test", Audience: "core", Keys: []identity.PublicKey{{Kid: "k1", Alg: "EdDSA", Kty: "OKP", Crv: "Ed25519", X: base64.RawURLEncoding.EncodeToString(signingKey().Public().(ed25519.PublicKey))}}, AllowedProfiles: []string{"azure"}}}, Profiles: []identity.Profile{{ID: "azure", Kind: identity.AzureHuman, TenantID: tenant, Issuer: "https://login.microsoftonline.com/" + tenant + "/v2.0", APIAudience: oid, ClientID: reader, DelegatedScope: "api://bank/access", FactSource: "appRoles"}}, Mappings: mappings}
 	docs := map[string][]byte{"identity.json": encoded(t, source), "runtime.json": encoded(t, f.runtime)}
 	profileID, profile := policybundle.RuntimeCallProfileID, policybundle.RuntimeCallProfile("rpc/v1")
@@ -114,17 +129,40 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 			f.capability(policybundle.CapabilitySignedCall)
 		}
 	}
-	manifest := policybundle.Manifest{APIVersion: policybundle.BundleAPIVersion, Kind: policybundle.BundleKind, Environment: "test", ChainID: "1", EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, Profile: profileID, SourceRevision: "selected", Organizations: []policybundle.Organization{{ID: orgA, Slug: "a", Name: "A"}, {ID: orgB, Slug: "b", Name: "B"}}, RequiredCapabilities: f.capabilities, IdentityCatalog: &policybundle.IdentityCatalogRef{Path: "identity.json", SHA256: policybundle.RawDigest(docs["identity.json"])}, RuntimeCatalog: &policybundle.RuntimeCatalogRef{Path: "runtime.json", SHA256: policybundle.RawDigest(docs["runtime.json"])}}
+	policyVersion, evaluator := policycore.NativeV2APIVersion, policybundle.NativeV2EvaluatorVersion
+	if f.multiOrg {
+		if f.rawMode == "" {
+			t.Fatal("multi-org fixture requires an explicit raw mode")
+		}
+		profileID, profile = policybundle.RuntimeMultiOrgProfileID, policybundle.RuntimeMultiOrgProfile("rpc/v1")
+		policyVersion, evaluator = policycore.NativeV3APIVersion, policybundle.NativeV3EvaluatorVersion
+		r := f.runtime
+		docs["runtime.json"] = encoded(t, policybundle.RuntimeMultiOrgSource{APIVersion: policybundle.RuntimeMultiOrgAPIVersion, Kind: r.Kind, ReadProfile: r.ReadProfile, IntraOrgGrantTracing: r.IntraOrgGrantTracing, SharedInfrastructure: r.SharedInfrastructure, AddressScopes: r.AddressScopes, NodeEvidenceProfile: r.NodeEvidenceProfile, RawSubmissionMode: f.rawMode})
+		f.capability(policybundle.CapabilityMultiOrg)
+	}
+	manifest := policybundle.Manifest{APIVersion: policybundle.BundleAPIVersion, Kind: policybundle.BundleKind, Environment: "test", ChainID: "1", EvaluatorVersion: evaluator, Profile: profileID, SourceRevision: "selected", Organizations: []policybundle.Organization{{ID: orgA, Slug: "a", Name: "A"}, {ID: orgB, Slug: "b", Name: "B"}}, RequiredCapabilities: f.capabilities, IdentityCatalog: &policybundle.IdentityCatalogRef{Path: "identity.json", SHA256: policybundle.RawDigest(docs["identity.json"])}, RuntimeCatalog: &policybundle.RuntimeCatalogRef{Path: "runtime.json", SHA256: policybundle.RawDigest(docs["runtime.json"])}}
 	if f.rawMode != "" {
 		manifest.ComplianceCatalog = &policybundle.ComplianceCatalogRef{Path: "compliance.json", SHA256: policybundle.RawDigest(docs["compliance.json"])}
+	}
+	bGroups := []policybundle.Group{{ID: foreign, Slug: "foreign", Name: "Foreign", AllowedMethods: []string{"eth_call"}, Claims: []string{}}}
+	bContracts := []policybundle.Contract{contract("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", addressB)}
+	bBindings := []policycore.Binding{{Group: foreign, Allow: []policycore.FrameRule{}}}
+	if f.bGroups != nil {
+		bGroups = f.bGroups
+	}
+	if f.bContracts != nil {
+		bContracts = f.bContracts
+	}
+	if f.bBindings != nil {
+		bBindings = f.bBindings
 	}
 	for _, entry := range []struct {
 		org, prefix string
 		groups      []policybundle.Group
 		contracts   []policybundle.Contract
 		bindings    []policycore.Binding
-	}{{orgA, "a", f.groups, f.contracts, f.bindings}, {orgB, "b", []policybundle.Group{{ID: foreign, Slug: "foreign", Name: "Foreign", AllowedMethods: []string{"eth_call"}, Claims: []string{}}}, []policybundle.Contract{contract("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", addressB)}, []policycore.Binding{{Group: foreign, Allow: []policycore.FrameRule{}}}}} {
-		for kind, spec := range map[policybundle.Kind]any{policybundle.Groups: policybundle.GroupsSpec{Groups: entry.groups}, policybundle.ContractRegistry: policybundle.RegistrySpec{Contracts: entry.contracts}, policybundle.ExecutionRules: policybundle.ExecutionSpec{Policy: &policycore.Policy{APIVersion: policycore.NativeV2APIVersion, Kind: policycore.Kind, Org: entry.org, NestedCalls: policycore.NestedCallsRequireOwnRule, Bindings: entry.bindings}}} {
+	}{{orgA, "a", f.groups, f.contracts, f.bindings}, {orgB, "b", bGroups, bContracts, bBindings}} {
+		for kind, spec := range map[policybundle.Kind]any{policybundle.Groups: policybundle.GroupsSpec{Groups: entry.groups}, policybundle.ContractRegistry: policybundle.RegistrySpec{Contracts: entry.contracts}, policybundle.ExecutionRules: policybundle.ExecutionSpec{Policy: &policycore.Policy{APIVersion: policyVersion, Kind: policycore.Kind, Org: entry.org, NestedCalls: policycore.NestedCallsRequireOwnRule, Bindings: entry.bindings}}} {
 			path := entry.prefix + "-" + string(kind) + ".json"
 			docs[path] = encoded(t, map[string]any{"apiVersion": policybundle.DocumentAPIVersion, "kind": kind, "organizationId": entry.org, "spec": spec})
 			manifest.Documents = append(manifest.Documents, policybundle.DocumentRef{Kind: kind, OrganizationID: entry.org, Path: path, SHA256: policybundle.RawDigest(docs[path])})

@@ -37,6 +37,10 @@ const APIVersion = "privacy.gateway.fm/v1alpha1"
 // be selected explicitly through ParseNativeV2 and ValidateNativeV2.
 const NativeV2APIVersion = "privacy.gateway.fm/v1alpha2"
 
+// NativeV3APIVersion adds explicitly referenced foreign implementation code.
+// Policy wire fields remain identical to native-v2; code access is a runtime fact.
+const NativeV3APIVersion = "privacy.gateway.fm/v1alpha3"
+
 // Kind is the only document kind this package understands.
 const Kind = "ContractExecutionPolicy"
 
@@ -365,9 +369,18 @@ func Parse(data []byte) (*Policy, error) {
 // ParseNativeV2 decodes the explicitly selected native-v2 source. Semantic
 // validation still requires ValidateNativeV2.
 func ParseNativeV2(data []byte) (*Policy, error) {
+	return parseNative(data, NativeV2APIVersion)
+}
+
+// ParseNativeV3 selects the native-v3 semantics explicitly.
+func ParseNativeV3(data []byte) (*Policy, error) {
+	return parseNative(data, NativeV3APIVersion)
+}
+
+func parseNative(data []byte, version string) (*Policy, error) {
 	p, err := parsePolicy(data)
-	if err == nil && p.APIVersion != NativeV2APIVersion {
-		err = fmt.Errorf("policy: unsupported native apiVersion %q, expected %q", p.APIVersion, NativeV2APIVersion)
+	if err == nil && p.APIVersion != version {
+		err = fmt.Errorf("policy: unsupported native apiVersion %q, expected %q", p.APIVersion, version)
 	}
 	if err != nil {
 		return nil, validationError(err)

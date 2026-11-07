@@ -54,22 +54,40 @@ func (v *View) Contract(address common.Address) (ContractView, bool) {
 	}
 	c := registered.contract
 	view := ContractView{owner: registered.owner, metadata: RegistryMetadata{ID: c.ID, Address: c.Address, Name: c.Name, ABI: c.ABI, AllowVisibleToUnlock: c.AllowVisibleToUnlock, EventsAllowDynamicPayload: c.EventsAllowDynamicPayload}}
+	_, view.associated, view.admin, view.grants = v.contractAssociation(registered, true)
+	sort.Slice(view.grants, func(i, j int) bool { return view.grants[i].ID < view.grants[j].ID })
+	return view, true
+}
+
+// ContractAssociation exposes only the same mapped owning-org association used
+// by Contract. It copies no ABI or grant payload and grants no native rule.
+func (v *View) ContractAssociation(address common.Address) (ownerOrg string, member bool, associated bool, registered bool) {
+	c, ok := v.factory.contracts[address]
+	if !ok {
+		return "", false, false, false
+	}
+	member, associated, _, _ = v.contractAssociation(c, false)
+	return c.owner, member, associated, true
+}
+
+func (v *View) contractAssociation(registered registeredContract, collect bool) (member, associated, admin bool, grants []policybundle.ReadGrant) {
 	org, member := v.orgs[registered.owner]
 	if !member {
-		return view, true
+		return false, false, false, nil
 	}
-	view.associated, view.admin = org.admin, org.admin
-	for _, grant := range c.ReadGrants {
+	associated, admin = org.admin, org.admin
+	for _, grant := range registered.contract.ReadGrants {
 		g, mapped := org.groupData[grant.GroupID]
 		if !mapped {
 			continue
 		}
-		view.grants = append(view.grants, grant)
-		view.associated = true
+		if collect {
+			grants = append(grants, grant)
+		}
+		associated = true
 		if g.IsOrgAdmin || slices.Contains(g.Claims, "admin") {
-			view.admin = true
+			admin = true
 		}
 	}
-	sort.Slice(view.grants, func(i, j int) bool { return view.grants[i].ID < view.grants[j].ID })
-	return view, true
+	return true, associated, admin, grants
 }

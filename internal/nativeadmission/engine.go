@@ -16,37 +16,43 @@ import (
 )
 
 type Engine struct {
-	raw      bool
-	metadata policybundle.BundleMetadata
-	runtime  *policybundle.RuntimeCatalog
-	owners   map[common.Address]string
-	shared   map[common.Address]*common.Hash
-	work     map[string]map[string]ruleWork
+	raw             bool
+	multiOrg        bool
+	metadata        policybundle.BundleMetadata
+	runtime         *policybundle.RuntimeCatalog
+	owners          map[common.Address]string
+	shared          map[common.Address]*common.Hash
+	work            map[string]map[string]ruleWork
+	associationWork map[common.Address]uint64
 }
 
 func New(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
-	return newEngine(snapshot, clock, false)
+	return newEngine(snapshot, clock, policybundle.RuntimeCallProfileID)
 }
 
 // NewRaw composes signed CALL authorization and unchanged simulation checks.
 func NewRaw(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
-	return newEngine(snapshot, clock, true)
+	return newEngine(snapshot, clock, policybundle.RuntimeRawSendProfileID)
 }
 
-func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, raw bool) (*Engine, error) {
+func NewMultiOrg(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
+	return newEngine(snapshot, clock, policybundle.RuntimeMultiOrgProfileID)
+}
+
+func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, expectedProfile string) (*Engine, error) {
 	if snapshot == nil || clock == nil {
 		return nil, errors.New("invalid native admission snapshot")
 	}
 	metadata := snapshot.Metadata()
 	runtime, ok := snapshot.Runtime()
-	expectedProfile := policybundle.RuntimeCallProfileID
-	if raw {
-		expectedProfile = policybundle.RuntimeRawSendProfileID
+	expectedEvaluator := policybundle.NativeV2EvaluatorVersion
+	if expectedProfile == policybundle.RuntimeMultiOrgProfileID {
+		expectedEvaluator = policybundle.NativeV3EvaluatorVersion
 	}
-	if !ok || metadata.Profile != expectedProfile || metadata.EvaluatorVersion != policybundle.NativeV2EvaluatorVersion || metadata.RuntimeCatalog == nil || metadata.RuntimeCatalog.SemanticDigest != runtime.Digest() {
+	if !ok || metadata.Profile != expectedProfile || metadata.EvaluatorVersion != expectedEvaluator || metadata.RuntimeCatalog == nil || metadata.RuntimeCatalog.SemanticDigest != runtime.Digest() {
 		return nil, errors.New("invalid native admission snapshot")
 	}
-	n := &Engine{raw: raw, metadata: metadata, runtime: runtime, owners: map[common.Address]string{}, shared: map[common.Address]*common.Hash{}, work: map[string]map[string]ruleWork{}}
+	n := &Engine{raw: expectedProfile != policybundle.RuntimeCallProfileID, multiOrg: expectedProfile == policybundle.RuntimeMultiOrgProfileID, metadata: metadata, runtime: runtime, owners: map[common.Address]string{}, shared: map[common.Address]*common.Hash{}, work: map[string]map[string]ruleWork{}, associationWork: map[common.Address]uint64{}}
 	for _, org := range snapshot.Organizations() {
 		catalog, ok := snapshot.NativeCatalog(org.ID)
 		if !ok {
@@ -58,6 +64,13 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, raw
 				return nil, errors.New("invalid native admission snapshot")
 			}
 			n.owners[a] = org.ID
+			if n.multiOrg {
+				contract, found := snapshot.Contract(org.ID, a)
+				if !found {
+					return nil, errors.New("invalid native admission snapshot")
+				}
+				n.associationWork[a] = 1 + uint64(len(contract.ReadGrants))
+			}
 		}
 		program, ok := snapshot.Execution(org.ID)
 		if !ok {
@@ -78,7 +91,11 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, raw
 
 func invalid() policycore.Decision { return policycore.Decision{Code: policycore.DenialInvalidFacts} }
 
-func (n *Engine) owner(execution *rpcexecution.CallExecution, address common.Address) string {
+// registeredOwner is an isolation label even when an account currently has no
+// code. It is separate from evidence capable of supplying operational claims.
+func (n *Engine) registeredOwner(address common.Address) string { return n.owners[address] }
+
+func (n *Engine) qualifiedRuntimeOwner(execution *rpcexecution.CallExecution, address common.Address) string {
 	code, ok := execution.Code(address)
 	if !ok || !code.HasCode() || code.Precompile() || code.Delegated() {
 		return ""
@@ -159,20 +176,39 @@ func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOr
 		return invalid()
 	}
 	var weight ruleWork
-	for _, group := range groups {
-		w := n.work[selectedOrg][group]
+	orgIDs := []string{selectedOrg}
+	if n.multiOrg {
+		orgIDs = view.OrgIDs()
+	}
+	var totalGroups uint64
+	for _, orgID := range orgIDs {
+		current, known := view.Org(orgID)
+		if !known {
+			return invalid()
+		}
+		currentGroups := current.Groups()
+		if len(currentGroups) > 4096 {
+			return invalid()
+		}
 		var valid bool
-		weight.rules, valid = add(weight.rules, w.rules)
+		totalGroups, valid = add(totalGroups, uint64(len(currentGroups)))
 		if !valid {
 			return invalid()
 		}
-		weight.items, valid = add(weight.items, w.items)
-		if !valid {
-			return invalid()
-		}
-		weight.linked, valid = add(weight.linked, w.linked)
-		if !valid {
-			return invalid()
+		for _, group := range currentGroups {
+			w := n.work[orgID][group]
+			weight.rules, valid = add(weight.rules, w.rules)
+			if !valid {
+				return invalid()
+			}
+			weight.items, valid = add(weight.items, w.items)
+			if !valid {
+				return invalid()
+			}
+			weight.linked, valid = add(weight.linked, w.linked)
+			if !valid {
+				return invalid()
+			}
 		}
 	}
 	needsFromProof := !signed && execution.Call().FromSupplied()
@@ -185,11 +221,15 @@ func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOr
 	if needsFromProof && !wallets.Contains(execution.Call().From()) {
 		return invalid()
 	}
-	if _, ok := admissionWork(uint64(execution.RecordCount()), uint64(len(groups)), weight, uint64(len(wallets.addresses))); !ok {
+	work, valid := admissionWork(uint64(execution.RecordCount()), totalGroups, weight, uint64(len(wallets.addresses)))
+	if !valid {
 		return invalid()
 	}
 	if ctx.Err() != nil {
 		return invalid()
+	}
+	if n.multiOrg {
+		return n.checkMultiOrg(ctx, view, selectedOrg, execution, wallets, signer, work)
 	}
 	frames, ok := n.materialize(org, execution)
 	if !ok {

@@ -19,8 +19,9 @@ const (
 
 // compileClassRule prepares rules that deliberately do not decode an ABI.
 // Wildcard includes receive/fallback; empty input is a separate explicit rule.
-func compileClassRule(r FrameRule, cat Catalog) (frameKey, *compiledRule, error) {
+func compileClassRule(r FrameRule, cat Catalog, references *codeReferences) (frameKey, *compiledRule, error) {
 	var key frameKey
+	var foreignOrg string
 	if r.Selector != "*" && r.Selector != "0x" {
 		return key, nil, fmt.Errorf("target classes require selector * or 0x")
 	}
@@ -51,9 +52,14 @@ func compileClassRule(r FrameRule, cat Catalog) (frameKey, *compiledRule, error)
 		if _, ok := cat.Contracts[catalogKey(key.storage.Hex())]; !ok {
 			return key, nil, fmt.Errorf("storageAddress is not registered to this organisation")
 		}
-		if _, ok := cat.Contracts[catalogKey(key.code.Hex())]; !ok {
-			return key, nil, fmt.Errorf("codeAddress is not registered to this organisation")
+		_, owner, err := resolveCodeReference(catalogKey(key.storage.Hex()), catalogKey(key.code.Hex()), cat, references)
+		if err != nil {
+			if references == nil {
+				return key, nil, fmt.Errorf("codeAddress is not registered to this organisation")
+			}
+			return key, nil, err
 		}
+		foreignOrg = owner
 	case "org", "shared", "precompile":
 	case "deployer", "pending":
 		if r.AllowUpgrade || r.Selector != "*" {
@@ -97,7 +103,7 @@ func compileClassRule(r FrameRule, cat Catalog) (frameKey, *compiledRule, error)
 			}
 		}
 	}
-	compiled := &compiledRule{sig: r.TargetClass + " " + r.Selector, selectorMode: key.selectorMode, exactLen: key.selectorMode == selectorEmpty, callTypes: kinds, allowUpgrade: r.AllowUpgrade}
+	compiled := &compiledRule{foreignCodeOrg: foreignOrg, sig: r.TargetClass + " " + r.Selector, selectorMode: key.selectorMode, exactLen: key.selectorMode == selectorEmpty, callTypes: kinds, allowUpgrade: r.AllowUpgrade}
 	var err error
 	compiled.exceptions, err = compileDeployerExceptions(r, cat)
 	if err != nil {
@@ -192,7 +198,8 @@ func (key frameKey) matchesTarget(org string, f Frame) bool {
 
 func (r *compiledRule) checkAuthority(ctx Context, f Frame, groupClaims uint8, key frameKey) (DenialCode, error) {
 	if key.targetClass == "" || key.targetClass == "org" || key.targetClass == "create" || key.targetClass == "deployer" || key.targetClass == "pending" {
-		if f.CodeOrg != ctx.Org || f.StorageOrg != ctx.Org {
+		foreignCodeAllowed := r.foreignCodeOrg != "" && key.targetClass == "" && key.code != key.storage && f.CodeAccessible && f.CodeOrg == r.foreignCodeOrg && !f.CodeShared && f.CodeKind == CodeContract && (f.CallType == CallTypeDelegateCall || f.CallType == CallTypeCallCode)
+		if f.StorageOrg != ctx.Org || (r.foreignCodeOrg != "" && !foreignCodeAllowed) || (r.foreignCodeOrg == "" && f.CodeOrg != ctx.Org) {
 			return DenialOwnership, fmt.Errorf("code and storage must belong to policy organisation")
 		}
 	}

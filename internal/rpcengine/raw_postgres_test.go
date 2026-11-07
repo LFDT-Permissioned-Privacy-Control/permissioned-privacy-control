@@ -33,6 +33,7 @@ import (
 	"privacy-proxy/internal/operational/admissionsql"
 	"privacy-proxy/internal/operational/walletsql"
 	"privacy-proxy/internal/policybundle"
+	"privacy-proxy/internal/policycore"
 	"privacy-proxy/internal/rpcengine"
 	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/runtimepolicy"
@@ -236,10 +237,23 @@ func rawCounts(t *testing.T, d rawDatabase, network admission.Digest, hash commo
 
 func TestBothRawModesCommitRealFinancialAndPrivacyEffectsBeforePublication(t *testing.T) {
 	d := rawPostgres(t)
-	for _, mode := range []string{policybundle.RawSubmissionOPSPreflight, policybundle.RawSubmissionGuardV1} {
-		t.Run(mode, func(t *testing.T) {
+	for _, scenario := range []struct {
+		mode     string
+		multiOrg bool
+	}{{policybundle.RawSubmissionOPSPreflight, false}, {policybundle.RawSubmissionGuardV1, false}, {policybundle.RawSubmissionOPSPreflight, true}, {policybundle.RawSubmissionGuardV1, true}} {
+		mode := scenario.mode
+		name := mode
+		if scenario.multiOrg {
+			name += "-multi-org"
+		}
+		t.Run(name, func(t *testing.T) {
 			f := newFixture()
 			f.rawMode = mode
+			f.multiOrg = scenario.multiOrg
+			if f.multiOrg {
+				f.roles = append(f.roles, foreign)
+				f.bBindings = []policycore.Binding{{Group: foreign, Allow: []policycore.FrameRule{{StorageAddress: addressB, Selector: "*"}}}}
+			}
 			f.groups[0].AllowedMethods = []string{"eth_call", "eth_sendTransaction"}
 			f.groups[0].IsOrgAdmin = true
 			f.capability("operational.travel-rule/v1")
@@ -258,7 +272,7 @@ func TestBothRawModesCommitRealFinancialAndPrivacyEffectsBeforePublication(t *te
 			instant.Store(now)
 			clock := func() time.Time { return time.Unix(instant.Load(), 0) }
 			tok := token(t, snapshot, f.roles)
-			binding := walletops.ServiceBinding{ServiceOrigin: "https://ops.test", Environment: "test", ChainID: "1", GenesisHash: nodeHash, DeploymentID: "raw-pg-" + mode}
+			binding := walletops.ServiceBinding{ServiceOrigin: "https://ops.test", Environment: "test", ChainID: "1", GenesisHash: nodeHash, DeploymentID: "raw-pg-" + name}
 			network := admission.NetworkBinding{Environment: binding.Environment, ChainID: binding.ChainID, GenesisHash: binding.GenesisHash, DeploymentID: binding.DeploymentID}
 			walletGeneration, generation := uuid.NewString(), uuid.NewString()
 			if err := walletsql.BootstrapEmpty(t.Context(), d.ownerDSN, binding, walletGeneration); err != nil {
@@ -312,6 +326,9 @@ func TestBothRawModesCommitRealFinancialAndPrivacyEffectsBeforePublication(t *te
 			}
 			createRecord()
 			n := &node{}
+			if f.multiOrg {
+				n.mutate = func(root map[string]any) { root["calls"] = []any{child("CALL", addressA, addressB, "0x")} }
+			}
 			nodeServer := httptest.NewServer(n)
 			t.Cleanup(nodeServer.Close)
 			var publications atomic.Int64
@@ -358,11 +375,26 @@ func TestBothRawModesCommitRealFinancialAndPrivacyEffectsBeforePublication(t *te
 				rawNode.MaxBatch = 32
 				rawNode.Delivery = nodeapproval.DeliveryOptions{Targets: []string{listener.Addr().String()}, Timeout: time.Second, MaxInFlight: 1, RetainMax: 32}
 			}
-			engine, err := rpcengine.NewRaw(snapshot, rpcengine.RawOptions{CallClients: callClients, RawNodes: map[string]rpcengine.RawNodeOptions{orgA: rawNode}, Wallets: resolver, WalletBinding: binding, WalletState: walletState, Admission: financial, Clock: clock})
+			constructor := rpcengine.NewRaw
+			if f.multiOrg {
+				constructor = rpcengine.NewMultiOrg
+			}
+			engine, err := constructor(snapshot, rpcengine.RawOptions{CallClients: callClients, RawNodes: map[string]rpcengine.RawNodeOptions{orgA: rawNode}, Wallets: resolver, WalletBinding: binding, WalletState: walletState, Admission: financial, Clock: clock})
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(engine.Close)
+			if f.multiOrg {
+				if out, _ := request(t, engine, tok, orgA, map[string]any{"to": addressA}, nil); out.Error != nil || out.Result == nil || *out.Result != "0xfeed" {
+					t.Fatal("new profile simulation not mounted", out)
+				}
+				// The readiness retry below requires zero *raw* node work so clear
+				// only this completed simulation's test observation, not service state.
+				n.mu.Lock()
+				n.methods = nil
+				n.anchors = nil
+				n.mu.Unlock()
+			}
 			server := httptest.NewServer(engine.Handler(orgA))
 			t.Cleanup(server.Close)
 			// A test CLIENT repeats only a known preflight readiness refusal with

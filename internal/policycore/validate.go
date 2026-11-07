@@ -35,6 +35,14 @@ type ContractInfo struct {
 	ABI string
 }
 
+// CodeReferenceCatalog is a separate, approved ABI/owner index. It never makes
+// another organisation's contract part of Catalog.Contracts.
+type CodeReferenceCatalog map[string]CodeReferenceInfo
+type CodeReferenceInfo struct {
+	OwnerOrg string
+	ABI      string
+}
+
 // argKind is the decoded-argument category a constraint applies to.
 type argKind uint8
 
@@ -62,18 +70,19 @@ type compiledArg struct {
 // tuples occupy their full encoded width there; dynamic values occupy one
 // offset word. The prepared offsets account for both, without decoding tails.
 type compiledRule struct {
-	selectorMode uint8
-	allowUpgrade bool
-	sig          string
-	headSlots    int  // total encoded head width in 32-byte words
-	exactLen     bool // true when every argument is statically sized
-	callTypes    map[CallType]struct{}
-	args         []compiledArg
-	maxValue     *big.Int
-	maxDepth     *int64
-	minDepth     *int
-	caller       *common.Address
-	exceptions   []DeployerException
+	foreignCodeOrg string
+	selectorMode   uint8
+	allowUpgrade   bool
+	sig            string
+	headSlots      int  // total encoded head width in 32-byte words
+	exactLen       bool // true when every argument is statically sized
+	callTypes      map[CallType]struct{}
+	args           []compiledArg
+	maxValue       *big.Int
+	maxDepth       *int64
+	minDepth       *int
+	caller         *common.Address
+	exceptions     []DeployerException
 }
 
 // headLen is the calldata length this rule's arguments occupy, including the
@@ -225,7 +234,7 @@ var defaultCallTypes = map[CallType]struct{}{
 // reviewer believed were constrained.
 // A non-nil error is a *ValidationError.
 func Validate(p *Policy, cat Catalog) (*Validated, error) {
-	v0, err := validatePolicy(p, cat, APIVersion)
+	v0, err := validatePolicy(p, cat, APIVersion, nil)
 	if err != nil {
 		return v0, validationError(err)
 	}
@@ -234,7 +243,20 @@ func Validate(p *Policy, cat Catalog) (*Validated, error) {
 
 // ValidateNativeV2 compiles only the explicitly versioned native-v2 source.
 func ValidateNativeV2(p *Policy, cat Catalog) (*Validated, error) {
-	v, err := validatePolicy(p, cat, NativeV2APIVersion)
+	v, err := validatePolicy(p, cat, NativeV2APIVersion, nil)
+	if err != nil {
+		return nil, validationError(err)
+	}
+	return v, nil
+}
+
+// ValidateNativeV3 compiles foreign literal code references without importing
+// foreign storage, memberships or claims into the policy's owned catalog.
+func ValidateNativeV3(p *Policy, cat Catalog, references CodeReferenceCatalog) (*Validated, error) {
+	if err := validateCodeReferences(cat, references); err != nil {
+		return nil, validationError(err)
+	}
+	v, err := validatePolicy(p, cat, NativeV3APIVersion, references)
 	if err != nil {
 		return nil, validationError(err)
 	}
@@ -242,7 +264,7 @@ func ValidateNativeV2(p *Policy, cat Catalog) (*Validated, error) {
 }
 
 // validatePolicy is Validate before its error is typed.
-func validatePolicy(p *Policy, cat Catalog, version string) (*Validated, error) {
+func validatePolicy(p *Policy, cat Catalog, version string, references CodeReferenceCatalog) (*Validated, error) {
 	if p == nil {
 		return nil, fmt.Errorf("policy: document is missing")
 	}
@@ -269,6 +291,13 @@ func validatePolicy(p *Policy, cat Catalog, version string) (*Validated, error) 
 	// Parsed ABIs are memoised per contract so that a policy naming many
 	// selectors on one contract parses its ABI once.
 	parsedABIs := make(map[string]map[string]abi.Method, len(cat.Contracts))
+	// Validate a used foreign ABI's canonical bytes once per code account, just
+	// as parsedABIs memoizes method parsing. Many rules must not reparse one
+	// large ABI, and unused global references need no ABI-buffer copies.
+	var refs *codeReferences
+	if version == NativeV3APIVersion {
+		refs = &codeReferences{catalog: references, canonical: make(map[string]bool)}
+	}
 
 	for bi, b := range p.Bindings {
 		if b.Group == "" {
@@ -286,7 +315,7 @@ func validatePolicy(p *Policy, cat Catalog, version string) (*Validated, error) 
 			if err := validateDepthVersion(r, version); err != nil {
 				return nil, fmt.Errorf("policy: binding %d, rule %d: %w", bi, ri, err)
 			}
-			key, rule, err := compileRule(r, cat, parsedABIs)
+			key, rule, err := compileRule(r, cat, parsedABIs, refs)
 			if err != nil {
 				return nil, fmt.Errorf("policy: binding %d (group %q), rule %d: %w", bi, b.Group, ri, err)
 			}
@@ -330,12 +359,12 @@ func validateDepthVersion(r FrameRule, version string) error {
 }
 
 // compileRule validates one frame rule and prepares its decoder.
-func compileRule(r FrameRule, cat Catalog, parsedABIs map[string]map[string]abi.Method) (frameKey, *compiledRule, error) {
+func compileRule(r FrameRule, cat Catalog, parsedABIs map[string]map[string]abi.Method, references *codeReferences) (frameKey, *compiledRule, error) {
 	if r.Except != nil && r.TargetClass != "deployer" {
 		return frameKey{}, nil, fmt.Errorf("except is supported only for deployer fallback")
 	}
 	if r.TargetClass != "" || r.Selector == "*" || r.Selector == "0x" {
-		return compileClassRule(r, cat)
+		return compileClassRule(r, cat, references)
 	}
 	var zero frameKey
 
@@ -365,9 +394,12 @@ func compileRule(r FrameRule, cat Catalog, parsedABIs map[string]map[string]abi.
 		codeKey = catalogKey(r.CodeAddress)
 	}
 
-	code, ok := cat.Contracts[codeKey]
-	if !ok {
-		return zero, nil, fmt.Errorf("codeAddress %s is not a contract registered to this organisation; its ABI is what decides what the selector and arguments mean, so it must be registered before a rule can name it", r.CodeAddress)
+	code, foreignOrg, err := resolveCodeReference(storageKey, codeKey, cat, references)
+	if err != nil {
+		if references == nil {
+			return zero, nil, fmt.Errorf("codeAddress %s is not a contract registered to this organisation; its ABI is what decides what the selector and arguments mean, so it must be registered before a rule can name it", r.CodeAddress)
+		}
+		return zero, nil, err
 	}
 
 	// A rule naming a separate code account may only permit the frame kinds where
@@ -470,15 +502,16 @@ func compileRule(r FrameRule, cat Catalog, parsedABIs map[string]map[string]abi.
 			code:     common.HexToAddress(codeKey),
 			selector: selector,
 		}, &compiledRule{
-			sig:          method.Sig,
-			allowUpgrade: r.AllowUpgrade,
-			headSlots:    headSlots,
-			exactLen:     exact,
-			callTypes:    callTypes,
-			args:         args,
-			maxValue:     maxValue,
-			maxDepth:     maxDepth,
-			caller:       caller,
+			foreignCodeOrg: foreignOrg,
+			sig:            method.Sig,
+			allowUpgrade:   r.AllowUpgrade,
+			headSlots:      headSlots,
+			exactLen:       exact,
+			callTypes:      callTypes,
+			args:           args,
+			maxValue:       maxValue,
+			maxDepth:       maxDepth,
+			caller:         caller,
 		}, nil
 }
 

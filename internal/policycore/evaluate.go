@@ -37,11 +37,14 @@ type Frame struct {
 	CodeKind         uint8
 	UpgradeTargetOrg string
 	// GroupClaims contains the current target-specific mask for each group.
-	GroupClaims     map[string]uint8
-	CallerOrg       string
-	CodeOrg         string
-	StorageOrg      string
-	CodeShared      bool
+	GroupClaims map[string]uint8
+	CallerOrg   string
+	CodeOrg     string
+	StorageOrg  string
+	CodeShared  bool
+	// CodeAccessible is a trusted native-v3 code-access fact. It never changes
+	// ownership and cannot authorize an org wildcard or an operational claim.
+	CodeAccessible  bool
 	StorageShared   bool
 	StorageDeployer bool
 	StoragePending  bool
@@ -157,6 +160,9 @@ func (v *Validated) Evaluate(ctx Context, frames []Frame) Decision {
 func (v *Validated) matchFrame(ctx Context, f Frame) (DenialCode, error) {
 	if f.CodeKind > CodePrecompile {
 		return DenialInvalidFacts, fmt.Errorf("unknown code kind")
+	}
+	if v.policy.APIVersion == NativeV3APIVersion && f.CodeShared && (f.CallType == CallTypeDelegateCall || f.CallType == CallTypeCallCode) {
+		return DenialOwnership, fmt.Errorf("shared code cannot execute against private storage")
 	}
 	var selector [4]byte
 	if len(f.Calldata) >= 4 {

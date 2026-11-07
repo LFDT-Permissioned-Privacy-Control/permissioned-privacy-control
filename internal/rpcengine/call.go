@@ -44,19 +44,16 @@ type Engine struct {
 }
 
 func New(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpcexecution.Client, wallets WalletResolver, clock identity.Clock) (*Engine, error) {
-	return newEngine(snapshot, bindings, wallets, clock, false)
+	return newEngine(snapshot, bindings, wallets, clock, policybundle.RuntimeCallProfileID)
 }
 
-func newEngine(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpcexecution.Client, wallets WalletResolver, clock identity.Clock, raw bool) (*Engine, error) {
+func newEngine(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpcexecution.Client, wallets WalletResolver, clock identity.Clock, expectedProfile string) (*Engine, error) {
 	if snapshot == nil || clock == nil {
 		return nil, errors.New("invalid RPC engine configuration")
 	}
 	runtime, ok := snapshot.Runtime()
 	metadata := snapshot.Metadata()
-	expectedProfile := policybundle.RuntimeCallProfileID
-	if raw {
-		expectedProfile = policybundle.RuntimeRawSendProfileID
-	}
+	raw := expectedProfile != policybundle.RuntimeCallProfileID
 	if !ok || metadata.Profile != expectedProfile {
 		return nil, errors.New("invalid RPC engine configuration")
 	}
@@ -67,6 +64,9 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpce
 	newNative := nativeadmission.New
 	if raw {
 		newNative = nativeadmission.NewRaw
+	}
+	if expectedProfile == policybundle.RuntimeMultiOrgProfileID {
+		newNative = nativeadmission.NewMultiOrg
 	}
 	native, err := newNative(snapshot, clock)
 	if err != nil {

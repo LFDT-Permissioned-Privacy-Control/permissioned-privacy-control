@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"privacy-proxy/internal/policycore"
+	"privacy-proxy/internal/runtimepolicy"
 )
 
 func TestAdmissionComposedWorkBoundariesAndOverflow(t *testing.T) {
@@ -28,6 +30,16 @@ func TestAdmissionComposedWorkBoundariesAndOverflow(t *testing.T) {
 	for _, w := range []ruleWork{{rules: math.MaxUint64}, {items: math.MaxUint64}, {linked: math.MaxUint64}} {
 		if _, ok := admissionWork(math.MaxUint64, 1, w, 4096); ok {
 			t.Fatal("arithmetic overflow accepted")
+		}
+	}
+}
+
+func TestRegisteredIsolationLabelsDoNotMintOperationalClaims(t *testing.T) {
+	for _, qualified := range []string{"", "B", "A"} {
+		frame := policycore.Frame{StorageOrg: "A"}
+		setFrameMasks(&frame, []runtimepolicy.GroupMask{{GroupID: "admin", Claims: 7}}, qualified, "A")
+		if (frame.GroupClaims["admin"] == 7) != (qualified == "A") {
+			t.Fatal("registry label supplied operational claims without qualified code", qualified)
 		}
 	}
 }

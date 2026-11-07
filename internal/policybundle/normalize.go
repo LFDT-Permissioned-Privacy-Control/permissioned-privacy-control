@@ -78,16 +78,16 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 	if (o.Profile.id == FoundationProfileID && m.IdentityCatalog != nil) || (o.Profile.id != FoundationProfileID && m.IdentityCatalog == nil) {
 		return fail(UnsupportedFeature, "", "", "identityCatalog", "identity source must match the explicitly selected profile")
 	}
-	if (o.Profile.id == RuntimeCallProfileID || o.Profile.id == RuntimeRawSendProfileID) != (m.RuntimeCatalog != nil) {
+	if runtimeProfile(o.Profile.id) != (m.RuntimeCatalog != nil) {
 		return fail(UnsupportedFeature, "", "", "runtimeCatalog", "runtime source must match the explicitly selected profile")
 	}
 	if (o.Profile.id == DisclosureProfileID) != (m.DisclosureCatalog != nil) {
 		return fail(UnsupportedFeature, "", "", "disclosureCatalog", "disclosure source must match the explicitly selected profile")
 	}
-	if (o.Profile.id == ComplianceProfileID || o.Profile.id == RuntimeRawSendProfileID) != (m.ComplianceCatalog != nil) {
+	if (o.Profile.id == ComplianceProfileID || rawRuntimeProfile(o.Profile.id)) != (m.ComplianceCatalog != nil) {
 		return fail(UnsupportedFeature, "", "", "complianceCatalog", "compliance source must match the explicitly selected profile")
 	}
-	if o.Profile.id == RuntimeRawSendProfileID && !positiveChain64(m.ChainID) {
+	if rawRuntimeProfile(o.Profile.id) && !positiveChain64(m.ChainID) {
 		return fail(UnsupportedFeature, "", "", "chainId", "raw submission requires a positive uint64 chain")
 	}
 	if len(m.Documents) > o.Limits.MaxDocuments-len(globalDocumentRefs(m)) {
