@@ -13,7 +13,7 @@ original request View before publishing protected bytes.
 | `eth_chainId` | Full positive uint64 chain ID matching the configured network. |
 | `eth_gasPrice`, `eth_maxPriorityFeePerGas` | uint256 fee quantities. |
 | `eth_feeHistory` | Bounded actual fee arrays and ratios, including shorter or empty history. |
-| `eth_syncing` | `false` or bounded quantity-valued progress telemetry. This does not establish that a node is caught up. |
+| `eth_syncing` | `false` or progress telemetry with three required uint256 quantities. The two optional warp counters may be null or uint256 quantities; optional `stages` may be null or up to 64 closed `name`/`block` entries, with nonempty UTF-8 names up to 128 bytes without ASCII controls and uint64 block quantities. Other bounded scalar quantity telemetry is allowed. This does not establish that a node is caught up. |
 | `net_listening`, `net_peerCount` | Boolean and full uint64 count respectively. |
 | `net_version` | Decimal network ID, which can differ from the chain ID. |
 | `web3_clientVersion` | Bounded client version string. |

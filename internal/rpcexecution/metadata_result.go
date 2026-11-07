@@ -24,6 +24,9 @@ func metadataResult(q MetadataQuery, raw []byte, l MetadataLimits) ([]byte, erro
 				return q.percentiles
 			}
 		}
+		if q.method == MetadataSyncing && depth == 1 {
+			return 64 // Only the typed stages field may use this bounded array.
+		}
 		return 0
 	})
 	if err != nil {
@@ -75,18 +78,7 @@ func metadataResult(q MetadataQuery, raw []byte, l MetadataLimits) ([]byte, erro
 			}
 		}
 	case MetadataSyncing:
-		if b, valid := v.(bool); valid {
-			ok = !b
-			break
-		}
-		object, valid := v.(map[string]any)
-		ok = valid
-		for _, name := range []string{"startingBlock", "currentBlock", "highestBlock"} {
-			ok = ok && object[name] != nil
-		}
-		for name, value := range object {
-			ok = ok && metadataIdentifier(name) && metadataQuantity(value, 256)
-		}
+		ok = metadataSyncing(v)
 	case MetadataFeeHistory:
 		ok = metadataFees(v, q)
 	}
@@ -94,6 +86,73 @@ func metadataResult(q MetadataQuery, raw []byte, l MetadataLimits) ([]byte, erro
 		return nil, failure(InvalidEvidence)
 	}
 	return raw, nil
+}
+
+// Sync progress remains telemetry. In particular a stage's block is not a
+// canonical head or a readiness assertion. Alloy's serialized Stage has a text
+// name and a full uint64 block; the enclosing progress counters are uint256.
+func metadataSyncing(v any) bool {
+	if b, ok := v.(bool); ok {
+		return !b
+	}
+	object, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, name := range []string{"startingBlock", "currentBlock", "highestBlock"} {
+		if !metadataQuantity(object[name], 256) {
+			return false
+		}
+	}
+	for name, value := range object {
+		switch name {
+		case "startingBlock", "currentBlock", "highestBlock":
+		case "warpChunksAmount", "warpChunksProcessed":
+			if value != nil && !metadataQuantity(value, 256) {
+				return false
+			}
+		case "stages":
+			if !metadataSyncStages(value) {
+				return false
+			}
+		default:
+			for _, reserved := range []string{"startingBlock", "currentBlock", "highestBlock", "warpChunksAmount", "warpChunksProcessed", "stages"} {
+				if strings.EqualFold(name, reserved) {
+					return false
+				}
+			}
+			if !metadataIdentifier(name) || !metadataQuantity(value, 256) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func metadataSyncStages(v any) bool {
+	if v == nil { // Optional stages is absent or null on supported encoders.
+		return true
+	}
+	stages, ok := v.([]any)
+	if !ok || len(stages) > 64 {
+		return false
+	}
+	for _, entry := range stages {
+		stage, ok := entry.(map[string]any)
+		if !ok || len(stage) != 2 || !metadataQuantity(stage["block"], 64) {
+			return false
+		}
+		name, ok := stage["name"].(string)
+		if !ok || len(name) == 0 || len(name) > 128 || !utf8.ValidString(name) {
+			return false
+		}
+		for _, c := range name {
+			if c < 0x20 || c == 0x7f {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func metadataQuantity(v any, bits int) bool {
