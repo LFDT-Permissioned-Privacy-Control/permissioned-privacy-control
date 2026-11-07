@@ -182,6 +182,7 @@ func TestNativeCallRuntimeDependencyBoundary(t *testing.T) {
 		allowed["privacy-proxy/internal/transactioninput"] = true
 		allowed["privacy-proxy/internal/pricefeedpolicy"] = true
 		allowed["privacy-proxy/internal/creationfacts"] = true
+		allowed["privacy-proxy/internal/networkidentity"] = true // shared stdlib-only network key
 		if pkg != "privacy-proxy/internal/rpcexecution" {
 			allowed["privacy-proxy/internal/runtimepolicy"] = true
 			allowed["privacy-proxy/internal/rpcexecution"] = true
@@ -214,7 +215,7 @@ func TestSignedEvidenceDependencyBoundaries(t *testing.T) {
 		if pkg == "privacy-proxy/internal/guardbridge" {
 			allowed["privacy-proxy/internal/pricefeedpolicy"] = true
 			allowed["privacy-proxy/internal/creationfacts"] = true
-			for _, name := range []string{"transactioninput", "rpcexecution", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate", "executionfacts", "policybundle", "policycore", "identity", "disclosurepolicy", "compliancepolicy", "compliance", "brokerpolicy", "strictjson", "creationfacts"} {
+			for _, name := range []string{"transactioninput", "rpcexecution", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate", "executionfacts", "policybundle", "policycore", "identity", "disclosurepolicy", "compliancepolicy", "compliance", "brokerpolicy", "strictjson", "creationfacts", "networkidentity"} {
 				allowed["privacy-proxy/internal/"+name] = true
 			}
 		}
@@ -394,7 +395,7 @@ func TestWalletDependencyBoundary(t *testing.T) {
 		}
 	}
 	allowed := map[string]bool{}
-	for _, name := range []string{"walletproof", "walletops", "wallethttp", "walletadapter", "identity", "runtimepolicy", "policybundle", "policycore", "strictjson", "disclosurepolicy", "compliancepolicy", "compliance", "nativeadmission", "rpcexecution", "executionfacts", "pricefeedpolicy", "brokerpolicy", "creationfacts"} {
+	for _, name := range []string{"walletproof", "walletops", "wallethttp", "walletadapter", "identity", "runtimepolicy", "policybundle", "policycore", "strictjson", "disclosurepolicy", "compliancepolicy", "compliance", "nativeadmission", "rpcexecution", "executionfacts", "pricefeedpolicy", "brokerpolicy", "creationfacts", "networkidentity"} {
 		allowed["privacy-proxy/internal/"+name] = true
 	}
 	for _, pkg := range []string{"privacy-proxy/internal/walletproof", "privacy-proxy/internal/walletops", "privacy-proxy/internal/wallethttp", "privacy-proxy/internal/walletadapter", "privacy-proxy/internal/operational/walletsql", "privacy-proxy/cmd/ops-v2-wallet-migrate"} {
