@@ -4,6 +4,7 @@ import (
 	"slices"
 	"sort"
 
+	"privacy-proxy/internal/compliancepolicy"
 	"privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/identity"
 )
@@ -14,6 +15,7 @@ const (
 	NativeV2ProfileID        = "catalog-native-v2/v1"
 	RuntimeCallProfileID     = "catalog-runtime-call/v1"
 	DisclosureProfileID      = "catalog-disclosure/v1"
+	ComplianceProfileID      = "catalog-compliance/v1"
 	CapabilityIdentity       = "identity.claims/v1"
 	NativeEvaluatorVersion   = "policycore/native-v1alpha1"
 	NativeV2EvaluatorVersion = "policycore/native-v1alpha2"
@@ -67,6 +69,10 @@ func DisclosureProfile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{DisclosureProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
 }
 
+func ComplianceProfile(methodCatalogVersion string) ValidationProfile {
+	return ValidationProfile{ComplianceProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+}
+
 // MethodCatalog is trusted startup data. Names are exact; aliases carry no
 // implicit passthrough authority. Wildcard is an explicit subset of Assignable.
 type MethodCatalog struct {
@@ -83,6 +89,7 @@ type Options struct {
 	Methods          MethodCatalog
 	IdentityLimits   identity.Limits
 	DisclosureLimits disclosurepolicy.Limits
+	ComplianceLimits compliancepolicy.Limits
 }
 
 type Requirements struct {
@@ -100,10 +107,10 @@ type methodIndex struct {
 func prepareOptions(options Options) (methodIndex, error) {
 	p := options.Profile
 	expectedEvaluator := NativeEvaluatorVersion
-	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID || p.id == DisclosureProfileID {
+	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID || p.id == DisclosureProfileID || p.id == ComplianceProfileID {
 		expectedEvaluator = NativeV2EvaluatorVersion
 	}
-	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && p.id != RuntimeCallProfileID && p.id != DisclosureProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || (p.id == DisclosureProfileID && !options.DisclosureLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
+	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && p.id != RuntimeCallProfileID && p.id != DisclosureProfileID && p.id != ComplianceProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || (p.id == DisclosureProfileID && !options.DisclosureLimits.Valid()) || (p.id == ComplianceProfileID && !options.ComplianceLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
 		return methodIndex{}, fail(InvalidSelection, "", "", "options", "invalid limits or pinned foundation/method profile")
 	}
 	m := methodIndex{map[string]bool{}, map[string]string{}, slices.Clone(options.Methods.Wildcard), map[string]string{}}

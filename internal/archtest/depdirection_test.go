@@ -19,6 +19,8 @@ import (
 	// gate.
 	_ "privacy-proxy/internal/apimodels"
 	_ "privacy-proxy/internal/audit"
+	_ "privacy-proxy/internal/compliance"
+	_ "privacy-proxy/internal/compliancepolicy"
 	_ "privacy-proxy/internal/config"
 	_ "privacy-proxy/internal/disclosurecase"
 	_ "privacy-proxy/internal/disclosurehttp"
@@ -148,7 +150,7 @@ func TestNativeExecutionEvidenceDependencyBoundary(t *testing.T) {
 
 func TestNativeCallRuntimeDependencyBoundary(t *testing.T) {
 	for _, pkg := range []string{"privacy-proxy/internal/rpcexecution", "privacy-proxy/internal/nativeadmission", "privacy-proxy/internal/rpcengine"} {
-		allowed := map[string]bool{pkg: true, "privacy-proxy/internal/executionfacts": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/policycore": true, "privacy-proxy/internal/strictjson": true, "privacy-proxy/internal/disclosurepolicy": true}
+		allowed := map[string]bool{pkg: true, "privacy-proxy/internal/executionfacts": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/policycore": true, "privacy-proxy/internal/strictjson": true, "privacy-proxy/internal/disclosurepolicy": true, "privacy-proxy/internal/compliancepolicy": true, "privacy-proxy/internal/compliance": true}
 		allowed["privacy-proxy/internal/transactioninput"] = true
 		if pkg != "privacy-proxy/internal/rpcexecution" {
 			allowed["privacy-proxy/internal/runtimepolicy"] = true
@@ -178,7 +180,7 @@ func TestSignedEvidenceDependencyBoundaries(t *testing.T) {
 	for _, pkg := range []string{"privacy-proxy/internal/transactioninput", "privacy-proxy/internal/guardbridge"} {
 		allowed := map[string]bool{pkg: true}
 		if pkg == "privacy-proxy/internal/guardbridge" {
-			for _, name := range []string{"transactioninput", "rpcexecution", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate", "executionfacts", "policybundle", "policycore", "identity", "disclosurepolicy", "strictjson"} {
+			for _, name := range []string{"transactioninput", "rpcexecution", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate", "executionfacts", "policybundle", "policycore", "identity", "disclosurepolicy", "compliancepolicy", "compliance", "strictjson"} {
 				allowed["privacy-proxy/internal/"+name] = true
 			}
 		}
@@ -200,7 +202,7 @@ func TestPolicyBundleDependencyBoundary(t *testing.T) {
 	for _, pkg := range []string{"privacy-proxy/internal/strictjson", "privacy-proxy/internal/policybundle"} {
 		deps := transitiveDeps(t, root, pkg)
 		for dep := range deps {
-			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !(pkg == "privacy-proxy/internal/policybundle" && (dep == "privacy-proxy/internal/policycore" || dep == "privacy-proxy/internal/strictjson" || dep == "privacy-proxy/internal/identity" || dep == "privacy-proxy/internal/disclosurepolicy")) {
+			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !(pkg == "privacy-proxy/internal/policybundle" && (dep == "privacy-proxy/internal/policycore" || dep == "privacy-proxy/internal/strictjson" || dep == "privacy-proxy/internal/identity" || dep == "privacy-proxy/internal/disclosurepolicy" || dep == "privacy-proxy/internal/compliancepolicy" || dep == "privacy-proxy/internal/compliance")) {
 				t.Errorf("%s imports application infrastructure %s", pkg, dep)
 			}
 			for _, forbidden := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/core", "github.com/ethereum/go-ethereum/triedb"} {
@@ -243,7 +245,7 @@ func TestIdentityDependencyBoundary(t *testing.T) {
 
 func TestRuntimePolicyDependencyBoundary(t *testing.T) {
 	const pkg = "privacy-proxy/internal/runtimepolicy"
-	allowed := map[string]bool{pkg: true, "privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/policycore": true, "privacy-proxy/internal/strictjson": true, "privacy-proxy/internal/disclosurepolicy": true}
+	allowed := map[string]bool{pkg: true, "privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/policycore": true, "privacy-proxy/internal/strictjson": true, "privacy-proxy/internal/disclosurepolicy": true, "privacy-proxy/internal/compliancepolicy": true, "privacy-proxy/internal/compliance": true}
 	for dep := range transitiveDeps(t, moduleRoot(t), pkg) {
 		if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
 			t.Errorf("runtime policy view imports application infrastructure %s", dep)
@@ -277,7 +279,7 @@ func TestPolicyAuthoringDependencyBoundary(t *testing.T) {
 		"privacy-proxy/internal/policyprofiles": true, "privacy-proxy/internal/rpcmethoddata": true,
 		"privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/identity": true,
 		"privacy-proxy/internal/policycore": true, "privacy-proxy/internal/strictjson": true,
-		"privacy-proxy/internal/disclosurepolicy": true,
+		"privacy-proxy/internal/disclosurepolicy": true, "privacy-proxy/internal/compliancepolicy": true, "privacy-proxy/internal/compliance": true,
 	}
 	for _, pkg := range []string{"privacy-proxy/cmd/ops-v2", "privacy-proxy/internal/policycli", "privacy-proxy/internal/policyprofiles", "privacy-proxy/internal/rpcmethoddata"} {
 		for dep := range transitiveDeps(t, root, pkg) {
@@ -319,7 +321,7 @@ func TestDisclosureDependencyBoundaries(t *testing.T) {
 			}
 		}
 	}
-	allowed := map[string]bool{"privacy-proxy/internal/disclosurepolicy": true, "privacy-proxy/internal/disclosurecase": true, "privacy-proxy/internal/disclosurehttp": true, "privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/policycore": true, "privacy-proxy/internal/policyprofiles": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/strictjson": true, "privacy-proxy/internal/runtimepolicy": true}
+	allowed := map[string]bool{"privacy-proxy/internal/disclosurepolicy": true, "privacy-proxy/internal/compliancepolicy": true, "privacy-proxy/internal/compliance": true, "privacy-proxy/internal/disclosurecase": true, "privacy-proxy/internal/disclosurehttp": true, "privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/policycore": true, "privacy-proxy/internal/policyprofiles": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/strictjson": true, "privacy-proxy/internal/runtimepolicy": true}
 	for _, pkg := range []string{"privacy-proxy/internal/disclosurepolicy", "privacy-proxy/internal/disclosurecase", "privacy-proxy/internal/disclosurehttp", "privacy-proxy/internal/operational/disclosuresql", "privacy-proxy/cmd/ops-v2-disclosure-migrate"} {
 		usesSQL := pkg == "privacy-proxy/internal/operational/disclosuresql" || pkg == "privacy-proxy/cmd/ops-v2-disclosure-migrate"
 		for dep := range transitiveDeps(t, root, pkg) {
@@ -392,4 +394,20 @@ func moduleRoot(t *testing.T) string {
 		t.Fatal("no active go.mod found")
 	}
 	return filepath.Dir(gomod)
+}
+
+func TestComplianceSourceDependencyBoundary(t *testing.T) {
+	allowed := map[string]bool{"privacy-proxy/internal/compliance": true, "privacy-proxy/internal/compliancepolicy": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/strictjson": true}
+	for _, pkg := range []string{"privacy-proxy/internal/compliance", "privacy-proxy/internal/compliancepolicy"} {
+		for dep := range transitiveDeps(t, moduleRoot(t), pkg) {
+			if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
+				t.Errorf("%s imports application infrastructure %s", pkg, dep)
+			}
+			for _, prefix := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/core", "github.com/ethereum/go-ethereum/triedb"} {
+				if strings.HasPrefix(dep, prefix) {
+					t.Errorf("%s imports SQL/VM machinery %s", pkg, dep)
+				}
+			}
+		}
+	}
 }

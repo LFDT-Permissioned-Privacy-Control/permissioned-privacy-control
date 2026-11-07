@@ -43,6 +43,21 @@ func TestComplianceDocumentCanonicalResources(t *testing.T) {
 	}
 }
 
+func TestLegacyComplianceKeepsDecimalRangeAndBackingSliceSort(t *testing.T) {
+	row := `{"id":"22222222-2222-2222-2222-222222222222","tokenAddress":"native","symbol":"ETH","decimals":255,"pricesByCurrency":{"usd":2500},"coingeckoId":""}`
+	if _, e := Parse([]byte(strings.Replace(complianceSource, `"tokenPrices":[]`, `"tokenPrices":[`+row+`]`, 1))); e != nil {
+		t.Fatal("legacy decimals narrowed", e)
+	}
+	rows := []AddressThreshold{{ID: "33333333-3333-3333-3333-333333333333", Address: "0x3333333333333333333333333333333333333333", ThresholdFiat: 1}, {ID: "22222222-2222-2222-2222-222222222222", Address: "0x2222222222222222222222222222222222222222", ThresholdFiat: 1}}
+	s := ComplianceSpec{Settings: ComplianceSettings{Currency: "usd", ThresholdFiat: 1, UnknownPricePolicy: "forbidden", EnforcementMode: "enforce"}, AddressThresholds: rows, TokenPrices: []TokenPrice{}}
+	if e := normalizeCompliance(&s); e != nil {
+		t.Fatal(e)
+	}
+	if rows[0].ID != "22222222-2222-2222-2222-222222222222" {
+		t.Fatal("legacy backing-slice sorting changed")
+	}
+}
+
 func TestComplianceDocumentRejectsThresholdProjectionRounding(t *testing.T) {
 	for _, number := range []string{"1.234", "0.001", "1000000000000000000", "1.00000000000000001", "100000000000000000.01", "1e-999999999"} {
 		source := strings.Replace(complianceSource, `"thresholdFiat":1000`, `"thresholdFiat":`+number, 1)

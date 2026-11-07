@@ -8,6 +8,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"privacy-proxy/internal/compliancepolicy"
 	"privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/policycore"
@@ -24,6 +25,7 @@ type CatalogSnapshot struct {
 	requirements  Requirements
 	identity      *identity.Catalog
 	disclosure    *disclosurepolicy.Catalog
+	compliance    *compliancepolicy.Catalog
 	methods       methodIndex
 	runtime       *RuntimeCatalog
 }
@@ -43,7 +45,15 @@ func (s *CatalogSnapshot) Metadata() BundleMetadata {
 		copied := *m.DisclosureCatalog
 		m.DisclosureCatalog = &copied
 	}
+	if m.ComplianceCatalog != nil {
+		copied := *m.ComplianceCatalog
+		m.ComplianceCatalog = &copied
+	}
 	return m
+}
+
+func (s *CatalogSnapshot) Compliance() (*compliancepolicy.Catalog, bool) {
+	return s.compliance, s.compliance != nil
 }
 
 func (s *CatalogSnapshot) Identity() (*identity.Catalog, bool) { return s.identity, s.identity != nil }
@@ -119,6 +129,9 @@ type catalogBuilder struct {
 	disclosureSource *disclosurepolicy.Source
 	disclosureRef    *DisclosureCatalogRef
 	disclosureLimits disclosurepolicy.Limits
+	complianceSource *compliancepolicy.Source
+	complianceRef    *ComplianceCatalogRef
+	complianceLimits compliancepolicy.Limits
 	runtimeSource    *RuntimeSource
 	runtimeRef       *RuntimeCatalogRef
 	runtimeScopes    map[string]string
@@ -132,7 +145,7 @@ func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
 		s.groups[org.ID] = map[string]Group{}
 		s.contracts[org.ID] = map[common.Address]Contract{}
 	}
-	b := &catalogBuilder{profile: o.Profile, snapshot: s, policies: map[string]*policycore.Policy{}, capabilities: map[string]bool{CapabilityNativeValidate: true}, secrets: map[string]bool{}, addresses: map[string]string{}, groupOwners: map[string]string{}, resourceIDs: map[string]bool{}, identityLimits: o.IdentityLimits, disclosureLimits: o.DisclosureLimits, limits: o.Limits}
+	b := &catalogBuilder{profile: o.Profile, snapshot: s, policies: map[string]*policycore.Policy{}, capabilities: map[string]bool{CapabilityNativeValidate: true}, secrets: map[string]bool{}, addresses: map[string]string{}, groupOwners: map[string]string{}, resourceIDs: map[string]bool{}, identityLimits: o.IdentityLimits, disclosureLimits: o.DisclosureLimits, complianceLimits: o.ComplianceLimits, limits: o.Limits}
 	if o.Profile.id == RuntimeCallProfileID {
 		for _, capability := range []string{CapabilityRuntimeCall, CapabilityPrincipal, CapabilityFrames, CapabilityAnchoredCode, CapabilityClassification, CapabilityOwnership} {
 			b.capabilities[capability] = true
@@ -252,7 +265,7 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 		}
 		catalog, _ := b.snapshot.NativeCatalog(org.ID)
 		validate := policycore.Validate
-		if b.profile.id == NativeV2ProfileID || b.profile.id == RuntimeCallProfileID || b.profile.id == DisclosureProfileID {
+		if b.profile.id == NativeV2ProfileID || b.profile.id == RuntimeCallProfileID || b.profile.id == DisclosureProfileID || b.profile.id == ComplianceProfileID {
 			validate = policycore.ValidateNativeV2
 		}
 		v, err := validate(b.policies[org.ID], catalog)
@@ -285,6 +298,9 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 		return nil, err
 	}
 	if err := b.compileDisclosure(); err != nil {
+		return nil, err
+	}
+	if err := b.compileCompliance(); err != nil {
 		return nil, err
 	}
 	for name := range b.capabilities {

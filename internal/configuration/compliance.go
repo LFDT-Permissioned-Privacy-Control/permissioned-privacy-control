@@ -1,17 +1,14 @@
 package configuration
 
 import (
-	"encoding/json"
 	"fmt"
-	"math"
-	"math/big"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 
 	"privacy-proxy/internal/compliance"
+	"privacy-proxy/internal/compliancepolicy"
 )
 
 type ComplianceSettings struct {
@@ -61,91 +58,26 @@ type ComplianceDiff struct {
 }
 
 func normalizeCompliance(s *ComplianceSpec) error {
-	if !exactThreshold(s.Settings.ThresholdFiat) || !compliance.IsValidCurrency(s.Settings.Currency) ||
-		(s.Settings.UnknownPricePolicy != "allowed" && s.Settings.UnknownPricePolicy != "forbidden") ||
-		!compliance.IsValidEnforcementMode(compliance.EnforcementMode(s.Settings.EnforcementMode)) {
-		return fmt.Errorf("invalid compliance settings")
+	v := compliancepolicy.SourceSpec{Settings: compliancepolicy.SourceSettings{Enabled: s.Settings.Enabled, ThresholdFiat: s.Settings.ThresholdFiat, Currency: s.Settings.Currency, UnknownPricePolicy: s.Settings.UnknownPricePolicy, EnforcementMode: s.Settings.EnforcementMode}, AddressThresholds: make([]compliancepolicy.SourceThreshold, len(s.AddressThresholds)), TokenPrices: make([]compliancepolicy.SourceTokenPrice, len(s.TokenPrices))}
+	for i, r := range s.AddressThresholds {
+		v.AddressThresholds[i] = compliancepolicy.SourceThreshold{ID: r.ID, Address: r.Address, ThresholdFiat: r.ThresholdFiat, Note: r.Note}
 	}
-	ids, addresses := map[string]bool{}, map[string]bool{}
-	for _, row := range s.AddressThresholds {
-		if !canonicalUUID(row.ID) || ids[row.ID] || !canonicalAddress(row.Address) || addresses[row.Address] || !exactThreshold(row.ThresholdFiat) || len(row.Note) > 4096 {
-			return fmt.Errorf("invalid or duplicate address threshold")
-		}
-		ids[row.ID], addresses[row.Address] = true, true
+	for i, r := range s.TokenPrices {
+		v.TokenPrices[i] = compliancepolicy.SourceTokenPrice{ID: r.ID, TokenAddress: r.TokenAddress, Symbol: r.Symbol, Decimals: r.Decimals, PricesByCurrency: r.PricesByCurrency, CoingeckoID: r.CoingeckoID}
 	}
-	addresses = map[string]bool{}
-	for _, row := range s.TokenPrices {
-		if !canonicalUUID(row.ID) || ids[row.ID] || (row.TokenAddress != "native" && !canonicalAddress(row.TokenAddress)) || addresses[row.TokenAddress] || row.Decimals < 0 || row.Decimals > 255 || len(row.Symbol) == 0 || len(row.Symbol) > 20 || len(row.CoingeckoID) > 100 || strings.TrimSpace(row.CoingeckoID) != row.CoingeckoID {
-			return fmt.Errorf("invalid or duplicate token price")
-		}
-		ids[row.ID], addresses[row.TokenAddress] = true, true
-		for currency, price := range row.PricesByCurrency {
-			if !compliance.IsValidCurrency(currency) || !finiteNonnegative(price) || price >= 1e12 {
-				return fmt.Errorf("invalid manual token price")
-			}
-		}
+	if err := compliancepolicy.NormalizeSpec(&v); err != nil {
+		return err
 	}
-	sort.Slice(s.AddressThresholds, func(i, j int) bool { return s.AddressThresholds[i].ID < s.AddressThresholds[j].ID })
-	sort.Slice(s.TokenPrices, func(i, j int) bool { return s.TokenPrices[i].ID < s.TokenPrices[j].ID })
-	return nil
-}
-func finiteNonnegative(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 }
-
-// Threshold columns are NUMERIC(20,2). Reject source values PostgreSQL would
-// silently round; multiplying the binary float by 100 would incorrectly reject
-// ordinary exact decimal inputs such as 0.29.
-func exactThreshold(v float64) bool {
-	if !finiteNonnegative(v) || v >= 1e18 {
-		return false
+	// Preserve the original backing-slice sorting behavior for legacy callers.
+	for i, r := range v.AddressThresholds {
+		s.AddressThresholds[i] = AddressThreshold{ID: r.ID, Address: r.Address, ThresholdFiat: r.ThresholdFiat, Note: r.Note}
 	}
-	text := strconv.FormatFloat(v, 'f', -1, 64)
-	point := strings.IndexByte(text, '.')
-	return point < 0 || len(text)-point-1 <= 2
-}
-
-// Existing compliance runtime models use float64. Preserve the authored decimal
-// through their JSON round trip instead of silently accepting more precision
-// than those models can carry. Prices remain JSON decimals, not 8-place values;
-// only their backing price_fiat integer range is constrained above.
-func validateComplianceWireNumbers(value any) error {
-	switch value := value.(type) {
-	case json.Number:
-		if len(value.String()) > 128 {
-			return fmt.Errorf("compliance number exceeds supported decimal precision")
-		}
-		v, err := value.Float64()
-		if err != nil || !finiteNonnegative(v) {
-			return fmt.Errorf("invalid compliance number")
-		}
-		if v == 0 {
-			// Reject underflow without constructing a rational with an attacker-
-			// chosen huge exponent. Arbitrarily spelled numeric zero needs no power.
-			mantissa := strings.FieldsFunc(value.String(), func(r rune) bool { return r == 'e' || r == 'E' })[0]
-			if strings.ContainsAny(mantissa, "123456789") {
-				return fmt.Errorf("compliance number exceeds supported decimal precision")
-			}
-			return nil
-		}
-		a, ok := new(big.Rat).SetString(value.String())
-		b, projected := new(big.Rat).SetString(strconv.FormatFloat(v, 'g', -1, 64))
-		if !ok || !projected || a.Cmp(b) != 0 {
-			return fmt.Errorf("compliance number exceeds supported decimal precision")
-		}
-	case map[string]any:
-		for _, child := range value {
-			if err := validateComplianceWireNumbers(child); err != nil {
-				return err
-			}
-		}
-	case []any:
-		for _, child := range value {
-			if err := validateComplianceWireNumbers(child); err != nil {
-				return err
-			}
-		}
+	for i, r := range v.TokenPrices {
+		s.TokenPrices[i] = TokenPrice{ID: r.ID, TokenAddress: r.TokenAddress, Symbol: r.Symbol, Decimals: r.Decimals, PricesByCurrency: r.PricesByCurrency, CoingeckoID: r.CoingeckoID}
 	}
 	return nil
 }
+func validateComplianceWireNumbers(value any) error { return compliance.ValidateWireNumbers(value) }
 func canonicalAddress(v string) bool {
 	return len(v) == 42 && strings.ToLower(v) == v && common.IsHexAddress(v)
 }

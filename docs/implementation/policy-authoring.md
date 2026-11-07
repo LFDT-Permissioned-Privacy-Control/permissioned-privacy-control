@@ -54,6 +54,11 @@ implicitly enable node tracing or protected report/data handlers.
 The runtime-call and disclosure profiles reject each other's global source;
 neither combines these capabilities into a complete runtime profile.
 
+`catalog-compliance/v1` requires its own global `complianceCatalog` source and
+rejects runtime/disclosure globals. Its shared checker and explicit limits are
+described in [compliance source and checker](compliance-source-checker.md).
+It validates source without connecting a record store or price provider.
+
 ## Derive ABI identifiers
 
 For an ABI obtained from the intended contract build, run:

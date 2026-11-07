@@ -13,7 +13,8 @@ import (
 
 // Checker performs compliance checks on value transfers.
 type Checker struct {
-	store                   Store
+	store                   CheckStore
+	source                  *SourceCheckOptions
 	recordExpiry            time.Duration // how long travel rule records stay valid
 	priceStalenessThreshold time.Duration // after this duration, system prices are considered stale
 	// defaultMode is the cluster-wide enforcement mode applied when a per-org
@@ -37,6 +38,9 @@ func NewChecker(store Store, recordExpiry time.Duration, priceStalenessThreshold
 // empty or unrecognised value pins the default at enforce (fail-safe). Wired
 // once at startup from the COMPLIANCE_DEFAULT_MODE env var.
 func (c *Checker) SetDefaultEnforcementMode(mode EnforcementMode) {
+	if c.source != nil {
+		return
+	}
 	if mode == EnforcementMonitor {
 		c.defaultMode = EnforcementMonitor
 		return
@@ -76,6 +80,9 @@ func (c *Checker) allowMonitored(ctx context.Context, req *CheckRequest, info *T
 	slog.Warn("compliance MONITOR mode: violation allowed but recorded (would have blocked under enforce)",
 		"org", req.OrgID, "user", req.UserID, "reason", blockReason)
 	if err := c.logWouldBlock(ctx, req, info, amountFiat, thresholdFiat, blockReason, currency); err != nil {
+		if c.source != nil {
+			return nil, err
+		}
 		slog.Error("compliance monitor: failed to persist would-block log, failing closed",
 			"org", req.OrgID, "user", req.UserID, "error", err)
 		if req.Transaction.Renewal {
@@ -119,7 +126,7 @@ func (c *Checker) logWouldBlock(ctx context.Context, req *CheckRequest, info *Tr
 		CorrelationID: req.CorrelationID,
 	}
 	_, err := c.store.CreateComplianceLog(ctx, entry)
-	return err
+	return c.auditError(err)
 }
 
 // CheckRequest contains the parameters for a compliance check.
@@ -183,6 +190,14 @@ var errRenewalLogUnavailable = errors.New("compliance audit log unavailable")
 
 // Check performs a compliance check on the given transaction.
 func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, error) {
+	var config *ComplianceConfig
+	var err error
+	if c.source != nil {
+		config, err = c.sourceConfig(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+	}
 	// Step 1: Detect if this is a value transfer
 	info := DetectTransfer(req.From, req.To, req.Data, req.Value)
 	if info == nil {
@@ -193,7 +208,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 	}
 
 	// Step 2: Check if compliance is enabled for this org
-	config, err := c.store.GetComplianceConfig(ctx, req.OrgID)
+	if c.source == nil {
+		config, err = c.store.GetComplianceConfig(ctx, req.OrgID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get compliance config: %w", err)
 	}
@@ -237,6 +254,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 			// a retryable internal-error so the audit row can be
 			// persisted on retry.
 			if err := c.logDecision(ctx, req, info, nil, nil, "denied", reason, nil, currency); err != nil {
+				if c.source != nil {
+					return nil, err
+				}
 				slog.Error("compliance: failed to persist denial log, failing closed retryable", "org", req.OrgID, "user", req.UserID, "error", err)
 				return nil, fmt.Errorf("compliance audit log unavailable")
 			}
@@ -260,6 +280,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 		// evidence. Escalate to slog.Error and surface a retryable
 		// internal-error so the audit row can be persisted on retry.
 		if err := c.logDecision(ctx, req, info, nil, nil, "denied", reason, nil, currency); err != nil {
+			if c.source != nil {
+				return nil, err
+			}
 			slog.Error("compliance: failed to persist denial log, failing closed retryable", "org", req.OrgID, "user", req.UserID, "error", err)
 			return nil, fmt.Errorf("compliance audit log unavailable")
 		}
@@ -282,6 +305,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 		// evidence. Escalate to slog.Error and surface a retryable
 		// internal-error so the audit row can be persisted on retry.
 		if err := c.logDecision(ctx, req, info, nil, nil, "denied", reason, nil, currency); err != nil {
+			if c.source != nil {
+				return nil, err
+			}
 			slog.Error("compliance: failed to persist denial log, failing closed retryable", "org", req.OrgID, "user", req.UserID, "error", err)
 			return nil, fmt.Errorf("compliance audit log unavailable")
 		}
@@ -313,6 +339,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 			reason := fmt.Sprintf("no price configured for token %s, allowing per unknown price policy", tokenAddr)
 			slog.Info("compliance allowed (unknown price policy)", "org", req.OrgID, "user", req.UserID, "reason", reason)
 			if err := c.logDecision(ctx, req, info, nil, nil, "allowed", "", nil, currency); err != nil {
+				if c.source != nil {
+					return nil, err
+				}
 				slog.Error("failed to log allowed decision, failing closed", "org", req.OrgID, "user", req.UserID, "error", err)
 				if req.Transaction.Renewal {
 					return nil, errRenewalLogUnavailable
@@ -338,6 +367,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 		}
 		slog.Warn("compliance denied (fail closed)", "org", req.OrgID, "user", req.UserID, "reason", reason)
 		if err := c.logDecision(ctx, req, info, nil, nil, "denied", reason, nil, currency); err != nil {
+			if c.source != nil {
+				return nil, err
+			}
 			slog.Warn("failed to log denial decision", "org", req.OrgID, "user", req.UserID, "error", err)
 		}
 		return &CheckResult{
@@ -369,6 +401,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 		// M2: Allowed decision — fail closed on log failure. Allowing a transaction
 		// without an audit trail is a compliance violation. Deny instead.
 		if err := c.logDecision(ctx, req, info, &amountFiat, &threshold, "allowed", "", nil, currency); err != nil {
+			if c.source != nil {
+				return nil, err
+			}
 			slog.Error("failed to log allowed decision, failing closed", "org", req.OrgID, "user", req.UserID, "error", err)
 			if req.Transaction.Renewal {
 				return nil, errRenewalLogUnavailable
@@ -418,6 +453,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 		slog.Warn("compliance denied", "org", req.OrgID, "user", req.UserID, "reason", reason)
 		// M2: Denial — warn on log failure, still deny.
 		if err := c.logDecision(ctx, req, info, &amountFiat, &threshold, "denied", reason, nil, currency); err != nil {
+			if c.source != nil {
+				return nil, err
+			}
 			slog.Warn("failed to log denial decision", "org", req.OrgID, "user", req.UserID, "error", err)
 		}
 		return &CheckResult{
@@ -434,6 +472,9 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 	slog.Info("compliance allowed", "org", req.OrgID, "user", req.UserID, "reason", reason)
 	// M2: Allowed decision — fail closed on log failure.
 	if err := c.logDecision(ctx, req, info, &amountFiat, &threshold, "allowed", "", &record.ID, currency); err != nil {
+		if c.source != nil {
+			return nil, err
+		}
 		slog.Error("failed to log allowed decision, failing closed", "org", req.OrgID, "user", req.UserID, "error", err)
 		if req.Transaction.Renewal {
 			return nil, errRenewalLogUnavailable
@@ -455,12 +496,20 @@ func (c *Checker) Check(ctx context.Context, req *CheckRequest) (*CheckResult, e
 // CheckPreview evaluates compliance without logs or travel-rule record claims.
 func (c *Checker) CheckPreview(ctx context.Context, req *CheckRequest) (*CheckResult, error) {
 	preview := *c
-	preview.store = previewStore{Store: c.store}
+	if c.source != nil {
+		reader, ok := c.store.(SourcePreviewStore)
+		if !ok {
+			return nil, ErrSourcePreviewUnsupported
+		}
+		preview.store = sourcePreviewStore{CheckStore: c.store, reader: reader, at: c.source.DecisionAt}
+	} else {
+		preview.store = previewStore{CheckStore: c.store}
+	}
 	return preview.Check(ctx, req)
 }
 
 type previewStore struct {
-	Store
+	CheckStore
 }
 
 func (s previewStore) ClaimUnusedTravelRuleRecord(ctx context.Context, orgID, userID, beneficiaryAddr, tokenAddr string, amountFiat float64) (*TravelRuleRecord, error) {
@@ -489,8 +538,8 @@ func (c *Checker) resolveTokenPrice(ctx context.Context, orgID, tokenAddr, activ
 			}
 			if sysPrice != nil {
 				// Check staleness
-				if c.priceStalenessThreshold > 0 && time.Since(sysPrice.UpdatedAt) > c.priceStalenessThreshold {
-					slog.Warn("system price is stale, failing closed", "coingecko_id", *tokenPrice.CoingeckoID, "age", time.Since(sysPrice.UpdatedAt).Round(time.Second), "threshold", c.priceStalenessThreshold)
+				if c.priceStale(sysPrice.UpdatedAt) {
+					slog.Warn("system price is stale, failing closed", "coingecko_id", *tokenPrice.CoingeckoID, "age", c.priceAge(sysPrice.UpdatedAt).Round(time.Second), "threshold", c.priceStalenessThreshold)
 					return -1, 0, nil
 				}
 				// Use prices_by_currency for the active currency
@@ -500,7 +549,7 @@ func (c *Checker) resolveTokenPrice(ctx context.Context, orgID, tokenAddr, activ
 					}
 				}
 				// Fall back to price_fiat if prices_by_currency doesn't have the active currency
-				if sysPrice.PriceFiat > 0 {
+				if c.source == nil && sysPrice.PriceFiat > 0 {
 					return sysPrice.PriceFiat, tokenPrice.Decimals, nil
 				}
 			}
@@ -516,7 +565,7 @@ func (c *Checker) resolveTokenPrice(ctx context.Context, orgID, tokenAddr, activ
 			return -1, 0, nil
 		}
 		// Legacy: prices_by_currency not populated, use price_fiat
-		if tokenPrice.PriceFiat > 0 {
+		if c.source == nil && tokenPrice.PriceFiat > 0 {
 			return tokenPrice.PriceFiat, tokenPrice.Decimals, nil
 		}
 		return -1, 0, nil
@@ -529,8 +578,8 @@ func (c *Checker) resolveTokenPrice(ctx context.Context, orgID, tokenAddr, activ
 			return 0, 0, fmt.Errorf("failed to get system ethereum price: %w", err)
 		}
 		if sysPrice != nil {
-			if c.priceStalenessThreshold > 0 && time.Since(sysPrice.UpdatedAt) > c.priceStalenessThreshold {
-				slog.Warn("system ethereum price is stale, failing closed", "age", time.Since(sysPrice.UpdatedAt).Round(time.Second), "threshold", c.priceStalenessThreshold)
+			if c.priceStale(sysPrice.UpdatedAt) {
+				slog.Warn("system ethereum price is stale, failing closed", "age", c.priceAge(sysPrice.UpdatedAt).Round(time.Second), "threshold", c.priceStalenessThreshold)
 				return -1, 0, nil
 			}
 			if sysPrice.PricesByCurrency != nil {
@@ -538,7 +587,7 @@ func (c *Checker) resolveTokenPrice(ctx context.Context, orgID, tokenAddr, activ
 					return price, sysPrice.Decimals, nil
 				}
 			}
-			if sysPrice.PriceFiat > 0 {
+			if c.source == nil && sysPrice.PriceFiat > 0 {
 				return sysPrice.PriceFiat, sysPrice.Decimals, nil
 			}
 		}
@@ -583,7 +632,7 @@ func (c *Checker) logDecision(ctx context.Context, req *CheckRequest, info *Tran
 	if err != nil {
 		slog.Warn("failed to create compliance log", "error", err)
 	}
-	return err
+	return c.auditError(err)
 }
 
 // resolveThreshold determines the applicable threshold for a transfer.

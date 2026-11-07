@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 
+	"privacy-proxy/internal/compliancepolicy"
 	"privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/identity"
 )
@@ -99,6 +100,26 @@ func compileSourceSet(ctx context.Context, manifest Manifest, digest Digest, man
 		}
 		builder.disclosureSource = &source
 		builder.disclosureRef = ref
+	}
+	if ref := manifest.ComplianceCatalog; ref != nil {
+		budget := min(options.Limits.MaxDocumentBytes, int64(options.ComplianceLimits.MaxDocumentBytes), options.Limits.MaxBundleBytes-total)
+		if budget <= 0 {
+			return nil, fail(LimitExceeded, "", "", "complianceCatalog", "compliance file exceeds remaining byte budget")
+		}
+		raw, err := read(ref.Path, budget)
+		if err != nil {
+			return nil, err
+		}
+		total += int64(len(raw))
+		if RawDigest(raw) != ref.SHA256 {
+			return nil, fail(IntegrityFailure, "", "", "complianceCatalog", "compliance digest does not match exact bytes")
+		}
+		source, err := compliancepolicy.Decode(raw, options.ComplianceLimits)
+		if err != nil {
+			return nil, fail(InvalidSchema, "", "", "complianceCatalog", err.Error())
+		}
+		builder.complianceSource = &source
+		builder.complianceRef = ref
 	}
 	if err := canceled(ctx); err != nil {
 		return nil, err

@@ -39,5 +39,8 @@ func globalDocumentRefs(m Manifest) []DocumentRef {
 	if r := m.DisclosureCatalog; r != nil {
 		refs = append(refs, DocumentRef{Path: r.Path, SHA256: r.SHA256})
 	}
+	if r := m.ComplianceCatalog; r != nil {
+		refs = append(refs, DocumentRef{Path: r.Path, SHA256: r.SHA256})
+	}
 	return refs
 }

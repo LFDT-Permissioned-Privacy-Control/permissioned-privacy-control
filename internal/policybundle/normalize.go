@@ -84,6 +84,9 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 	if (o.Profile.id == DisclosureProfileID) != (m.DisclosureCatalog != nil) {
 		return fail(UnsupportedFeature, "", "", "disclosureCatalog", "disclosure source must match the explicitly selected profile")
 	}
+	if (o.Profile.id == ComplianceProfileID) != (m.ComplianceCatalog != nil) {
+		return fail(UnsupportedFeature, "", "", "complianceCatalog", "compliance source must match the explicitly selected profile")
+	}
 	if len(m.Documents) > o.Limits.MaxDocuments-len(globalDocumentRefs(m)) {
 		return fail(LimitExceeded, "", "", "documents", "global files exceed document count budget")
 	}
@@ -130,6 +133,12 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 	if ref := m.DisclosureCatalog; ref != nil {
 		if len(ref.Path) > 128 || !filePattern.MatchString(ref.Path) || ref.Path == "manifest.json" || paths[ref.Path] || !validDigest(ref.SHA256) {
 			return fail(InvalidSchema, "", "", "disclosureCatalog", "invalid or colliding global disclosure file reference")
+		}
+		paths[ref.Path] = true
+	}
+	if ref := m.ComplianceCatalog; ref != nil {
+		if len(ref.Path) > 128 || !filePattern.MatchString(ref.Path) || ref.Path == "manifest.json" || paths[ref.Path] || !validDigest(ref.SHA256) {
+			return fail(InvalidSchema, "", "", "complianceCatalog", "invalid or colliding global compliance file reference")
 		}
 	}
 	return nil

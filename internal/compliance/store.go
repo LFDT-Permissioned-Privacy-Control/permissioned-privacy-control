@@ -2,6 +2,20 @@ package compliance
 
 import "context"
 
+// CheckStore is the existing checker's narrow decision dependency. The
+// optional TransactionClaimer remains a separate dynamic capability.
+type CheckStore interface {
+	GetComplianceConfig(context.Context, string) (*ComplianceConfig, error)
+	GetTokenPrice(context.Context, string, string) (*TokenPrice, error)
+	GetSystemTokenPrice(context.Context, string) (*SystemTokenPrice, error)
+	GetAddressThresholdOverride(context.Context, string, string) (*AddressThresholdOverride, error)
+	IsAddressSanctioned(context.Context, string, string) (bool, error)
+	GetSystemSetting(context.Context, string) (string, error)
+	FindUnusedTravelRuleRecord(context.Context, string, string, string, string, float64) (*TravelRuleRecord, error)
+	ClaimUnusedTravelRuleRecord(context.Context, string, string, string, string, float64) (*TravelRuleRecord, error)
+	CreateComplianceLog(context.Context, *ComplianceLog) (int64, error)
+}
+
 // Store defines database operations for travel rule compliance.
 type Store interface {
 	// Compliance config
@@ -54,5 +68,4 @@ type Store interface {
 	// System settings
 	GetSystemSetting(ctx context.Context, key string) (string, error)
 	SetSystemSetting(ctx context.Context, key, value string) error
-
 }

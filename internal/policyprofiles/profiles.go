@@ -5,6 +5,7 @@ package policyprofiles
 import (
 	"fmt"
 
+	"privacy-proxy/internal/compliancepolicy"
 	"privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/policybundle"
@@ -26,6 +27,7 @@ func Supported() []Description {
 		{ID: policybundle.NativeV2ProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 		{ID: policybundle.RuntimeCallProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "eth_call integration slice; not a complete runtime"},
 		{ID: policybundle.DisclosureProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
+		{ID: policybundle.ComplianceProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 	}
 }
 
@@ -54,6 +56,11 @@ func Options(id string) (policybundle.Options, Description, error) {
 		options.Profile = policybundle.DisclosureProfile(seed.Version)
 		options.IdentityLimits = identity.DefaultLimits()
 		options.DisclosureLimits = disclosurepolicy.DefaultLimits()
+		evaluator = policybundle.NativeV2EvaluatorVersion
+	case policybundle.ComplianceProfileID:
+		options.Profile = policybundle.ComplianceProfile(seed.Version)
+		options.IdentityLimits = identity.DefaultLimits()
+		options.ComplianceLimits = compliancepolicy.DefaultLimits()
 		evaluator = policybundle.NativeV2EvaluatorVersion
 	default:
 		return policybundle.Options{}, Description{}, fmt.Errorf("unsupported compiled policy profile %q", id)

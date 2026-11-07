@@ -28,6 +28,7 @@ type Draft struct {
 	IdentityCatalog   *DraftIdentity  `json:"identityCatalog,omitempty" optional:"true"`
 	RuntimeCatalog    *DraftRuntime   `json:"runtimeCatalog,omitempty" optional:"true"`
 	DisclosureCatalog *DraftIdentity  `json:"disclosureCatalog,omitempty" optional:"true"`
+	ComplianceCatalog *DraftIdentity  `json:"complianceCatalog,omitempty" optional:"true"`
 }
 
 type DraftDocument struct {
@@ -124,6 +125,12 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		manifest.DisclosureCatalog = &DisclosureCatalogRef{Path: draft.DisclosureCatalog.Path, SHA256: RawDigest(nil)}
 	}
 	selected := Selection{ExpectedManifestDigest: RawDigest(nil), ExpectedEnvironment: draft.Environment, ExpectedChainID: draft.ChainID}
+	if draft.ComplianceCatalog != nil {
+		if draft.ComplianceCatalog.Path == "draft.json" {
+			return nil, fail(InvalidSchema, "", "", "complianceCatalog", "compliance source collides with draft.json")
+		}
+		manifest.ComplianceCatalog = &ComplianceCatalogRef{Path: draft.ComplianceCatalog.Path, SHA256: RawDigest(nil)}
+	}
 	if err := validateManifest(manifest, selected, options); err != nil {
 		return nil, err
 	}
@@ -141,6 +148,9 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		}
 		if manifest.DisclosureCatalog != nil && ref.Path == manifest.DisclosureCatalog.Path {
 			budget = min(budget, int64(options.DisclosureLimits.MaxDocumentBytes))
+		}
+		if manifest.ComplianceCatalog != nil && ref.Path == manifest.ComplianceCatalog.Path {
+			budget = min(budget, int64(options.ComplianceLimits.MaxDocumentBytes))
 		}
 		if budget <= 0 {
 			return nil, fail(LimitExceeded, ref.Kind, ref.OrganizationID, ref.Path, "draft bundle byte budget exceeded")
@@ -162,6 +172,9 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		ref.SHA256 = RawDigest(files[ref.Path])
 	}
 	if ref := manifest.DisclosureCatalog; ref != nil {
+		ref.SHA256 = RawDigest(files[ref.Path])
+	}
+	if ref := manifest.ComplianceCatalog; ref != nil {
 		ref.SHA256 = RawDigest(files[ref.Path])
 	}
 	snapshot, err := compileSourceSet(ctx, manifest, RawDigest(nil), int64(len(raw)), options, methods, func(name string, budget int64) ([]byte, error) {
