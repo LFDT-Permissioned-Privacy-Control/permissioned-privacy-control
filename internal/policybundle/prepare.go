@@ -26,6 +26,7 @@ type Draft struct {
 	Organizations    []Organization  `json:"organizations"`
 	Documents        []DraftDocument `json:"documents"`
 	IdentityCatalog  *DraftIdentity  `json:"identityCatalog,omitempty" optional:"true"`
+	RuntimeCatalog   *DraftRuntime   `json:"runtimeCatalog,omitempty" optional:"true"`
 }
 
 type DraftDocument struct {
@@ -34,6 +35,9 @@ type DraftDocument struct {
 	Path           string `json:"path"`
 }
 type DraftIdentity struct {
+	Path string `json:"path"`
+}
+type DraftRuntime struct {
 	Path string `json:"path"`
 }
 
@@ -106,6 +110,12 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		}
 		manifest.IdentityCatalog = &IdentityCatalogRef{Path: draft.IdentityCatalog.Path, SHA256: RawDigest(nil)}
 	}
+	if draft.RuntimeCatalog != nil {
+		if draft.RuntimeCatalog.Path == "draft.json" {
+			return nil, fail(InvalidSchema, "", "", "runtimeCatalog", "runtime source collides with draft.json")
+		}
+		manifest.RuntimeCatalog = &RuntimeCatalogRef{Path: draft.RuntimeCatalog.Path, SHA256: RawDigest(nil)}
+	}
 	selected := Selection{ExpectedManifestDigest: RawDigest(nil), ExpectedEnvironment: draft.Environment, ExpectedChainID: draft.ChainID}
 	if err := validateManifest(manifest, selected, options); err != nil {
 		return nil, err
@@ -113,6 +123,9 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 	refs := slices.Clone(manifest.Documents)
 	if manifest.IdentityCatalog != nil {
 		refs = append(refs, DocumentRef{Path: manifest.IdentityCatalog.Path})
+	}
+	if manifest.RuntimeCatalog != nil {
+		refs = append(refs, DocumentRef{Path: manifest.RuntimeCatalog.Path})
 	}
 	if err := checkEntriesNamed(ctx, root, refs, options.Limits.MaxDocuments, "draft.json"); err != nil {
 		return nil, err
@@ -138,6 +151,9 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		manifest.Documents[i].SHA256 = RawDigest(files[manifest.Documents[i].Path])
 	}
 	if ref := manifest.IdentityCatalog; ref != nil {
+		ref.SHA256 = RawDigest(files[ref.Path])
+	}
+	if ref := manifest.RuntimeCatalog; ref != nil {
 		ref.SHA256 = RawDigest(files[ref.Path])
 	}
 	snapshot, err := compileSourceSet(ctx, manifest, RawDigest(nil), int64(len(raw)), options, methods, func(name string, budget int64) ([]byte, error) {

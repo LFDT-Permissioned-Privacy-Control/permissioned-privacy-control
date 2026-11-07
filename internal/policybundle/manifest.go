@@ -53,6 +53,7 @@ type Manifest struct {
 	RequiredCapabilities []string            `json:"requiredCapabilities"`
 	Documents            []DocumentRef       `json:"documents"`
 	IdentityCatalog      *IdentityCatalogRef `json:"identityCatalog,omitempty" optional:"true"`
+	RuntimeCatalog       *RuntimeCatalogRef  `json:"runtimeCatalog,omitempty" optional:"true"`
 }
 
 type IdentityCatalogRef struct {
@@ -87,6 +88,7 @@ type BundleMetadata struct {
 	SourceRevision       string
 	Documents            []DocumentIdentity
 	IdentityCatalog      *IdentityCatalogIdentity
+	RuntimeCatalog       *RuntimeCatalogIdentity
 }
 
 // RawDigest pins the approved file. SemanticDigest identifies its normalized

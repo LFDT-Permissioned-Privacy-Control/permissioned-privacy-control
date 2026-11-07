@@ -57,6 +57,27 @@ func compileSourceSet(ctx context.Context, manifest Manifest, digest Digest, man
 		}
 		builder.identitySource = &source
 		builder.identityRef = ref
+		total += int64(len(raw))
+	}
+	if ref := manifest.RuntimeCatalog; ref != nil {
+		budget := min(options.Limits.MaxDocumentBytes, options.Limits.MaxBundleBytes-total)
+		if budget <= 0 {
+			return nil, fail(LimitExceeded, "", "", "runtimeCatalog", "runtime file exceeds remaining byte budget")
+		}
+		raw, err := read(ref.Path, budget)
+		if err != nil {
+			return nil, err
+		}
+		total += int64(len(raw))
+		if RawDigest(raw) != ref.SHA256 {
+			return nil, fail(IntegrityFailure, "", "", "runtimeCatalog", "runtime file digest does not match exact bytes")
+		}
+		var source RuntimeSource
+		if err := decodeSource(raw, &source, options.Limits.MaxJSONDepth); err != nil {
+			return nil, fail(InvalidSchema, "", "", "runtimeCatalog", err.Error())
+		}
+		builder.runtimeSource = &source
+		builder.runtimeRef = ref
 	}
 	if err := canceled(ctx); err != nil {
 		return nil, err

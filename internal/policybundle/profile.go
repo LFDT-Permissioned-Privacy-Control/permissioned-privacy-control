@@ -11,6 +11,7 @@ const (
 	FoundationProfileID      = "catalog-foundation/v1"
 	IdentityProfileID        = "catalog-identity/v1"
 	NativeV2ProfileID        = "catalog-native-v2/v1"
+	RuntimeCallProfileID     = "catalog-runtime-call/v1"
 	CapabilityIdentity       = "identity.claims/v1"
 	NativeEvaluatorVersion   = "policycore/native-v1alpha1"
 	NativeV2EvaluatorVersion = "policycore/native-v1alpha2"
@@ -25,6 +26,13 @@ const (
 	CapabilityDepth          = "inputs.depth"
 	CapabilityRPCCredential  = "secrets.rpc-credential"
 	CapabilityDynamicPayload = "privacy.dynamic-event-payload"
+	CapabilityRuntimeCall    = "runtime.eth-call/v1"
+	CapabilityAnchoredCode   = "inputs.anchored-code/v1"
+	CapabilityClassification = "inputs.classification"
+	CapabilityOwnership      = "inputs.ownership"
+	CapabilitySharedCode     = "inputs.shared-code"
+	CapabilityUpgradeFacts   = "inputs.upgrade-facts"
+	CapabilityAddressScopes  = "policy.address-scopes/v1"
 )
 
 // ValidationProfile is opaque: files cannot register validators or enable
@@ -43,6 +51,12 @@ func IdentityProfile(methodCatalogVersion string) ValidationProfile {
 // bounded static rule matrix. It does not enable operational target classes.
 func NativeV2Profile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{NativeV2ProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+}
+
+// RuntimeCallProfile selects only the qualified eth_call integration. Other
+// runtime methods and lifecycle/deployment evidence require successor profiles.
+func RuntimeCallProfile(methodCatalogVersion string) ValidationProfile {
+	return ValidationProfile{RuntimeCallProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
 }
 
 // MethodCatalog is trusted startup data. Names are exact; aliases carry no
@@ -77,10 +91,10 @@ type methodIndex struct {
 func prepareOptions(options Options) (methodIndex, error) {
 	p := options.Profile
 	expectedEvaluator := NativeEvaluatorVersion
-	if p.id == NativeV2ProfileID {
+	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID {
 		expectedEvaluator = NativeV2EvaluatorVersion
 	}
-	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
+	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && p.id != RuntimeCallProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
 		return methodIndex{}, fail(InvalidSelection, "", "", "options", "invalid limits or pinned foundation/method profile")
 	}
 	m := methodIndex{map[string]bool{}, map[string]string{}, slices.Clone(options.Methods.Wildcard), map[string]string{}}

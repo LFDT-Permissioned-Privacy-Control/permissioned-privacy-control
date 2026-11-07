@@ -163,7 +163,8 @@ verify-audit-buffer:
 # the endpoint inventory from the live route table. All outputs are committed;
 # CI regenerates and fails on drift. The route↔spec coverage gate lives in
 # internal/server/openapi_coverage_test.go (runs with test-unit).
-SWAG_EXCLUDES = ./site,./frontend,./e2e,./mcp,./contracts,./scripts,./monitoring,./demos,./docs
+# Keep private V2 implementation types outside legacy handler/schema discovery.
+SWAG_EXCLUDES = ./site,./frontend,./e2e,./mcp,./contracts,./scripts,./monitoring,./demos,./docs,./internal/nativeadmission,./internal/rpcengine,./internal/rpcexecution
 .PHONY: api-spec
 api-spec:
 	go tool swag init --v3.1 -q -g internal/server/openapi_general_info.go -d ./ \

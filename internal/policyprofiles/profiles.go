@@ -15,13 +15,15 @@ type Description struct {
 	EvaluatorVersion     string `json:"evaluatorVersion"`
 	MethodCatalogVersion string `json:"methodCatalogVersion"`
 	ValidationOnly       bool   `json:"validationOnly"`
+	IntegrationScope     string `json:"integrationScope,omitempty"`
 }
 
 func Supported() []Description {
 	return []Description{
-		{policybundle.FoundationProfileID, policybundle.NativeEvaluatorVersion, rpcmethoddata.Version, true},
-		{policybundle.IdentityProfileID, policybundle.NativeEvaluatorVersion, rpcmethoddata.Version, true},
-		{policybundle.NativeV2ProfileID, policybundle.NativeV2EvaluatorVersion, rpcmethoddata.Version, true},
+		{ID: policybundle.FoundationProfileID, EvaluatorVersion: policybundle.NativeEvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
+		{ID: policybundle.IdentityProfileID, EvaluatorVersion: policybundle.NativeEvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
+		{ID: policybundle.NativeV2ProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
+		{ID: policybundle.RuntimeCallProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "eth_call integration slice; not a complete runtime"},
 	}
 }
 
@@ -42,8 +44,16 @@ func Options(id string) (policybundle.Options, Description, error) {
 		options.Profile = policybundle.NativeV2Profile(seed.Version)
 		options.IdentityLimits = identity.DefaultLimits()
 		evaluator = policybundle.NativeV2EvaluatorVersion
+	case policybundle.RuntimeCallProfileID:
+		options.Profile = policybundle.RuntimeCallProfile(seed.Version)
+		options.IdentityLimits = identity.DefaultLimits()
+		evaluator = policybundle.NativeV2EvaluatorVersion
 	default:
 		return policybundle.Options{}, Description{}, fmt.Errorf("unsupported compiled policy profile %q", id)
 	}
-	return options, Description{id, evaluator, seed.Version, true}, nil
+	description := Description{ID: id, EvaluatorVersion: evaluator, MethodCatalogVersion: seed.Version, ValidationOnly: true}
+	if id == policybundle.RuntimeCallProfileID {
+		description.IntegrationScope = "eth_call integration slice; not a complete runtime"
+	}
+	return options, description, nil
 }

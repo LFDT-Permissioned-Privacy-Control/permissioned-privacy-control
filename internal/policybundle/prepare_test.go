@@ -21,6 +21,9 @@ func draftFor(f fixture) policybundle.Draft {
 	if f.manifest.IdentityCatalog != nil {
 		d.IdentityCatalog = &policybundle.DraftIdentity{Path: f.manifest.IdentityCatalog.Path}
 	}
+	if f.manifest.RuntimeCatalog != nil {
+		d.RuntimeCatalog = &policybundle.DraftRuntime{Path: f.manifest.RuntimeCatalog.Path}
+	}
 	return d
 }
 

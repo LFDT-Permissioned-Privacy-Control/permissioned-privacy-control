@@ -145,6 +145,27 @@ func upgradeAddressIndex(data []byte) (int, bool) {
 	}
 }
 
+// InspectUpgradeTarget recognizes only the existing fixed upgrade operations.
+// It decodes their canonical address argument without granting any authority.
+// A recognized malformed argument returns recognized=true and an error.
+func InspectUpgradeTarget(data []byte) (target common.Address, recognized bool, err error) {
+	index, recognized := upgradeAddressIndex(data)
+	if !recognized {
+		return target, false, nil
+	}
+	offset := 4 + 32*index
+	if len(data) < offset+32 {
+		return target, true, fmt.Errorf("upgrade target is truncated")
+	}
+	word := data[offset : offset+32]
+	for _, b := range word[:12] {
+		if b != 0 {
+			return target, true, fmt.Errorf("upgrade target is not a canonical address")
+		}
+	}
+	return common.BytesToAddress(word), true, nil
+}
+
 func (key frameKey) matchesTarget(org string, f Frame) bool {
 	same := f.CodeAddress == f.StorageAddress
 	switch key.targetClass {
@@ -193,21 +214,14 @@ func (r *compiledRule) checkAuthority(ctx Context, f Frame, groupClaims uint8, k
 		}
 		return "", nil
 	}
-	if index, upgrade := upgradeAddressIndex(f.Calldata); upgrade {
-		offset := 4 + 32*index
-		if len(f.Calldata) < offset+32 {
-			return DenialMalformedCalldata, fmt.Errorf("upgrade target is truncated")
-		}
-		word := f.Calldata[offset : offset+32]
-		for _, b := range word[:12] {
-			if b != 0 {
-				return DenialMalformedCalldata, fmt.Errorf("upgrade target is not a canonical address")
-			}
+	if target, upgrade, err := InspectUpgradeTarget(f.Calldata); upgrade {
+		if err != nil {
+			return DenialMalformedCalldata, err
 		}
 		if !r.allowUpgrade || groupClaims&(ClaimAdmin|ClaimUpgrade) == 0 {
 			return DenialOperationalClaim, fmt.Errorf("binding does not authorize upgrades")
 		}
-		if f.UpgradeTargetOrg != ctx.Org || common.BytesToAddress(word) == (common.Address{}) {
+		if f.UpgradeTargetOrg != ctx.Org || target == (common.Address{}) {
 			return DenialOwnership, fmt.Errorf("upgrade target must belong to policy organisation")
 		}
 	}

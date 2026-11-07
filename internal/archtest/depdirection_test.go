@@ -22,11 +22,14 @@ import (
 	_ "privacy-proxy/internal/config"
 	_ "privacy-proxy/internal/executionfacts"
 	_ "privacy-proxy/internal/identity"
+	_ "privacy-proxy/internal/nativeadmission"
 	_ "privacy-proxy/internal/netguard"
 	_ "privacy-proxy/internal/policybundle"
 	_ "privacy-proxy/internal/policycli"
 	_ "privacy-proxy/internal/policycore"
 	_ "privacy-proxy/internal/policyprofiles"
+	_ "privacy-proxy/internal/rpcengine"
+	_ "privacy-proxy/internal/rpcexecution"
 	_ "privacy-proxy/internal/rpcmethoddata"
 	_ "privacy-proxy/internal/runtimepolicy"
 	_ "privacy-proxy/internal/server/middleware"
@@ -132,6 +135,29 @@ func TestNativeExecutionEvidenceDependencyBoundary(t *testing.T) {
 		for _, forbidden := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb"} {
 			if strings.HasPrefix(dep, forbidden) {
 				t.Errorf("execution evidence parser imports storage or execution machinery %s", dep)
+			}
+		}
+	}
+}
+
+func TestNativeCallRuntimeDependencyBoundary(t *testing.T) {
+	for _, pkg := range []string{"privacy-proxy/internal/rpcexecution", "privacy-proxy/internal/nativeadmission", "privacy-proxy/internal/rpcengine"} {
+		allowed := map[string]bool{pkg: true, "privacy-proxy/internal/executionfacts": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/policycore": true, "privacy-proxy/internal/strictjson": true}
+		if pkg != "privacy-proxy/internal/rpcexecution" {
+			allowed["privacy-proxy/internal/runtimepolicy"] = true
+			allowed["privacy-proxy/internal/rpcexecution"] = true
+		}
+		if pkg == "privacy-proxy/internal/rpcengine" {
+			allowed["privacy-proxy/internal/nativeadmission"] = true
+		}
+		for dep := range transitiveDeps(t, moduleRoot(t), pkg) {
+			if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
+				t.Errorf("%s imports unapproved application infrastructure %s", pkg, dep)
+			}
+			for _, prefix := range []string{"github.com/jackc/pgx", "github.com/jackc/tern", "github.com/redis/", "github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb"} {
+				if strings.HasPrefix(dep, prefix) {
+					t.Errorf("%s imports storage/VM machinery %s", pkg, dep)
+				}
 			}
 		}
 	}

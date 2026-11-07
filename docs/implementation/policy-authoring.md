@@ -34,6 +34,13 @@ contains `environment`, `chainId`, `evaluatorVersion`, `profile`,
 Hashes and `requiredCapabilities` are derived by preparation. Do not add them to
 the draft. `sourceRevision` is descriptive metadata, not proof of Git approval.
 
+`catalog-runtime-call/v1` additionally requires `runtimeCatalog: {"path": ...}`
+in the draft. The shared compiler pins its exact file bytes and infers the
+runtime requirements. The profile report labels it as an **eth_call integration
+slice**; a successful file check does not establish a complete server or qualify
+its node, wallet and deployment providers. Other runtime operations require
+their explicitly supported profiles. The older profiles reject this global file.
+
 Keep only `draft.json` and its referenced JSON files in that flat source
 directory. Files must be regular files with lowercase ASCII `.json` basenames;
 symlinks and extra files are rejected. The default limits include 1 MiB per

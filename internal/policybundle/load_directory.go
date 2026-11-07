@@ -43,6 +43,9 @@ func LoadDirectory(ctx context.Context, selection Selection, options Options) (*
 	if manifest.IdentityCatalog != nil {
 		entries = append(entries, DocumentRef{Path: manifest.IdentityCatalog.Path})
 	}
+	if manifest.RuntimeCatalog != nil {
+		entries = append(entries, DocumentRef{Path: manifest.RuntimeCatalog.Path})
+	}
 	if err := checkEntries(ctx, root, entries, options.Limits.MaxDocuments); err != nil {
 		return nil, err
 	}

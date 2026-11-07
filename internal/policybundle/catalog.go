@@ -23,6 +23,7 @@ type CatalogSnapshot struct {
 	requirements  Requirements
 	identity      *identity.Catalog
 	methods       methodIndex
+	runtime       *RuntimeCatalog
 }
 
 func (s *CatalogSnapshot) Metadata() BundleMetadata {
@@ -31,6 +32,10 @@ func (s *CatalogSnapshot) Metadata() BundleMetadata {
 	if m.IdentityCatalog != nil {
 		copied := *m.IdentityCatalog
 		m.IdentityCatalog = &copied
+	}
+	if m.RuntimeCatalog != nil {
+		copied := *m.RuntimeCatalog
+		m.RuntimeCatalog = &copied
 	}
 	return m
 }
@@ -102,6 +107,10 @@ type catalogBuilder struct {
 	identitySource *identity.SourceCatalog
 	identityRef    *IdentityCatalogRef
 	identityLimits identity.Limits
+	runtimeSource  *RuntimeSource
+	runtimeRef     *RuntimeCatalogRef
+	runtimeScopes  map[string]string
+	limits         Limits
 }
 
 func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
@@ -111,7 +120,13 @@ func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
 		s.groups[org.ID] = map[string]Group{}
 		s.contracts[org.ID] = map[common.Address]Contract{}
 	}
-	return &catalogBuilder{profile: o.Profile, snapshot: s, policies: map[string]*policycore.Policy{}, capabilities: map[string]bool{CapabilityNativeValidate: true}, secrets: map[string]bool{}, addresses: map[string]string{}, groupOwners: map[string]string{}, resourceIDs: map[string]bool{}, identityLimits: o.IdentityLimits}
+	b := &catalogBuilder{profile: o.Profile, snapshot: s, policies: map[string]*policycore.Policy{}, capabilities: map[string]bool{CapabilityNativeValidate: true}, secrets: map[string]bool{}, addresses: map[string]string{}, groupOwners: map[string]string{}, resourceIDs: map[string]bool{}, identityLimits: o.IdentityLimits, limits: o.Limits}
+	if o.Profile.id == RuntimeCallProfileID {
+		for _, capability := range []string{CapabilityRuntimeCall, CapabilityPrincipal, CapabilityFrames, CapabilityAnchoredCode, CapabilityClassification, CapabilityOwnership} {
+			b.capabilities[capability] = true
+		}
+	}
+	return b
 }
 
 func (b *catalogBuilder) add(wire wireDocument, spec any, ref DocumentRef, methods methodIndex, limits Limits) error {
@@ -209,6 +224,9 @@ func (b *catalogBuilder) add(wire wireDocument, spec any, ref DocumentRef, metho
 }
 
 func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
+	if err := b.compileRuntime(b.limits); err != nil {
+		return nil, err
+	}
 	for _, org := range b.snapshot.organizations {
 		if err := canceled(ctx); err != nil {
 			return nil, err
@@ -222,7 +240,7 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 		}
 		catalog, _ := b.snapshot.NativeCatalog(org.ID)
 		validate := policycore.Validate
-		if b.profile.id == NativeV2ProfileID {
+		if b.profile.id == NativeV2ProfileID || b.profile.id == RuntimeCallProfileID {
 			validate = policycore.ValidateNativeV2
 		}
 		v, err := validate(b.policies[org.ID], catalog)
@@ -243,7 +261,12 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 			return nil, fail(ReferenceFailure, ContractRegistry, ref.org, "paramRules.must_be", "address literal belongs to another organization")
 		}
 		if !known {
-			return nil, fail(UnsupportedFeature, ContractRegistry, ref.org, "paramRules.must_be", "unregistered EOA literal requires a later operational validation profile")
+			if b.profile.id != RuntimeCallProfileID {
+				return nil, fail(UnsupportedFeature, ContractRegistry, ref.org, "paramRules.must_be", "unregistered EOA literal requires a later operational validation profile")
+			}
+			if scopedOwner, scoped := b.runtimeScopes[ref.address]; !scoped || scopedOwner != ref.org {
+				return nil, fail(UnsupportedFeature, ContractRegistry, ref.org, "paramRules.must_be", "unregistered EOA literal requires explicit same-org static scope")
+			}
 		}
 	}
 	if err := b.compileIdentity(); err != nil {
@@ -264,6 +287,7 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 }
 
 func (b *catalogBuilder) inferNative(p *policycore.Policy, org string) error {
+	runtime := b.profile.id == RuntimeCallProfileID
 	unsupported := func(field, requirement string) error {
 		return fail(UnsupportedFeature, ExecutionRules, org, field, requirement+" requires a later runtime profile")
 	}
@@ -277,13 +301,26 @@ func (b *catalogBuilder) inferNative(p *policycore.Policy, org string) error {
 				b.capabilities[CapabilityCalldata] = true
 			}
 			if r.TargetClass != "" {
-				return unsupported("targetClass", "inputs.classification/ownership ("+r.TargetClass+")")
+				if !runtime {
+					return unsupported("targetClass", "inputs.classification/ownership ("+r.TargetClass+")")
+				}
+				switch r.TargetClass {
+				case "org", "shared", "eoa", "precompile":
+				default:
+					return unsupported("targetClass", "deployment/lifecycle qualification ("+r.TargetClass+")")
+				}
+				if r.TargetClass == "shared" {
+					b.capabilities[CapabilitySharedCode] = true
+				}
 			}
 			if r.AllowUpgrade {
-				return unsupported("allowUpgrade", "inputs.upgrade-facts")
+				if !runtime {
+					return unsupported("allowUpgrade", "inputs.upgrade-facts")
+				}
+				b.capabilities[CapabilityUpgradeFacts] = true
 			}
 			for _, ct := range r.CallTypes {
-				if ct != policycore.CallTypeCall && ct != policycore.CallTypeStaticCall {
+				if ct != policycore.CallTypeCall && ct != policycore.CallTypeStaticCall && !(runtime && (ct == policycore.CallTypeDelegateCall || ct == policycore.CallTypeCallCode)) {
 					return unsupported("callTypes", "inputs.frame-kind ("+string(ct)+")")
 				}
 			}
