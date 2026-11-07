@@ -4,7 +4,9 @@
 directory or mutable policy API. `New` requires the same selected manifest,
 identity catalog, broker catalog and deployment Origin as the service. The
 standalone `catalog-broker/v1` profile remains distinct from RPC runtime profiles.
-This adapter and the helper are available for composition; the legacy server
+The separate `NewMulti` constructor and `NewMultiClient` helper compose
+[Privado sessions](v2-privado-session.md) under an explicit multi-provider profile.
+This Azure-only adapter/helper are available for composition; the legacy server
 and frontend entry point do not mount them automatically.
 
 ## Hosting and routes
@@ -154,5 +156,5 @@ server. Ignoring the fixture's self-signed browser certificate does not relax
 production TLS. Browser time is aligned to the signed fixture clock. This
 proves the local protocol, not a real Entra tenant's registration, directory
 replication, account lifecycle or supported-provider configuration. Real tenant
-qualification, product pages/router/own-context UX, Privado, enterprise OAuth,
+qualification, product pages/router/own-context UX, enterprise OAuth,
 production server mounting and full release composition remain separate work.

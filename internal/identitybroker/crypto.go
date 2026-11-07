@@ -31,6 +31,9 @@ type keyring struct {
 }
 
 func newKeyrings(source brokerpolicy.Source, renewal, encryption []SecretBinding, signing ed25519.PrivateKey) (*keyring, *keyring, error) {
+	return newCommonKeyrings(brokerpolicy.CommonSettings{RenewalKeys: source.RenewalKeys, EncryptionKeys: source.EncryptionKeys}, renewal, encryption, signing)
+}
+func newCommonKeyrings(source brokerpolicy.CommonSettings, renewal, encryption []SecretBinding, signing ed25519.PrivateKey) (*keyring, *keyring, error) {
 	if len(signing) != ed25519.PrivateKeySize {
 		return nil, nil, ErrInvalid
 	}

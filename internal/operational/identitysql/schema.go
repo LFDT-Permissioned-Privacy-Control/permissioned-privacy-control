@@ -16,7 +16,7 @@ import (
 //go:embed migrations/001.sql
 var schemaSQL string
 
-func SchemaChecksum() string {
+func SchemaChecksumV1() string {
 	sum := sha256.Sum256([]byte(schemaSQL))
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
@@ -61,11 +61,11 @@ func Migrate(ctx context.Context, dsn, appRole, retentionRole string, scope b.Sc
 		if _, err := tx.Exec(ctx, schemaSQL); err != nil {
 			return b.ErrUnavailable
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO ops_identity_v2.metadata(singleton,schema_version,migration_checksum,namespace,recovery_epoch,ready,updated_at)VALUES(true,1,$1,$2,$3::uuid,false,clock_timestamp())`, SchemaChecksum(), scope.Namespace.String(), scope.State.RecoveryEpoch); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO ops_identity_v2.metadata(singleton,schema_version,migration_checksum,namespace,recovery_epoch,ready,updated_at)VALUES(true,1,$1,$2,$3::uuid,false,clock_timestamp())`, SchemaChecksumV1(), scope.Namespace.String(), scope.State.RecoveryEpoch); err != nil {
 			return b.ErrUnavailable
 		}
 	}
-	if err := checkSchema(ctx, tx); err != nil {
+	if err := checkSchemaV1(ctx, tx); err != nil {
 		return err
 	}
 	var namespace string
@@ -137,10 +137,10 @@ var expectedIndexes = map[string]string{
 	"family_active_expiry":                        "CREATE INDEX family_active_expiry ON ops_identity_v2.renewal_families USING btree (absolute_expires_at) WHERE (revoked_at IS NULL)",
 }
 
-func checkSchema(ctx context.Context, q querier) error {
+func checkSchemaV1Legacy(ctx context.Context, q querier) error {
 	var version, count int
 	var checksum string
-	if err := q.QueryRow(ctx, `SELECT schema_version,migration_checksum,(SELECT count(*) FROM ops_identity_v2.metadata)FROM ops_identity_v2.metadata WHERE singleton`).Scan(&version, &checksum, &count); err != nil || version != 1 || count != 1 || checksum != SchemaChecksum() {
+	if err := q.QueryRow(ctx, `SELECT schema_version,migration_checksum,(SELECT count(*) FROM ops_identity_v2.metadata)FROM ops_identity_v2.metadata WHERE singleton`).Scan(&version, &checksum, &count); err != nil || version != 1 || count != 1 || checksum != SchemaChecksumV1() {
 		return b.ErrUnavailable
 	}
 	remaining := map[string]map[string]string{}

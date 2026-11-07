@@ -84,7 +84,8 @@ the SDK's background fetch immediately. Signing-key caching is intentional.
 ## Operational SQL, without user rows
 
 `internal/operational/identitysql` is the named PostgreSQL adapter. Its
-`ops_identity_v2` schema has two application tables:
+`ops_identity_v2` schema2 retains two Azure application tables; the separate
+[Privado integration](v2-privado-session.md) adds immutable challenge/offer tables:
 
 - `pending_requests`: one-use state hash, encrypted nonce/PKCE, approved profile
   digest, recipient hash and a maximum five-minute expiry.
@@ -143,22 +144,32 @@ An offline schema owner runs `ops-v2-identity-migrate`. The application has
 metadata SELECT; pending SELECT/INSERT/DELETE; family SELECT/INSERT and UPDATE
 only for rotation/revocation columns. A trigger preserves identity, recipient,
 absolute lifetime, monotonic generation and permanent revocation. Startup checks
-exact columns/indexes/checksum, readiness/namespace/epoch and effective roles;
+the exact schema2 catalog (columns, constraints/FKs, indexes, trigger/function
+definitions and owners), checksum, readiness/namespace/epoch and effective roles;
 owner/superuser/foreign application-table privileges reject. Runtime never runs
 DDL. PostgreSQL administrators, migration credentials and stored state are
 trusted; encrypted tokens do not make a malicious database owner harmless.
 
-The retention role has SELECT/DELETE on both application tables, with no INSERT,
-UPDATE or metadata mutation. The trusted cleanup command deletes expired
-pending rows and families only after absolute expiry +24 hours, at most 1,000
-rows/five seconds per call. SQL grants do not impose those row predicates: a
+The retention role has SELECT/DELETE on the Azure tables and Privado challenge
+parents, and SELECT on proof offers. Proof deletion cascades from parents; there
+is no direct child DELETE or any INSERT, UPDATE or metadata mutation. The
+trusted cleanup command deletes pending rows at `expires_at`, explicitly
+selects at most 256 Privado challenge parents at their `expires_at`, and deletes
+families only after absolute expiry +24 hours. A call selects at most 1,000
+parent rows in total within five seconds; FK cascades can delete additional
+offers and family-owned renewal challenges. SQL grants do not impose those row predicates: a
 compromised retention credential can delete active state and force logins.
 
-Run `migrate`, then `bootstrap-empty` only for a fresh empty installation. For a
-restore, drain ALL broker workers, select a NEW expected recovery epoch outside
+Run `migrate-v2` with explicit existing app, proof and retention roles plus
+`--acknowledge-drained`. It commits unready before the additive upgrade and only
+enables schema2 after validation; existing Azure ciphertext/epoch remain intact.
+Legacy `migrate-v1` only prepares001, which the new runtime cannot open. New
+image/schema1 and old image/schema2 are unready; new image/old Azure source on
+schema2 is supported. For a restore, drain ALL broker workers, select a NEW
+expected recovery epoch outside
 the restored database, run `begin-recovery --acknowledge-drained`, then
 `finalize --acknowledge-drained`, and start workers with that epoch. Finalization
-clears old pending/family material before readiness. It is transactionally
+clears old pending/challenge/offer/family material before readiness. It is transactionally
 repeatable if interrupted while unready; a failed finalization preserves the
 unready state. Normal restart retains the epoch. Bundle rollback does not reset
 it. An operator reusing an old restored epoch can defeat this safeguard; the
@@ -172,8 +183,8 @@ binding. Raw DSNs and provider/token details are omitted from errors/output.
 ## Remaining composition
 
 The HTTP adapter and browser helper establish their own exact Origin, cookie,
-recipient and serialized-renewal contracts. Privado proof verification,
-enterprise OAuth resource delegation, Explorer/UI wiring, production mounting
+recipient and serialized-renewal contracts. The separate explicit multi-provider
+constructors compose [Privado sessions](v2-privado-session.md). Enterprise OAuth resource delegation, Explorer/UI wiring, production mounting
 and real Azure tenant/account qualification require separate composition.
 A complete runtime must compose the broker and RPC profiles deliberately and
 qualify its binary imports, credentials, recovery and deployment.

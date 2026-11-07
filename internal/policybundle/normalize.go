@@ -90,7 +90,7 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 	if rawRuntimeProfile(o.Profile.id) && !positiveChain64(m.ChainID) {
 		return fail(UnsupportedFeature, "", "", "chainId", "raw submission requires a positive uint64 chain")
 	}
-	if (o.Profile.id == BrokerProfileID) != (m.AuthCatalog != nil) {
+	if (o.Profile.id == BrokerProfileID || o.Profile.id == BrokerMultiProfileID) != (m.AuthCatalog != nil) {
 		return fail(UnsupportedFeature, "", "", "authCatalog", "auth source must match the explicitly selected profile")
 	}
 	if len(m.Documents) > o.Limits.MaxDocuments-len(globalDocumentRefs(m)) {

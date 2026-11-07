@@ -41,6 +41,11 @@ func LoadDirectory(ctx context.Context, selection Selection, options Options) (*
 	}
 	entries := append([]DocumentRef(nil), manifest.Documents...)
 	entries = append(entries, globalDocumentRefs(manifest)...)
+	pinned, err := discoverAuthPinned(ctx, manifest, options, entries, func(name string, budget int64) ([]byte, error) { return readRegular(ctx, root, name, budget) })
+	if err != nil {
+		return nil, err
+	}
+	entries = append(entries, pinned...)
 	if err := checkEntries(ctx, root, entries, options.Limits.MaxDocuments); err != nil {
 		return nil, err
 	}

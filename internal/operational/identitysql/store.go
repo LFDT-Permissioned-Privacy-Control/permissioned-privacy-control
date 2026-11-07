@@ -48,8 +48,8 @@ func open(ctx context.Context, dsn string, scope b.Scope, clock identity.Clock, 
 	if err != nil {
 		return nil, b.ErrUnavailable
 	}
-	s := &Store{pool, scope, clock, mode}
-	if checkSchema(ctx, pool) != nil || s.checkPrivileges(ctx) != nil || checkState(ctx, pool, scope) != nil {
+	s := &Store{pool: pool, scope: scope, clock: clock, mode: mode}
+	if checkSchema(ctx, pool) != nil || checkV2Privileges(ctx, pool, "", mode) != nil || checkState(ctx, pool, scope) != nil {
 		pool.Close()
 		return nil, b.ErrUnavailable
 	}
@@ -84,7 +84,7 @@ func begin(ctx context.Context, pool beginner) (pgx.Tx, error) {
 }
 func checkState(ctx context.Context, q querier, scope b.Scope) error {
 	var ok bool
-	err := q.QueryRow(ctx, `SELECT schema_version=1 AND migration_checksum=$1 AND namespace=$2 AND recovery_epoch=$3::uuid AND ready FROM ops_identity_v2.metadata WHERE singleton`, SchemaChecksum(), scope.Namespace.String(), scope.State.RecoveryEpoch).Scan(&ok)
+	err := q.QueryRow(ctx, `SELECT schema_version=2 AND migration_checksum=$1 AND namespace=$2 AND recovery_epoch=$3::uuid AND ready FROM ops_identity_v2.metadata WHERE singleton`, SchemaChecksum(), scope.Namespace.String(), scope.State.RecoveryEpoch).Scan(&ok)
 	if err != nil || !ok {
 		return b.ErrUnavailable
 	}
@@ -173,7 +173,7 @@ type pendingTx struct {
 }
 
 func (t *pendingTx) InsertFamily(f b.Family) error {
-	if !t.active || t.inserted || t.pending == nil || !f.Valid() || f.Scope != t.store.scope || f.Generation != 0 || f.RevokedAt != nil || f.RequestID != t.pending.ID || f.ProfileID != t.pending.ProfileID || f.ProfileDigest != t.pending.ProfileDigest || f.Recipient != t.pending.Recipient {
+	if !t.active || t.inserted || t.pending == nil || !f.Valid() || f.Provider != b.FamilyAzure || f.Scope != t.store.scope || f.Generation != 0 || f.RevokedAt != nil || f.RequestID != t.pending.ID || f.ProfileID != t.pending.ProfileID || f.ProfileDigest != t.pending.ProfileDigest || f.Recipient != t.pending.Recipient {
 		return b.ErrInvalid
 	}
 	if err := t.capacity("family", b.MaxFamilies); err != nil {
@@ -186,9 +186,8 @@ func (t *pendingTx) InsertFamily(f b.Family) error {
 	if now.Before(f.CreatedAt) || !now.Before(f.AbsoluteExpiresAt) {
 		return b.ErrUnauthorized
 	}
-	_, err = t.tx.Exec(t.ctx, `INSERT INTO ops_identity_v2.renewal_families(family_id,originating_request_id,namespace,recovery_epoch,actor_id,profile_id,profile_digest,identity_authority,source_tenant,source_subject,principal_kind,oidc_subject_hash,login_nonce_hash,original_auth_time,recipient_hash,generation,current_handle_hash,encryption_key_id,refresh_ciphertext,created_at,absolute_expires_at,last_rotated_at,revoked_at)VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`, f.ID, f.RequestID, f.Scope.Namespace.String(), f.Scope.State.RecoveryEpoch, f.Actor, f.ProfileID, f.ProfileDigest, f.Authority, f.Tenant, f.Subject, string(f.Kind), f.OIDCSubjectHash[:], f.NonceHash[:], f.OriginalAuthTime, f.Recipient[:], f.Generation, f.CurrentHandleHash[:], f.EncryptionKeyID, f.Ciphertext, f.CreatedAt, f.AbsoluteExpiresAt, f.LastRotatedAt, f.RevokedAt)
-	if err != nil {
-		return b.ErrUnavailable
+	if err := insertFamily(t.ctx, t.tx, f); err != nil {
+		return err
 	}
 	t.inserted = true
 	return nil
@@ -244,17 +243,21 @@ func (s *Store) WithPending(ctx context.Context, scope b.Scope, hash b.Digest, r
 	return b.Commit{Committed: true, Kind: b.Create}, nil
 }
 
-const familyColumns = `family_id::text,originating_request_id::text,actor_id,profile_id,profile_digest,identity_authority,source_tenant,source_subject,principal_kind,oidc_subject_hash,login_nonce_hash,original_auth_time,recipient_hash,generation,current_handle_hash,encryption_key_id,CASE WHEN octet_length(refresh_ciphertext)<=33792 THEN refresh_ciphertext ELSE NULL END,created_at,absolute_expires_at,last_rotated_at,revoked_at`
+const familyColumns = `provider_kind,family_id::text,originating_request_id::text,actor_id,profile_id,profile_digest,identity_authority,source_tenant,source_subject,principal_kind,oidc_subject_hash,login_nonce_hash,original_auth_time,recipient_hash,generation,current_handle_hash,encryption_key_id,CASE WHEN provider_kind='azure-human' AND octet_length(refresh_ciphertext)<=33792 OR provider_kind='privado' AND octet_length(refresh_ciphertext)<=2048 THEN refresh_ciphertext ELSE NULL END,created_at,absolute_expires_at,last_rotated_at,revoked_at`
 
 func scanFamily(row pgx.Row, scope b.Scope) (b.Family, error) {
 	f := b.Family{Scope: scope}
 	var oidc, nonce, recipient, hash []byte
-	err := row.Scan(&f.ID, &f.RequestID, &f.Actor, &f.ProfileID, &f.ProfileDigest, &f.Authority, &f.Tenant, &f.Subject, &f.Kind, &oidc, &nonce, &f.OriginalAuthTime, &recipient, &f.Generation, &hash, &f.EncryptionKeyID, &f.Ciphertext, &f.CreatedAt, &f.AbsoluteExpiresAt, &f.LastRotatedAt, &f.RevokedAt)
+	var tenant *string
+	err := row.Scan(&f.Provider, &f.ID, &f.RequestID, &f.Actor, &f.ProfileID, &f.ProfileDigest, &f.Authority, &tenant, &f.Subject, &f.Kind, &oidc, &nonce, &f.OriginalAuthTime, &recipient, &f.Generation, &hash, &f.EncryptionKeyID, &f.Ciphertext, &f.CreatedAt, &f.AbsoluteExpiresAt, &f.LastRotatedAt, &f.RevokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return f, b.ErrUnauthorized
 	}
-	if err != nil || len(oidc) != 32 || len(nonce) != 32 || len(recipient) != 32 || len(hash) != 32 {
+	if err != nil || len(recipient) != 32 || len(hash) != 32 || (f.Provider == b.FamilyAzure && (tenant == nil || len(oidc) != 32 || len(nonce) != 32)) || (f.Provider == b.FamilyPrivado && (tenant != nil || oidc != nil || nonce != nil)) {
 		return f, b.ErrUnavailable
+	}
+	if tenant != nil {
+		f.Tenant = *tenant
 	}
 	copy(f.OIDCSubjectHash[:], oidc)
 	copy(f.NonceHash[:], nonce)
@@ -270,9 +273,18 @@ func sameImmutable(a, z b.Family) bool {
 }
 func familyIdentityEqual(a, z b.Family) bool {
 	auth := a.OriginalAuthTime == nil && z.OriginalAuthTime == nil || a.OriginalAuthTime != nil && z.OriginalAuthTime != nil && *a.OriginalAuthTime == *z.OriginalAuthTime
-	return auth && a.ID == z.ID && a.RequestID == z.RequestID && a.Scope == z.Scope && a.Actor == z.Actor && a.ProfileID == z.ProfileID && a.ProfileDigest == z.ProfileDigest && a.Authority == z.Authority && a.Tenant == z.Tenant && a.Subject == z.Subject && a.Kind == z.Kind && a.OIDCSubjectHash == z.OIDCSubjectHash && a.NonceHash == z.NonceHash && a.Recipient == z.Recipient && a.CreatedAt.Equal(z.CreatedAt) && a.AbsoluteExpiresAt.Equal(z.AbsoluteExpiresAt)
+	return auth && a.Provider == z.Provider && a.ID == z.ID && a.RequestID == z.RequestID && a.Scope == z.Scope && a.Actor == z.Actor && a.ProfileID == z.ProfileID && a.ProfileDigest == z.ProfileDigest && a.Authority == z.Authority && a.Tenant == z.Tenant && a.Subject == z.Subject && a.Kind == z.Kind && a.OIDCSubjectHash == z.OIDCSubjectHash && a.NonceHash == z.NonceHash && a.Recipient == z.Recipient && a.CreatedAt.Equal(z.CreatedAt) && a.AbsoluteExpiresAt.Equal(z.AbsoluteExpiresAt)
 }
 func (s *Store) WithFamily(ctx context.Context, scope b.Scope, id string, callback func(b.Family) (b.FamilyDecision, error), gate func() error) (b.Commit, error) {
+	return s.withFamily(ctx, scope, b.FamilyAzure, id, callback, gate, false)
+}
+func (s *Store) WithProviderFamily(ctx context.Context, scope b.Scope, provider b.FamilyProvider, id string, callback func(b.Family) (b.FamilyDecision, error), gate func() error) (b.Commit, error) {
+	if provider != b.FamilyAzure && provider != b.FamilyPrivado {
+		return b.Commit{}, b.ErrInvalid
+	}
+	return s.withFamily(ctx, scope, provider, id, callback, gate, true)
+}
+func (s *Store) withFamily(ctx context.Context, scope b.Scope, provider b.FamilyProvider, id string, callback func(b.Family) (b.FamilyDecision, error), gate func() error, flow bool) (b.Commit, error) {
 	if !s.valid(scope) || !b.ValidUUID(id) || callback == nil {
 		return b.Commit{}, b.ErrInvalid
 	}
@@ -286,9 +298,17 @@ func (s *Store) WithFamily(ctx context.Context, scope b.Scope, id string, callba
 	if err := checkState(ctx, tx, scope); err != nil {
 		return b.Commit{}, err
 	}
+	if flow {
+		if err := lockPrivadoFlow(ctx, tx, scope); err != nil {
+			return b.Commit{}, err
+		}
+	}
 	old, err := scanFamily(tx.QueryRow(ctx, `SELECT `+familyColumns+` FROM ops_identity_v2.renewal_families WHERE namespace=$1 AND recovery_epoch=$2::uuid AND family_id=$3::uuid FOR UPDATE`, scope.Namespace.String(), scope.State.RecoveryEpoch, id), scope)
 	if err != nil {
 		return b.Commit{}, err
+	}
+	if old.Provider != provider {
+		return b.Commit{}, b.ErrUnauthorized
 	}
 	input := old
 	input.Ciphertext = bytes.Clone(old.Ciphertext)
@@ -300,34 +320,8 @@ func (s *Store) WithFamily(ctx context.Context, scope b.Scope, id string, callba
 	if err != nil {
 		return b.Commit{}, err
 	}
-	f := decision.Family
-	switch decision.Kind {
-	case b.DenyUnchanged:
-	case b.Rotate:
-		if gate == nil || old.RevokedAt != nil || !f.Valid() || !sameImmutable(old, f) || old.Generation == int64(^uint64(0)>>1) || f.Generation != old.Generation+1 || f.RevokedAt != nil || f.CurrentHandleHash == old.CurrentHandleHash || f.LastRotatedAt.Before(old.LastRotatedAt) {
-			return b.Commit{}, b.ErrInvalid
-		}
-		now, err := s.now()
-		if err != nil {
-			return b.Commit{}, err
-		}
-		if now.Before(f.LastRotatedAt) || !now.Before(f.AbsoluteExpiresAt) {
-			return b.Commit{}, b.ErrUnauthorized
-		}
-		tag, err := tx.Exec(ctx, `UPDATE ops_identity_v2.renewal_families SET generation=$4,current_handle_hash=$5,encryption_key_id=$6,refresh_ciphertext=$7,last_rotated_at=$8 WHERE namespace=$1 AND recovery_epoch=$2::uuid AND family_id=$3::uuid`, scope.Namespace.String(), scope.State.RecoveryEpoch, id, f.Generation, f.CurrentHandleHash[:], f.EncryptionKeyID, f.Ciphertext, f.LastRotatedAt)
-		if err != nil || tag.RowsAffected() != 1 {
-			return b.Commit{}, b.ErrUnavailable
-		}
-	case b.RevokeDeny, b.RevokeSuccess:
-		if !f.Valid() || !sameImmutable(old, f) || f.RevokedAt == nil || f.RevokedAt.Before(old.CreatedAt) {
-			return b.Commit{}, b.ErrInvalid
-		}
-		tag, err := tx.Exec(ctx, `UPDATE ops_identity_v2.renewal_families SET revoked_at=COALESCE(revoked_at,$4) WHERE namespace=$1 AND recovery_epoch=$2::uuid AND family_id=$3::uuid`, scope.Namespace.String(), scope.State.RecoveryEpoch, id, *f.RevokedAt)
-		if err != nil || tag.RowsAffected() != 1 {
-			return b.Commit{}, b.ErrUnavailable
-		}
-	default:
-		return b.Commit{}, b.ErrInvalid
+	if err := s.applyFamilyDecision(ctx, tx, scope, old, decision, gate); err != nil {
+		return b.Commit{}, err
 	}
 	if err := checkState(ctx, tx, scope); err != nil {
 		return b.Commit{}, err
@@ -341,4 +335,40 @@ func (s *Store) WithFamily(ctx context.Context, scope b.Scope, id string, callba
 		return b.Commit{}, b.ErrUnavailable
 	}
 	return b.Commit{Committed: true, Kind: decision.Kind}, nil
+}
+
+// applyFamilyDecision is the one shared monotonic family mutation engine.
+// Provider calls and result construction belong to the caller's prepared path.
+func (s *Store) applyFamilyDecision(ctx context.Context, tx pgx.Tx, scope b.Scope, old b.Family, decision b.FamilyDecision, gate func() error) error {
+	id := old.ID
+	f := decision.Family
+	switch decision.Kind {
+	case b.DenyUnchanged:
+	case b.Rotate:
+		if gate == nil || old.RevokedAt != nil || !f.Valid() || !sameImmutable(old, f) || old.Generation == int64(^uint64(0)>>1) || f.Generation != old.Generation+1 || f.RevokedAt != nil || f.CurrentHandleHash == old.CurrentHandleHash || f.LastRotatedAt.Before(old.LastRotatedAt) {
+			return b.ErrInvalid
+		}
+		now, err := s.now()
+		if err != nil {
+			return err
+		}
+		if now.Before(f.LastRotatedAt) || !now.Before(f.AbsoluteExpiresAt) {
+			return b.ErrUnauthorized
+		}
+		tag, err := tx.Exec(ctx, `UPDATE ops_identity_v2.renewal_families SET generation=$4,current_handle_hash=$5,encryption_key_id=$6,refresh_ciphertext=$7,last_rotated_at=$8 WHERE namespace=$1 AND recovery_epoch=$2::uuid AND family_id=$3::uuid`, scope.Namespace.String(), scope.State.RecoveryEpoch, id, f.Generation, f.CurrentHandleHash[:], f.EncryptionKeyID, f.Ciphertext, f.LastRotatedAt)
+		if err != nil || tag.RowsAffected() != 1 {
+			return b.ErrUnavailable
+		}
+	case b.RevokeDeny, b.RevokeSuccess:
+		if !f.Valid() || !sameImmutable(old, f) || f.RevokedAt == nil || f.RevokedAt.Before(old.CreatedAt) {
+			return b.ErrInvalid
+		}
+		tag, err := tx.Exec(ctx, `UPDATE ops_identity_v2.renewal_families SET revoked_at=COALESCE(revoked_at,$4) WHERE namespace=$1 AND recovery_epoch=$2::uuid AND family_id=$3::uuid`, scope.Namespace.String(), scope.State.RecoveryEpoch, id, *f.RevokedAt)
+		if err != nil || tag.RowsAffected() != 1 {
+			return b.ErrUnavailable
+		}
+	default:
+		return b.ErrInvalid
+	}
+	return nil
 }

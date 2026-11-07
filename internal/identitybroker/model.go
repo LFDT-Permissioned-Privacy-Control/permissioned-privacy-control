@@ -127,6 +127,7 @@ func (p Pending) Valid() bool {
 }
 
 type Family struct {
+	Provider                                    FamilyProvider
 	ID, RequestID                               string
 	Scope                                       Scope
 	Actor, ProfileID, ProfileDigest             string
@@ -145,7 +146,12 @@ type Family struct {
 
 func (f Family) Valid() bool {
 	_, digestErr := ParseDigest(f.ProfileDigest)
-	return ValidUUID(f.ID) && ValidUUID(f.RequestID) && f.Scope.Valid() && identity.ValidActorID(f.Actor) && validText(f.ProfileID, 128) && digestErr == nil && ValidUUID(f.Tenant) && ValidUUID(f.Subject) && f.Authority == "https://login.microsoftonline.com/"+f.Tenant+"/v2.0" && f.Kind == identity.Human && f.OIDCSubjectHash != (Digest{}) && f.NonceHash != (Digest{}) && (f.OriginalAuthTime == nil || *f.OriginalAuthTime >= 0) && f.Recipient.Valid() && f.Generation >= 0 && f.CurrentHandleHash != (Digest{}) && validText(f.EncryptionKeyID, 128) && len(f.Ciphertext) >= 28 && len(f.Ciphertext) <= MaxFamilyCipherBytes && !f.CreatedAt.IsZero() && f.AbsoluteExpiresAt.After(f.CreatedAt) && f.AbsoluteExpiresAt.Sub(f.CreatedAt) <= FamilyLifetime && !f.LastRotatedAt.Before(f.CreatedAt) && (f.RevokedAt == nil || !f.RevokedAt.Before(f.CreatedAt))
+	providerValid := f.Provider == FamilyAzure && ValidUUID(f.Tenant) && ValidUUID(f.Subject) && f.Authority == "https://login.microsoftonline.com/"+f.Tenant+"/v2.0" && f.OIDCSubjectHash != (Digest{}) && f.NonceHash != (Digest{}) && (f.OriginalAuthTime == nil || *f.OriginalAuthTime >= 0)
+	if f.Provider == FamilyPrivado {
+		_, holderValid := PrivadoHolderNetwork(f.Subject)
+		providerValid = holderValid && f.Authority == "privado" && f.Tenant == "" && f.OIDCSubjectHash == (Digest{}) && f.NonceHash == (Digest{}) && f.OriginalAuthTime == nil && len(f.Ciphertext) <= 2048
+	}
+	return providerValid && ValidUUID(f.ID) && ValidUUID(f.RequestID) && f.Scope.Valid() && identity.ValidActorID(f.Actor) && validText(f.ProfileID, 128) && digestErr == nil && f.Kind == identity.Human && f.Recipient.Valid() && f.Generation >= 0 && f.CurrentHandleHash != (Digest{}) && validText(f.EncryptionKeyID, 128) && len(f.Ciphertext) >= 28 && len(f.Ciphertext) <= MaxFamilyCipherBytes && !f.CreatedAt.IsZero() && f.AbsoluteExpiresAt.After(f.CreatedAt) && f.AbsoluteExpiresAt.Sub(f.CreatedAt) <= FamilyLifetime && !f.LastRotatedAt.Before(f.CreatedAt) && (f.RevokedAt == nil || !f.RevokedAt.Before(f.CreatedAt))
 }
 
 type DecisionKind uint8

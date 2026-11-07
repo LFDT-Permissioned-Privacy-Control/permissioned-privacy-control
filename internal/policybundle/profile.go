@@ -21,6 +21,7 @@ const (
 	DisclosureProfileID            = "catalog-disclosure/v1"
 	ComplianceProfileID            = "catalog-compliance/v1"
 	BrokerProfileID                = "catalog-broker/v1"
+	BrokerMultiProfileID           = "catalog-broker-multi/v1"
 	CapabilityIdentity             = "identity.claims/v1"
 	NativeEvaluatorVersion         = "policycore/native-v1alpha1"
 	NativeV2EvaluatorVersion       = "policycore/native-v1alpha2"
@@ -129,6 +130,10 @@ func ComplianceProfile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{ComplianceProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
 }
 
+func BrokerMultiProfile(methodCatalogVersion string) ValidationProfile {
+	return ValidationProfile{BrokerMultiProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+}
+
 func BrokerProfile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{BrokerProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
 }
@@ -167,7 +172,7 @@ type methodIndex struct {
 func prepareOptions(options Options) (methodIndex, error) {
 	p := options.Profile
 	expectedEvaluator := NativeEvaluatorVersion
-	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID || p.id == RuntimeRawSendProfileID || p.id == DisclosureProfileID || p.id == ComplianceProfileID || p.id == BrokerProfileID {
+	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID || p.id == RuntimeRawSendProfileID || p.id == DisclosureProfileID || p.id == ComplianceProfileID || p.id == BrokerProfileID || p.id == BrokerMultiProfileID {
 		expectedEvaluator = NativeV2EvaluatorVersion
 	}
 	if p.id == RuntimeMultiOrgProfileID {
@@ -176,7 +181,7 @@ func prepareOptions(options Options) (methodIndex, error) {
 	if lifecycleRuntimeProfile(p.id) {
 		expectedEvaluator = NativeV4EvaluatorVersion
 	}
-	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && !runtimeProfile(p.id) && p.id != DisclosureProfileID && p.id != ComplianceProfileID && p.id != BrokerProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || (p.id == DisclosureProfileID && !options.DisclosureLimits.Valid()) || ((p.id == ComplianceProfileID || rawRuntimeProfile(p.id)) && !options.ComplianceLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
+	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && !runtimeProfile(p.id) && p.id != DisclosureProfileID && p.id != ComplianceProfileID && p.id != BrokerProfileID && p.id != BrokerMultiProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || (p.id == DisclosureProfileID && !options.DisclosureLimits.Valid()) || ((p.id == ComplianceProfileID || rawRuntimeProfile(p.id)) && !options.ComplianceLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
 		return methodIndex{}, fail(InvalidSelection, "", "", "options", "invalid limits or pinned foundation/method profile")
 	}
 	m := methodIndex{map[string]bool{}, map[string]string{}, slices.Clone(options.Methods.Wildcard), map[string]string{}}

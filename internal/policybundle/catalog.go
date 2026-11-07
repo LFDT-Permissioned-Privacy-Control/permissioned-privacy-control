@@ -157,6 +157,8 @@ type catalogBuilder struct {
 	complianceRef           *ComplianceCatalogRef
 	complianceLimits        compliancepolicy.Limits
 	authSource              *brokerpolicy.Source
+	authMultiSource         *brokerpolicy.SourceV2
+	authDocuments           []brokerpolicy.DocumentBytes
 	authRef                 *AuthCatalogRef
 	runtimeSource           *RuntimeSource
 	runtimeRawSource        *RuntimeRawSource
@@ -315,7 +317,7 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 		}
 		catalog, _ := b.snapshot.NativeCatalog(org.ID)
 		validate := policycore.Validate
-		if b.profile.id == NativeV2ProfileID || b.profile.id == RuntimeCallProfileID || b.profile.id == RuntimeRawSendProfileID || b.profile.id == DisclosureProfileID || b.profile.id == ComplianceProfileID || b.profile.id == BrokerProfileID {
+		if b.profile.id == NativeV2ProfileID || b.profile.id == RuntimeCallProfileID || b.profile.id == RuntimeRawSendProfileID || b.profile.id == DisclosureProfileID || b.profile.id == ComplianceProfileID || b.profile.id == BrokerProfileID || b.profile.id == BrokerMultiProfileID {
 			validate = policycore.ValidateNativeV2
 		}
 		var v *policycore.Validated

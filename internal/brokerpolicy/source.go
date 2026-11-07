@@ -92,14 +92,19 @@ type Profile struct {
 }
 type Catalog struct {
 	source                 Source
+	multi                  *SourceV2
+	documents              []DocumentBytes
 	digest, identityDigest string
 	issuer                 identity.Issuer
 	profiles               map[string]Profile
 	capabilities, refs     []string
 }
 
-func (c *Catalog) Digest() string                    { return c.digest }
-func (c *Catalog) IdentityDigest() string            { return c.identityDigest }
+func (c *Catalog) Digest() string         { return c.digest }
+func (c *Catalog) IdentityDigest() string { return c.identityDigest }
+
+// Source returns only the legacy source variant. Use SourceV1 or MultiSource
+// when the variant is not already fixed by a compiled validation profile.
 func (c *Catalog) Source() Source                    { return clone(c.source) }
 func (c *Catalog) Issuer() identity.Issuer           { return clone(c.issuer) }
 func (c *Catalog) Profile(id string) (Profile, bool) { p, ok := c.profiles[id]; return clone(p), ok }
@@ -157,6 +162,10 @@ func https(raw string, origin bool) (string, bool) {
 	return u.String(), true
 }
 func Compile(source Source, identities *identity.Catalog) (*Catalog, error) {
+	return compile(source, identities, false)
+}
+
+func compile(source Source, identities *identity.Catalog, allowEmptyAzure bool) (*Catalog, error) {
 	if identities == nil {
 		return nil, ErrInvalid
 	}
@@ -168,7 +177,7 @@ func Compile(source Source, identities *identity.Catalog) (*Catalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	if source.APIVersion != APIVersion || source.Kind != Kind || !identifier.MatchString(source.IssuerID) || !identifier.MatchString(source.AccessKeyID) || len(source.AzureProfiles) == 0 {
+	if source.APIVersion != APIVersion || source.Kind != Kind || !identifier.MatchString(source.IssuerID) || !identifier.MatchString(source.AccessKeyID) || len(source.AzureProfiles) == 0 && !allowEmptyAzure {
 		return nil, ErrInvalid
 	}
 	origin, ok := https(source.WebOrigin, true)

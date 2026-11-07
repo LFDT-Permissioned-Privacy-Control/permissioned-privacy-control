@@ -141,11 +141,44 @@ func compileSourceSet(ctx context.Context, manifest Manifest, digest Digest, man
 		if RawDigest(raw) != ref.SHA256 {
 			return nil, fail(IntegrityFailure, "", "", "authCatalog", "auth digest does not match exact bytes")
 		}
-		source, err := brokerpolicy.Decode(raw)
-		if err != nil {
-			return nil, fail(InvalidSchema, "", "", "authCatalog", err.Error())
+		if options.Profile.id == BrokerMultiProfileID {
+			source, err := brokerpolicy.DecodeV2(raw)
+			if err != nil {
+				return nil, fail(InvalidSchema, "", "", "authCatalog", err.Error())
+			}
+			builder.authMultiSource = &source
+			existing := append(append([]DocumentRef(nil), manifest.Documents...), globalDocumentRefs(manifest)...)
+			refs, err := authPinnedRefs(raw, options.Profile.id, existing)
+			if err != nil {
+				return nil, err
+			}
+			if len(existing)+len(refs) > options.Limits.MaxDocuments {
+				return nil, fail(LimitExceeded, "", "", "pinnedDocuments", "too many source files")
+			}
+			docTotal := 0
+			for i, r := range refs {
+				budget := min(options.Limits.MaxDocumentBytes, int64(brokerpolicy.MaxPinnedDocumentBytes), int64(brokerpolicy.MaxPinnedDocumentsBytes-docTotal), options.Limits.MaxBundleBytes-total)
+				if budget <= 0 {
+					return nil, fail(LimitExceeded, "", "", r.Path, "pinned document exceeds byte budget")
+				}
+				data, err := read(r.Path, budget)
+				if err != nil {
+					return nil, err
+				}
+				total += int64(len(data))
+				docTotal += len(data)
+				if RawDigest(data) != r.SHA256 {
+					return nil, fail(IntegrityFailure, "", "", r.Path, "pinned document digest does not match exact bytes")
+				}
+				builder.authDocuments = append(builder.authDocuments, brokerpolicy.DocumentBytes{URL: source.PinnedDocuments[i].URL, RawBytes: data})
+			}
+		} else {
+			source, err := brokerpolicy.Decode(raw)
+			if err != nil {
+				return nil, fail(InvalidSchema, "", "", "authCatalog", err.Error())
+			}
+			builder.authSource = &source
 		}
-		builder.authSource = &source
 		builder.authRef = ref
 	}
 	return builder.finish(ctx)

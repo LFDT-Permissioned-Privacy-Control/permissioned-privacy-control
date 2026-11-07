@@ -1,0 +1,782 @@
+{
+  "columns": [
+    {
+      "table_name": "metadata",
+      "attnum": 1,
+      "attname": "singleton",
+      "type": "boolean",
+      "not_null": true,
+      "default_expr": "true"
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 2,
+      "attname": "schema_version",
+      "type": "integer",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 3,
+      "attname": "migration_checksum",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 4,
+      "attname": "namespace",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 5,
+      "attname": "recovery_epoch",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 6,
+      "attname": "ready",
+      "type": "boolean",
+      "not_null": true,
+      "default_expr": "false"
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 7,
+      "attname": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 1,
+      "attname": "request_id",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 2,
+      "attname": "namespace",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 3,
+      "attname": "recovery_epoch",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 4,
+      "attname": "state_hash",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 5,
+      "attname": "profile_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 6,
+      "attname": "profile_digest",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 7,
+      "attname": "recipient_hash",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 8,
+      "attname": "encryption_key_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 9,
+      "attname": "secret_ciphertext",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 10,
+      "attname": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 11,
+      "attname": "expires_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 1,
+      "attname": "family_id",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 2,
+      "attname": "originating_request_id",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 3,
+      "attname": "namespace",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 4,
+      "attname": "recovery_epoch",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 5,
+      "attname": "actor_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 6,
+      "attname": "profile_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 7,
+      "attname": "profile_digest",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 8,
+      "attname": "identity_authority",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 9,
+      "attname": "source_tenant",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 10,
+      "attname": "source_subject",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 11,
+      "attname": "principal_kind",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 12,
+      "attname": "oidc_subject_hash",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 13,
+      "attname": "login_nonce_hash",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 14,
+      "attname": "original_auth_time",
+      "type": "bigint",
+      "not_null": false,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 15,
+      "attname": "recipient_hash",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 16,
+      "attname": "generation",
+      "type": "bigint",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 17,
+      "attname": "current_handle_hash",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 18,
+      "attname": "encryption_key_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 19,
+      "attname": "refresh_ciphertext",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 20,
+      "attname": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 21,
+      "attname": "absolute_expires_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 22,
+      "attname": "last_rotated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 23,
+      "attname": "revoked_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default_expr": null
+    }
+  ],
+  "constraints": [
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_migration_checksum_check",
+      "definition": "CHECK (migration_checksum ~ '^sha256:[0-9a-f]{64}$'::text)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_namespace_check",
+      "definition": "CHECK (namespace ~ '^sha256:[0-9a-f]{64}$'::text)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_pkey",
+      "definition": "PRIMARY KEY (singleton)",
+      "type": "p",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_recovery_epoch_check",
+      "definition": "CHECK (recovery_epoch <> '00000000-0000-0000-0000-000000000000'::uuid)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_schema_version_check",
+      "definition": "CHECK (schema_version = 1)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_singleton_check",
+      "definition": "CHECK (singleton)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_check",
+      "definition": "CHECK (created_at < expires_at AND expires_at <= (created_at + '00:05:00'::interval))",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_encryption_key_id_check",
+      "definition": "CHECK (octet_length(encryption_key_id) >= 1 AND octet_length(encryption_key_id) <= 128)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_namespace_check",
+      "definition": "CHECK (namespace ~ '^sha256:[0-9a-f]{64}$'::text)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_pkey",
+      "definition": "PRIMARY KEY (request_id)",
+      "type": "p",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_profile_digest_check",
+      "definition": "CHECK (profile_digest ~ '^sha256:[0-9a-f]{64}$'::text)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_profile_id_check",
+      "definition": "CHECK (octet_length(profile_id) >= 1 AND octet_length(profile_id) <= 128)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_recipient_hash_check",
+      "definition": "CHECK (octet_length(recipient_hash) = 32)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_recovery_epoch_check",
+      "definition": "CHECK (recovery_epoch <> '00000000-0000-0000-0000-000000000000'::uuid)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_request_id_check",
+      "definition": "CHECK (request_id <> '00000000-0000-0000-0000-000000000000'::uuid)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_secret_ciphertext_check",
+      "definition": "CHECK (octet_length(secret_ciphertext) >= 28 AND octet_length(secret_ciphertext) <= 2048)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_state_hash_check",
+      "definition": "CHECK (octet_length(state_hash) = 32)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_state_hash_key",
+      "definition": "UNIQUE (state_hash)",
+      "type": "u",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_actor_id_check",
+      "definition": "CHECK (actor_id ~ '^ops:p1:[A-Za-z0-9_-]{43}$'::text)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_check",
+      "definition": "CHECK (identity_authority = (('https://login.microsoftonline.com/'::text || source_tenant) || '/v2.0'::text))",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_check1",
+      "definition": "CHECK (created_at < absolute_expires_at AND absolute_expires_at <= (created_at + '168:00:00'::interval))",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_check2",
+      "definition": "CHECK (last_rotated_at >= created_at AND last_rotated_at < absolute_expires_at)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_check3",
+      "definition": "CHECK (revoked_at >= created_at)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_current_handle_hash_check",
+      "definition": "CHECK (octet_length(current_handle_hash) = 32)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_encryption_key_id_check",
+      "definition": "CHECK (octet_length(encryption_key_id) >= 1 AND octet_length(encryption_key_id) <= 128)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_family_id_check",
+      "definition": "CHECK (family_id <> '00000000-0000-0000-0000-000000000000'::uuid)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_generation_check",
+      "definition": "CHECK (generation >= 0)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_login_nonce_hash_check",
+      "definition": "CHECK (octet_length(login_nonce_hash) = 32)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_namespace_check",
+      "definition": "CHECK (namespace ~ '^sha256:[0-9a-f]{64}$'::text)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_oidc_subject_hash_check",
+      "definition": "CHECK (octet_length(oidc_subject_hash) = 32)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_original_auth_time_check",
+      "definition": "CHECK (original_auth_time >= 0)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_originating_request_id_check",
+      "definition": "CHECK (originating_request_id <> '00000000-0000-0000-0000-000000000000'::uuid)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_originating_request_id_key",
+      "definition": "UNIQUE (originating_request_id)",
+      "type": "u",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_pkey",
+      "definition": "PRIMARY KEY (family_id)",
+      "type": "p",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_principal_kind_check",
+      "definition": "CHECK (principal_kind = 'human'::text)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_profile_digest_check",
+      "definition": "CHECK (profile_digest ~ '^sha256:[0-9a-f]{64}$'::text)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_profile_id_check",
+      "definition": "CHECK (octet_length(profile_id) >= 1 AND octet_length(profile_id) <= 128)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_recipient_hash_check",
+      "definition": "CHECK (octet_length(recipient_hash) = 32)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_recovery_epoch_check",
+      "definition": "CHECK (recovery_epoch <> '00000000-0000-0000-0000-000000000000'::uuid)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_refresh_ciphertext_check",
+      "definition": "CHECK (octet_length(refresh_ciphertext) >= 28 AND octet_length(refresh_ciphertext) <= 33792)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_source_subject_check",
+      "definition": "CHECK (source_subject ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text AND source_subject <> '00000000-0000-0000-0000-000000000000'::text)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_source_tenant_check",
+      "definition": "CHECK (source_tenant ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text AND source_tenant <> '00000000-0000-0000-0000-000000000000'::text)",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false
+    }
+  ],
+  "indexes": [
+    {
+      "name": "family_active_expiry",
+      "definition": "CREATE INDEX family_active_expiry ON ops_identity_v2.renewal_families USING btree (absolute_expires_at) WHERE (revoked_at IS NULL)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "family_expiry",
+      "definition": "CREATE INDEX family_expiry ON ops_identity_v2.renewal_families USING btree (absolute_expires_at)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "metadata_pkey",
+      "definition": "CREATE UNIQUE INDEX metadata_pkey ON ops_identity_v2.metadata USING btree (singleton)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "pending_expiry",
+      "definition": "CREATE INDEX pending_expiry ON ops_identity_v2.pending_requests USING btree (expires_at)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "pending_requests_pkey",
+      "definition": "CREATE UNIQUE INDEX pending_requests_pkey ON ops_identity_v2.pending_requests USING btree (request_id)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "pending_requests_state_hash_key",
+      "definition": "CREATE UNIQUE INDEX pending_requests_state_hash_key ON ops_identity_v2.pending_requests USING btree (state_hash)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "renewal_families_originating_request_id_key",
+      "definition": "CREATE UNIQUE INDEX renewal_families_originating_request_id_key ON ops_identity_v2.renewal_families USING btree (originating_request_id)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "renewal_families_pkey",
+      "definition": "CREATE UNIQUE INDEX renewal_families_pkey ON ops_identity_v2.renewal_families USING btree (family_id)",
+      "valid": true,
+      "ready": true
+    }
+  ],
+  "triggers": [
+    {
+      "name": "family_monotonic",
+      "table_name": "ops_identity_v2.renewal_families",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER family_monotonic BEFORE UPDATE ON ops_identity_v2.renewal_families FOR EACH ROW EXECUTE FUNCTION ops_identity_v2.family_monotonic()"
+    }
+  ],
+  "functions": [
+    {
+      "name": "family_monotonic",
+      "security_definer": false,
+      "volatility": "v",
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "language": "plpgsql",
+      "body": "\nBEGIN\n IF ROW(NEW.family_id,NEW.originating_request_id,NEW.namespace,NEW.recovery_epoch,\n NEW.actor_id,NEW.profile_id,NEW.profile_digest,NEW.identity_authority,NEW.source_tenant,\n NEW.source_subject,NEW.principal_kind,NEW.oidc_subject_hash,NEW.login_nonce_hash,\n NEW.original_auth_time,NEW.recipient_hash,NEW.created_at,NEW.absolute_expires_at)\n IS DISTINCT FROM ROW(OLD.family_id,OLD.originating_request_id,OLD.namespace,OLD.recovery_epoch,\n OLD.actor_id,OLD.profile_id,OLD.profile_digest,OLD.identity_authority,OLD.source_tenant,\n OLD.source_subject,OLD.principal_kind,OLD.oidc_subject_hash,OLD.login_nonce_hash,\n OLD.original_auth_time,OLD.recipient_hash,OLD.created_at,OLD.absolute_expires_at)\n THEN RAISE EXCEPTION 'immutable renewal identity'; END IF;\n IF OLD.revoked_at IS NOT NULL AND NEW IS DISTINCT FROM OLD\n THEN RAISE EXCEPTION 'renewal revocation is permanent'; END IF;\n IF NEW.generation<OLD.generation OR NEW.last_rotated_at<OLD.last_rotated_at\n THEN RAISE EXCEPTION 'renewal generation is monotonic'; END IF;\n IF ROW(NEW.current_handle_hash,NEW.encryption_key_id,NEW.refresh_ciphertext,NEW.last_rotated_at)\n IS DISTINCT FROM ROW(OLD.current_handle_hash,OLD.encryption_key_id,OLD.refresh_ciphertext,OLD.last_rotated_at)\n AND (OLD.generation=9223372036854775807 OR NEW.generation<>OLD.generation+1 OR NEW.revoked_at IS NOT NULL)\n THEN RAISE EXCEPTION 'renewal material requires one rotation'; END IF;\n IF NEW.generation<>OLD.generation AND\n (OLD.generation=9223372036854775807 OR NEW.generation<>OLD.generation+1 OR NEW.current_handle_hash=OLD.current_handle_hash OR NEW.refresh_ciphertext=OLD.refresh_ciphertext OR NEW.revoked_at IS NOT NULL)\n THEN RAISE EXCEPTION 'rotation requires replacement material'; END IF;\n RETURN NEW;\nEND "
+    }
+  ]
+}

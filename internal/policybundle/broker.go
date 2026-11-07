@@ -3,10 +3,16 @@ package policybundle
 import "privacy-proxy/internal/brokerpolicy"
 
 func (b *catalogBuilder) compileAuth() error {
-	if b.authSource == nil {
+	if b.authSource == nil && b.authMultiSource == nil {
 		return nil
 	}
-	catalog, err := brokerpolicy.Compile(*b.authSource, b.snapshot.identity)
+	var catalog *brokerpolicy.Catalog
+	var err error
+	if b.authMultiSource != nil {
+		catalog, err = brokerpolicy.CompileV2(*b.authMultiSource, b.snapshot.identity, b.authDocuments)
+	} else {
+		catalog, err = brokerpolicy.Compile(*b.authSource, b.snapshot.identity)
+	}
 	if err != nil {
 		return fail(InvalidSchema, "", "", "authCatalog", err.Error())
 	}

@@ -4,7 +4,8 @@
 `credentialAtomicQuerySigV2` predicates through the pinned iden3 SDK. Its output
 is an opaque, expiring `VerifiedProof`. The package issues no OPS token and
 opens no database. The existing Azure broker/source/family and HTTP contracts
-remain closed to Privado until deliberately composed with this provider.
+remain Azure-only. Separate explicit `NewMulti` constructors compose this
+provider with [recipient-bound sessions](v2-privado-session.md).
 
 ## Explicit startup trust
 
@@ -171,8 +172,10 @@ No success stub replaces proof verification. The provider boundary excludes
 SQL drivers, legacy session infrastructure and EVM/state/rawdb packages;
 standard SQL value-conversion helpers in Ethereum primitive types are harmless.
 
-Actual recipient-bound operational challenges, wallet callback/completion,
-fresh proof renewal, SQL recovery/consumption, HTTP/helper and issuer composition
-require integration. Fresh SigV2 credentials and a real supported wallet's
-five-minute renewal flow remain explicit qualification requirements. This
-library alone is not a delivered Privado login or complete V2 release.
+The explicit [session integration](v2-privado-session.md) adds recipient-bound
+challenges, callback/confirmation, fresh same-family renewal, SQL recovery and
+the browser helper. Its owned pinned JS SDK qualification generates new real
+AuthV2/SigV2 credentials/proofs and reaches the concrete provider/TLS/Core path.
+External hosted/mobile wallet behavior and unattended five-minute interaction
+still need deployment qualification. This library alone is not a complete V2
+release.

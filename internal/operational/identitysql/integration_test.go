@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,14 +27,16 @@ import (
 )
 
 type fixture struct {
-	ownerDSN, appDSN, retentionDSN string
-	owner                          *pgx.Conn
-	one, two                       *identitysql.Store
-	snapshot                       *policybundle.CatalogSnapshot
-	provider                       *azure.ProviderSet
-	entra                          *f.Entra
-	scope                          b.Scope
-	binding                        b.ServiceBinding
+	wallClock                                atomic.Bool
+	wallOffset                               atomic.Int64
+	ownerDSN, appDSN, proofDSN, retentionDSN string
+	owner                                    *pgx.Conn
+	one, two                                 *identitysql.Store
+	snapshot                                 *policybundle.CatalogSnapshot
+	provider                                 *azure.ProviderSet
+	entra                                    *f.Entra
+	scope                                    b.Scope
+	binding                                  b.ServiceBinding
 }
 
 func setup(t *testing.T) *fixture {
@@ -46,7 +49,7 @@ func setupConfigured(t *testing.T, change func(*brokerpolicy.Source)) *fixture {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
-	raw, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--detach", "--publish", "127.0.0.1::5432", "--env", "POSTGRES_PASSWORD=broker-test-only", "--env", "POSTGRES_DB=broker_test", "--name", "ops-v2-broker-test-"+uuid.NewString()[:8], "postgres:16-alpine").CombinedOutput()
+	raw, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--detach", "--pull=never", "--memory=256m", "--cpus=1", "--publish", "127.0.0.1::5432", "--env", "POSTGRES_PASSWORD=broker-test-only", "--env", "POSTGRES_DB=broker_test", "--name", "ops-v2-broker-test-"+uuid.NewString()[:8], "postgres:16-alpine").CombinedOutput()
 	if err != nil {
 		t.Fatalf("owned PostgreSQL: %v %s", err, raw)
 	}
@@ -90,7 +93,7 @@ func setupConfigured(t *testing.T, change func(*brokerpolicy.Source)) *fixture {
 		defer cancel()
 		_ = x.owner.Close(ctx)
 	})
-	for _, role := range []string{"broker_app", "broker_retention"} {
+	for _, role := range []string{"broker_app", "broker_proof", "broker_retention"} {
 		if _, err := x.owner.Exec(t.Context(), `CREATE ROLE `+pgx.Identifier{role}.Sanitize()+` LOGIN PASSWORD 'broker-test-only'`); err != nil {
 			t.Fatal(err)
 		}
@@ -103,15 +106,14 @@ func setupConfigured(t *testing.T, change func(*brokerpolicy.Source)) *fixture {
 		t.Fatal(err)
 	}
 	x.scope = b.Scope{Namespace: ns, State: b.ExpectedState{RecoveryEpoch: uuid.NewString()}}
-	if err := identitysql.Migrate(t.Context(), x.ownerDSN, "broker_app", "broker_retention", x.scope); err != nil {
+	if err := identitysql.MigrateV2(t.Context(), x.ownerDSN, "broker_app", "broker_proof", "broker_retention", x.scope, true); err != nil {
 		t.Fatal("offline migration", err)
-	}
-	if err := identitysql.BootstrapEmpty(t.Context(), x.ownerDSN, x.scope); err != nil {
-		t.Fatal("new store readiness", err)
 	}
 	u, _ := url.Parse(x.ownerDSN)
 	u.User = url.UserPassword("broker_app", "broker-test-only")
 	x.appDSN = u.String()
+	u.User = url.UserPassword("broker_proof", "broker-test-only")
+	x.proofDSN = u.String()
 	u.User = url.UserPassword("broker_retention", "broker-test-only")
 	x.retentionDSN = u.String()
 	x.one, err = identitysql.Open(t.Context(), x.appDSN, x.scope, x.clock)
@@ -132,7 +134,12 @@ func setupConfigured(t *testing.T, change func(*brokerpolicy.Source)) *fixture {
 	t.Cleanup(x.provider.Close)
 	return x
 }
-func (x *fixture) clock() time.Time { return time.Unix(x.entra.Clock.Load(), 0).UTC() }
+func (x *fixture) clock() time.Time {
+	if x.wallClock.Load() {
+		return time.Now().UTC().Add(time.Duration(x.wallOffset.Load()) * time.Second)
+	}
+	return time.Unix(x.entra.Clock.Load(), 0).UTC()
+}
 func (x *fixture) service(t *testing.T, store b.Store) *b.Service {
 	return x.serviceWithClock(t, store, x.clock)
 }
@@ -687,7 +694,7 @@ func TestActualAzureSessionProtocol(t *testing.T) {
 			bad.Close()
 			t.Fatal("column-only extra privilege accepted")
 		}
-		if err := identitysql.Migrate(t.Context(), x.ownerDSN, "broker_app", "broker_retention", x.scope); err != nil {
+		if err := identitysql.MigrateV2(t.Context(), x.ownerDSN, "broker_app", "broker_proof", "broker_retention", x.scope, true); err != nil {
 			t.Fatal("offline exact role reconciliation", err)
 		}
 		if clean, err := identitysql.Open(t.Context(), x.appDSN, x.scope, x.clock); err != nil {

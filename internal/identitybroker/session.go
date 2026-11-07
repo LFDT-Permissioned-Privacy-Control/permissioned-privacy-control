@@ -180,7 +180,7 @@ func (s *Service) initialFamily(pending Pending, evidence azure.Evidence, access
 		return Family{}, "", err
 	}
 	continuity := evidence.Continuity(start.Unix())
-	family := Family{ID: id.String(), RequestID: pending.ID, Scope: s.scope, Actor: access.metadata.ActorID, ProfileID: identitySource.ProfileID, ProfileDigest: evidence.ProfileDigest(), Authority: identitySource.Authority, Tenant: *identitySource.Tenant, Subject: identitySource.Subject, Kind: identity.Human, OIDCSubjectHash: Digest(continuity.OIDCSubjectHash), NonceHash: Digest(continuity.NonceHash), OriginalAuthTime: continuity.OriginalAuthTime, Recipient: pending.Recipient, Generation: 0, EncryptionKeyID: s.aes.active, CreatedAt: start, AbsoluteExpiresAt: start.Add(FamilyLifetime), LastRotatedAt: now}
+	family := Family{Provider: FamilyAzure, ID: id.String(), RequestID: pending.ID, Scope: s.scope, Actor: access.metadata.ActorID, ProfileID: identitySource.ProfileID, ProfileDigest: evidence.ProfileDigest(), Authority: identitySource.Authority, Tenant: *identitySource.Tenant, Subject: identitySource.Subject, Kind: identity.Human, OIDCSubjectHash: Digest(continuity.OIDCSubjectHash), NonceHash: Digest(continuity.NonceHash), OriginalAuthTime: continuity.OriginalAuthTime, Recipient: pending.Recipient, Generation: 0, EncryptionKeyID: s.aes.active, CreatedAt: start, AbsoluteExpiresAt: start.Add(FamilyLifetime), LastRotatedAt: now}
 	handle, err := s.familyMaterial(&family, evidence.RefreshToken(), now)
 	if err != nil {
 		return Family{}, "", err
@@ -194,6 +194,17 @@ func (s *Service) familyMaterial(family *Family, refresh string, now time.Time) 
 	if len(refresh) == 0 || len(refresh) > MaxRefreshBytes {
 		return "", ErrUnauthorized
 	}
+	handle, err := s.familyHandle(family, now)
+	if err != nil {
+		return "", err
+	}
+	family.Ciphertext, err = s.aes.seal(family.EncryptionKeyID, []byte(refresh), familyAAD(*family))
+	if err != nil {
+		return "", err
+	}
+	return handle, nil
+}
+func (s *Service) familyHandle(family *Family, now time.Time) (string, error) {
 	jti, err := randomToken()
 	if err != nil {
 		return "", err
@@ -205,12 +216,9 @@ func (s *Service) familyMaterial(family *Family, refresh string, now time.Time) 
 	}
 	family.CurrentHandleHash = tokenHash(handle)
 	family.EncryptionKeyID = s.aes.active
-	family.Ciphertext, err = s.aes.seal(family.EncryptionKeyID, []byte(refresh), familyAAD(*family))
-	if err != nil {
-		return "", err
-	}
 	return handle, nil
 }
+
 func (s *Service) familyContext(f Family, claims refreshClaims, recipient RecipientBinding, now time.Time) error {
 	if !f.Valid() || f.Scope != s.scope || f.ID != claims.FamilyID || f.Actor != claims.Actor || f.ProfileID != claims.ProfileID || f.ProfileDigest != claims.ProfileDigest || f.AbsoluteExpiresAt.Unix() != claims.Expires || f.Scope.State.RecoveryEpoch != claims.Epoch || subtle.ConstantTimeCompare(f.Recipient[:], recipient[:]) != 1 {
 		return ErrUnauthorized
@@ -253,6 +261,9 @@ func (s *Service) renewAzure(ctx context.Context, handle string, recipient Recip
 		grantStart, err := s.now()
 		if err != nil {
 			return FamilyDecision{}, err
+		}
+		if family.Provider != FamilyAzure {
+			return FamilyDecision{Kind: DenyUnchanged}, nil
 		}
 		if err := s.familyContext(family, claims, recipient, grantStart); err != nil {
 			return FamilyDecision{Kind: DenyUnchanged}, nil
@@ -376,7 +387,19 @@ func (s *Service) revokeSession(ctx context.Context, handle string, recipient Re
 	if expected != nil && (claims.Actor != expected.ActorID || claims.FamilyID != expected.SessionID) {
 		return ErrSessionChanged
 	}
-	committed, err := s.store.WithFamily(ctx, s.scope, claims.FamilyID, func(f Family) (FamilyDecision, error) {
+	withFamily := s.store.WithFamily
+	if s.IsMulti() {
+		provider := FamilyAzure
+		if _, _, ok := s.privadoProfile(claims.ProfileID); ok {
+			provider = FamilyPrivado
+		} else if p, ok := s.broker.Profile(claims.ProfileID); !ok || p.Definition.Kind != identity.AzureHuman {
+			return ErrUnauthorized
+		}
+		withFamily = func(ctx context.Context, scope Scope, id string, decision func(Family) (FamilyDecision, error), gate func() error) (Commit, error) {
+			return s.app.WithProviderFamily(ctx, scope, provider, id, decision, gate)
+		}
+	}
+	committed, err := withFamily(ctx, s.scope, claims.FamilyID, func(f Family) (FamilyDecision, error) {
 		now, err := s.now()
 		if err != nil {
 			return FamilyDecision{}, err

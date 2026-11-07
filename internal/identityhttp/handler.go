@@ -41,9 +41,12 @@ type Handler struct {
 	profiles                     []provider
 	kinds                        map[string]string
 	slots                        chan struct{}
+	multi                        bool
 }
 
-func New(c Config) (*Handler, error) {
+func New(c Config) (*Handler, error)      { return newHandler(c, false) }
+func NewMulti(c Config) (*Handler, error) { return newHandler(c, true) }
+func newHandler(c Config, multi bool) (*Handler, error) {
 	if c.Snapshot == nil || c.Service == nil || c.Clock == nil {
 		return nil, b.ErrInvalid
 	}
@@ -56,8 +59,8 @@ func New(c Config) (*Handler, error) {
 		return nil, b.ErrInvalid
 	}
 	meta, service := c.Snapshot.Metadata(), c.Service.Metadata()
-	source := auth.Source()
-	if meta.Profile != policybundle.BrokerProfileID || string(meta.ManifestDigest) != service.ManifestDigest || ids.Digest() != service.IdentityDigest || auth.Digest() != service.BrokerDigest || service.Binding.Origin != source.WebOrigin {
+	source := auth.CommonSettings()
+	if (meta.Profile != policybundle.BrokerProfileID && !multi || meta.Profile != policybundle.BrokerMultiProfileID && multi) || c.Service.IsMulti() != multi || string(meta.ManifestDigest) != service.ManifestDigest || ids.Digest() != service.IdentityDigest || auth.Digest() != service.BrokerDigest || service.Binding.Origin != source.WebOrigin {
 		return nil, b.ErrInvalid
 	}
 	u, err := url.Parse(source.WebOrigin)
@@ -82,7 +85,7 @@ func New(c Config) (*Handler, error) {
 	if err != nil || complete.Scheme+"://"+complete.Host != source.WebOrigin || complete.User != nil || complete.RawQuery != "" || complete.ForceQuery || complete.Fragment != "" || complete.Path == "" || !strings.HasPrefix(complete.Path, "/") || strings.HasPrefix(complete.Path, "//") || path.Clean(complete.Path) != complete.Path || strings.ContainsAny(source.CompletionURI, "%\\") {
 		return nil, b.ErrInvalid
 	}
-	h := &Handler{service: c.Service, clock: c.Clock, origin: source.WebOrigin, host: u.Host, completionPath: complete.Path, kinds: map[string]string{}, slots: make(chan struct{}, MaxInFlight), profiles: []provider{}}
+	h := &Handler{service: c.Service, clock: c.Clock, origin: source.WebOrigin, host: u.Host, completionPath: complete.Path, kinds: map[string]string{}, slots: make(chan struct{}, MaxInFlight), profiles: []provider{}, multi: multi}
 	for _, p := range auth.Profiles() {
 		h.kinds[p.Definition.ID] = p.Definition.Kind
 		if p.Definition.Kind == identity.AzureHuman {
@@ -90,6 +93,22 @@ func New(c Config) (*Handler, error) {
 				return nil, b.ErrInvalid
 			}
 			h.profiles = append(h.profiles, provider{p.Definition.ID, "azure", identity.Human})
+		}
+	}
+	if multi {
+		source, ok := auth.MultiSource()
+		if !ok {
+			return nil, b.ErrInvalid
+		}
+		selected := map[string]bool{}
+		for _, p := range source.PrivadoProfiles {
+			selected[p.ProfileID] = true
+		}
+		for _, p := range ids.Source().Profiles {
+			if selected[p.ID] {
+				h.kinds[p.ID] = p.Kind
+				h.profiles = append(h.profiles, provider{p.ID, "privado", identity.Human})
+			}
 		}
 	}
 	return h, nil
@@ -155,11 +174,19 @@ func failService(w http.ResponseWriter, err error) {
 }
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	headers(w)
+	if h.multi && h.publicPrivado(w, r) {
+		return
+	}
 	want := "POST"
 	switch r.URL.Path {
 	case Prefix + "providers":
 		want = "GET"
 	case Prefix + "azure/start", Prefix + "azure/complete", Prefix + "renew", Prefix + "logout", Prefix + "service/exchange":
+	case Prefix + "privado/start", Prefix + "privado/preview", Prefix + "privado/complete":
+		if !h.multi {
+			failure(w, 404, "not_found")
+			return
+		}
 	default:
 		failure(w, 404, "not_found")
 		return
@@ -176,6 +203,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.RawQuery != "" || r.URL.ForceQuery || r.URL.RawPath != "" && r.URL.RawPath != r.URL.Path {
 		failure(w, 400, "invalid_request")
 		return
+	}
+	if h.multi {
+		ctx, cancel := httpOperation(r, w)
+		defer cancel()
+		if ctx == nil {
+			return
+		}
+		r = r.WithContext(ctx)
 	}
 	machine := r.URL.Path == Prefix+"service/exchange"
 	origins := r.Header.Values("Origin")
@@ -199,13 +234,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		failure(w, 403, "forbidden")
 		return
 	}
-	select {
-	case h.slots <- struct{}{}:
-		defer func() { <-h.slots }()
-	default:
-		failure(w, 503, "busy")
+	release, ok := h.admit(w)
+	if !ok {
 		return
 	}
+	defer release()
 	switch r.URL.Path {
 	case Prefix + "providers":
 		if r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
@@ -224,12 +257,35 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.start(w, r, cookies)
 	case Prefix + "azure/complete":
 		h.complete(w, r, cookies)
+	case Prefix + "privado/start":
+		h.privadoStart(w, r, cookies)
+	case Prefix + "privado/preview":
+		h.privadoPreview(w, r, cookies)
+	case Prefix + "privado/complete":
+		h.privadoComplete(w, r, cookies)
 	case Prefix + "renew":
 		h.renew(w, r, cookies)
 	case Prefix + "logout":
 		h.logout(w, r, cookies)
 	case Prefix + "service/exchange":
 		h.exchange(w, r)
+	}
+}
+
+func (h *Handler) admit(w http.ResponseWriter) (func(), bool) {
+	if h.multi {
+		release, ok := h.service.TryAdmitHTTP()
+		if !ok {
+			failure(w, 503, "busy")
+		}
+		return release, ok
+	}
+	select {
+	case h.slots <- struct{}{}:
+		return func() { <-h.slots }, true
+	default:
+		failure(w, 503, "busy")
+		return nil, false
 	}
 }
 func publish(w http.ResponseWriter, r *http.Request, value any, cookies []string, gate func() error) {

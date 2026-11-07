@@ -32,6 +32,7 @@ func Supported() []Description {
 		{ID: policybundle.RuntimeSimulationProfileID, EvaluatorVersion: policybundle.NativeV4EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "unsigned deployment simulation and lifecycle signed integration; not a complete runtime"},
 		{ID: policybundle.DisclosureProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 		{ID: policybundle.ComplianceProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
+		{ID: policybundle.BrokerMultiProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 		{ID: policybundle.BrokerProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 	}
 }
@@ -87,6 +88,10 @@ func Options(id string) (policybundle.Options, Description, error) {
 		options.IdentityLimits = identity.DefaultLimits()
 		options.ComplianceLimits = compliancepolicy.DefaultLimits()
 		evaluator = policybundle.NativeV4EvaluatorVersion
+	case policybundle.BrokerMultiProfileID:
+		options.Profile = policybundle.BrokerMultiProfile(seed.Version)
+		options.IdentityLimits = identity.DefaultLimits()
+		evaluator = policybundle.NativeV2EvaluatorVersion
 	case policybundle.BrokerProfileID:
 		options.Profile = policybundle.BrokerProfile(seed.Version)
 		options.IdentityLimits = identity.DefaultLimits()

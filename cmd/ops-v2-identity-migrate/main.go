@@ -27,6 +27,7 @@ func run(args []string, out, stderr io.Writer) int {
 	fs.SetOutput(io.Discard)
 	env := fs.String("dsn-env", "", "explicit environment variable containing the selected role DSN")
 	app := fs.String("app-role", "", "pre-existing application role")
+	proof := fs.String("proof-role", "", "pre-existing public-proof role (schema2)")
 	retention := fs.String("retention-role", "", "pre-existing retention role")
 	environment := fs.String("environment", "", "selected environment")
 	deployment := fs.String("deployment-id", "", "stable broker deployment ID")
@@ -36,7 +37,7 @@ func run(args []string, out, stderr io.Writer) int {
 	limit := fs.Int("limit", 1000, "cleanup batch maximum1000")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
-			fmt.Fprintln(out, "ops-v2-identity-migrate migrate|bootstrap-empty|begin-recovery|finalize|cleanup --dsn-env NAME --environment ENV --deployment-id ID --issuer URI --recovery-epoch UUID [roles/drain acknowledgment/limit]")
+			fmt.Fprintln(out, "ops-v2-identity-migrate migrate-v2|migrate-v1|bootstrap-empty|begin-recovery|finalize|cleanup --dsn-env NAME --environment ENV --deployment-id ID --issuer URI --recovery-epoch UUID [roles/drain acknowledgment/limit]")
 			return 0
 		}
 		fmt.Fprintln(stderr, "invalid identity migration arguments")
@@ -60,9 +61,12 @@ func run(args []string, out, stderr io.Writer) int {
 	ctx := context.Background()
 	var result any
 	switch command {
-	case "migrate":
+	case "migrate-v2":
+		err = identitysql.MigrateV2(ctx, dsn, *app, *proof, *retention, scope, *drained)
+		result = map[string]any{"schemaVersion": 2, "sourceChecksum": identitysql.SchemaChecksum(), "ready": true}
+	case "migrate-v1":
 		err = identitysql.Migrate(ctx, dsn, *app, *retention, scope)
-		result = map[string]any{"schemaVersion": 1, "sourceChecksum": identitysql.SchemaChecksum()}
+		result = map[string]any{"schemaVersion": 1, "sourceChecksum": identitysql.SchemaChecksumV1()}
 	case "bootstrap-empty":
 		err = identitysql.BootstrapEmpty(ctx, dsn, scope)
 		result = map[string]any{"ready": true}

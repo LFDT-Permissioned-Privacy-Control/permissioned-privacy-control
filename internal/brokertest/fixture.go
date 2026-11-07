@@ -39,7 +39,11 @@ func Snapshot(t testing.TB, change func(*identity.SourceCatalog, *brokerpolicy.S
 	if change != nil {
 		change(&identities, &broker)
 	}
-	draft := policybundle.Draft{APIVersion: policybundle.DraftAPIVersion, Kind: policybundle.DraftKind, Environment: "test", ChainID: "1", EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, Profile: policybundle.BrokerProfileID, SourceRevision: "broker-fixture", Organizations: []policybundle.Organization{{ID: f.Org, Slug: "bank", Name: "Bank"}}, Documents: []policybundle.DraftDocument{}, IdentityCatalog: &policybundle.DraftIdentity{Path: "identity.json"}, AuthCatalog: &policybundle.DraftIdentity{Path: "auth.json"}}
+	return snapshot(t, identities, broker, policybundle.BrokerProfileID, nil)
+}
+func snapshot(t testing.TB, identities identity.SourceCatalog, broker any, profile string, extra map[string][]byte) *policybundle.CatalogSnapshot {
+	t.Helper()
+	draft := policybundle.Draft{APIVersion: policybundle.DraftAPIVersion, Kind: policybundle.DraftKind, Environment: "test", ChainID: "1", EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, Profile: profile, SourceRevision: "broker-fixture", Organizations: []policybundle.Organization{{ID: f.Org, Slug: "bank", Name: "Bank"}}, Documents: []policybundle.DraftDocument{}, IdentityCatalog: &policybundle.DraftIdentity{Path: "identity.json"}, AuthCatalog: &policybundle.DraftIdentity{Path: "auth.json"}}
 	dir := t.TempDir()
 	write := func(name string, value any) {
 		raw, err := json.Marshal(value)
@@ -62,7 +66,12 @@ func Snapshot(t testing.TB, change func(*identity.SourceCatalog, *brokerpolicy.S
 	write("identity.json", identities)
 	write("auth.json", broker)
 	write("draft.json", draft)
-	options, _, err := policyprofiles.Options(policybundle.BrokerProfileID)
+	for name, raw := range extra {
+		if err := os.WriteFile(filepath.Join(dir, name), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	options, _, err := policyprofiles.Options(profile)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,7 +9,7 @@ import (
 
 func TestProfilesStayExplicitAndRegistryDataDetached(t *testing.T) {
 	profiles := policyprofiles.Supported()
-	if len(profiles) != 11 {
+	if len(profiles) != 12 {
 		t.Fatal("compiled profiles changed without a registry test")
 	}
 	for _, expected := range profiles {
@@ -32,7 +32,7 @@ func TestProfilesStayExplicitAndRegistryDataDetached(t *testing.T) {
 		if expected.ID == policybundle.RuntimeCallProfileID && actual.IntegrationScope == "" {
 			t.Fatal("runtime slice lacks explicit qualification scope")
 		}
-		if expected.ID == policybundle.BrokerProfileID && actual.EvaluatorVersion != policybundle.NativeV2EvaluatorVersion {
+		if (expected.ID == policybundle.BrokerProfileID || expected.ID == policybundle.BrokerMultiProfileID) && actual.EvaluatorVersion != policybundle.NativeV2EvaluatorVersion {
 			t.Fatal("broker profile lost native-v2 source boundary")
 		}
 		options.Methods.Assignable[0] = "mutated"

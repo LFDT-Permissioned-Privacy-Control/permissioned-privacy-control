@@ -1,0 +1,1511 @@
+{
+  "columns": [
+    {
+      "table_name": "metadata",
+      "attnum": 1,
+      "attname": "singleton",
+      "type": "boolean",
+      "not_null": true,
+      "default_expr": "true"
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 2,
+      "attname": "schema_version",
+      "type": "integer",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 3,
+      "attname": "migration_checksum",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 4,
+      "attname": "namespace",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 5,
+      "attname": "recovery_epoch",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 6,
+      "attname": "ready",
+      "type": "boolean",
+      "not_null": true,
+      "default_expr": "false"
+    },
+    {
+      "table_name": "metadata",
+      "attnum": 7,
+      "attname": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 1,
+      "attname": "request_id",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 2,
+      "attname": "namespace",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 3,
+      "attname": "recovery_epoch",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 4,
+      "attname": "state_hash",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 5,
+      "attname": "profile_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 6,
+      "attname": "profile_digest",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 7,
+      "attname": "recipient_hash",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 8,
+      "attname": "encryption_key_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 9,
+      "attname": "secret_ciphertext",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 10,
+      "attname": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "pending_requests",
+      "attnum": 11,
+      "attname": "expires_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 1,
+      "attname": "request_id",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 2,
+      "attname": "namespace",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 3,
+      "attname": "recovery_epoch",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 4,
+      "attname": "provider_kind",
+      "type": "text",
+      "not_null": true,
+      "default_expr": "'privado'::text"
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 5,
+      "attname": "profile_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 6,
+      "attname": "profile_digest",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 7,
+      "attname": "recipient_hash",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 8,
+      "attname": "mode",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 9,
+      "attname": "expected_actor_id",
+      "type": "text",
+      "not_null": false,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 10,
+      "attname": "family_id",
+      "type": "uuid",
+      "not_null": false,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 11,
+      "attname": "current_generation",
+      "type": "bigint",
+      "not_null": false,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 12,
+      "attname": "current_handle_hash",
+      "type": "bytea",
+      "not_null": false,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 13,
+      "attname": "encryption_key_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 14,
+      "attname": "context_ciphertext",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 15,
+      "attname": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_challenges",
+      "attnum": 16,
+      "attname": "expires_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 1,
+      "attname": "request_id",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 2,
+      "attname": "namespace",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 3,
+      "attname": "recovery_epoch",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 4,
+      "attname": "context_digest",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 5,
+      "attname": "proof_digest",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 6,
+      "attname": "holder_did",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 7,
+      "attname": "actor_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 8,
+      "attname": "network",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 9,
+      "attname": "profile_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 10,
+      "attname": "profile_digest",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 11,
+      "attname": "source_auth_digest",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 12,
+      "attname": "identity_digest",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 13,
+      "attname": "profile_plan_digest",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 14,
+      "attname": "network_plan_digest",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 15,
+      "attname": "document_plan_digest",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 16,
+      "attname": "claims_as_of",
+      "type": "bigint",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 17,
+      "attname": "not_after",
+      "type": "bigint",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 18,
+      "attname": "verified_at",
+      "type": "bigint",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 19,
+      "attname": "encryption_key_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "privado_offers",
+      "attnum": 20,
+      "attname": "proof_ciphertext",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 1,
+      "attname": "family_id",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 2,
+      "attname": "originating_request_id",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 3,
+      "attname": "namespace",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 4,
+      "attname": "recovery_epoch",
+      "type": "uuid",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 5,
+      "attname": "actor_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 6,
+      "attname": "profile_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 7,
+      "attname": "profile_digest",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 8,
+      "attname": "identity_authority",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 9,
+      "attname": "source_tenant",
+      "type": "text",
+      "not_null": false,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 10,
+      "attname": "source_subject",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 11,
+      "attname": "principal_kind",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 12,
+      "attname": "oidc_subject_hash",
+      "type": "bytea",
+      "not_null": false,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 13,
+      "attname": "login_nonce_hash",
+      "type": "bytea",
+      "not_null": false,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 14,
+      "attname": "original_auth_time",
+      "type": "bigint",
+      "not_null": false,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 15,
+      "attname": "recipient_hash",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 16,
+      "attname": "generation",
+      "type": "bigint",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 17,
+      "attname": "current_handle_hash",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 18,
+      "attname": "encryption_key_id",
+      "type": "text",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 19,
+      "attname": "refresh_ciphertext",
+      "type": "bytea",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 20,
+      "attname": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 21,
+      "attname": "absolute_expires_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 22,
+      "attname": "last_rotated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 23,
+      "attname": "revoked_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default_expr": null
+    },
+    {
+      "table_name": "renewal_families",
+      "attnum": 24,
+      "attname": "provider_kind",
+      "type": "text",
+      "not_null": true,
+      "default_expr": "'azure-human'::text"
+    }
+  ],
+  "constraints": [
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_migration_checksum_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (migration_checksum ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_namespace_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (namespace ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_pkey",
+      "type": "p",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (singleton)"
+    },
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_recovery_epoch_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (recovery_epoch <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_schema_version_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (schema_version = 2)"
+    },
+    {
+      "table_name": "ops_identity_v2.metadata",
+      "name": "metadata_singleton_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (singleton)"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (created_at < expires_at AND expires_at <= (created_at + '00:05:00'::interval))"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_encryption_key_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(encryption_key_id) >= 1 AND octet_length(encryption_key_id) <= 128)"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_namespace_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (namespace ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_pkey",
+      "type": "p",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (request_id)"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_profile_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (profile_digest ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_profile_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(profile_id) >= 1 AND octet_length(profile_id) <= 128)"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_recipient_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(recipient_hash) = 32)"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_recovery_epoch_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (recovery_epoch <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_request_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (request_id <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_secret_ciphertext_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(secret_ciphertext) >= 28 AND octet_length(secret_ciphertext) <= 2048)"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_state_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(state_hash) = 32)"
+    },
+    {
+      "table_name": "ops_identity_v2.pending_requests",
+      "name": "pending_requests_state_hash_key",
+      "type": "u",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "UNIQUE (state_hash)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "challenge_family_fk",
+      "type": "f",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "FOREIGN KEY (family_id, namespace, recovery_epoch, provider_kind) REFERENCES ops_identity_v2.renewal_families(family_id, namespace, recovery_epoch, provider_kind) ON DELETE CASCADE"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "challenge_mode",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (mode = 'login'::text AND family_id IS NULL AND current_generation IS NULL AND current_handle_hash IS NULL OR mode = 'renew'::text AND expected_actor_id IS NOT NULL AND family_id IS NOT NULL AND current_generation IS NOT NULL AND current_handle_hash IS NOT NULL)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "challenge_scoped_unique",
+      "type": "u",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "UNIQUE (request_id, namespace, recovery_epoch)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "challenge_time",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (isfinite(created_at) AND isfinite(expires_at) AND created_at >= '1970-01-01 00:00:00+00'::timestamp with time zone AND expires_at <= '9999-12-31 23:59:59+00'::timestamp with time zone AND date_trunc('second'::text, created_at) = created_at AND date_trunc('second'::text, expires_at) = expires_at AND created_at < expires_at AND expires_at <= (created_at + '00:05:00'::interval))"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_context_ciphertext_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(context_ciphertext) >= 28 AND octet_length(context_ciphertext) <= 2048)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_current_generation_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (current_generation >= 0)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_current_handle_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(current_handle_hash) = 32)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_encryption_key_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(encryption_key_id) >= 1 AND octet_length(encryption_key_id) <= 128)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_expected_actor_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (expected_actor_id ~ '^ops:p1:[A-Za-z0-9_-]{43}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_family_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (family_id <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_mode_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (mode = ANY (ARRAY['login'::text, 'renew'::text]))"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_namespace_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (namespace ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_pkey",
+      "type": "p",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (request_id)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_profile_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (profile_digest ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_profile_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(profile_id) >= 1 AND octet_length(profile_id) <= 128)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_provider_kind_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (provider_kind = 'privado'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_recipient_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(recipient_hash) = 32)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_recovery_epoch_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (recovery_epoch <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_challenges",
+      "name": "privado_challenges_request_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (request_id <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "offer_challenge_fk",
+      "type": "f",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "FOREIGN KEY (request_id, namespace, recovery_epoch) REFERENCES ops_identity_v2.privado_challenges(request_id, namespace, recovery_epoch) ON DELETE CASCADE"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "offer_times",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (claims_as_of <= verified_at AND verified_at < not_after AND not_after <= (claims_as_of + 300))"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_actor_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (actor_id ~ '^ops:p1:[A-Za-z0-9_-]{43}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_claims_as_of_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (claims_as_of >= 0 AND claims_as_of <= '253402300799'::bigint)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_context_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(context_digest) = 32)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_document_plan_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (document_plan_digest ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_encryption_key_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(encryption_key_id) >= 1 AND octet_length(encryption_key_id) <= 128)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_holder_did_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(holder_did) >= 1 AND octet_length(holder_did) <= 1024 AND holder_did ~ '^did:(iden3|polygonid):[a-z0-9]+:[a-z0-9]+:[1-9A-HJ-NP-Za-km-z]+$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_identity_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (identity_digest ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_namespace_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (namespace ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_network_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(network) >= 3 AND octet_length(network) <= 128 AND network ~ '^[a-z0-9]+:[a-z0-9]+$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_network_plan_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (network_plan_digest ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_not_after_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (not_after >= 1 AND not_after <= '253402300799'::bigint)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_pkey",
+      "type": "p",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (request_id)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_profile_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (profile_digest ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_profile_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(profile_id) >= 1 AND octet_length(profile_id) <= 128)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_profile_plan_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (profile_plan_digest ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_proof_ciphertext_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(proof_ciphertext) >= 28 AND octet_length(proof_ciphertext) <= 1048604)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_proof_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(proof_digest) = 32)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_recovery_epoch_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (recovery_epoch <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_source_auth_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (source_auth_digest ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.privado_offers",
+      "name": "privado_offers_verified_at_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (verified_at >= 0 AND verified_at <= '253402300799'::bigint)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "family_provider_kind",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (provider_kind = ANY (ARRAY['azure-human'::text, 'privado'::text]))"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "family_provider_shape",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (provider_kind = 'azure-human'::text AND source_tenant IS NOT NULL AND source_tenant ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text AND source_tenant <> '00000000-0000-0000-0000-000000000000'::text AND source_subject ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text AND source_subject <> '00000000-0000-0000-0000-000000000000'::text AND identity_authority = (('https://login.microsoftonline.com/'::text || source_tenant) || '/v2.0'::text) AND oidc_subject_hash IS NOT NULL AND octet_length(oidc_subject_hash) = 32 AND login_nonce_hash IS NOT NULL AND octet_length(login_nonce_hash) = 32 OR provider_kind = 'privado'::text AND identity_authority = 'privado'::text AND source_tenant IS NULL AND oidc_subject_hash IS NULL AND login_nonce_hash IS NULL AND original_auth_time IS NULL AND octet_length(source_subject) >= 1 AND octet_length(source_subject) <= 1024 AND source_subject ~ '^did:(iden3|polygonid):[a-z0-9]+:[a-z0-9]+:[1-9A-HJ-NP-Za-km-z]+$'::text AND octet_length(refresh_ciphertext) >= 28 AND octet_length(refresh_ciphertext) <= 2048)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "family_scoped_provider_unique",
+      "type": "u",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "UNIQUE (family_id, namespace, recovery_epoch, provider_kind)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_actor_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (actor_id ~ '^ops:p1:[A-Za-z0-9_-]{43}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_check1",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (created_at < absolute_expires_at AND absolute_expires_at <= (created_at + '168:00:00'::interval))"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_check2",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (last_rotated_at >= created_at AND last_rotated_at < absolute_expires_at)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_check3",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (revoked_at >= created_at)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_current_handle_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(current_handle_hash) = 32)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_encryption_key_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(encryption_key_id) >= 1 AND octet_length(encryption_key_id) <= 128)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_family_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (family_id <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_generation_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (generation >= 0)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_login_nonce_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(login_nonce_hash) = 32)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_namespace_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (namespace ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_oidc_subject_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(oidc_subject_hash) = 32)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_original_auth_time_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (original_auth_time >= 0)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_originating_request_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (originating_request_id <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_originating_request_id_key",
+      "type": "u",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "UNIQUE (originating_request_id)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_pkey",
+      "type": "p",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (family_id)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_principal_kind_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (principal_kind = 'human'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_profile_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (profile_digest ~ '^sha256:[0-9a-f]{64}$'::text)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_profile_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(profile_id) >= 1 AND octet_length(profile_id) <= 128)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_recipient_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(recipient_hash) = 32)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_recovery_epoch_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (recovery_epoch <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_identity_v2.renewal_families",
+      "name": "renewal_families_refresh_ciphertext_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(refresh_ciphertext) >= 28 AND octet_length(refresh_ciphertext) <= 33792)"
+    }
+  ],
+  "indexes": [
+    {
+      "name": "challenge_scoped_unique",
+      "definition": "CREATE UNIQUE INDEX challenge_scoped_unique ON ops_identity_v2.privado_challenges USING btree (request_id, namespace, recovery_epoch)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "family_active_expiry",
+      "definition": "CREATE INDEX family_active_expiry ON ops_identity_v2.renewal_families USING btree (absolute_expires_at) WHERE (revoked_at IS NULL)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "family_expiry",
+      "definition": "CREATE INDEX family_expiry ON ops_identity_v2.renewal_families USING btree (absolute_expires_at)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "family_scoped_provider_unique",
+      "definition": "CREATE UNIQUE INDEX family_scoped_provider_unique ON ops_identity_v2.renewal_families USING btree (family_id, namespace, recovery_epoch, provider_kind)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "metadata_pkey",
+      "definition": "CREATE UNIQUE INDEX metadata_pkey ON ops_identity_v2.metadata USING btree (singleton)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "pending_expiry",
+      "definition": "CREATE INDEX pending_expiry ON ops_identity_v2.pending_requests USING btree (expires_at)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "pending_requests_pkey",
+      "definition": "CREATE UNIQUE INDEX pending_requests_pkey ON ops_identity_v2.pending_requests USING btree (request_id)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "pending_requests_state_hash_key",
+      "definition": "CREATE UNIQUE INDEX pending_requests_state_hash_key ON ops_identity_v2.pending_requests USING btree (state_hash)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "privado_challenge_expiry",
+      "definition": "CREATE INDEX privado_challenge_expiry ON ops_identity_v2.privado_challenges USING btree (namespace, expires_at, request_id)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "privado_challenge_namespace",
+      "definition": "CREATE INDEX privado_challenge_namespace ON ops_identity_v2.privado_challenges USING btree (namespace, request_id)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "privado_challenges_pkey",
+      "definition": "CREATE UNIQUE INDEX privado_challenges_pkey ON ops_identity_v2.privado_challenges USING btree (request_id)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "privado_offer_namespace",
+      "definition": "CREATE INDEX privado_offer_namespace ON ops_identity_v2.privado_offers USING btree (namespace, request_id)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "privado_offers_pkey",
+      "definition": "CREATE UNIQUE INDEX privado_offers_pkey ON ops_identity_v2.privado_offers USING btree (request_id)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "renewal_families_originating_request_id_key",
+      "definition": "CREATE UNIQUE INDEX renewal_families_originating_request_id_key ON ops_identity_v2.renewal_families USING btree (originating_request_id)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "renewal_families_pkey",
+      "definition": "CREATE UNIQUE INDEX renewal_families_pkey ON ops_identity_v2.renewal_families USING btree (family_id)",
+      "valid": true,
+      "ready": true
+    }
+  ],
+  "triggers": [
+    {
+      "name": "family_monotonic",
+      "table_name": "ops_identity_v2.renewal_families",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER family_monotonic BEFORE UPDATE ON ops_identity_v2.renewal_families FOR EACH ROW EXECUTE FUNCTION ops_identity_v2.family_monotonic()"
+    },
+    {
+      "name": "privado_challenge_immutable",
+      "table_name": "ops_identity_v2.privado_challenges",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER privado_challenge_immutable BEFORE UPDATE ON ops_identity_v2.privado_challenges FOR EACH ROW EXECUTE FUNCTION ops_identity_v2.privado_immutable()"
+    },
+    {
+      "name": "privado_offer_immutable",
+      "table_name": "ops_identity_v2.privado_offers",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER privado_offer_immutable BEFORE UPDATE ON ops_identity_v2.privado_offers FOR EACH ROW EXECUTE FUNCTION ops_identity_v2.privado_immutable()"
+    }
+  ],
+  "functions": [
+    {
+      "name": "family_monotonic",
+      "security_definer": false,
+      "volatility": "v",
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "language": "plpgsql",
+      "body": "\nBEGIN\n IF ROW(NEW.family_id,NEW.originating_request_id,NEW.namespace,NEW.recovery_epoch,\n NEW.actor_id,NEW.profile_id,NEW.profile_digest,NEW.identity_authority,NEW.source_tenant,\n NEW.source_subject,NEW.principal_kind,NEW.oidc_subject_hash,NEW.login_nonce_hash,\n NEW.original_auth_time,NEW.recipient_hash,NEW.created_at,NEW.absolute_expires_at,NEW.provider_kind)\n IS DISTINCT FROM ROW(OLD.family_id,OLD.originating_request_id,OLD.namespace,OLD.recovery_epoch,\n OLD.actor_id,OLD.profile_id,OLD.profile_digest,OLD.identity_authority,OLD.source_tenant,\n OLD.source_subject,OLD.principal_kind,OLD.oidc_subject_hash,OLD.login_nonce_hash,\n OLD.original_auth_time,OLD.recipient_hash,OLD.created_at,OLD.absolute_expires_at,OLD.provider_kind)\n THEN RAISE EXCEPTION 'immutable renewal identity'; END IF;\n IF OLD.revoked_at IS NOT NULL AND NEW IS DISTINCT FROM OLD\n THEN RAISE EXCEPTION 'renewal revocation is permanent'; END IF;\n IF NEW.generation<OLD.generation OR NEW.last_rotated_at<OLD.last_rotated_at\n THEN RAISE EXCEPTION 'renewal generation is monotonic'; END IF;\n IF ROW(NEW.current_handle_hash,NEW.encryption_key_id,NEW.refresh_ciphertext,NEW.last_rotated_at)\n IS DISTINCT FROM ROW(OLD.current_handle_hash,OLD.encryption_key_id,OLD.refresh_ciphertext,OLD.last_rotated_at)\n AND (OLD.generation=9223372036854775807 OR NEW.generation<>OLD.generation+1 OR NEW.revoked_at IS NOT NULL)\n THEN RAISE EXCEPTION 'renewal material requires one rotation'; END IF;\n IF NEW.generation<>OLD.generation AND\n (OLD.generation=9223372036854775807 OR NEW.generation<>OLD.generation+1\n OR NEW.current_handle_hash=OLD.current_handle_hash OR NEW.refresh_ciphertext=OLD.refresh_ciphertext\n OR NEW.revoked_at IS NOT NULL)\n THEN RAISE EXCEPTION 'rotation requires replacement material'; END IF;\n RETURN NEW;\nEND "
+    },
+    {
+      "name": "privado_immutable",
+      "security_definer": false,
+      "volatility": "v",
+      "config": [
+        "search_path=pg_catalog"
+      ],
+      "language": "plpgsql",
+      "body": "\nBEGIN\n RAISE EXCEPTION 'immutable Privado flow';\nEND "
+    }
+  ]
+}

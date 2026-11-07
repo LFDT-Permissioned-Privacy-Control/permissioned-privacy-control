@@ -2,6 +2,7 @@ package identityhttp
 
 import (
 	"net/http"
+	"time"
 
 	"privacy-proxy/internal/identity"
 	b "privacy-proxy/internal/identitybroker"
@@ -29,10 +30,15 @@ func (h *Handler) dto(meta b.ResultMetadata, access string, kind identity.Kind) 
 	if kind == identity.Service {
 		sourceKind = identity.AzureService
 	}
+	provider := "azure"
+	if h.multi && kind == identity.Human && (h.kinds[meta.ProfileID] == identity.PrivadoIdentity || h.kinds[meta.ProfileID] == identity.PrivadoRole) {
+		sourceKind = h.kinds[meta.ProfileID]
+		provider = "privado"
+	}
 	if meta.Kind != kind || !identity.ValidActorID(meta.ActorID) || h.kinds[meta.ProfileID] != sourceKind || len(access) == 0 || len(access) > identity.DefaultLimits().MaxCompactAccessBytes {
 		return AccessDTO{}, b.ErrUnavailable
 	}
-	return AccessDTO{AccessToken: access, TokenType: "Bearer", ActorID: meta.ActorID, PrincipalKind: kind, Provider: "azure", SourceProfile: meta.ProfileID, ExpiresAt: meta.ExpiresAt.Unix()}, nil
+	return AccessDTO{AccessToken: access, TokenType: "Bearer", ActorID: meta.ActorID, PrincipalKind: kind, Provider: provider, SourceProfile: meta.ProfileID, ExpiresAt: meta.ExpiresAt.Unix()}, nil
 }
 func (h *Handler) publishBrowser(w http.ResponseWriter, r *http.Request, c requestCookies, result browserResult) {
 	access, renewal, err := result.Credentials()
@@ -181,6 +187,35 @@ func (h *Handler) renew(w http.ResponseWriter, r *http.Request, c requestCookies
 	binding, err := recipient(c.recipient)
 	if err != nil {
 		failService(w, err)
+		return
+	}
+	if h.multi {
+		var result *b.MultiRenewal
+		if request.Mode == "bootstrap" {
+			result, err = h.service.BootstrapMulti(r.Context(), c.renewal, binding)
+		} else {
+			result, err = h.service.RenewMultiForSession(r.Context(), c.renewal, binding, b.ExpectedSession{ActorID: *request.ExpectedActorID, SessionID: *request.ExpectedSessionID})
+		}
+		if err != nil {
+			failService(w, err)
+			return
+		}
+		if access, ok := result.Access(); ok {
+			h.publishBrowser(w, r, c, access)
+			return
+		}
+		pending, ok := result.ProofRequired()
+		if !ok {
+			failService(w, b.ErrUnavailable)
+			return
+		}
+		publish(w, r, pending, nil, func() error {
+			now, e := h.now()
+			if e != nil {
+				return e
+			}
+			return live(r.Context(), now, time.Unix(pending.ExpiresAt, 0))
+		})
 		return
 	}
 	var result *b.CommittedRenewal

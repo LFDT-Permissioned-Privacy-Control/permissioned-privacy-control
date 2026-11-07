@@ -144,13 +144,26 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 	}
 	refs := slices.Clone(manifest.Documents)
 	refs = append(refs, globalDocumentRefs(manifest)...)
+	pinned, err := discoverAuthPinned(ctx, manifest, options, refs, func(name string, budget int64) ([]byte, error) { return readRegular(ctx, root, name, budget) })
+	if err != nil {
+		return nil, err
+	}
+	refs = append(refs, pinned...)
 	if err := checkEntriesNamed(ctx, root, refs, options.Limits.MaxDocuments, "draft.json"); err != nil {
 		return nil, err
 	}
 	files := map[string][]byte{}
+	pinnedPaths := map[string]bool{}
+	for _, r := range pinned {
+		pinnedPaths[r.Path] = true
+	}
+	pinnedBytes := int64(0)
 	total := int64(len(raw))
 	for _, ref := range refs {
 		budget := min(options.Limits.MaxDocumentBytes, options.Limits.MaxBundleBytes-total)
+		if pinnedPaths[ref.Path] {
+			budget = min(budget, int64(brokerpolicy.MaxPinnedDocumentBytes), int64(brokerpolicy.MaxPinnedDocumentsBytes)-pinnedBytes)
+		}
 		if manifest.IdentityCatalog != nil && ref.Path == manifest.IdentityCatalog.Path {
 			budget = min(budget, int64(options.IdentityLimits.MaxIdentityDocumentBytes))
 		}
@@ -172,6 +185,9 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		}
 		total += int64(len(bytes))
 		files[ref.Path] = bytes
+		if pinnedPaths[ref.Path] {
+			pinnedBytes += int64(len(bytes))
+		}
 	}
 	for i := range manifest.Documents {
 		manifest.Documents[i].SHA256 = RawDigest(files[manifest.Documents[i].Path])

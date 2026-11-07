@@ -1,10 +1,9 @@
 import { access, AccessResult, actor, AuthError, BrowserSession, canonicalState,
-  liveExpiry, object, providers, Providers, responseJSON, same, session, text } from './protocol'
+  liveExpiry, object, providers, Providers, same, session, text } from './protocol'
 import { active, denied, hashState, locked, Marker, pairOf, readMarker,
   requireActive, requireUnchanged, writeMarker } from './context'
 import { takeCallback } from './callback'
-
-const PREFIX = '/api/v2/auth/'
+import { requestAuth } from './transport'
 
 // Instantiate once per browser document. This module has no V1 AuthContext,
 // user directory, stored JWT, refresh-token reader or role-decoding fallback.
@@ -16,23 +15,7 @@ export class BrowserAuthClient {
 
   private clear(): void { this.memory = null }
   private async request(path: string, body?: unknown): Promise<unknown> {
-    const response = await fetch(PREFIX + path, {
-      method: body === undefined ? 'GET' : 'POST', mode: 'same-origin',
-      credentials: 'same-origin', redirect: 'error', cache: 'no-store',
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(25000),
-    })
-    if (path === 'logout' && response.status === 204 && response.headers.get('Cache-Control') === 'no-store') return undefined
-    const data = await responseJSON(response)
-    if (response.status !== 200) {
-      const v = object(data, ['error'])
-      if (v.error === 'session_changed') throw new AuthError('session_changed')
-      if (v.error === 'reauthentication_required') throw new AuthError('login_required')
-      throw new AuthError('authentication_unavailable')
-    }
-    if (path === 'logout') throw new AuthError('invalid_response')
-    return data
+    return requestAuth(path, body)
   }
   async providers(): Promise<Providers> {
     return locked(async () => providers(await this.request('providers')))

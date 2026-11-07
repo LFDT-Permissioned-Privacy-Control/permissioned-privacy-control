@@ -13,6 +13,7 @@ import (
 	"privacy-proxy/internal/brokerpolicy"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/identitybroker/azure"
+	"privacy-proxy/internal/identitybroker/privado"
 	"privacy-proxy/internal/policybundle"
 )
 
@@ -36,23 +37,29 @@ type Metadata struct {
 	RecoveryEpoch                                           string
 }
 type Service struct {
-	snapshot *policybundle.CatalogSnapshot
-	identity *identity.Catalog
-	broker   *brokerpolicy.Catalog
-	clock    identity.Clock
-	store    Store
-	provider *azure.ProviderSet
-	scope    Scope
-	metadata Metadata
-	issuer   identity.Issuer
-	keyID    string
-	private  ed25519.PrivateKey
-	mac, aes *keyring
-	verifier *identity.Verifier
+	snapshot   *policybundle.CatalogSnapshot
+	identity   *identity.Catalog
+	broker     *brokerpolicy.Catalog
+	clock      identity.Clock
+	store      Store
+	provider   *azure.ProviderSet
+	multi      bool
+	privado    *privado.Provider
+	app        MultiStore
+	proofStore PrivadoProofStore
+	httpSlots  chan struct{}
+	scope      Scope
+	metadata   Metadata
+	issuer     identity.Issuer
+	keyID      string
+	private    ed25519.PrivateKey
+	mac, aes   *keyring
+	verifier   *identity.Verifier
 }
 
-func New(c Config) (*Service, error) {
-	if c.Snapshot == nil || c.Clock == nil || c.Store == nil || c.AzureProvider == nil || !c.ExpectedState.Valid() || len(c.AccessSigningBinding.PrivateKey) != ed25519.PrivateKeySize {
+func New(c Config) (*Service, error) { return newService(c, false) }
+func newService(c Config, multi bool) (*Service, error) {
+	if c.Snapshot == nil || c.Clock == nil || c.Store == nil || !multi && c.AzureProvider == nil || !c.ExpectedState.Valid() || len(c.AccessSigningBinding.PrivateKey) != ed25519.PrivateKeySize {
 		return nil, ErrInvalid
 	}
 	broker, ok := c.Snapshot.AuthBroker()
@@ -63,14 +70,18 @@ func New(c Config) (*Service, error) {
 	if !ok {
 		return nil, ErrInvalid
 	}
-	source := broker.Source()
+	source := broker.CommonSettings()
 	issuer := broker.Issuer()
 	meta := c.Snapshot.Metadata()
-	if meta.Profile != policybundle.BrokerProfileID || meta.Environment != c.ServiceBinding.Environment || c.ServiceBinding.Origin != source.WebOrigin || c.AccessSigningBinding.IssuerID != issuer.ID || c.AccessSigningBinding.KeyID != source.AccessKeyID {
+	if (!multi && meta.Profile != policybundle.BrokerProfileID || multi && meta.Profile != policybundle.BrokerMultiProfileID) || meta.Environment != c.ServiceBinding.Environment || c.ServiceBinding.Origin != source.WebOrigin || c.AccessSigningBinding.IssuerID != issuer.ID || c.AccessSigningBinding.KeyID != source.AccessKeyID {
 		return nil, ErrInvalid
 	}
-	providerMeta := c.AzureProvider.Metadata()
-	if providerMeta.BrokerDigest != broker.Digest() || providerMeta.IdentityDigest != identities.Digest() {
+	providerValid := len(broker.Profiles()) == 0 && c.AzureProvider == nil
+	if c.AzureProvider != nil {
+		providerMeta := c.AzureProvider.Metadata()
+		providerValid = providerMeta.BrokerDigest == broker.Digest() && providerMeta.IdentityDigest == identities.Digest()
+	}
+	if !providerValid {
 		return nil, ErrInvalid
 	}
 	public := c.AccessSigningBinding.PrivateKey.Public().(ed25519.PublicKey)
@@ -87,7 +98,7 @@ func New(c Config) (*Service, error) {
 	if !matched {
 		return nil, ErrInvalid
 	}
-	mac, aes, err := newKeyrings(source, c.RenewalKeyBindings, c.EncryptionKeyBindings, c.AccessSigningBinding.PrivateKey)
+	mac, aes, err := newCommonKeyrings(source, c.RenewalKeyBindings, c.EncryptionKeyBindings, c.AccessSigningBinding.PrivateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +110,7 @@ func New(c Config) (*Service, error) {
 	if err != nil {
 		return nil, ErrInvalid
 	}
-	return &Service{snapshot: c.Snapshot, identity: identities, broker: broker, clock: c.Clock, store: c.Store, provider: c.AzureProvider, scope: Scope{namespace, c.ExpectedState}, metadata: Metadata{string(meta.ManifestDigest), identities.Digest(), broker.Digest(), namespace.String(), c.ServiceBinding, c.ExpectedState.RecoveryEpoch}, issuer: issuer, keyID: source.AccessKeyID, private: append(ed25519.PrivateKey{}, c.AccessSigningBinding.PrivateKey...), mac: mac, aes: aes, verifier: verifier}, nil
+	return &Service{snapshot: c.Snapshot, identity: identities, broker: broker, clock: c.Clock, store: c.Store, provider: c.AzureProvider, multi: multi, scope: Scope{namespace, c.ExpectedState}, metadata: Metadata{string(meta.ManifestDigest), identities.Digest(), broker.Digest(), namespace.String(), c.ServiceBinding, c.ExpectedState.RecoveryEpoch}, issuer: issuer, keyID: source.AccessKeyID, private: append(ed25519.PrivateKey{}, c.AccessSigningBinding.PrivateKey...), mac: mac, aes: aes, verifier: verifier}, nil
 }
 func (s *Service) Metadata() Metadata { return s.metadata }
 func brokerOperation(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -127,6 +138,7 @@ type AccessResult struct {
 	familyExpires *time.Time
 	sessionID     string
 	valid         bool
+	proof         *privado.VerifiedProof
 }
 
 func (r *AccessResult) Metadata() ResultMetadata {
@@ -149,6 +161,11 @@ func (r *AccessResult) RequireDeliverable() error {
 	digest, ok := r.service.identity.ProfileDigest(r.metadata.ProfileID)
 	if !ok || digest != r.metadata.ProfileDigest || r.metadata.ManifestDigest != r.service.metadata.ManifestDigest {
 		return ErrUnauthorized
+	}
+	if r.proof != nil {
+		if r.service.privado == nil || r.service.privado.RequireProof(r.proof) != nil {
+			return ErrUnauthorized
+		}
 	}
 	if _, err := r.service.verifier.VerifyAccess(r.token); err != nil {
 		return ErrUnauthorized
@@ -285,6 +302,12 @@ func (s *Service) buildAccess(evidence azure.Evidence, grantStart time.Time) (*A
 		return nil, err
 	}
 	claims := identity.AccessClaims{Issuer: s.issuer.Issuer, Audience: s.issuer.Audience, Subject: actor, ID: jti, IssuedAt: now.Unix(), NotBefore: now.Unix(), Expires: expires, PrincipalKind: source.Kind, SourceProfile: source.ProfileID, SourceProfileDigest: profile.Digest, IdentityAuthority: source.Authority, SourceSubject: source.Subject, SourceTenant: source.Tenant, SourceVerifiedAt: observed, ClaimsAsOf: claimsAsOf, SourceNotAfter: &providerExpires, Facts: evidence.Facts()}
+	return s.signAccessClaims(claims, grantStart)
+}
+
+// signAccessClaims is private to the two actual, qualified provider adapters.
+// No public constructor accepts facts or a restored verifier flag.
+func (s *Service) signAccessClaims(claims identity.AccessClaims, grantStart time.Time) (*AccessResult, error) {
 	header, err := json.Marshal(identity.AccessHeader{Typ: "ops-access+jwt", Alg: "EdDSA", Kid: s.keyID})
 	if err != nil {
 		return nil, ErrUnavailable
@@ -300,12 +323,15 @@ func (s *Service) buildAccess(evidence azure.Evidence, grantStart time.Time) (*A
 	}
 	token := encoded + "." + base64.RawURLEncoding.EncodeToString(signature)
 	principal, err := s.verifier.VerifyAccess(token)
-	if err != nil || principal.ActorID() != actor || principal.Kind() != source.Kind {
+	if err != nil || principal.ActorID() != claims.Subject || principal.Kind() != claims.PrincipalKind {
 		return nil, ErrUnauthorized
 	}
-	return &AccessResult{service: s, token: token, metadata: ResultMetadata{actor, source.Kind, time.Unix(expires, 0).UTC(), s.metadata.ManifestDigest, source.ProfileID, profile.Digest}, grantStart: grantStart, valid: true}, nil
+	return &AccessResult{service: s, token: token, metadata: ResultMetadata{claims.Subject, claims.PrincipalKind, time.Unix(claims.Expires, 0).UTC(), s.metadata.ManifestDigest, claims.SourceProfile, claims.SourceProfileDigest}, grantStart: grantStart, valid: true}, nil
 }
 func (s *Service) ExchangeAzureService(ctx context.Context, profileID, rawToken string) (*AccessResult, error) {
+	if s.provider == nil {
+		return nil, ErrInvalid
+	}
 	ctx, cancel := brokerOperation(ctx)
 	defer cancel()
 	at, err := s.now()

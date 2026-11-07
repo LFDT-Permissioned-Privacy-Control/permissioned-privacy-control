@@ -20,7 +20,7 @@ func BootstrapEmpty(ctx context.Context, dsn string, scope b.Scope) error {
 		}
 		var ready, empty bool
 		var ns, epoch string
-		if err := tx.QueryRow(ctx, `SELECT namespace,recovery_epoch::text,ready,NOT EXISTS(SELECT 1 FROM ops_identity_v2.pending_requests)AND NOT EXISTS(SELECT 1 FROM ops_identity_v2.renewal_families) FROM ops_identity_v2.metadata WHERE singleton FOR UPDATE`).Scan(&ns, &epoch, &ready, &empty); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT namespace,recovery_epoch::text,ready,NOT EXISTS(SELECT 1 FROM ops_identity_v2.pending_requests)AND NOT EXISTS(SELECT 1 FROM ops_identity_v2.renewal_families)AND NOT EXISTS(SELECT 1 FROM ops_identity_v2.privado_challenges)AND NOT EXISTS(SELECT 1 FROM ops_identity_v2.privado_offers) FROM ops_identity_v2.metadata WHERE singleton FOR UPDATE`).Scan(&ns, &epoch, &ready, &empty); err != nil {
 			return b.ErrUnavailable
 		}
 		if ns != scope.Namespace.String() || epoch != scope.State.RecoveryEpoch || ready || !empty {
@@ -76,7 +76,11 @@ func FinalizeRecovery(ctx context.Context, dsn string, scope b.Scope, allWorkers
 		if err := tx.QueryRow(ctx, `SELECT namespace=$1 AND recovery_epoch=$2::uuid AND NOT ready FROM ops_identity_v2.metadata WHERE singleton FOR UPDATE`, scope.Namespace.String(), scope.State.RecoveryEpoch).Scan(&ok); err != nil || !ok {
 			return b.ErrConflict
 		}
+		if e := lockPrivadoFlow(ctx, tx, scope); e != nil {
+			return e
+		}
 		for _, q := range []string{
+			`DELETE FROM ops_identity_v2.privado_challenges WHERE request_id IN(SELECT request_id FROM ops_identity_v2.privado_challenges ORDER BY request_id LIMIT 256)`,
 			`DELETE FROM ops_identity_v2.pending_requests WHERE request_id IN(SELECT request_id FROM ops_identity_v2.pending_requests ORDER BY request_id LIMIT 1000)`,
 			`DELETE FROM ops_identity_v2.renewal_families WHERE family_id IN(SELECT family_id FROM ops_identity_v2.renewal_families ORDER BY family_id LIMIT 1000)`,
 		} {
@@ -85,7 +89,7 @@ func FinalizeRecovery(ctx context.Context, dsn string, scope b.Scope, allWorkers
 				if err != nil {
 					return b.ErrUnavailable
 				}
-				if tag.RowsAffected() < 1000 {
+				if tag.RowsAffected() == 0 {
 					break
 				}
 			}

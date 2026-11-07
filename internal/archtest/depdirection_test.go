@@ -563,6 +563,9 @@ func TestIdentityBrokerDependencyBoundaries(t *testing.T) {
 	for name := range provider {
 		service[name] = true
 	}
+	// Multi-broker assembly owns the real verifier. The pure policy and Azure
+	// provider allowlists above remain closed; Core/runtime checks are separate.
+	service["privacy-proxy/internal/identitybroker/privado"] = true
 	for _, name := range []string{"identitybroker", "policybundle", "policycore", "disclosurepolicy", "compliancepolicy", "compliance", "pricefeedpolicy"} {
 		service["privacy-proxy/internal/"+name] = true
 	}
@@ -582,7 +585,8 @@ func TestIdentityBrokerDependencyBoundaries(t *testing.T) {
 			if !usesSQL && (strings.HasPrefix(dep, "github.com/jackc/pgx") || strings.HasPrefix(dep, "github.com/jackc/tern")) {
 				t.Errorf("provider/core session logic imports SQL driver %s", dep)
 			}
-			if strings.HasPrefix(dep, "github.com/redis/") || strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/core") || strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/triedb") {
+			primitive := allowed["privacy-proxy/internal/identitybroker/privado"] && transactionPrimitive(dep)
+			if strings.HasPrefix(dep, "github.com/redis/") || strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/core") && !primitive || strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/triedb") {
 				t.Errorf("identity broker imports legacy persistence/VM %s", dep)
 			}
 			if pkg == "privacy-proxy/internal/brokerpolicy" && (dep == "net/http" || dep == "crypto/tls") {
