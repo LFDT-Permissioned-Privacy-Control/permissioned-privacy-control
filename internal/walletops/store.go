@@ -14,6 +14,19 @@ type Store interface {
 	LoadActive(context.Context, Namespace, ExpectedState, string, int) ([]OwnershipFact, error)
 	ResolveActiveActors(context.Context, Namespace, ExpectedState, common.Address, int) ([]string, error)
 }
+
+// MaxSnapshotActors bounds one complete current-association read, including
+// the viewer when it is not already one of the selected target actors.
+const MaxSnapshotActors = 257
+
+// MultiReader is a separate internal read capability, not a user directory.
+// Actors must be canonical, unique and sorted by byte order. A returned length
+// of MaxLinks+1 is an overflow sentinel, never a usable partial snapshot.
+// Existing single-actor Store implementations need not implement this method.
+type MultiReader interface {
+	LoadActiveMany(context.Context, Namespace, ExpectedState, []string) ([]OwnershipFact, error)
+}
+
 type ActorTx interface {
 	DeleteExpiredChallenges(time.Time, int) error
 	CountChallenges() (int, error)

@@ -29,6 +29,7 @@ import (
 	_ "privacy-proxy/internal/disclosuredata"
 	_ "privacy-proxy/internal/disclosurehttp"
 	_ "privacy-proxy/internal/disclosurepolicy"
+	_ "privacy-proxy/internal/disclosurewallet"
 	_ "privacy-proxy/internal/executionfacts"
 	_ "privacy-proxy/internal/guardbridge"
 	_ "privacy-proxy/internal/identity"
@@ -642,6 +643,23 @@ func TestProtectedDataPureBoundary(t *testing.T) {
 		for _, prefix := range []string{"github.com/jackc/", "github.com/redis/", "github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb"} {
 			if strings.HasPrefix(dep, prefix) {
 				t.Errorf("pure data imports persistence/VM %s", dep)
+			}
+		}
+	}
+}
+
+func TestCurrentWalletDataSourceBoundary(t *testing.T) {
+	allowed := map[string]bool{}
+	for _, name := range []string{"disclosurewallet", "disclosuredata", "disclosurepolicy", "networkidentity", "walletops", "walletproof", "identity", "runtimepolicy", "policybundle", "policycore", "strictjson", "compliancepolicy", "compliance", "pricefeedpolicy", "brokerpolicy"} {
+		allowed["privacy-proxy/internal/"+name] = true
+	}
+	for dep := range transitiveDeps(t, moduleRoot(t), "privacy-proxy/internal/disclosurewallet") {
+		if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
+			t.Errorf("current wallet data source imports application machinery %s", dep)
+		}
+		for _, prefix := range []string{"github.com/jackc/", "github.com/redis/", "github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb"} {
+			if strings.HasPrefix(dep, prefix) {
+				t.Errorf("current wallet data source imports persistence/VM %s", dep)
 			}
 		}
 	}

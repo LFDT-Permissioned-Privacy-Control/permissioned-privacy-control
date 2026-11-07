@@ -116,6 +116,19 @@ var expectedColumns = map[string]map[string]string{
 }
 
 func checkSchema(ctx context.Context, q querier) error {
+	// RLS can hide stored links and turn a populated scope into a false empty
+	// snapshot. These ordinary permanent relations are the supported shape.
+	var unsafe bool
+	if err := q.QueryRow(ctx, `SELECT EXISTS(
+ SELECT 1 FROM pg_catalog.pg_class c
+ JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+ WHERE n.nspname='ops_wallet_v2'
+ AND c.relname IN('schema_version','store_state','wallet_links','wallet_challenges')
+ AND(c.relkind<>'r' OR c.relpersistence<>'p' OR c.relrowsecurity OR c.relforcerowsecurity)
+) AS unsafe
+`).Scan(&unsafe); err != nil || unsafe {
+		return w.ErrUnavailable
+	}
 	var version, count int
 	var checksum string
 	if err := q.QueryRow(ctx, `SELECT version,source_checksum,(SELECT count(*) FROM ops_wallet_v2.schema_version)FROM ops_wallet_v2.schema_version WHERE singleton`).Scan(&version, &checksum, &count); err != nil || version != 1 || count != 1 || checksum != SchemaChecksum() {
