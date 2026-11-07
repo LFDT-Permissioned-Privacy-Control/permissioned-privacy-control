@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
+	"privacy-proxy/internal/compliancepolicy"
 	p "privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/policybundle"
@@ -67,6 +68,16 @@ func Snapshot(t testing.TB, rules []p.RuleSource) *policybundle.CatalogSnapshot 
 }
 
 func SelectedSnapshot(t testing.TB, rules []p.RuleSource, environment, chain string) *policybundle.CatalogSnapshot {
+	return selectedSnapshot(t, rules, environment, chain, nil)
+}
+
+// ComplianceSnapshot reuses only deterministic identity/group fixtures and the
+// real closed compliance source prepare/load profile; it constructs no mixed
+// runtime/disclosure snapshot or synthetic policy permission.
+func ComplianceSnapshot(t testing.TB, source compliancepolicy.Source) *policybundle.CatalogSnapshot {
+	return selectedSnapshot(t, nil, "test", "1", &source)
+}
+func selectedSnapshot(t testing.TB, rules []p.RuleSource, environment, chain string, compliance *compliancepolicy.Source) *policybundle.CatalogSnapshot {
 	t.Helper()
 	if rules == nil {
 		rules = []p.RuleSource{DefaultRule()}
@@ -87,6 +98,11 @@ func SelectedSnapshot(t testing.TB, rules []p.RuleSource, environment, chain str
 		identitySource.Mappings = append(identitySource.Mappings, identity.Mapping{ID: item.name, ProfileID: "azure", OrganizationID: item.org, PrincipalKind: identity.Human, Fact: identity.Fact{Kind: "azure.role", Value: item.name}, GroupIDs: []string{item.id}})
 	}
 	draft := policybundle.Draft{APIVersion: policybundle.DraftAPIVersion, Kind: policybundle.DraftKind, Environment: environment, ChainID: chain, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, Profile: policybundle.DisclosureProfileID, SourceRevision: "fixture", Organizations: []policybundle.Organization{{ID: Org, Slug: "a", Name: "A"}, {ID: OtherOrg, Slug: "b", Name: "B"}}, Documents: []policybundle.DraftDocument{}, IdentityCatalog: &policybundle.DraftIdentity{Path: "identity.json"}, DisclosureCatalog: &policybundle.DraftIdentity{Path: "disclosure.json"}}
+	if compliance != nil {
+		draft.Profile = policybundle.ComplianceProfileID
+		draft.DisclosureCatalog = nil
+		draft.ComplianceCatalog = &policybundle.DraftIdentity{Path: "compliance.json"}
+	}
 	sourceDir := t.TempDir()
 	write := func(name string, v any) {
 		t.Helper()
@@ -107,9 +123,13 @@ func SelectedSnapshot(t testing.TB, rules []p.RuleSource, environment, chain str
 		}
 	}
 	write("identity.json", identitySource)
-	write("disclosure.json", p.Source{APIVersion: p.APIVersion, Kind: p.Kind, Rules: rules})
+	if compliance == nil {
+		write("disclosure.json", p.Source{APIVersion: p.APIVersion, Kind: p.Kind, Rules: rules})
+	} else {
+		write("compliance.json", *compliance)
+	}
 	write("draft.json", draft)
-	options, _, err := policyprofiles.Options(policybundle.DisclosureProfileID)
+	options, _, err := policyprofiles.Options(draft.Profile)
 	if err != nil {
 		t.Fatal(err)
 	}

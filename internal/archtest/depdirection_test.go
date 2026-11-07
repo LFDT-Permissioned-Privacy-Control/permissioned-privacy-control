@@ -17,9 +17,11 @@ import (
 	// a forbidden import was added. With them, any change to a policed
 	// package (or its dependency tree) invalidates the cache and re-runs the
 	// gate.
+	_ "privacy-proxy/internal/admission"
 	_ "privacy-proxy/internal/apimodels"
 	_ "privacy-proxy/internal/audit"
 	_ "privacy-proxy/internal/compliance"
+	_ "privacy-proxy/internal/compliancehttp"
 	_ "privacy-proxy/internal/compliancepolicy"
 	_ "privacy-proxy/internal/config"
 	_ "privacy-proxy/internal/disclosurecase"
@@ -30,6 +32,7 @@ import (
 	_ "privacy-proxy/internal/identity"
 	_ "privacy-proxy/internal/nativeadmission"
 	_ "privacy-proxy/internal/netguard"
+	_ "privacy-proxy/internal/operational/admissionsql"
 	_ "privacy-proxy/internal/operational/disclosuresql"
 	_ "privacy-proxy/internal/operational/walletsql"
 	_ "privacy-proxy/internal/policybundle"
@@ -455,6 +458,42 @@ func TestComplianceSourceDependencyBoundary(t *testing.T) {
 				if strings.HasPrefix(dep, prefix) {
 					t.Errorf("%s imports SQL/VM machinery %s", pkg, dep)
 				}
+			}
+		}
+	}
+}
+
+func TestNativeAdmissionStorageBoundary(t *testing.T) {
+	root := moduleRoot(t)
+	// Main packages cannot be blank-imported. Explicit reads make CLI-only
+	// changes invalidate this go-test result before subprocess go-list checks.
+	command := filepath.Join(root, "cmd", "ops-v2-admission-migrate")
+	entries, err := os.ReadDir(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".go") {
+			if _, err := os.ReadFile(filepath.Join(command, entry.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	allowed := map[string]bool{}
+	for _, name := range []string{"admission", "compliancehttp", "compliance", "compliancepolicy", "disclosurepolicy", "identity", "strictjson", "policybundle", "policycore", "runtimepolicy", "nativeadmission", "rpcexecution", "executionfacts", "transactioninput"} {
+		allowed["privacy-proxy/internal/"+name] = true
+	}
+	for _, pkg := range []string{"privacy-proxy/internal/admission", "privacy-proxy/internal/compliancehttp", "privacy-proxy/internal/operational/admissionsql", "privacy-proxy/cmd/ops-v2-admission-migrate"} {
+		usesSQL := pkg == "privacy-proxy/internal/operational/admissionsql" || pkg == "privacy-proxy/cmd/ops-v2-admission-migrate"
+		for dep := range transitiveDeps(t, root, pkg) {
+			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !allowed[dep] && !(usesSQL && dep == "privacy-proxy/internal/operational/admissionsql") {
+				t.Errorf("%s imports unapproved application infrastructure %s", pkg, dep)
+			}
+			if !usesSQL && (strings.HasPrefix(dep, "github.com/jackc/pgx") || strings.HasPrefix(dep, "github.com/jackc/tern")) {
+				t.Errorf("%s imports SQL driver %s", pkg, dep)
+			}
+			if strings.HasPrefix(dep, "github.com/redis/") || strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/core/") && !transactionPrimitive(dep) || strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/triedb") {
+				t.Errorf("%s imports excluded persistence/VM machinery %s", pkg, dep)
 			}
 		}
 	}
