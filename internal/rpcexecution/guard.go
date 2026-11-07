@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"math/big"
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -58,26 +57,7 @@ func (c *Client) QualifyTrustedGuardEvidence(ctx context.Context, tx transaction
 	// Own bytes before parsing. The DTO remains caller-owned trusted input;
 	// callers must not mutate it concurrently during this invocation.
 	calls, pre := bytes.Clone(e.Calls), bytes.Clone(e.Prestate)
-	call := Call{from: tx.Signer(), to: to, fromSupplied: true, input: tx.Input(), value: tx.Value(), chainID: new(big.Int)}
-	call.chainID.SetString(tx.ChainID(), 10)
-	call.wire = map[string]any{"from": call.from.Hex(), "to": to.Hex(), "input": "0x" + common.Bytes2Hex(call.input), "value": "0x" + call.value.Text(16), "gas": "0x" + strconv.FormatUint(tx.Gas(), 16), "nonce": "0x" + strconv.FormatUint(tx.Nonce(), 16)}
-	call.wire["chainId"] = "0x" + call.chainID.Text(16)
-	call.wire["type"] = "0x" + strconv.FormatUint(uint64(tx.Type()), 16)
-	if tx.Type() == 0 {
-		call.wire["gasPrice"] = "0x" + tx.GasPrice().Text(16)
-	} else {
-		call.wire["maxFeePerGas"] = "0x" + tx.FeeCap().Text(16)
-		call.wire["maxPriorityFeePerGas"] = "0x" + tx.TipCap().Text(16)
-		entries := []any{}
-		for _, entry := range tx.AccessList() {
-			keys := []any{}
-			for _, key := range entry.StorageKeys {
-				keys = append(keys, key.Hex())
-			}
-			entries = append(entries, map[string]any{"address": entry.Address.Hex(), "storageKeys": keys})
-		}
-		call.wire["accessList"] = entries
-	}
+	call := signedCall(tx)
 	expected := executionfacts.ExpectedRoot{Kind: executionfacts.Call, From: call.from, To: executionfacts.Address{Value: to, Known: true}, Input: call.input, Value: call.value}
 	tree, err := executionfacts.Parse(calls, expected, executionfacts.GethCallTracerWithLogsProfile(), c.limits.Trace)
 	if err != nil {

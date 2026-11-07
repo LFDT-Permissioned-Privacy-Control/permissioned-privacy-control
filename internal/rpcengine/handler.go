@@ -18,8 +18,12 @@ func (e *Engine) Handler(selectedOrg string) http.Handler {
 			json.NewEncoder(w).Encode(responseError(nil, -32600, "invalid request"))
 			return
 		}
-		raw, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBytes+1))
-		if err != nil || len(raw) > MaxRequestBytes {
+		limit := MaxRequestBytes
+		if e != nil && e.raw != nil {
+			limit = MaxRawRequestBytes
+		}
+		raw, err := io.ReadAll(io.LimitReader(r.Body, int64(limit)+1))
+		if err != nil || len(raw) > limit {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(responseError(nil, -32600, "invalid request"))
 			return
@@ -31,6 +35,15 @@ func (e *Engine) Handler(selectedOrg string) http.Handler {
 				assertion = parts[1]
 			}
 		}
-		json.NewEncoder(w).Encode(e.Call(r.Context(), assertion, selectedOrg, raw))
+		// This inspection only selects a strict parser. It grants no authority;
+		// SubmitRaw and Call independently reject ambiguous/duplicate fields.
+		var route struct {
+			Method string `json:"method"`
+		}
+		if e != nil && e.raw != nil && json.Unmarshal(raw, &route) == nil && route.Method == "eth_sendRawTransaction" {
+			json.NewEncoder(w).Encode(e.SubmitRaw(r.Context(), assertion, selectedOrg, raw))
+		} else {
+			json.NewEncoder(w).Encode(e.Call(r.Context(), assertion, selectedOrg, raw))
+		}
 	})
 }

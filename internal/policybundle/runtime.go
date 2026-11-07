@@ -5,14 +5,18 @@ import (
 	"encoding/json"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 )
 
 const RuntimeAPIVersion = "ops.runtime-policy/v1alpha1"
+const RuntimeRawAPIVersion = "ops.runtime-policy/v1alpha2"
 const RuntimeKind = "RuntimePolicy"
 const RuntimeNodeEvidenceProfileID = "geth-prague-call/v1"
+const RawSubmissionGuardV1 = "guard-v1"
+const RawSubmissionOPSPreflight = "ops-preflight"
 
 type RuntimeCatalogRef struct {
 	Path   string `json:"path"`
@@ -40,35 +44,130 @@ type RuntimeSource struct {
 	NodeEvidenceProfile  string                 `json:"nodeEvidenceProfile"`
 }
 
+// RuntimeRawSource is a distinct closed wire shape. Its approved submission
+// mode cannot disappear through an older source projection or environment.
+type RuntimeRawSource struct {
+	APIVersion           string                 `json:"apiVersion"`
+	Kind                 string                 `json:"kind"`
+	ReadProfile          string                 `json:"readProfile"`
+	IntraOrgGrantTracing bool                   `json:"intraOrgGrantTracing"`
+	SharedInfrastructure []SharedInfrastructure `json:"sharedInfrastructure"`
+	AddressScopes        []AddressScope         `json:"addressScopes"`
+	NodeEvidenceProfile  string                 `json:"nodeEvidenceProfile"`
+	RawSubmissionMode    string                 `json:"rawSubmissionMode"`
+}
+
+func positiveChain64(raw string) bool {
+	n, err := strconv.ParseUint(raw, 10, 64)
+	return err == nil && n > 0 && strconv.FormatUint(n, 10) == raw
+}
+
+func decodeRuntimeSource(raw []byte, depth int) (*RuntimeSource, *RuntimeRawSource, error) {
+	value, err := strictValue(raw, depth)
+	if err != nil {
+		return nil, nil, err
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, nil, fail(InvalidSchema, "", "", "runtimeCatalog", "runtime source must be an object")
+	}
+	switch object["apiVersion"] {
+	case RuntimeAPIVersion:
+		var source RuntimeSource
+		if err := decodeSource(raw, &source, depth); err != nil {
+			return nil, nil, err
+		}
+		return &source, nil, nil
+	case RuntimeRawAPIVersion:
+		var source RuntimeRawSource
+		if err := decodeSource(raw, &source, depth); err != nil {
+			return nil, nil, err
+		}
+		return nil, &source, nil
+	default:
+		return nil, nil, fail(InvalidSchema, "", "", "apiVersion", "unsupported runtime source version")
+	}
+}
+
 // RuntimeCatalog is approved immutable source. Its static scopes never enter
 // the registered-contract/native execution or operational ownership indexes.
 type RuntimeCatalog struct {
-	source RuntimeSource
-	digest Digest
+	source    RuntimeSource
+	rawSource *RuntimeRawSource
+	digest    Digest
 }
 
+// Source returns only the detached v1 source. A v2 catalog returns zero;
+// callers must explicitly inspect RawSource so they cannot lose its mode.
 func (r *RuntimeCatalog) Source() RuntimeSource {
+	if r == nil || r.rawSource != nil {
+		return RuntimeSource{}
+	}
 	s := r.source
 	s.AddressScopes = slices.Clone(s.AddressScopes)
-	s.SharedInfrastructure = slices.Clone(s.SharedInfrastructure)
-	for i := range s.SharedInfrastructure {
-		if s.SharedInfrastructure[i].CodeHash != nil {
-			h := *s.SharedInfrastructure[i].CodeHash
-			s.SharedInfrastructure[i].CodeHash = &h
-		}
-	}
+	s.SharedInfrastructure = cloneShared(s.SharedInfrastructure)
 	return s
 }
-func (r *RuntimeCatalog) Digest() Digest                    { return r.digest }
-func (r *RuntimeCatalog) NodeEvidenceProfile() string       { return r.source.NodeEvidenceProfile }
+
+func cloneShared(in []SharedInfrastructure) []SharedInfrastructure {
+	out := slices.Clone(in)
+	for i := range out {
+		if out[i].CodeHash != nil {
+			h := *out[i].CodeHash
+			out[i].CodeHash = &h
+		}
+	}
+	return out
+}
+
+func (r *RuntimeCatalog) RawSource() (RuntimeRawSource, bool) {
+	if r == nil || r.rawSource == nil {
+		return RuntimeRawSource{}, false
+	}
+	s := *r.rawSource
+	s.SharedInfrastructure = cloneShared(s.SharedInfrastructure)
+	s.AddressScopes = slices.Clone(s.AddressScopes)
+	return s, true
+}
+func (r *RuntimeCatalog) RawSubmissionMode() string {
+	if r == nil || r.rawSource == nil {
+		return ""
+	}
+	return r.rawSource.RawSubmissionMode
+}
+func (r *RuntimeCatalog) SharedInfrastructure() []SharedInfrastructure {
+	if r.rawSource != nil {
+		return cloneShared(r.rawSource.SharedInfrastructure)
+	}
+	return cloneShared(r.source.SharedInfrastructure)
+}
+func (r *RuntimeCatalog) Digest() Digest { return r.digest }
+func (r *RuntimeCatalog) NodeEvidenceProfile() string {
+	if r.rawSource != nil {
+		return r.rawSource.NodeEvidenceProfile
+	}
+	return r.source.NodeEvidenceProfile
+}
 func (s *CatalogSnapshot) Runtime() (*RuntimeCatalog, bool) { return s.runtime, s.runtime != nil }
 
 func (b *catalogBuilder) compileRuntime(limits Limits) error {
-	if b.runtimeSource == nil {
+	if b.runtimeSource == nil && b.runtimeRawSource == nil {
 		return nil
 	}
-	s := *b.runtimeSource
 	bad := func(field, message string) error { return fail(InvalidSchema, "", "", field, message) }
+	var s RuntimeSource
+	if b.runtimeRawSource != nil {
+		r := b.runtimeRawSource
+		if b.runtimeSource != nil || b.profile.id != RuntimeRawSendProfileID || r.APIVersion != RuntimeRawAPIVersion || (r.RawSubmissionMode != RawSubmissionGuardV1 && r.RawSubmissionMode != RawSubmissionOPSPreflight) {
+			return bad("runtimeCatalog", "unsupported runtime source/profile or raw mode")
+		}
+		s = RuntimeSource{RuntimeAPIVersion, r.Kind, r.ReadProfile, r.IntraOrgGrantTracing, r.SharedInfrastructure, r.AddressScopes, r.NodeEvidenceProfile}
+	} else {
+		if b.profile.id != RuntimeCallProfileID {
+			return bad("runtimeCatalog", "runtime source version does not match profile")
+		}
+		s = *b.runtimeSource
+	}
 	if s.APIVersion != RuntimeAPIVersion || s.Kind != RuntimeKind || (s.ReadProfile != "standard" && s.ReadProfile != "strict") || s.NodeEvidenceProfile != RuntimeNodeEvidenceProfileID {
 		return bad("runtimeCatalog", "unsupported runtime schema/profile")
 	}
@@ -121,8 +220,20 @@ func (b *catalogBuilder) compileRuntime(limits Limits) error {
 	sort.Slice(s.SharedInfrastructure, func(i, j int) bool { return s.SharedInfrastructure[i].Address < s.SharedInfrastructure[j].Address })
 	sort.Slice(s.AddressScopes, func(i, j int) bool { return s.AddressScopes[i].Address < s.AddressScopes[j].Address })
 	raw, _ := json.Marshal(s)
+	catalog := &RuntimeCatalog{source: s}
+	if b.runtimeRawSource != nil {
+		r := &RuntimeRawSource{RuntimeRawAPIVersion, s.Kind, s.ReadProfile, s.IntraOrgGrantTracing, s.SharedInfrastructure, s.AddressScopes, s.NodeEvidenceProfile, b.runtimeRawSource.RawSubmissionMode}
+		catalog.source, catalog.rawSource = RuntimeSource{}, r
+		raw, _ = json.Marshal(r)
+		if r.RawSubmissionMode == RawSubmissionGuardV1 {
+			b.capabilities[CapabilityGuardDelivery] = true
+		} else {
+			b.capabilities[CapabilitySignedCall] = true
+		}
+	}
 	digest := RawDigest(raw)
-	b.snapshot.runtime = &RuntimeCatalog{source: s, digest: digest}
+	catalog.digest = digest
+	b.snapshot.runtime = catalog
 	b.snapshot.metadata.RuntimeCatalog = &RuntimeCatalogIdentity{RuntimeCatalogRef: *b.runtimeRef, SemanticDigest: digest}
 	if len(s.SharedInfrastructure) > 0 {
 		b.capabilities[CapabilitySharedCode] = true

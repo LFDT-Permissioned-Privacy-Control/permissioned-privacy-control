@@ -9,7 +9,7 @@ import (
 
 func TestProfilesStayExplicitAndRegistryDataDetached(t *testing.T) {
 	profiles := policyprofiles.Supported()
-	if len(profiles) != 6 {
+	if len(profiles) != 7 {
 		t.Fatal("compiled profiles changed without a registry test")
 	}
 	for _, expected := range profiles {

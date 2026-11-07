@@ -1,12 +1,16 @@
-// Package guardbridge pairs a startup-owned Guard preflight service and its
-// exact supplemental node binding. It does not authorize, queue or broadcast.
+// Package guardbridge owns paired Guard evidence, delivery and node bindings.
+// The caller applies native authorization and commits financial effects before
+// enqueueing the original approval or broadcasting signed bytes.
 package guardbridge
 
 import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"privacy-proxy/internal/nodeapproval"
 	"privacy-proxy/internal/rpcexecution"
@@ -14,13 +18,15 @@ import (
 )
 
 type Pair struct {
-	service *nodeapproval.Service
-	client  *rpcexecution.Client
-	timeout time.Duration
+	service  *nodeapproval.Service
+	client   *rpcexecution.Client
+	timeout  time.Duration
+	delivery bool
 }
 
 type QualifiedPrepared struct {
-	prepared  *nodeapproval.Prepared // request-local; later delivery is a separate contract.
+	origin    *Pair
+	prepared  *nodeapproval.Prepared // original sealed request-local result; never reconstructed for delivery.
 	execution *rpcexecution.CallExecution
 	binding   rpcexecution.BindingMetadata
 }
@@ -94,5 +100,65 @@ func (p *Pair) qualify(ctx context.Context, prepared *nodeapproval.Prepared, tx 
 	if err != nil {
 		return nil, errors.New("unqualified Guard evidence")
 	}
-	return &QualifiedPrepared{prepared: prepared, execution: execution, binding: p.client.Metadata()}, nil
+	return &QualifiedPrepared{origin: p, prepared: prepared, execution: execution, binding: p.client.Metadata()}, nil
+}
+
+// NewDeliveryPair owns the same selected node credential for preflight,
+// supplemental evidence and broadcast. Delivery settings never override it.
+func NewDeliveryPair(binding rpcexecution.NodeBinding, credentialRef string, transport http.RoundTripper, hashMode uint8, limits rpcexecution.Limits, options nodeapproval.BoundDeliveryOptions) (*Pair, error) {
+	if binding.Profile != rpcexecution.GuardRetainedProfileID {
+		return nil, errors.New("invalid Guard pair configuration")
+	}
+	client, err := rpcexecution.NewClient(transport, binding, limits)
+	if err != nil {
+		return nil, err
+	}
+	client, err = client.WithCredential(credentialRef)
+	if err != nil {
+		return nil, err
+	}
+	credential := binding.Credentials[credentialRef]
+	if credentialRef == "" {
+		credential = rpcexecution.Credential{}
+	}
+	options.BoundPreflightOptions = nodeapproval.BoundPreflightOptions{URL: binding.URL, CredentialHeader: credential.Header, CredentialValue: credential.Value, Transport: transport, HashMode: hashMode}
+	service, err := nodeapproval.NewBoundDelivery(options)
+	if err != nil {
+		return nil, err
+	}
+	return &Pair{service: service, client: client, timeout: limits.AcquisitionTimeout, delivery: true}, nil
+}
+
+func (p *Pair) Metadata() rpcexecution.BindingMetadata {
+	if p == nil || p.client == nil {
+		return rpcexecution.BindingMetadata{}
+	}
+	return p.client.Metadata()
+}
+
+func (p *Pair) Ready() bool {
+	if p == nil || p.service == nil || p.client == nil {
+		return false
+	}
+	chain, err := strconv.ParseUint(p.client.Metadata().ChainID, 10, 64)
+	return err == nil && p.service.Ready(chain)
+}
+
+// EnqueueQualified accepts only this Pair's untouched original request-local
+// approval. The caller must first commit and validate its financial receipt.
+func (p *Pair) EnqueueQualified(q *QualifiedPrepared) error {
+	if p == nil || !p.delivery || p.service == nil || q == nil || q.origin != p || q.prepared == nil {
+		return errors.New("unqualified Guard approval")
+	}
+	if _, ok := p.service.EvidenceFor(q.prepared); !ok {
+		return errors.New("unqualified Guard approval")
+	}
+	return p.service.Enqueue(q.prepared)
+}
+
+func (p *Pair) BroadcastRaw(ctx context.Context, tx transactioninput.VerifiedTransaction) (common.Hash, error) {
+	if p == nil || p.client == nil {
+		return common.Hash{}, errors.New("Guard pair unavailable")
+	}
+	return p.client.BroadcastRaw(ctx, tx)
 }

@@ -141,6 +141,9 @@ func TestPairUsesOriginalGuardSnapshotAndSealedServiceBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := q.Execution()
+	if p.Ready() || p.EnqueueQualified(q) == nil {
+		t.Fatal("preflight-only pair gained delivery authority")
+	}
 	signer, ok := e.VerifiedSigner()
 	hash, known := e.TransactionHash()
 	if !e.Signed() || !ok || !known || signer != tx.Signer() || hash != tx.Hash() || e.Anchor().Profile != rpcexecution.GuardRetainedProfileID || e.HashMode() != nodeapproval.HashCalls {

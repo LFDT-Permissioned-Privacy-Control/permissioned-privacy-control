@@ -16,6 +16,7 @@ import (
 )
 
 type Engine struct {
+	raw      bool
 	metadata policybundle.BundleMetadata
 	runtime  *policybundle.RuntimeCatalog
 	owners   map[common.Address]string
@@ -24,15 +25,28 @@ type Engine struct {
 }
 
 func New(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
+	return newEngine(snapshot, clock, false)
+}
+
+// NewRaw composes signed CALL authorization and unchanged simulation checks.
+func NewRaw(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
+	return newEngine(snapshot, clock, true)
+}
+
+func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, raw bool) (*Engine, error) {
 	if snapshot == nil || clock == nil {
 		return nil, errors.New("invalid native admission snapshot")
 	}
 	metadata := snapshot.Metadata()
 	runtime, ok := snapshot.Runtime()
-	if !ok || metadata.Profile != policybundle.RuntimeCallProfileID || metadata.EvaluatorVersion != policybundle.NativeV2EvaluatorVersion || metadata.RuntimeCatalog == nil || metadata.RuntimeCatalog.SemanticDigest != runtime.Digest() {
+	expectedProfile := policybundle.RuntimeCallProfileID
+	if raw {
+		expectedProfile = policybundle.RuntimeRawSendProfileID
+	}
+	if !ok || metadata.Profile != expectedProfile || metadata.EvaluatorVersion != policybundle.NativeV2EvaluatorVersion || metadata.RuntimeCatalog == nil || metadata.RuntimeCatalog.SemanticDigest != runtime.Digest() {
 		return nil, errors.New("invalid native admission snapshot")
 	}
-	n := &Engine{metadata: metadata, runtime: runtime, owners: map[common.Address]string{}, shared: map[common.Address]*common.Hash{}, work: map[string]map[string]ruleWork{}}
+	n := &Engine{raw: raw, metadata: metadata, runtime: runtime, owners: map[common.Address]string{}, shared: map[common.Address]*common.Hash{}, work: map[string]map[string]ruleWork{}}
 	for _, org := range snapshot.Organizations() {
 		catalog, ok := snapshot.NativeCatalog(org.ID)
 		if !ok {
@@ -51,7 +65,7 @@ func New(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine,
 		}
 		n.work[org.ID] = sourceWork(program.Policy())
 	}
-	for _, entry := range runtime.Source().SharedInfrastructure {
+	for _, entry := range runtime.SharedInfrastructure() {
 		var pin *common.Hash
 		if entry.CodeHash != nil {
 			h := common.HexToHash(*entry.CodeHash)
@@ -93,7 +107,20 @@ func (n *Engine) sharedCode(execution *rpcexecution.CallExecution, address commo
 // Check consumes only a paired opaque acquisition and the captured request
 // View. Supplied-from ownership is enforced here as well as before node work.
 func (n *Engine) Check(ctx context.Context, view *runtimepolicy.View, selectedOrg string, execution *rpcexecution.CallExecution, wallets WalletSnapshot) policycore.Decision {
-	if ctx.Err() != nil || n == nil || view == nil || execution == nil || execution.Signed() || execution.Tree() == nil || view.RequireLive() != nil {
+	return n.check(ctx, view, selectedOrg, execution, wallets, false)
+}
+
+// CheckSigned accepts only opaque signed acquisition on the explicitly selected
+// raw profile. Its signer never supplies an ActorID-to-wallet association.
+func (n *Engine) CheckSigned(ctx context.Context, view *runtimepolicy.View, selectedOrg string, execution *rpcexecution.CallExecution, wallets WalletSnapshot) policycore.Decision {
+	if n == nil || !n.raw {
+		return invalid()
+	}
+	return n.check(ctx, view, selectedOrg, execution, wallets, true)
+}
+
+func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOrg string, execution *rpcexecution.CallExecution, wallets WalletSnapshot, signed bool) policycore.Decision {
+	if ctx.Err() != nil || n == nil || view == nil || execution == nil || execution.Signed() != signed || execution.Tree() == nil || view.RequireLive() != nil {
 		return invalid()
 	}
 	metadata := view.Metadata()
@@ -102,7 +129,25 @@ func (n *Engine) Check(ctx context.Context, view *runtimepolicy.View, selectedOr
 		return invalid()
 	}
 	anchor := execution.Anchor()
-	if anchor.ChainID != metadata.ChainID || anchor.OrganizationID != selectedOrg || anchor.Profile != runtime.NodeEvidenceProfile() {
+	expectedEvidence := runtime.NodeEvidenceProfile()
+	var signer common.Address
+	if signed {
+		var known bool
+		signer, known = execution.VerifiedSigner()
+		hash, hashKnown := execution.TransactionHash()
+		if !known || !hashKnown || hash == (common.Hash{}) || execution.Call().From() != signer {
+			return invalid()
+		}
+		switch runtime.RawSubmissionMode() {
+		case policybundle.RawSubmissionGuardV1:
+			expectedEvidence = rpcexecution.GuardRetainedProfileID
+		case policybundle.RawSubmissionOPSPreflight:
+			expectedEvidence = rpcexecution.SignedCallProfileID
+		default:
+			return invalid()
+		}
+	}
+	if anchor.ChainID != metadata.ChainID || anchor.OrganizationID != selectedOrg || anchor.Profile != expectedEvidence {
 		return invalid()
 	}
 	org, ok := view.Org(selectedOrg)
@@ -130,13 +175,14 @@ func (n *Engine) Check(ctx context.Context, view *runtimepolicy.View, selectedOr
 			return invalid()
 		}
 	}
-	if (execution.Call().FromSupplied() || weight.linked > 0) && (!wallets.valid || wallets.actorID != view.ActorID()) {
+	needsFromProof := !signed && execution.Call().FromSupplied()
+	if (needsFromProof || weight.linked > 0) && (!wallets.valid || wallets.actorID != view.ActorID()) {
 		return invalid()
 	}
 	if wallets.valid && wallets.actorID != view.ActorID() {
 		return invalid()
 	}
-	if execution.Call().FromSupplied() && !wallets.Contains(execution.Call().From()) {
+	if needsFromProof && !wallets.Contains(execution.Call().From()) {
 		return invalid()
 	}
 	if _, ok := admissionWork(uint64(execution.RecordCount()), uint64(len(groups)), weight, uint64(len(wallets.addresses))); !ok {
@@ -152,7 +198,7 @@ func (n *Engine) Check(ctx context.Context, view *runtimepolicy.View, selectedOr
 	if ctx.Err() != nil || view.RequireLive() != nil {
 		return invalid()
 	}
-	decision := org.NativeProgram().Evaluate(policycore.Context{Org: selectedOrg, Groups: groups, LinkedAddresses: wallets.addresses}, frames)
+	decision := org.NativeProgram().Evaluate(policycore.Context{Org: selectedOrg, Groups: groups, LinkedAddresses: wallets.addresses, Signer: signer}, frames)
 	if ctx.Err() != nil || view.RequireLive() != nil {
 		return invalid()
 	}

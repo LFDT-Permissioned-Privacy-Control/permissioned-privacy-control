@@ -165,7 +165,9 @@ func TestNativeCallRuntimeDependencyBoundary(t *testing.T) {
 			allowed["privacy-proxy/internal/rpcexecution"] = true
 		}
 		if pkg == "privacy-proxy/internal/rpcengine" {
-			allowed["privacy-proxy/internal/nativeadmission"] = true
+			for _, name := range []string{"nativeadmission", "admission", "walletadapter", "walletops", "walletproof", "guardbridge", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate"} {
+				allowed["privacy-proxy/internal/"+name] = true
+			}
 		}
 		for dep := range transitiveDeps(t, moduleRoot(t), pkg) {
 			if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {

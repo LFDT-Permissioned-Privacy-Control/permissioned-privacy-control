@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/golang-jwt/jwt/v5"
 
+	"privacy-proxy/internal/compliancepolicy"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/policybundle"
@@ -47,12 +48,14 @@ const nodeHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const now = int64(1800000000)
 
 type fixture struct {
-	groups       []policybundle.Group
-	bindings     []policycore.Binding
-	contracts    []policybundle.Contract
-	runtime      policybundle.RuntimeSource
-	capabilities []string
-	roles        []string
+	rawMode        string
+	complianceHook func(*compliancepolicy.Source)
+	groups         []policybundle.Group
+	bindings       []policycore.Binding
+	contracts      []policybundle.Contract
+	runtime        policybundle.RuntimeSource
+	capabilities   []string
+	roles          []string
 }
 
 func encoded(t *testing.T, v any) []byte {
@@ -85,7 +88,36 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 	mappings = append(mappings, identity.Mapping{ID: "foreign", ProfileID: "azure", OrganizationID: orgB, PrincipalKind: identity.Human, Fact: identity.Fact{Kind: "azure.role", Value: foreign}, GroupIDs: []string{foreign}})
 	source := identity.SourceCatalog{APIVersion: identity.APIVersion, Kind: identity.CatalogKind, Issuers: []identity.Issuer{{ID: "ops", Issuer: "https://ops.test", Audience: "core", Keys: []identity.PublicKey{{Kid: "k1", Alg: "EdDSA", Kty: "OKP", Crv: "Ed25519", X: base64.RawURLEncoding.EncodeToString(signingKey().Public().(ed25519.PublicKey))}}, AllowedProfiles: []string{"azure"}}}, Profiles: []identity.Profile{{ID: "azure", Kind: identity.AzureHuman, TenantID: tenant, Issuer: "https://login.microsoftonline.com/" + tenant + "/v2.0", APIAudience: oid, ClientID: reader, DelegatedScope: "api://bank/access", FactSource: "appRoles"}}, Mappings: mappings}
 	docs := map[string][]byte{"identity.json": encoded(t, source), "runtime.json": encoded(t, f.runtime)}
-	manifest := policybundle.Manifest{APIVersion: policybundle.BundleAPIVersion, Kind: policybundle.BundleKind, Environment: "test", ChainID: "1", EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, Profile: policybundle.RuntimeCallProfileID, SourceRevision: "selected", Organizations: []policybundle.Organization{{ID: orgA, Slug: "a", Name: "A"}, {ID: orgB, Slug: "b", Name: "B"}}, RequiredCapabilities: f.capabilities, IdentityCatalog: &policybundle.IdentityCatalogRef{Path: "identity.json", SHA256: policybundle.RawDigest(docs["identity.json"])}, RuntimeCatalog: &policybundle.RuntimeCatalogRef{Path: "runtime.json", SHA256: policybundle.RawDigest(docs["runtime.json"])}}
+	profileID, profile := policybundle.RuntimeCallProfileID, policybundle.RuntimeCallProfile("rpc/v1")
+	limits := compliancepolicy.Limits{}
+	assignable := []string{"eth_call", "alias_call", "eth_getCode"}
+	if f.rawMode != "" {
+		profileID, profile = policybundle.RuntimeRawSendProfileID, policybundle.RuntimeRawSendProfile("rpc/v1")
+		limits = compliancepolicy.DefaultLimits()
+		assignable = append(assignable, "eth_sendTransaction", "eth_sendRawTransaction")
+		r := f.runtime
+		docs["runtime.json"] = encoded(t, policybundle.RuntimeRawSource{APIVersion: policybundle.RuntimeRawAPIVersion, Kind: r.Kind, ReadProfile: r.ReadProfile, IntraOrgGrantTracing: r.IntraOrgGrantTracing, SharedInfrastructure: r.SharedInfrastructure, AddressScopes: r.AddressScopes, NodeEvidenceProfile: r.NodeEvidenceProfile, RawSubmissionMode: f.rawMode})
+		compliance := compliancepolicy.Source{APIVersion: compliancepolicy.APIVersion, Kind: compliancepolicy.Kind, Organizations: []compliancepolicy.OrganizationPolicy{}, Sanctions: []compliancepolicy.SourceSanction{}}
+		for _, org := range []string{orgA, orgB} {
+			compliance.Organizations = append(compliance.Organizations, compliancepolicy.OrganizationPolicy{OrganizationID: org, RecordMaxSeconds: 86400, PriceMaxAgeSeconds: 600, Spec: compliancepolicy.SourceSpec{Settings: compliancepolicy.SourceSettings{Currency: "eur", ThresholdFiat: 100, UnknownPricePolicy: "forbidden", EnforcementMode: "enforce"}, AddressThresholds: []compliancepolicy.SourceThreshold{}, TokenPrices: []compliancepolicy.SourceTokenPrice{}}})
+		}
+		if f.complianceHook != nil {
+			f.complianceHook(&compliance)
+		}
+		docs["compliance.json"] = encoded(t, compliance)
+		for _, capability := range []string{policybundle.CapabilityRuntimeRawSend, policybundle.CapabilitySigner, policybundle.CapabilityAdmission, policybundle.CapabilityWalletProofs, "catalog.compliance-validate/v1"} {
+			f.capability(capability)
+		}
+		if f.rawMode == policybundle.RawSubmissionGuardV1 {
+			f.capability(policybundle.CapabilityGuardDelivery)
+		} else {
+			f.capability(policybundle.CapabilitySignedCall)
+		}
+	}
+	manifest := policybundle.Manifest{APIVersion: policybundle.BundleAPIVersion, Kind: policybundle.BundleKind, Environment: "test", ChainID: "1", EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, Profile: profileID, SourceRevision: "selected", Organizations: []policybundle.Organization{{ID: orgA, Slug: "a", Name: "A"}, {ID: orgB, Slug: "b", Name: "B"}}, RequiredCapabilities: f.capabilities, IdentityCatalog: &policybundle.IdentityCatalogRef{Path: "identity.json", SHA256: policybundle.RawDigest(docs["identity.json"])}, RuntimeCatalog: &policybundle.RuntimeCatalogRef{Path: "runtime.json", SHA256: policybundle.RawDigest(docs["runtime.json"])}}
+	if f.rawMode != "" {
+		manifest.ComplianceCatalog = &policybundle.ComplianceCatalogRef{Path: "compliance.json", SHA256: policybundle.RawDigest(docs["compliance.json"])}
+	}
 	for _, entry := range []struct {
 		org, prefix string
 		groups      []policybundle.Group
@@ -107,7 +139,7 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 	if e := os.WriteFile(filepath.Join(directory, "manifest.json"), raw, 0600); e != nil {
 		t.Fatal(e)
 	}
-	snapshot, e := policybundle.LoadDirectory(t.Context(), policybundle.Selection{Directory: directory, ExpectedManifestDigest: policybundle.RawDigest(raw), ExpectedEnvironment: "test", ExpectedChainID: "1"}, policybundle.Options{Limits: policybundle.DefaultLimits(), Profile: policybundle.RuntimeCallProfile("rpc/v1"), Methods: policybundle.MethodCatalog{Version: "rpc/v1", Assignable: []string{"eth_call", "alias_call", "eth_getCode"}, Aliases: map[string]string{"alias_call": "eth_call"}, Wildcard: []string{"eth_call", "eth_getCode"}, RequiredClaims: map[string]string{}}, IdentityLimits: identity.DefaultLimits()})
+	snapshot, e := policybundle.LoadDirectory(t.Context(), policybundle.Selection{Directory: directory, ExpectedManifestDigest: policybundle.RawDigest(raw), ExpectedEnvironment: "test", ExpectedChainID: "1"}, policybundle.Options{Limits: policybundle.DefaultLimits(), Profile: profile, Methods: policybundle.MethodCatalog{Version: "rpc/v1", Assignable: assignable, Aliases: map[string]string{"alias_call": "eth_call"}, Wildcard: []string{"eth_call", "eth_getCode"}, RequiredClaims: map[string]string{}}, IdentityLimits: identity.DefaultLimits(), ComplianceLimits: limits})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -145,6 +177,7 @@ type node struct {
 	anchors []string
 	mutate  func(map[string]any)
 	onTrace func()
+	onSend  func(string) string
 	code    string
 	codes   map[string]string
 }
@@ -166,9 +199,15 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch req.Method {
 	case "eth_chainId":
 		result = "0x1"
-	case "eth_getBlockByNumber", "eth_getBlockByHash":
+	case "eth_getBlockByNumber", "eth_getBlockByHash", "eth_getHeaderByNumber":
 		result = map[string]any{"hash": nodeHash, "number": "0x1", "timestamp": "0xa"}
 	case "debug_traceCall":
+		var traceConfig map[string]any
+		json.Unmarshal(req.Params[2], &traceConfig)
+		if traceConfig["tracer"] == "prestateTracer" {
+			result = map[string]any{"pre": map[string]any{}, "post": map[string]any{}}
+			break
+		}
 		var call map[string]any
 		json.Unmarshal(req.Params[0], &call)
 		var anchor string
@@ -208,6 +247,13 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal(req.Params[1], &block)
 		n.anchors = append(n.anchors, block["blockHash"].(string))
 		result = "0x"
+	case "eth_sendRawTransaction":
+		var raw string
+		if n.onSend == nil || len(req.Params) != 1 || json.Unmarshal(req.Params[0], &raw) != nil {
+			w.WriteHeader(500)
+			return
+		}
+		result = n.onSend(raw)
 	default:
 		w.WriteHeader(500)
 		return

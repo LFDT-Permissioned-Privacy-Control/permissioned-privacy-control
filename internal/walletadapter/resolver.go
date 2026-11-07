@@ -25,6 +25,19 @@ type Resolver struct {
 	clock     identity.Clock
 }
 
+type Metadata struct {
+	Namespace     walletops.Namespace
+	ExpectedState walletops.ExpectedState
+}
+
+// Metadata exposes detached startup pairing values, not a wallet proof.
+func (r *Resolver) Metadata() Metadata {
+	if r == nil {
+		return Metadata{}
+	}
+	return Metadata{r.namespace, r.state}
+}
+
 func New(store walletops.Store, namespace walletops.Namespace, state walletops.ExpectedState, clock identity.Clock) (*Resolver, error) {
 	if store == nil || !state.Valid() || clock == nil {
 		return nil, walletops.ErrInvalid

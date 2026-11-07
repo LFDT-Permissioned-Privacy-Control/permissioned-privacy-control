@@ -28,8 +28,9 @@ Its exported fields do not prove a service origin or a valid approval. Pair
 checks its private service seal before constructing the DTO; the execution
 client independently checks the signed root, chain, header, profile, fork,
 resource limits and complete execution evidence. HTTP requests and arbitrary
-trace providers must never supply this DTO. The pure runtime packages do not
-import the Guard service or its legacy trace projection.
+trace providers must never supply this DTO. The execution-facts, acquisition
+and native-evaluation packages do not import the Guard service or its legacy
+trace projection; the outer RPC orchestrator owns the selected Pair.
 
 The original `eth_getHeaderByNumber` request, nonce override, tracers,
 fingerprints, wire domains, producer readiness and approval TTL remain intact.
@@ -45,6 +46,9 @@ call/prestate subtree to 16 MiB with duplicate-aware closed parsing. Original
 subtree bytes and number spellings are preserved. These limits bound additional
 retention; they do not add a bound to the legacy RPC response acquisition.
 Approval queues continue to hold the original compact approval only.
+The separate `NewBoundDelivery` constructor additionally rejects HTTP envelopes
+larger than 34 MiB before RPC decoding, including oversized tails after a valid
+JSON prefix. Legacy constructors retain their response behavior.
 
 The retained Guard prestate profile includes storage because the original
 tracer enables it. Storage is checked and discarded for code classification,
@@ -54,8 +58,11 @@ are rejected. The call-only profile continues to reject storage. A present
 account with omitted code is known empty under the owned code-enabled profile;
 an absent account needs a bounded code lookup at the original header hash.
 
-Signed evidence remains distinct from a simulation. The existing call-only
-acquisition, catalog and native admission engine reject the signed retained
-scope. This library creates no accepting send profile, HTTP route, broadcast,
-approval renewal, wallet link, SQL write or permission. Creation, lifecycle and
-delegation-designator evidence is explicitly unsupported by this profile.
+Signed evidence remains distinct from a simulation. The call-only acquisition,
+catalog and native constructor reject signed retained scope. The explicit
+[raw-send profile and orchestrator](ops-v2-raw-send.md) use `NewDeliveryPair` and
+`CheckSigned`, preserving the same original Prepared seal and requiring the
+atomic financial receipt before enqueue/broadcast. `NewPair` itself remains
+preflight-only and cannot enqueue. Neither acquisition alone grants permission
+or creates wallet/SQL authority. Creation, lifecycle and delegation-designator
+evidence remains unsupported by these acquisition profiles.

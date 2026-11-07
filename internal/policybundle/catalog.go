@@ -133,6 +133,7 @@ type catalogBuilder struct {
 	complianceRef    *ComplianceCatalogRef
 	complianceLimits compliancepolicy.Limits
 	runtimeSource    *RuntimeSource
+	runtimeRawSource *RuntimeRawSource
 	runtimeRef       *RuntimeCatalogRef
 	runtimeScopes    map[string]string
 	limits           Limits
@@ -146,8 +147,13 @@ func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
 		s.contracts[org.ID] = map[common.Address]Contract{}
 	}
 	b := &catalogBuilder{profile: o.Profile, snapshot: s, policies: map[string]*policycore.Policy{}, capabilities: map[string]bool{CapabilityNativeValidate: true}, secrets: map[string]bool{}, addresses: map[string]string{}, groupOwners: map[string]string{}, resourceIDs: map[string]bool{}, identityLimits: o.IdentityLimits, disclosureLimits: o.DisclosureLimits, complianceLimits: o.ComplianceLimits, limits: o.Limits}
-	if o.Profile.id == RuntimeCallProfileID {
+	if o.Profile.id == RuntimeCallProfileID || o.Profile.id == RuntimeRawSendProfileID {
 		for _, capability := range []string{CapabilityRuntimeCall, CapabilityPrincipal, CapabilityFrames, CapabilityAnchoredCode, CapabilityClassification, CapabilityOwnership} {
+			b.capabilities[capability] = true
+		}
+	}
+	if o.Profile.id == RuntimeRawSendProfileID {
+		for _, capability := range []string{CapabilityRuntimeRawSend, CapabilitySigner, CapabilityAdmission, CapabilityWalletProofs} {
 			b.capabilities[capability] = true
 		}
 	}
@@ -265,7 +271,7 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 		}
 		catalog, _ := b.snapshot.NativeCatalog(org.ID)
 		validate := policycore.Validate
-		if b.profile.id == NativeV2ProfileID || b.profile.id == RuntimeCallProfileID || b.profile.id == DisclosureProfileID || b.profile.id == ComplianceProfileID {
+		if b.profile.id == NativeV2ProfileID || b.profile.id == RuntimeCallProfileID || b.profile.id == RuntimeRawSendProfileID || b.profile.id == DisclosureProfileID || b.profile.id == ComplianceProfileID {
 			validate = policycore.ValidateNativeV2
 		}
 		v, err := validate(b.policies[org.ID], catalog)
@@ -286,7 +292,7 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 			return nil, fail(ReferenceFailure, ContractRegistry, ref.org, "paramRules.must_be", "address literal belongs to another organization")
 		}
 		if !known {
-			if b.profile.id != RuntimeCallProfileID {
+			if b.profile.id != RuntimeCallProfileID && b.profile.id != RuntimeRawSendProfileID {
 				return nil, fail(UnsupportedFeature, ContractRegistry, ref.org, "paramRules.must_be", "unregistered EOA literal requires a later operational validation profile")
 			}
 			if scopedOwner, scoped := b.runtimeScopes[ref.address]; !scoped || scopedOwner != ref.org {
@@ -318,7 +324,7 @@ func (b *catalogBuilder) finish(ctx context.Context) (*CatalogSnapshot, error) {
 }
 
 func (b *catalogBuilder) inferNative(p *policycore.Policy, org string) error {
-	runtime := b.profile.id == RuntimeCallProfileID
+	runtime := b.profile.id == RuntimeCallProfileID || b.profile.id == RuntimeRawSendProfileID
 	unsupported := func(field, requirement string) error {
 		return fail(UnsupportedFeature, ExecutionRules, org, field, requirement+" requires a later runtime profile")
 	}

@@ -53,7 +53,7 @@ func NewClient(transport Transport, binding NodeBinding, limits Limits) (*Client
 	u, e := url.Parse(binding.URL)
 	id, uuidErr := uuid.Parse(binding.OrganizationID)
 	chain, ok := new(big.Int).SetString(binding.ChainID, 10)
-	if transport == nil || !limits.valid() || e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" || uuidErr != nil || id.String() != binding.OrganizationID || !ok || chain.Sign() < 0 || chain.BitLen() > 256 || chain.String() != binding.ChainID || (binding.Profile != NodeProfileID && binding.Profile != GuardRetainedProfileID) || binding.PragueEndExclusive <= binding.PragueStartInclusive {
+	if transport == nil || !limits.valid() || e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" || uuidErr != nil || id.String() != binding.OrganizationID || !ok || chain.Sign() < 0 || chain.BitLen() > 256 || chain.String() != binding.ChainID || (binding.Profile != NodeProfileID && binding.Profile != GuardRetainedProfileID && binding.Profile != SignedCallProfileID) || binding.PragueEndExclusive <= binding.PragueStartInclusive {
 		return nil, failure(InvalidBinding)
 	}
 	owned := make(map[string]Credential, len(binding.Credentials))
@@ -138,6 +138,10 @@ func (e *CallExecution) HashMode() uint8 {
 }
 
 func (c *Client) rpc(ctx context.Context, method string, params []any) (json.RawMessage, error) {
+	return c.rpcBounded(ctx, method, params, c.limits.MaxMuxBytes)
+}
+
+func (c *Client) rpcBounded(ctx context.Context, method string, params []any, maxBytes int64) (json.RawMessage, error) {
 	id := c.ids.Add(1)
 	request, _ := json.Marshal(struct {
 		JSONRPC string `json:"jsonrpc"`
@@ -164,11 +168,11 @@ func (c *Client) rpc(ctx context.Context, method string, params []any) (json.Raw
 	if resp.StatusCode != http.StatusOK {
 		return nil, failure(NodeFailure)
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, c.limits.MaxMuxBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return nil, failure(NodeFailure)
 	}
-	if int64(len(raw)) > c.limits.MaxMuxBytes {
+	if int64(len(raw)) > maxBytes {
 		return nil, failure(EvidenceLimit)
 	}
 	fields, err := closedRawObject(raw, 4)
@@ -197,6 +201,10 @@ func (c *Client) AcquireCall(ctx context.Context, call Call, block BlockSelector
 	if c == nil || !c.selected || c.binding.Profile != NodeProfileID || call.wire == nil || call.value == nil || block.selector == "" {
 		return nil, failure(InvalidBinding)
 	}
+	return c.acquire(ctx, call, block, nil)
+}
+
+func (c *Client) acquire(ctx context.Context, call Call, block BlockSelector, overrides map[string]any) (*CallExecution, error) {
 	if call.chainID != nil && call.chainID.String() != c.binding.ChainID {
 		return nil, failure(InvalidCall)
 	}
@@ -253,6 +261,9 @@ func (c *Client) AcquireCall(ctx context.Context, call Call, block BlockSelector
 	}
 	anchor.ChainID, anchor.Profile, anchor.OrganizationID = c.binding.ChainID, c.binding.Profile, c.binding.OrganizationID
 	config := map[string]any{"tracer": "muxTracer", "tracerConfig": map[string]any{"callTracer": map[string]any{"onlyTopCall": false, "withLog": true}, "prestateTracer": map[string]any{"diffMode": false, "disableCode": false, "disableStorage": true, "includeEmpty": true}}}
+	if overrides != nil {
+		config["stateOverrides"] = overrides
+	}
 	mux, err := c.rpc(ctx, "debug_traceCall", []any{call.Object(), anchor.Hash.Hex(), config})
 	if err != nil {
 		return nil, err

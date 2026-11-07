@@ -26,6 +26,7 @@ func Supported() []Description {
 		{ID: policybundle.IdentityProfileID, EvaluatorVersion: policybundle.NativeEvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 		{ID: policybundle.NativeV2ProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 		{ID: policybundle.RuntimeCallProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "eth_call integration slice; not a complete runtime"},
+		{ID: policybundle.RuntimeRawSendProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true, IntegrationScope: "eth_call and raw CALL submission integration; not a complete runtime"},
 		{ID: policybundle.DisclosureProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 		{ID: policybundle.ComplianceProfileID, EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, MethodCatalogVersion: rpcmethoddata.Version, ValidationOnly: true},
 	}
@@ -57,6 +58,11 @@ func Options(id string) (policybundle.Options, Description, error) {
 		options.IdentityLimits = identity.DefaultLimits()
 		options.DisclosureLimits = disclosurepolicy.DefaultLimits()
 		evaluator = policybundle.NativeV2EvaluatorVersion
+	case policybundle.RuntimeRawSendProfileID:
+		options.Profile = policybundle.RuntimeRawSendProfile(seed.Version)
+		options.IdentityLimits = identity.DefaultLimits()
+		options.ComplianceLimits = compliancepolicy.DefaultLimits()
+		evaluator = policybundle.NativeV2EvaluatorVersion
 	case policybundle.ComplianceProfileID:
 		options.Profile = policybundle.ComplianceProfile(seed.Version)
 		options.IdentityLimits = identity.DefaultLimits()
@@ -68,6 +74,9 @@ func Options(id string) (policybundle.Options, Description, error) {
 	description := Description{ID: id, EvaluatorVersion: evaluator, MethodCatalogVersion: seed.Version, ValidationOnly: true}
 	if id == policybundle.RuntimeCallProfileID {
 		description.IntegrationScope = "eth_call integration slice; not a complete runtime"
+	}
+	if id == policybundle.RuntimeRawSendProfileID {
+		description.IntegrationScope = "eth_call and raw CALL submission integration; not a complete runtime"
 	}
 	return options, description, nil
 }

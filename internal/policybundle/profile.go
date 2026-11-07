@@ -14,6 +14,7 @@ const (
 	IdentityProfileID        = "catalog-identity/v1"
 	NativeV2ProfileID        = "catalog-native-v2/v1"
 	RuntimeCallProfileID     = "catalog-runtime-call/v1"
+	RuntimeRawSendProfileID  = "catalog-runtime-raw-send/v1"
 	DisclosureProfileID      = "catalog-disclosure/v1"
 	ComplianceProfileID      = "catalog-compliance/v1"
 	CapabilityIdentity       = "identity.claims/v1"
@@ -31,6 +32,11 @@ const (
 	CapabilityRPCCredential  = "secrets.rpc-credential"
 	CapabilityDynamicPayload = "privacy.dynamic-event-payload"
 	CapabilityRuntimeCall    = "runtime.eth-call/v1"
+	CapabilityRuntimeRawSend = "runtime.raw-send/v1"
+	CapabilityAdmission      = "operational.admission/v1"
+	CapabilityWalletProofs   = "operational.wallet-proofs/v1"
+	CapabilityGuardDelivery  = "delivery.guard-v1/v1"
+	CapabilitySignedCall     = "acquisition.signed-call/v1"
 	CapabilityAnchoredCode   = "inputs.anchored-code/v1"
 	CapabilityClassification = "inputs.classification"
 	CapabilityOwnership      = "inputs.ownership"
@@ -61,6 +67,12 @@ func NativeV2Profile(methodCatalogVersion string) ValidationProfile {
 // runtime methods and lifecycle/deployment evidence require successor profiles.
 func RuntimeCallProfile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{RuntimeCallProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+}
+
+// RuntimeRawSendProfile composes the call and bounded signed CALL consumers
+// with approved compliance. Deployment and lifecycle inputs remain unsupported.
+func RuntimeRawSendProfile(methodCatalogVersion string) ValidationProfile {
+	return ValidationProfile{RuntimeRawSendProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
 }
 
 // DisclosureProfile validates explicit rules and identity with the native-v2
@@ -107,10 +119,10 @@ type methodIndex struct {
 func prepareOptions(options Options) (methodIndex, error) {
 	p := options.Profile
 	expectedEvaluator := NativeEvaluatorVersion
-	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID || p.id == DisclosureProfileID || p.id == ComplianceProfileID {
+	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID || p.id == RuntimeRawSendProfileID || p.id == DisclosureProfileID || p.id == ComplianceProfileID {
 		expectedEvaluator = NativeV2EvaluatorVersion
 	}
-	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && p.id != RuntimeCallProfileID && p.id != DisclosureProfileID && p.id != ComplianceProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || (p.id == DisclosureProfileID && !options.DisclosureLimits.Valid()) || (p.id == ComplianceProfileID && !options.ComplianceLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
+	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && p.id != RuntimeCallProfileID && p.id != RuntimeRawSendProfileID && p.id != DisclosureProfileID && p.id != ComplianceProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || (p.id == DisclosureProfileID && !options.DisclosureLimits.Valid()) || ((p.id == ComplianceProfileID || p.id == RuntimeRawSendProfileID) && !options.ComplianceLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
 		return methodIndex{}, fail(InvalidSelection, "", "", "options", "invalid limits or pinned foundation/method profile")
 	}
 	m := methodIndex{map[string]bool{}, map[string]string{}, slices.Clone(options.Methods.Wildcard), map[string]string{}}

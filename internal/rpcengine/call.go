@@ -1,5 +1,5 @@
-// Package rpcengine implements the authenticated native eth_call vertical
-// slice. It neither imports the legacy server nor forwards a second eth_call.
+// Package rpcengine implements authenticated native simulations and signed raw
+// admission. It neither imports the legacy server nor issues a second eth_call.
 package rpcengine
 
 import (
@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/nativeadmission"
@@ -38,22 +40,35 @@ type Engine struct {
 	clients      map[string]*rpcexecution.Client
 	wallets      WalletResolver
 	needsWallets bool
+	raw          *rawEngine
 }
 
 func New(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpcexecution.Client, wallets WalletResolver, clock identity.Clock) (*Engine, error) {
+	return newEngine(snapshot, bindings, wallets, clock, false)
+}
+
+func newEngine(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpcexecution.Client, wallets WalletResolver, clock identity.Clock, raw bool) (*Engine, error) {
 	if snapshot == nil || clock == nil {
 		return nil, errors.New("invalid RPC engine configuration")
 	}
 	runtime, ok := snapshot.Runtime()
 	metadata := snapshot.Metadata()
-	if !ok || metadata.Profile != policybundle.RuntimeCallProfileID {
+	expectedProfile := policybundle.RuntimeCallProfileID
+	if raw {
+		expectedProfile = policybundle.RuntimeRawSendProfileID
+	}
+	if !ok || metadata.Profile != expectedProfile {
 		return nil, errors.New("invalid RPC engine configuration")
 	}
 	factory, err := runtimepolicy.NewFactory(snapshot, clock)
 	if err != nil {
 		return nil, errors.New("invalid RPC engine configuration")
 	}
-	native, err := nativeadmission.New(snapshot, clock)
+	newNative := nativeadmission.New
+	if raw {
+		newNative = nativeadmission.NewRaw
+	}
+	native, err := newNative(snapshot, clock)
 	if err != nil {
 		return nil, errors.New("invalid RPC engine configuration")
 	}
@@ -82,8 +97,15 @@ func New(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpcexecuti
 			if !ok {
 				return nil, errors.New("invalid RPC engine configuration")
 			}
+			if raw && !slices.Contains(g.AllowedMethods, "eth_call") {
+				continue
+			}
 			if g.RpcCredential != nil {
 				if _, err := client.WithCredential(g.RpcCredential.FromEnv); err != nil {
+					return nil, errors.New("unbound RPC credential")
+				}
+			} else if raw {
+				if _, err := client.WithCredential(""); err != nil {
 					return nil, errors.New("unbound RPC credential")
 				}
 			}
@@ -102,7 +124,11 @@ func responseError(id json.RawMessage, code int, message string) Response {
 }
 
 func selectedOrganization(view *runtimepolicy.View, explicit string, call rpcexecution.Call) (string, bool) {
-	contract, registered := view.Contract(call.To())
+	return selectedAddressOrganization(view, explicit, call.To())
+}
+
+func selectedAddressOrganization(view *runtimepolicy.View, explicit string, address common.Address) (string, bool) {
+	contract, registered := view.Contract(address)
 	if explicit != "" {
 		if _, ok := view.Org(explicit); !ok {
 			return "", false
@@ -124,13 +150,37 @@ func selectedOrganization(view *runtimepolicy.View, explicit string, call rpcexe
 	return ids[0], true
 }
 
+func methodAuthorized(snapshot *policybundle.CatalogSnapshot, org *runtimepolicy.OrgView, name string) bool {
+	method, known := snapshot.Method(name)
+	if !known || method.Canonical != name || !org.GroupAllowsMethod(name) {
+		return false
+	}
+	for _, claim := range method.RequiredClaims {
+		mask := uint8(0)
+		switch claim {
+		case "admin":
+			mask = policycore.ClaimAdmin
+		case "deploy":
+			mask = policycore.ClaimDeploy
+		case "upgrade":
+			mask = policycore.ClaimUpgrade
+		default:
+			return false
+		}
+		if org.UnionClaims()&mask == 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawRequest []byte) Response {
 	req, requestError := parseRequest(rawRequest)
 	if requestError != nil {
 		out := responseError(req.id, requestError.Code, requestError.Message)
 		return out
 	}
-	if e == nil || ctx.Err() != nil {
+	if e == nil || ctx.Err() != nil || (e.raw != nil && e.raw.closed.Load()) {
 		return responseError(req.id, -32002, "execution unavailable")
 	}
 	view, err := e.factory.Build(assertion)
@@ -145,25 +195,8 @@ func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawReq
 	if req.block.Historical() && !org.IsOrgAdmin() {
 		return denied(req.id)
 	}
-	method, known := e.snapshot.Method("eth_call")
-	if !known || method.Canonical != "eth_call" || !org.GroupAllowsMethod("eth_call") {
+	if !methodAuthorized(e.snapshot, org, "eth_call") {
 		return denied(req.id)
-	}
-	for _, claim := range method.RequiredClaims {
-		mask := uint8(0)
-		switch claim {
-		case "admin":
-			mask = policycore.ClaimAdmin
-		case "deploy":
-			mask = policycore.ClaimDeploy
-		case "upgrade":
-			mask = policycore.ClaimUpgrade
-		default:
-			return denied(req.id)
-		}
-		if org.UnionClaims()&mask == 0 {
-			return denied(req.id)
-		}
 	}
 	ref, err := org.SelectCredentialRef("eth_call")
 	if err != nil {

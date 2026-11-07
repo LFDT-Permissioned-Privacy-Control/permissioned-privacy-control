@@ -66,12 +66,14 @@ covering all node work. Admission checks the conservative frame/group/rule/sort/
 linked-address work product before materialization and synchronous evaluation.
 These limits are not throughput or hard realtime guarantees.
 
-This is an eth_call integration slice. It rejects CREATE, CREATE2, SELFDESTRUCT
+The call-only constructor/profile is an eth_call integration slice. It rejects CREATE, CREATE2, SELFDESTRUCT
 and encountered EIP-7702 designators until their evidence is qualified. It does
 not install production routes, provide broker/wallet storage, deliver send/Guard,
 history or enterprise workflows, or establish complete runtime readiness. Final
 assembly must provide global/concurrent backpressure before exposure. Existing
 Guard wire, fingerprints and approval lifetime are unchanged.
+The separately selected [raw-send profile](ops-v2-raw-send.md) preserves this
+simulation behavior while adding its own signed admission and financial gates.
 
 Run the scoped checks with:
 
