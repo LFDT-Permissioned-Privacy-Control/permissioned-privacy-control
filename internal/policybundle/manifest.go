@@ -42,18 +42,28 @@ type Selection struct {
 }
 
 type Manifest struct {
-	APIVersion           string              `json:"apiVersion"`
-	Kind                 string              `json:"kind"`
-	Environment          string              `json:"environment"`
-	ChainID              string              `json:"chainId"`
-	EvaluatorVersion     string              `json:"evaluatorVersion"`
-	Profile              string              `json:"profile"`
-	SourceRevision       string              `json:"sourceRevision"`
-	Organizations        []Organization      `json:"organizations"`
-	RequiredCapabilities []string            `json:"requiredCapabilities"`
-	Documents            []DocumentRef       `json:"documents"`
-	IdentityCatalog      *IdentityCatalogRef `json:"identityCatalog,omitempty" optional:"true"`
-	RuntimeCatalog       *RuntimeCatalogRef  `json:"runtimeCatalog,omitempty" optional:"true"`
+	APIVersion           string                `json:"apiVersion"`
+	Kind                 string                `json:"kind"`
+	Environment          string                `json:"environment"`
+	ChainID              string                `json:"chainId"`
+	EvaluatorVersion     string                `json:"evaluatorVersion"`
+	Profile              string                `json:"profile"`
+	SourceRevision       string                `json:"sourceRevision"`
+	Organizations        []Organization        `json:"organizations"`
+	RequiredCapabilities []string              `json:"requiredCapabilities"`
+	Documents            []DocumentRef         `json:"documents"`
+	IdentityCatalog      *IdentityCatalogRef   `json:"identityCatalog,omitempty" optional:"true"`
+	RuntimeCatalog       *RuntimeCatalogRef    `json:"runtimeCatalog,omitempty" optional:"true"`
+	DisclosureCatalog    *DisclosureCatalogRef `json:"disclosureCatalog,omitempty" optional:"true"`
+}
+
+type DisclosureCatalogRef struct {
+	Path   string `json:"path"`
+	SHA256 Digest `json:"sha256"`
+}
+type DisclosureCatalogIdentity struct {
+	DisclosureCatalogRef
+	SemanticDigest Digest
 }
 
 type IdentityCatalogRef struct {
@@ -89,6 +99,7 @@ type BundleMetadata struct {
 	Documents            []DocumentIdentity
 	IdentityCatalog      *IdentityCatalogIdentity
 	RuntimeCatalog       *RuntimeCatalogIdentity
+	DisclosureCatalog    *DisclosureCatalogIdentity
 }
 
 // RawDigest pins the approved file. SemanticDigest identifies its normalized

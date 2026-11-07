@@ -81,15 +81,11 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 	if (o.Profile.id == RuntimeCallProfileID) != (m.RuntimeCatalog != nil) {
 		return fail(UnsupportedFeature, "", "", "runtimeCatalog", "runtime source must match the explicitly selected profile")
 	}
-	extra := 0
-	if m.IdentityCatalog != nil {
-		extra++
+	if (o.Profile.id == DisclosureProfileID) != (m.DisclosureCatalog != nil) {
+		return fail(UnsupportedFeature, "", "", "disclosureCatalog", "disclosure source must match the explicitly selected profile")
 	}
-	if m.RuntimeCatalog != nil {
-		extra++
-	}
-	if extra > o.Limits.MaxDocuments-len(m.Documents) {
-		return fail(LimitExceeded, "", "", "manifest", "global source files exceed document count budget")
+	if len(m.Documents) > o.Limits.MaxDocuments-len(globalDocumentRefs(m)) {
+		return fail(LimitExceeded, "", "", "documents", "global files exceed document count budget")
 	}
 	orgs, slugs := map[string]bool{}, map[string]bool{}
 	for _, org := range m.Organizations {
@@ -130,6 +126,11 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 			return fail(InvalidSchema, "", "", "runtimeCatalog", "invalid or colliding runtime file reference")
 		}
 		paths[ref.Path] = true
+	}
+	if ref := m.DisclosureCatalog; ref != nil {
+		if len(ref.Path) > 128 || !filePattern.MatchString(ref.Path) || ref.Path == "manifest.json" || paths[ref.Path] || !validDigest(ref.SHA256) {
+			return fail(InvalidSchema, "", "", "disclosureCatalog", "invalid or colliding global disclosure file reference")
+		}
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 
+	"privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/identity"
 )
 
@@ -48,6 +49,7 @@ func compileSourceSet(ctx context.Context, manifest Manifest, digest Digest, man
 		if err != nil {
 			return nil, err
 		}
+		total += int64(len(raw))
 		if RawDigest(raw) != ref.SHA256 {
 			return nil, fail(IntegrityFailure, "", "", "identityCatalog", "identity file digest does not match exact bytes")
 		}
@@ -57,7 +59,6 @@ func compileSourceSet(ctx context.Context, manifest Manifest, digest Digest, man
 		}
 		builder.identitySource = &source
 		builder.identityRef = ref
-		total += int64(len(raw))
 	}
 	if ref := manifest.RuntimeCatalog; ref != nil {
 		budget := min(options.Limits.MaxDocumentBytes, options.Limits.MaxBundleBytes-total)
@@ -78,6 +79,26 @@ func compileSourceSet(ctx context.Context, manifest Manifest, digest Digest, man
 		}
 		builder.runtimeSource = &source
 		builder.runtimeRef = ref
+	}
+	if ref := manifest.DisclosureCatalog; ref != nil {
+		budget := min(options.Limits.MaxDocumentBytes, int64(options.DisclosureLimits.MaxDocumentBytes), options.Limits.MaxBundleBytes-total)
+		if budget <= 0 {
+			return nil, fail(LimitExceeded, "", "", "disclosureCatalog", "disclosure file exceeds remaining byte budget")
+		}
+		raw, err := read(ref.Path, budget)
+		if err != nil {
+			return nil, err
+		}
+		total += int64(len(raw))
+		if RawDigest(raw) != ref.SHA256 {
+			return nil, fail(IntegrityFailure, "", "", "disclosureCatalog", "disclosure digest does not match exact bytes")
+		}
+		source, err := disclosurepolicy.Decode(raw, options.DisclosureLimits)
+		if err != nil {
+			return nil, fail(InvalidSchema, "", "", "disclosureCatalog", err.Error())
+		}
+		builder.disclosureSource = &source
+		builder.disclosureRef = ref
 	}
 	if err := canceled(ctx); err != nil {
 		return nil, err

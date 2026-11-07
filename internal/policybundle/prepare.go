@@ -16,17 +16,18 @@ type DraftSelection struct{ Directory string }
 // Draft supplies source identity and file references. File hashes and required
 // capabilities are derived by the shared compiler, never authored as guesses.
 type Draft struct {
-	APIVersion       string          `json:"apiVersion"`
-	Kind             string          `json:"kind"`
-	Environment      string          `json:"environment"`
-	ChainID          string          `json:"chainId"`
-	EvaluatorVersion string          `json:"evaluatorVersion"`
-	Profile          string          `json:"profile"`
-	SourceRevision   string          `json:"sourceRevision"`
-	Organizations    []Organization  `json:"organizations"`
-	Documents        []DraftDocument `json:"documents"`
-	IdentityCatalog  *DraftIdentity  `json:"identityCatalog,omitempty" optional:"true"`
-	RuntimeCatalog   *DraftRuntime   `json:"runtimeCatalog,omitempty" optional:"true"`
+	APIVersion        string          `json:"apiVersion"`
+	Kind              string          `json:"kind"`
+	Environment       string          `json:"environment"`
+	ChainID           string          `json:"chainId"`
+	EvaluatorVersion  string          `json:"evaluatorVersion"`
+	Profile           string          `json:"profile"`
+	SourceRevision    string          `json:"sourceRevision"`
+	Organizations     []Organization  `json:"organizations"`
+	Documents         []DraftDocument `json:"documents"`
+	IdentityCatalog   *DraftIdentity  `json:"identityCatalog,omitempty" optional:"true"`
+	RuntimeCatalog    *DraftRuntime   `json:"runtimeCatalog,omitempty" optional:"true"`
+	DisclosureCatalog *DraftIdentity  `json:"disclosureCatalog,omitempty" optional:"true"`
 }
 
 type DraftDocument struct {
@@ -116,17 +117,18 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		}
 		manifest.RuntimeCatalog = &RuntimeCatalogRef{Path: draft.RuntimeCatalog.Path, SHA256: RawDigest(nil)}
 	}
+	if draft.DisclosureCatalog != nil {
+		if draft.DisclosureCatalog.Path == "draft.json" {
+			return nil, fail(InvalidSchema, "", "", "disclosureCatalog", "disclosure source collides with draft.json")
+		}
+		manifest.DisclosureCatalog = &DisclosureCatalogRef{Path: draft.DisclosureCatalog.Path, SHA256: RawDigest(nil)}
+	}
 	selected := Selection{ExpectedManifestDigest: RawDigest(nil), ExpectedEnvironment: draft.Environment, ExpectedChainID: draft.ChainID}
 	if err := validateManifest(manifest, selected, options); err != nil {
 		return nil, err
 	}
 	refs := slices.Clone(manifest.Documents)
-	if manifest.IdentityCatalog != nil {
-		refs = append(refs, DocumentRef{Path: manifest.IdentityCatalog.Path})
-	}
-	if manifest.RuntimeCatalog != nil {
-		refs = append(refs, DocumentRef{Path: manifest.RuntimeCatalog.Path})
-	}
+	refs = append(refs, globalDocumentRefs(manifest)...)
 	if err := checkEntriesNamed(ctx, root, refs, options.Limits.MaxDocuments, "draft.json"); err != nil {
 		return nil, err
 	}
@@ -136,6 +138,9 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		budget := min(options.Limits.MaxDocumentBytes, options.Limits.MaxBundleBytes-total)
 		if manifest.IdentityCatalog != nil && ref.Path == manifest.IdentityCatalog.Path {
 			budget = min(budget, int64(options.IdentityLimits.MaxIdentityDocumentBytes))
+		}
+		if manifest.DisclosureCatalog != nil && ref.Path == manifest.DisclosureCatalog.Path {
+			budget = min(budget, int64(options.DisclosureLimits.MaxDocumentBytes))
 		}
 		if budget <= 0 {
 			return nil, fail(LimitExceeded, ref.Kind, ref.OrganizationID, ref.Path, "draft bundle byte budget exceeded")
@@ -154,6 +159,9 @@ func PrepareDirectory(ctx context.Context, selection DraftSelection, options Opt
 		ref.SHA256 = RawDigest(files[ref.Path])
 	}
 	if ref := manifest.RuntimeCatalog; ref != nil {
+		ref.SHA256 = RawDigest(files[ref.Path])
+	}
+	if ref := manifest.DisclosureCatalog; ref != nil {
 		ref.SHA256 = RawDigest(files[ref.Path])
 	}
 	snapshot, err := compileSourceSet(ctx, manifest, RawDigest(nil), int64(len(raw)), options, methods, func(name string, budget int64) ([]byte, error) {

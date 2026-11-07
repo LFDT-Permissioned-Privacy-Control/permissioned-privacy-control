@@ -64,7 +64,11 @@ func makeOrg(snapshot *policybundle.CatalogSnapshot, id string, groups []string)
 	return o, nil
 }
 
-func (o *OrgView) Groups() []string                     { return slices.Clone(o.groups) }
+func (o *OrgView) Groups() []string { return slices.Clone(o.groups) }
+
+// HasGroup checks this verified request's immutable membership index. It does
+// not consult a directory, infer admin rights or copy the complete group list.
+func (o *OrgView) HasGroup(id string) bool              { _, ok := o.groupData[id]; return ok }
 func (o *OrgView) GroupMasks() []GroupMask              { return slices.Clone(o.masks) }
 func (o *OrgView) UnionClaims() uint8                   { return o.claims }
 func (o *OrgView) IsOrgAdmin() bool                     { return o.admin }

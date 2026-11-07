@@ -13,7 +13,7 @@ From the source root, list the compiled profiles:
 go run ./cmd/ops-v2 policy profiles
 ```
 
-The catalog foundation, identity and native V2 profiles are **validation-only**.
+The catalog foundation, identity, native V2 and disclosure profiles are **validation-only**.
 The native V2 profile explicitly selects `policycore/native-v1alpha2`, including
 `minDepth`; it does not change the older profiles' semantics. A passing source
 check does not establish working identity providers, node tracing, linked wallets,
@@ -46,6 +46,13 @@ directory. Files must be regular files with lowercase ASCII `.json` basenames;
 symlinks and extra files are rejected. The default limits include 1 MiB per
 document or manifest and 64 MiB for the artifact. The generated manifest's
 hashes and inferred requirements count toward those limits.
+
+The explicit `catalog-disclosure/v1` profile additionally requires a global
+`disclosureCatalog` source. Its rules, case APIs and operational boundaries are
+described in [disclosure cases](disclosure-cases.md). This profile does not
+implicitly enable node tracing or protected report/data handlers.
+The runtime-call and disclosure profiles reject each other's global source;
+neither combines these capabilities into a complete runtime profile.
 
 ## Derive ABI identifiers
 

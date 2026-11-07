@@ -4,6 +4,7 @@ import (
 	"slices"
 	"sort"
 
+	"privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/identity"
 )
 
@@ -12,6 +13,7 @@ const (
 	IdentityProfileID        = "catalog-identity/v1"
 	NativeV2ProfileID        = "catalog-native-v2/v1"
 	RuntimeCallProfileID     = "catalog-runtime-call/v1"
+	DisclosureProfileID      = "catalog-disclosure/v1"
 	CapabilityIdentity       = "identity.claims/v1"
 	NativeEvaluatorVersion   = "policycore/native-v1alpha1"
 	NativeV2EvaluatorVersion = "policycore/native-v1alpha2"
@@ -59,6 +61,12 @@ func RuntimeCallProfile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{RuntimeCallProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
 }
 
+// DisclosureProfile validates explicit rules and identity with the native-v2
+// static matrix. It does not attest operational stores or data/report handlers.
+func DisclosureProfile(methodCatalogVersion string) ValidationProfile {
+	return ValidationProfile{DisclosureProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+}
+
 // MethodCatalog is trusted startup data. Names are exact; aliases carry no
 // implicit passthrough authority. Wildcard is an explicit subset of Assignable.
 type MethodCatalog struct {
@@ -70,10 +78,11 @@ type MethodCatalog struct {
 }
 
 type Options struct {
-	Limits         Limits
-	Profile        ValidationProfile
-	Methods        MethodCatalog
-	IdentityLimits identity.Limits
+	Limits           Limits
+	Profile          ValidationProfile
+	Methods          MethodCatalog
+	IdentityLimits   identity.Limits
+	DisclosureLimits disclosurepolicy.Limits
 }
 
 type Requirements struct {
@@ -91,10 +100,10 @@ type methodIndex struct {
 func prepareOptions(options Options) (methodIndex, error) {
 	p := options.Profile
 	expectedEvaluator := NativeEvaluatorVersion
-	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID {
+	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID || p.id == DisclosureProfileID {
 		expectedEvaluator = NativeV2EvaluatorVersion
 	}
-	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && p.id != RuntimeCallProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
+	if !options.Limits.valid() || (p.id != FoundationProfileID && p.id != IdentityProfileID && p.id != NativeV2ProfileID && p.id != RuntimeCallProfileID && p.id != DisclosureProfileID) || (p.id != FoundationProfileID && !options.IdentityLimits.Valid()) || (p.id == DisclosureProfileID && !options.DisclosureLimits.Valid()) || p.evaluatorVersion != expectedEvaluator || !boundedName(p.methodCatalogVersion, 128) || options.Methods.Version != p.methodCatalogVersion {
 		return methodIndex{}, fail(InvalidSelection, "", "", "options", "invalid limits or pinned foundation/method profile")
 	}
 	m := methodIndex{map[string]bool{}, map[string]string{}, slices.Clone(options.Methods.Wildcard), map[string]string{}}
