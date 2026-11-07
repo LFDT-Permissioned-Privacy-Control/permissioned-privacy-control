@@ -15,6 +15,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"privacy-proxy/internal/brokerpolicy"
 	f "privacy-proxy/internal/brokertest"
 	d "privacy-proxy/internal/disclosuretest"
 	"privacy-proxy/internal/identity"
@@ -36,6 +37,9 @@ type fixture struct {
 }
 
 func setup(t *testing.T) *fixture {
+	return setupConfigured(t, nil)
+}
+func setupConfigured(t *testing.T, change func(*brokerpolicy.Source)) *fixture {
 	t.Helper()
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("requires owned Docker PostgreSQL")
@@ -58,7 +62,19 @@ func setup(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	x := &fixture{ownerDSN: "postgres://postgres:broker-test-only@" + strings.TrimSpace(string(raw)) + "/broker_test?sslmode=disable", snapshot: f.Snapshot(t, nil), entra: f.NewEntra(t), binding: b.ServiceBinding{Environment: "test", DeploymentID: "broker-fixture", Origin: "https://ops.test"}}
+	x := &fixture{ownerDSN: "postgres://postgres:broker-test-only@" + strings.TrimSpace(string(raw)) + "/broker_test?sslmode=disable", snapshot: f.Snapshot(t, func(_ *identity.SourceCatalog, source *brokerpolicy.Source) {
+		if change != nil {
+			change(source)
+		}
+	}), entra: f.NewEntra(t), binding: b.ServiceBinding{Environment: "test", DeploymentID: "broker-fixture", Origin: "https://ops.test"}}
+	auth, _ := x.snapshot.AuthBroker()
+	authSource := auth.Source()
+	x.binding.Origin = authSource.WebOrigin
+	for _, p := range auth.Profiles() {
+		if p.Definition.Kind == identity.AzureHuman {
+			x.entra.SetRedirectURI(p.Binding.RedirectURI)
+		}
+	}
 	for ctx.Err() == nil {
 		x.owner, err = pgx.Connect(ctx, x.ownerDSN)
 		if err == nil {
@@ -118,8 +134,11 @@ func setup(t *testing.T) *fixture {
 }
 func (x *fixture) clock() time.Time { return time.Unix(x.entra.Clock.Load(), 0).UTC() }
 func (x *fixture) service(t *testing.T, store b.Store) *b.Service {
+	return x.serviceWithClock(t, store, x.clock)
+}
+func (x *fixture) serviceWithClock(t *testing.T, store b.Store, clock identity.Clock) *b.Service {
 	t.Helper()
-	s, err := b.New(b.Config{Snapshot: x.snapshot, Clock: x.clock, Store: store, AzureProvider: x.provider, AccessSigningBinding: b.AccessSigningBinding{IssuerID: "ops", KeyID: "test", PrivateKey: f.SigningKey()}, RenewalKeyBindings: []b.SecretBinding{{FromEnv: "OPS_BROKER_REFRESH_TEST", Value: bytes.Repeat([]byte{1}, 32)}}, EncryptionKeyBindings: []b.SecretBinding{{FromEnv: "OPS_BROKER_ENCRYPTION_TEST", Value: bytes.Repeat([]byte{2}, 32)}}, ServiceBinding: x.binding, ExpectedState: x.scope.State})
+	s, err := b.New(b.Config{Snapshot: x.snapshot, Clock: clock, Store: store, AzureProvider: x.provider, AccessSigningBinding: b.AccessSigningBinding{IssuerID: "ops", KeyID: "test", PrivateKey: f.SigningKey()}, RenewalKeyBindings: []b.SecretBinding{{FromEnv: "OPS_BROKER_REFRESH_TEST", Value: bytes.Repeat([]byte{1}, 32)}}, EncryptionKeyBindings: []b.SecretBinding{{FromEnv: "OPS_BROKER_ENCRYPTION_TEST", Value: bytes.Repeat([]byte{2}, 32)}}, ServiceBinding: x.binding, ExpectedState: x.scope.State})
 	if err != nil {
 		t.Fatal(err)
 	}

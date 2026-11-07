@@ -125,6 +125,7 @@ type AccessResult struct {
 	metadata      ResultMetadata
 	grantStart    time.Time
 	familyExpires *time.Time
+	sessionID     string
 	valid         bool
 }
 
@@ -170,6 +171,42 @@ type CommittedRenewal struct {
 	access  *AccessResult
 	refresh string
 	valid   bool
+}
+
+type BrowserSession struct {
+	ID, ActorID       string
+	AbsoluteExpiresAt time.Time
+}
+
+func (r *AccessResult) sessionInfo() (BrowserSession, error) {
+	if err := r.RequireDeliverable(); err != nil {
+		return BrowserSession{}, err
+	}
+	if r.metadata.Kind != identity.Human || !ValidUUID(r.sessionID) || r.familyExpires == nil {
+		return BrowserSession{}, ErrUnauthorized
+	}
+	now, err := r.service.now()
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	// Refresh proofs encode integral Unix expiry; a rounded-down already-expired
+	// handle must not be published in the family's final fractional second.
+	if !now.Before(time.Unix(r.familyExpires.Unix(), 0)) {
+		return BrowserSession{}, ErrUnauthorized
+	}
+	return BrowserSession{ID: r.sessionID, ActorID: r.metadata.ActorID, AbsoluteExpiresAt: *r.familyExpires}, nil
+}
+func (r *CommittedLogin) SessionInfo() (BrowserSession, error) {
+	if err := r.RequireDeliverable(); err != nil {
+		return BrowserSession{}, err
+	}
+	return r.access.sessionInfo()
+}
+func (r *CommittedRenewal) SessionInfo() (BrowserSession, error) {
+	if err := r.RequireDeliverable(); err != nil {
+		return BrowserSession{}, err
+	}
+	return r.access.sessionInfo()
 }
 
 func (r *CommittedLogin) Metadata() ResultMetadata {
