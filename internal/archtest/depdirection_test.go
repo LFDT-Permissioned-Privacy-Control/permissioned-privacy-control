@@ -17,9 +17,11 @@ import (
 	// a forbidden import was added. With them, any change to a policed
 	// package (or its dependency tree) invalidates the cache and re-runs the
 	// gate.
+	_ "privacy-proxy/internal/activitylog"
 	_ "privacy-proxy/internal/admission"
 	_ "privacy-proxy/internal/apimodels"
 	_ "privacy-proxy/internal/audit"
+	_ "privacy-proxy/internal/audit/chainlock"
 	_ "privacy-proxy/internal/brokerpolicy"
 	_ "privacy-proxy/internal/compliance"
 	_ "privacy-proxy/internal/compliancehttp"
@@ -44,6 +46,8 @@ import (
 	_ "privacy-proxy/internal/nativeadmission"
 	_ "privacy-proxy/internal/netguard"
 	_ "privacy-proxy/internal/networkidentity"
+	_ "privacy-proxy/internal/operational/activitysource"
+	_ "privacy-proxy/internal/operational/activitysql"
 	_ "privacy-proxy/internal/operational/admissionsql"
 	_ "privacy-proxy/internal/operational/disclosuresql"
 	_ "privacy-proxy/internal/operational/identitysql"

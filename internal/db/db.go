@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io/fs"
 	"log/slog"
 	"slices"
@@ -19,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/jackc/tern/v2/migrate"
 
+	"privacy-proxy/internal/audit/chainlock"
 	"privacy-proxy/internal/configuration"
 	"privacy-proxy/internal/db/migrations"
 )
@@ -1038,17 +1038,10 @@ type AccessLogChain interface {
 	Reset(lastHash string)
 }
 
-// accessLogChainLockClass is the first half of the transaction advisory lock
-// that serialises the writers of one access-log chain (the second half is a
-// hash of the chain name). It sits beside the configuration scope lock
-// (730074) and the node-policy publisher lease (730075).
-const accessLogChainLockClass int64 = 730076
-
-// AccessLogChainLockKey is the advisory-lock key of one access-log chain.
+// AccessLogChainLockKey delegates the unchanged class730076/FNV chain lock to
+// the shared primitive; legacy and operational writers use identical keys.
 func AccessLogChainLockKey(chainName string) int64 {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(chainName))
-	return accessLogChainLockClass<<32 | int64(h.Sum32())
+	return chainlock.Key(chainName)
 }
 
 // sqlQuerier is what a seal runs its statements on (a transaction).
