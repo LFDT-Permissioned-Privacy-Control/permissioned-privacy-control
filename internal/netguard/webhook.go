@@ -43,8 +43,10 @@ import (
 // keeping them blocked here is what makes URL validation and dial-time
 // enforcement agree in relaxed mode as well as strict.
 var alwaysBlockedCIDRs = mustPrefixes(
-	"169.254.0.0/16", // Link-local / cloud instance metadata (AWS, GCP, Azure)
-	"fe80::/10",      // IPv6 link-local
+	"169.254.0.0/16",    // Link-local / cloud instance metadata (AWS, GCP, Azure)
+	"fe80::/10",         // IPv6 link-local
+	"fd00:ec2::254/128", // AWS IPv6 IMDS inside otherwise allowed ULA
+	"fd20:ce::254/128",  // GCP IPv6-only metadata inside otherwise allowed ULA
 )
 
 // strictBlockedCIDRs are refused in strict (production) mode only. These are
@@ -202,6 +204,9 @@ func requireLoopbackOrPrivate(host string) error {
 		// Domain name — cannot prove private at validation time without DNS,
 		// and we don't want cleartext POSTs to "evil.com". Reject.
 		return fmt.Errorf("http scheme is only allowed for loopback or private destinations, got hostname %q", host)
+	}
+	if err := CheckResolvedAddrForEnv(ip, true); err != nil {
+		return fmt.Errorf("http scheme is only allowed for loopback or private destinations: %w", err)
 	}
 	if ip.IsLoopback() {
 		return nil

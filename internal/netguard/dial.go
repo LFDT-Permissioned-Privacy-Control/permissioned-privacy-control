@@ -62,6 +62,25 @@ func CheckResolvedAddrForEnv(addr netip.Addr, allowPrivate bool) error {
 	return nil
 }
 
+// CheckPrivateHTTPAddr restricts cleartext feed dials to the same private and
+// loopback ranges as URL eligibility, after resolution. It additionally keeps
+// the shared metadata/link-local/unspecified denial in force.
+func CheckPrivateHTTPAddr(addr netip.Addr) error {
+	addr = addr.WithZone("").Unmap()
+	if err := CheckResolvedAddrForEnv(addr, true); err != nil {
+		return err
+	}
+	if addr.IsLoopback() {
+		return nil
+	}
+	for _, prefix := range allowedHTTPCIDRs {
+		if prefix.Contains(addr) {
+			return nil
+		}
+	}
+	return fmt.Errorf("cleartext destination must be private or loopback")
+}
+
 // GuardedDialer returns a dialer that refuses outbound connections to blocked
 // destinations, classified by CheckResolvedAddrForEnv.
 //

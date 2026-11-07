@@ -39,6 +39,8 @@ import (
 	_ "privacy-proxy/internal/policycli"
 	_ "privacy-proxy/internal/policycore"
 	_ "privacy-proxy/internal/policyprofiles"
+	_ "privacy-proxy/internal/pricefeedpolicy"
+	_ "privacy-proxy/internal/quotefeed"
 	_ "privacy-proxy/internal/rpcengine"
 	_ "privacy-proxy/internal/rpcexecution"
 	_ "privacy-proxy/internal/rpcmethoddata"
@@ -496,6 +498,27 @@ func TestNativeAdmissionStorageBoundary(t *testing.T) {
 			}
 			if strings.HasPrefix(dep, "github.com/redis/") || strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/core/") && !transactionPrimitive(dep) || strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/triedb") {
 				t.Errorf("%s imports excluded persistence/VM machinery %s", pkg, dep)
+			}
+		}
+	}
+}
+
+func TestApprovedPriceFeedDependencyBoundary(t *testing.T) {
+	root := moduleRoot(t)
+	allowed := map[string]bool{}
+	for _, name := range []string{"pricefeedpolicy", "quotefeed", "admission", "compliance", "compliancepolicy", "disclosurepolicy", "identity", "strictjson", "policybundle", "policycore", "runtimepolicy", "nativeadmission", "rpcexecution", "executionfacts", "transactioninput", "netguard"} {
+		allowed["privacy-proxy/internal/"+name] = true
+	}
+	for _, pkg := range []string{"privacy-proxy/internal/pricefeedpolicy", "privacy-proxy/internal/quotefeed"} {
+		for dep := range transitiveDeps(t, root, pkg) {
+			if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
+				t.Errorf("%s imports unapproved application package %s", pkg, dep)
+			}
+			if pkg == "privacy-proxy/internal/pricefeedpolicy" && strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && dep != "privacy-proxy/internal/compliancepolicy" && dep != "privacy-proxy/internal/compliance" && dep != "privacy-proxy/internal/identity" && dep != "privacy-proxy/internal/strictjson" {
+				t.Errorf("pure price-feed policy imports runtime machinery %s", dep)
+			}
+			if strings.HasPrefix(dep, "github.com/jackc/pgx") || strings.HasPrefix(dep, "github.com/jackc/tern") || strings.HasPrefix(dep, "github.com/redis/") || strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/core/") && !transactionPrimitive(dep) || strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/triedb") {
+				t.Errorf("%s imports SQL/VM machinery %s", pkg, dep)
 			}
 		}
 	}
