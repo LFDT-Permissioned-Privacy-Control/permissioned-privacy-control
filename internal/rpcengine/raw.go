@@ -16,6 +16,7 @@ import (
 	"privacy-proxy/internal/admission"
 	"privacy-proxy/internal/guardbridge"
 	"privacy-proxy/internal/identity"
+	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/nodeapproval"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/rpcexecution"
@@ -133,8 +134,16 @@ func NewSimulation(snapshot *policybundle.CatalogSnapshot, options RawOptions) (
 	return newRaw(snapshot, options, policybundle.RuntimeSimulationProfileID)
 }
 
+func NewCreationIntents(snapshot *policybundle.CatalogSnapshot, options RawOptions) (*Engine, error) {
+	return newRaw(snapshot, options, policybundle.RuntimeCreationIntentProfileID)
+}
+
+func simulationProfile(id string) bool {
+	return id == policybundle.RuntimeSimulationProfileID || id == policybundle.RuntimeCreationIntentProfileID
+}
+
 func lifecycleProfile(id string) bool {
-	return id == policybundle.RuntimeLifecycleProfileID || id == policybundle.RuntimeSimulationProfileID
+	return id == policybundle.RuntimeLifecycleProfileID || simulationProfile(id)
 }
 
 func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expectedProfile string) (*Engine, error) {
@@ -151,7 +160,8 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 	_, multiOrgSource := runtime.MultiOrgSource()
 	_, lifecycleSource := runtime.LifecycleSource()
 	_, simulationSource := runtime.SimulationSource()
-	if (expectedProfile == policybundle.RuntimeRawSendProfileID && !rawSource) || (expectedProfile == policybundle.RuntimeMultiOrgProfileID && !multiOrgSource) || (expectedProfile == policybundle.RuntimeLifecycleProfileID && !lifecycleSource) || (expectedProfile == policybundle.RuntimeSimulationProfileID && !simulationSource) {
+	_, creationIntentSource := runtime.CreationIntentSource()
+	if (expectedProfile == policybundle.RuntimeRawSendProfileID && !rawSource) || (expectedProfile == policybundle.RuntimeMultiOrgProfileID && !multiOrgSource) || (expectedProfile == policybundle.RuntimeLifecycleProfileID && !lifecycleSource) || (expectedProfile == policybundle.RuntimeSimulationProfileID && !simulationSource) || (expectedProfile == policybundle.RuntimeCreationIntentProfileID && !creationIntentSource) {
 		return bad()
 	}
 	compliance, ok := snapshot.Compliance()
@@ -159,11 +169,14 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 		return bad()
 	}
 	financial := options.Admission.Metadata()
+	if financial.CreationIntents != creationIntentSource {
+		return bad()
+	}
 	profile := rpcexecution.SignedCallProfileID
 	if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 		profile = rpcexecution.GuardRetainedProfileID
 	}
-	if lifecycleSource || simulationSource {
+	if lifecycleSource || simulationSource || creationIntentSource {
 		profile = rpcexecution.LifecycleSignedProfileID
 		if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 			profile = rpcexecution.LifecycleGuardProfileID
@@ -240,7 +253,7 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 			binding := rawBinding{client: prepared[org][ref]}
 			if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
 				newPair := guardbridge.NewDeliveryPair
-				if lifecycleSource || simulationSource {
+				if lifecycleSource || simulationSource || creationIntentSource {
 					newPair = guardbridge.NewLifecycleDeliveryPair
 				}
 				pair, err := newPair(n.Binding, ref, n.Transport, n.HashMode, n.Limits, deliveryOptions(n))
@@ -383,7 +396,13 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 	if err != nil {
 		return responseError(req.id, -32002, "unavailable")
 	}
-	if !e.native.CheckSigned(ctx, view, orgID, execution, wallet).Allowed {
+	var approvedCheck *nativeadmission.ApprovedSignedCheck
+	if e.snapshot.Metadata().Profile == policybundle.RuntimeCreationIntentProfileID {
+		approvedCheck, err = e.native.CheckSignedWithCreationPlan(ctx, view, orgID, execution, wallet)
+		if err != nil {
+			return denied(req.id)
+		}
+	} else if !e.native.CheckSigned(ctx, view, orgID, execution, wallet).Allowed {
 		return denied(req.id)
 	}
 	if len(actors) > 0 {
@@ -392,7 +411,7 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 			return denied(req.id)
 		}
 	}
-	input := admission.TrustedRawInput{View: view, OrganizationID: orgID, Transaction: tx, Execution: execution, WalletSnapshot: wallet, Audience: actors}
+	input := admission.TrustedRawInput{ApprovedCheck: approvedCheck, View: view, OrganizationID: orgID, Transaction: tx, Execution: execution, WalletSnapshot: wallet, Audience: actors}
 	result, err := e.raw.admission.CheckAndRecordRaw(ctx, input)
 	if err != nil {
 		return rawFailure(req.id, err)

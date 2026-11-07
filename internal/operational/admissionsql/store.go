@@ -15,8 +15,10 @@ import (
 )
 
 type Store struct {
-	pool *pgxpool.Pool
-	mode string
+	pool           *pgxpool.Pool
+	mode           string
+	schemaVersion  int
+	creationLimits a.CreationLimits
 }
 
 var _ a.Store = (*Store)(nil)
@@ -42,8 +44,9 @@ func open(ctx context.Context, dsn, mode string) (*Store, error) {
 	if err != nil {
 		return nil, a.ErrUnavailable
 	}
-	s := &Store{pool, mode}
-	if s.CheckSchema(ctx) != nil || s.checkPrivileges(ctx) != nil {
+	version, versionErr := schemaVersion(ctx, pool)
+	s := &Store{pool: pool, mode: mode, schemaVersion: version, creationLimits: a.DefaultCreationLimits()}
+	if versionErr != nil || s.CheckSchema(ctx) != nil || s.checkPrivileges(ctx) != nil {
 		pool.Close()
 		return nil, a.ErrUnavailable
 	}
@@ -123,7 +126,7 @@ func (s *Store) WithRawTransaction(ctx context.Context, scope a.Scope, callback 
 	if err := state(ctx, tx, scope.Network, scope.State); err != nil {
 		return a.CommitReceipt{}, err
 	}
-	rows := &rawTx{recordReader: recordReader{ctx, tx, scope}, tx: tx}
+	rows := &rawTx{recordReader: recordReader{ctx, tx, scope}, tx: tx, creationLimits: s.creationLimits}
 	kind, err := callback(rows)
 	if err != nil {
 		return a.CommitReceipt{}, err
@@ -179,6 +182,7 @@ type recordReader struct {
 }
 type rawTx struct {
 	recordReader
-	tx      pgx.Tx
-	effects bool
+	tx             pgx.Tx
+	effects        bool
+	creationLimits a.CreationLimits
 }

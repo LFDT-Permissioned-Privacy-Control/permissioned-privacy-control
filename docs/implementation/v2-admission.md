@@ -103,16 +103,20 @@ component does not substitute for those release requirements.
 
 ## Schema, retention and recovery
 
-The five operational data tables are `travel_records`, `compliance_events`,
+Schema 1's five operational data tables are `travel_records`, `compliance_events`,
 `qualified_tx_origins`, `extra_privacy_witnesses` and `tx_shares`. Two metadata
 tables hold schema version/checksum and network readiness/coverage. None stores
 approved policy, users, groups or memberships.
+
+The explicit [creation-intent profile](native-creation-intent.md) adds four
+operational journal tables through offline schema 2. Their separate immutable
+reference, capacity and recovery rules apply when that profile is selected.
 
 Run `ops-v2-admission-migrate` offline with an explicitly named DSN environment
 variable. `migrate` assigns pre-existing app, reader and retention roles;
 `bootstrap-empty` accepts only a previously empty network. Startup verifies the
 schema, expected indexes/trigger and effective privileges, including access to
-unrelated/legacy tables. App writes are restricted to inserts, unused-record
+unrelated/legacy tables. Schema-1 app writes are restricted to inserts, unused-record
 deletes and the two monotonic record-use columns. An independent reader cannot
 write. Migrator/database/backup operators remain trusted: forged operational
 facts can affect privacy and compliance despite policy being file-authoritative.

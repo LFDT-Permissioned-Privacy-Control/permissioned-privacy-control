@@ -38,7 +38,7 @@ func multiOrgEngine(t *testing.T, f fixture, n *node, d rawDatabase) (*rpcengine
 	return mountedRawEngine(t, f, n, d, true)
 }
 
-func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg bool) (*rpcengine.Engine, string, *admission.Service, *policybundle.CatalogSnapshot) {
+func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg bool, creationOptions ...creationMountOptions) (*rpcengine.Engine, string, *admission.Service, *policybundle.CatalogSnapshot) {
 	t.Helper()
 	f.multiOrg = multiOrg
 	if f.rawMode == "" {
@@ -46,6 +46,17 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	}
 	if !slices.Contains(f.groups[0].AllowedMethods, "eth_sendTransaction") {
 		f.groups[0].AllowedMethods = append(slices.Clone(f.groups[0].AllowedMethods), "eth_sendTransaction")
+	}
+	if f.creationAttribution != nil {
+		var version int
+		if err := d.owner.QueryRow(t.Context(), `SELECT version FROM ops_admission_v2.schema_version WHERE singleton`).Scan(&version); err != nil {
+			t.Fatal(err)
+		}
+		if version == 1 {
+			if err := admissionsql.MigrateCreationIntents(t.Context(), d.ownerDSN, "raw_app", "raw_reader", "raw_retention"); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	snapshot := f.load(t)
 	clock := func() time.Time { return time.Unix(now, 0) }
@@ -64,7 +75,13 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	if err := walletsql.BootstrapEmpty(t.Context(), d.ownerDSN, binding, walletGen); err != nil {
 		t.Fatal(err)
 	}
-	store, err := admissionsql.Open(t.Context(), d.appDSN)
+	var store *admissionsql.Store
+	var err error
+	if len(creationOptions) > 0 && creationOptions[0].limits != nil {
+		store, err = admissionsql.OpenCreationWriter(t.Context(), d.appDSN, *creationOptions[0].limits)
+	} else {
+		store, err = admissionsql.Open(t.Context(), d.appDSN)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,12 +93,17 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	t.Cleanup(walletStore.Close)
 	namespace, _ := binding.Namespace()
 	walletState := walletops.ExpectedState{Generation: walletGen, Coverage: walletsql.EmptyCoverage()}
-	if f.linkSigner {
+	if f.linkSigner || len(creationOptions) > 0 && creationOptions[0].walletService != nil {
 		service, err := walletops.New(walletops.Config{Snapshot: snapshot, Clock: clock, Binding: binding, State: walletState, Store: walletStore})
 		if err != nil {
 			t.Fatal(err)
 		}
-		operationalLink(t, service, token(t, snapshot, f.roles), signedValue(t, 9).Signer())
+		if f.linkSigner {
+			operationalLink(t, service, token(t, snapshot, f.roles), signedValue(t, 9).Signer())
+		}
+		if len(creationOptions) > 0 && creationOptions[0].walletService != nil {
+			creationOptions[0].walletService(service)
+		}
 	}
 	resolver, err := walletadapter.New(walletStore, namespace, walletState, clock)
 	if err != nil {
@@ -92,17 +114,25 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 		profile = rpcexecution.GuardRetainedProfileID
 	}
 	callProfile := rpcexecution.NodeProfileID
-	if f.lifecycle || f.simulation {
+	if f.lifecycle || f.simulation || f.creationAttribution != nil {
 		callProfile = rpcexecution.LifecycleCallProfileID
 		profile = rpcexecution.LifecycleSignedProfileID
 		if f.rawMode == policybundle.RawSubmissionGuardV1 {
 			profile = rpcexecution.LifecycleGuardProfileID
 		}
-		if f.simulation {
+		if f.simulation || f.creationAttribution != nil {
 			callProfile = rpcexecution.SimulationCallProfileID
 		}
 	}
-	financial, err := admission.New(admission.Config{Snapshot: snapshot, Clock: clock, NetworkBinding: network, ExpectedState: admission.ExpectedState{Generation: gen, Coverage: admissionsql.EmptyCoverage()}, Store: store, ExpectedEvidenceProfile: profile, CursorKeyring: admission.CursorKeyring{Active: admission.CursorKey{ID: "test", Key: bytes.Repeat([]byte{8}, 32)}}})
+	newFinancial := admission.New
+	if f.creationAttribution != nil {
+		newFinancial = admission.NewCreationIntents
+	}
+	var financialStore admission.Store = store
+	if len(creationOptions) > 0 && creationOptions[0].wrap != nil {
+		financialStore = creationOptions[0].wrap(store)
+	}
+	financial, err := newFinancial(admission.Config{Snapshot: snapshot, Clock: clock, NetworkBinding: network, ExpectedState: admission.ExpectedState{Generation: gen, Coverage: admissionsql.EmptyCoverage()}, Store: financialStore, ExpectedEvidenceProfile: profile, CursorKeyring: admission.CursorKeyring{Active: admission.CursorKey{ID: "test", Key: bytes.Repeat([]byte{8}, 32)}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +195,9 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 			t.Fatal("old lifecycle RPC constructor accepted v5 simulation source")
 		}
 		constructor = rpcengine.NewSimulation
+	}
+	if f.creationAttribution != nil {
+		constructor = rpcengine.NewCreationIntents
 	}
 	e, err := constructor(snapshot, options)
 	if err != nil {

@@ -164,7 +164,9 @@ verify-audit-buffer:
 # CI regenerates and fails on drift. The route↔spec coverage gate lives in
 # internal/server/openapi_coverage_test.go (runs with test-unit).
 # Keep private V2 implementation types outside legacy handler/schema discovery.
-SWAG_EXCLUDES = ./site,./frontend,./e2e,./mcp,./contracts,./scripts,./monitoring,./demos,./docs,./internal/nativeadmission,./internal/rpcengine,./internal/rpcexecution
+# Private auth dependencies also declare json types that collide in swag's type cache;
+# legacy handlers and their referenced public models remain in the discovery roots.
+SWAG_EXCLUDES = ./site,./frontend,./e2e,./mcp,./contracts,./scripts,./monitoring,./demos,./docs,./internal/nativeadmission,./internal/rpcengine,./internal/rpcexecution,./internal/identitybroker,./internal/brokerpolicy,./internal/brokertest,./internal/identityhttp,./internal/operational/identitysql
 .PHONY: api-spec
 api-spec:
 	go tool swag init --v3.1 -q -g internal/server/openapi_general_info.go -d ./ \

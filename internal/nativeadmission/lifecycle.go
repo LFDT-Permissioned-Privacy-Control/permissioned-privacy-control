@@ -43,7 +43,7 @@ func (n *Engine) temporalOwner(address common.Address, code rpcexecution.CodeInf
 // creation metadata, frame code, storage, caller, upgrade target, SELF target.
 // The reviewed16-query bound is therefore conservative across ALL passes;
 // matching and association scans consume only these copied cheap facts.
-func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, rootOrg string, e *rpcexecution.CallExecution, wallets WalletSnapshot, signer common.Address, work uint64) policycore.Decision {
+func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, rootOrg string, e *rpcexecution.CallExecution, wallets WalletSnapshot, signer common.Address, work uint64, capture *creationCapture) policycore.Decision {
 	var valid bool
 	work, valid = add(work, uint64(e.RecordCount()))
 	if !valid || work > MaxAdmissionWork {
@@ -349,6 +349,9 @@ func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, r
 		}
 	}
 	if ctx.Err() != nil || view.RequireLive() != nil {
+		return invalid()
+	}
+	if capture != nil && !n.captureCreations(ctx, view, rootOrg, e, records, plan, fresh, work, capture) {
 		return invalid()
 	}
 	return policycore.Decision{Allowed: true}

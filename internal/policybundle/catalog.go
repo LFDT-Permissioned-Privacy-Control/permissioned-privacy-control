@@ -138,36 +138,37 @@ func cloneContract(c Contract) Contract {
 }
 
 type catalogBuilder struct {
-	profile                 ValidationProfile
-	snapshot                *CatalogSnapshot
-	policies                map[string]*policycore.Policy
-	capabilities            map[string]bool
-	secrets                 map[string]bool
-	addresses               map[string]string
-	groupOwners             map[string]string
-	resourceIDs             map[string]bool
-	addressRefs             []eventAddressRef
-	identitySource          *identity.SourceCatalog
-	identityRef             *IdentityCatalogRef
-	identityLimits          identity.Limits
-	disclosureSource        *disclosurepolicy.Source
-	disclosureRef           *DisclosureCatalogRef
-	disclosureLimits        disclosurepolicy.Limits
-	complianceSource        *compliancepolicy.Source
-	complianceRef           *ComplianceCatalogRef
-	complianceLimits        compliancepolicy.Limits
-	authSource              *brokerpolicy.Source
-	authMultiSource         *brokerpolicy.SourceV2
-	authDocuments           []brokerpolicy.DocumentBytes
-	authRef                 *AuthCatalogRef
-	runtimeSource           *RuntimeSource
-	runtimeRawSource        *RuntimeRawSource
-	runtimeMultiOrgSource   *RuntimeMultiOrgSource
-	runtimeLifecycleSource  *RuntimeLifecycleSource
-	runtimeSimulationSource *RuntimeSimulationSource
-	runtimeRef              *RuntimeCatalogRef
-	runtimeScopes           map[string]string
-	limits                  Limits
+	profile                     ValidationProfile
+	snapshot                    *CatalogSnapshot
+	policies                    map[string]*policycore.Policy
+	capabilities                map[string]bool
+	secrets                     map[string]bool
+	addresses                   map[string]string
+	groupOwners                 map[string]string
+	resourceIDs                 map[string]bool
+	addressRefs                 []eventAddressRef
+	identitySource              *identity.SourceCatalog
+	identityRef                 *IdentityCatalogRef
+	identityLimits              identity.Limits
+	disclosureSource            *disclosurepolicy.Source
+	disclosureRef               *DisclosureCatalogRef
+	disclosureLimits            disclosurepolicy.Limits
+	complianceSource            *compliancepolicy.Source
+	complianceRef               *ComplianceCatalogRef
+	complianceLimits            compliancepolicy.Limits
+	authSource                  *brokerpolicy.Source
+	authMultiSource             *brokerpolicy.SourceV2
+	authDocuments               []brokerpolicy.DocumentBytes
+	authRef                     *AuthCatalogRef
+	runtimeSource               *RuntimeSource
+	runtimeRawSource            *RuntimeRawSource
+	runtimeMultiOrgSource       *RuntimeMultiOrgSource
+	runtimeLifecycleSource      *RuntimeLifecycleSource
+	runtimeSimulationSource     *RuntimeSimulationSource
+	runtimeCreationIntentSource *RuntimeCreationIntentSource
+	runtimeRef                  *RuntimeCatalogRef
+	runtimeScopes               map[string]string
+	limits                      Limits
 }
 
 func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
@@ -196,7 +197,10 @@ func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
 			b.capabilities[name] = true
 		}
 	}
-	if o.Profile.id == RuntimeSimulationProfileID {
+	if o.Profile.id == RuntimeCreationIntentProfileID {
+		b.capabilities[CapabilityCreationIntents] = true
+	}
+	if o.Profile.id == RuntimeSimulationProfileID || o.Profile.id == RuntimeCreationIntentProfileID {
 		b.capabilities[CapabilityUnsignedSimulation] = true
 	}
 	return b

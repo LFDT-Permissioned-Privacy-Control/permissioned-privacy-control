@@ -18,6 +18,7 @@ const (
 	RuntimeMultiOrgProfileID       = "catalog-runtime-multi-org/v1"
 	RuntimeLifecycleProfileID      = "catalog-runtime-lifecycle/v1"
 	RuntimeSimulationProfileID     = "catalog-runtime-simulation/v1"
+	RuntimeCreationIntentProfileID = "catalog-runtime-creation-intent/v1"
 	DisclosureProfileID            = "catalog-disclosure/v1"
 	ComplianceProfileID            = "catalog-compliance/v1"
 	BrokerProfileID                = "catalog-broker/v1"
@@ -58,6 +59,7 @@ const (
 	CapabilityCreationContext      = "inputs.creation-context/v1"
 	CapabilityLifecycleBeneficiary = "inputs.lifecycle-beneficiary/v1"
 	CapabilityUnsignedSimulation   = "runtime.unsigned-create-simulation/v1"
+	CapabilityCreationIntents      = "operational.creation-intent/v1"
 )
 
 // ValidationProfile is opaque: files cannot register validators or enable
@@ -104,8 +106,12 @@ func RuntimeSimulationProfile(methodCatalogVersion string) ValidationProfile {
 	return ValidationProfile{RuntimeSimulationProfileID, NativeV4EvaluatorVersion, methodCatalogVersion}
 }
 
+func RuntimeCreationIntentProfile(methodCatalogVersion string) ValidationProfile {
+	return ValidationProfile{RuntimeCreationIntentProfileID, NativeV4EvaluatorVersion, methodCatalogVersion}
+}
+
 func lifecycleRuntimeProfile(id string) bool {
-	return id == RuntimeLifecycleProfileID || id == RuntimeSimulationProfileID
+	return id == RuntimeLifecycleProfileID || id == RuntimeSimulationProfileID || id == RuntimeCreationIntentProfileID
 }
 
 func multiOrgRuntimeProfile(id string) bool {

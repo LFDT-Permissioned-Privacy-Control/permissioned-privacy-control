@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"time"
 
 	a "privacy-proxy/internal/admission"
 	"privacy-proxy/internal/operational/admissionsql"
@@ -35,12 +36,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 	generation := fs.String("generation", "", "explicit generation UUID")
 	coverage := fs.String("coverage-digest", "", "operator completeness attestation digest")
 	ack := fs.Bool("acknowledge-complete", false, "attest complete restored operational facts")
+	recoveryTimeout := fs.Duration("recovery-timeout", 10*time.Minute, "finalize only: finite offline scan budget, at most 30m")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
-			fmt.Fprintln(stdout, "ops-v2-admission-migrate migrate|bootstrap-empty|begin-recovery|finalize --dsn-env NAME [explicit roles/binding/generation/coverage options]")
+			fmt.Fprintln(stdout, "ops-v2-admission-migrate migrate|migrate-creation-intents|bootstrap-empty|begin-recovery|finalize --dsn-env NAME [explicit roles/binding/generation/coverage options; finalize --recovery-timeout 10m, maximum 30m]")
 			return 0
 		}
 		fmt.Fprintln(stderr, "invalid admission migration arguments")
+		return 2
+	}
+	invalidTimeout := *recoveryTimeout <= 0 || *recoveryTimeout > admissionsql.MaxRecoveryTimeout
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "recovery-timeout" && command != "finalize" {
+			invalidTimeout = true
+		}
+	})
+	if invalidTimeout {
+		fmt.Fprintln(stderr, "recovery timeout must be positive, at most 30m, and used only with finalize")
 		return 2
 	}
 	if fs.NArg() != 0 || !regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,127}$`).MatchString(*dsnEnv) {
@@ -59,7 +71,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch command {
 	case "migrate":
 		err = admissionsql.Migrate(ctx, dsn, *app, *reader, *retention)
-		out = map[string]any{"schemaVersion": 1, "sourceChecksum": admissionsql.SchemaChecksum()}
+		if err == nil {
+			out, err = admissionsql.InstalledSchema(ctx, dsn)
+		}
+	case "migrate-creation-intents":
+		err = admissionsql.MigrateCreationIntents(ctx, dsn, *app, *reader, *retention)
+		if err == nil {
+			out, err = admissionsql.InstalledSchema(ctx, dsn)
+		}
 	case "bootstrap-empty":
 		err = admissionsql.BootstrapEmpty(ctx, dsn, binding, *generation)
 		out = map[string]any{"generation": *generation, "coverageDigest": admissionsql.EmptyCoverage().String(), "ready": true}
@@ -70,7 +89,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		var digest a.Digest
 		digest, err = a.ParseDigest(*coverage)
 		if err == nil {
-			err = admissionsql.FinalizeRecovery(ctx, dsn, binding, a.ExpectedState{Generation: *generation, Coverage: digest}, *ack)
+			err = admissionsql.FinalizeRecoveryWithTimeout(ctx, dsn, binding, a.ExpectedState{Generation: *generation, Coverage: digest}, *ack, *recoveryTimeout)
 		}
 		out = map[string]any{"generation": *generation, "coverageDigest": *coverage, "ready": true}
 	default:

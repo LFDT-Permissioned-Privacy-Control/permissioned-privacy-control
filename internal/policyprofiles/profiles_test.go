@@ -9,7 +9,7 @@ import (
 
 func TestProfilesStayExplicitAndRegistryDataDetached(t *testing.T) {
 	profiles := policyprofiles.Supported()
-	if len(profiles) != 12 {
+	if len(profiles) != 13 {
 		t.Fatal("compiled profiles changed without a registry test")
 	}
 	for _, expected := range profiles {
@@ -28,6 +28,9 @@ func TestProfilesStayExplicitAndRegistryDataDetached(t *testing.T) {
 		}
 		if expected.ID == policybundle.RuntimeSimulationProfileID && (actual.EvaluatorVersion != policybundle.NativeV4EvaluatorVersion || actual.IntegrationScope == "") {
 			t.Fatal("simulation source lacks explicit native-v4 semantics/scope")
+		}
+		if expected.ID == policybundle.RuntimeCreationIntentProfileID && (actual.EvaluatorVersion != policybundle.NativeV4EvaluatorVersion || actual.IntegrationScope != "atomic creation intent recording; no observed ownership or pending authority") {
+			t.Fatal("intent journal mislabeled as observed or pending authority")
 		}
 		if expected.ID == policybundle.RuntimeCallProfileID && actual.IntegrationScope == "" {
 			t.Fatal("runtime slice lacks explicit qualification scope")
