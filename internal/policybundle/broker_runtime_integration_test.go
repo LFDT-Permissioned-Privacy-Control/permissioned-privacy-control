@@ -12,10 +12,12 @@ import (
 func TestBrokerRuntimeIntegrationKeepsSourceProfilesClosed(t *testing.T) {
 	auth := brokerFixture(t)
 	for name, makeFixture := range map[string]func(*testing.T) fixture{
-		"native":     nativeV2Fixture,
-		"call":       runtimeFixture,
-		"lifecycle":  lifecycleFixture,
-		"simulation": simulationFixture,
+		"native":            nativeV2Fixture,
+		"call":              runtimeFixture,
+		"lifecycle":         lifecycleFixture,
+		"simulation":        simulationFixture,
+		"creation-intent":   creationIntentFixture,
+		"creation-observed": creationObservedFixture,
 		"raw": func(t *testing.T) fixture {
 			return rawRuntimeFixture(t, policybundle.RawSubmissionOPSPreflight)
 		},

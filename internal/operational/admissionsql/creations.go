@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	a "privacy-proxy/internal/admission"
+	"privacy-proxy/internal/creationfacts"
 	"privacy-proxy/internal/identity"
 )
 
@@ -124,7 +125,24 @@ func (t *rawTx) creationRefs() ([]creationRef, error) {
 }
 
 func (t *rawTx) PutCreationIntent(i a.CreationIntent) (a.CreationIntentReceipt, error) {
-	plan, err := i.Validate(t.scope)
+	return t.putCreationIntent(i, nil)
+}
+func (t *rawTx) putCreationIntent(i a.CreationIntent, coverage *creationfacts.CoverageRecord) (a.CreationIntentReceipt, error) {
+	validator := i.Validate
+	if coverage != nil {
+		validator = i.ValidateCaptured
+	}
+	plan, err := validator(t.scope)
+	version := 1
+	coverageBytes := 0
+	if coverage != nil {
+		version = 2
+		raw, e := coverage.Canonical()
+		if e != nil {
+			return a.CreationIntentReceipt{}, a.ErrInvalid
+		}
+		coverageBytes = len(raw)
+	}
 	if err != nil {
 		return a.CreationIntentReceipt{}, err
 	}
@@ -198,6 +216,11 @@ func (t *rawTx) PutCreationIntent(i a.CreationIntent) (a.CreationIntentReceipt, 
 				if !r.equal(i, kind, manifest, runtime) {
 					return a.CreationIntentReceipt{}, a.ErrConflict
 				}
+				if coverage != nil {
+					if err := t.originalCoverage(seed, i.Anchor.Hash, i.Anchor.Number); err != nil {
+						return a.CreationIntentReceipt{}, err
+					}
+				}
 				matched = true
 			}
 		}
@@ -226,6 +249,15 @@ func (t *rawTx) PutCreationIntent(i a.CreationIntent) (a.CreationIntentReceipt, 
 	if err := t.tx.QueryRow(t.ctx, `SELECT work_count,plan_count,plan_bytes,wallet_ref_count,factory_ref_count FROM ops_admission_v2.creation_capacity WHERE network_key=$1 FOR UPDATE`, t.scope.Network[:]).Scan(&usage.Work, &usage.Plans, &usage.Bytes, &usage.WalletRefs, &usage.FactoryRefs); err != nil {
 		return a.CreationIntentReceipt{}, a.ErrUnavailable
 	}
+	if coverage != nil {
+		rows, bytes, err := t.coverageUsage(t.ctx)
+		limits := t.observerLimits
+		addRows := int64(len(newRefs))
+		addBytes := addRows * int64(coverageBytes)
+		if err != nil || !limits.Valid() || rows < 0 || bytes < 0 || rows > limits.CoverageRows-addRows || bytes > limits.CoverageBytes-addBytes {
+			return a.CreationIntentReceipt{}, a.ErrUnavailable
+		}
+	}
 	delta := a.CreationLimits{}
 	if newWork {
 		delta.Work = 1
@@ -246,7 +278,7 @@ func (t *rawTx) PutCreationIntent(i a.CreationIntent) (a.CreationIntentReceipt, 
 		return a.CreationIntentReceipt{}, a.ErrUnavailable
 	}
 	if newPlan {
-		_, err = t.tx.Exec(t.ctx, `INSERT INTO ops_admission_v2.creation_plans(network_key,tx_hash,plan_digest,version,payload,entry_count,root_org,manifest_digest,runtime_digest,chain_id,evidence_profile,created_at)VALUES($1,$2,$3,1,$4,$5,$6::uuid,$7,$8,$9,$10,$11)`, t.scope.Network[:], t.scope.Hash[:], i.PlanDigest[:], i.Plan, len(plan.Entries), plan.RootOrg, manifest[:], runtime[:], plan.Chain, plan.Evidence, i.CapturedAt)
+		_, err = t.tx.Exec(t.ctx, `INSERT INTO ops_admission_v2.creation_plans(network_key,tx_hash,plan_digest,version,payload,entry_count,root_org,manifest_digest,runtime_digest,chain_id,evidence_profile,created_at)VALUES($1,$2,$3,$12,$4,$5,$6::uuid,$7,$8,$9,$10,$11)`, t.scope.Network[:], t.scope.Hash[:], i.PlanDigest[:], i.Plan, len(plan.Entries), plan.RootOrg, manifest[:], runtime[:], plan.Chain, plan.Evidence, i.CapturedAt, version)
 		if err != nil {
 			return a.CreationIntentReceipt{}, dbError(err)
 		}
@@ -261,6 +293,13 @@ func (t *rawTx) PutCreationIntent(i a.CreationIntent) (a.CreationIntentReceipt, 
 			return a.CreationIntentReceipt{}, dbError(err)
 		}
 	}
+	if coverage != nil {
+		for _, r := range newRefs {
+			if err := t.insertCoverage(r.seed, *coverage); err != nil {
+				return a.CreationIntentReceipt{}, err
+			}
+		}
+	}
 	if newWork {
 		_, err = t.tx.Exec(t.ctx, `INSERT INTO ops_admission_v2.creation_work(network_key,tx_hash,generation,created_at,updated_at)VALUES($1,$2,1,$3,$3)`, t.scope.Network[:], t.scope.Hash[:], i.CapturedAt)
 	} else {
@@ -270,7 +309,11 @@ func (t *rawTx) PutCreationIntent(i a.CreationIntent) (a.CreationIntentReceipt, 
 	if err != nil {
 		return a.CreationIntentReceipt{}, dbError(err)
 	}
-	_, err = t.tx.Exec(t.ctx, `UPDATE ops_admission_v2.creation_capacity SET work_count=work_count+$2,plan_count=plan_count+$3,plan_bytes=plan_bytes+$4,wallet_ref_count=wallet_ref_count+$5,factory_ref_count=factory_ref_count+$6 WHERE network_key=$1`, t.scope.Network[:], delta.Work, delta.Plans, delta.Bytes, delta.WalletRefs, delta.FactoryRefs)
+	if coverage != nil {
+		_, err = t.tx.Exec(t.ctx, `UPDATE ops_admission_v2.creation_capacity SET work_count=work_count+$2,plan_count=plan_count+$3,plan_bytes=plan_bytes+$4,wallet_ref_count=wallet_ref_count+$5,factory_ref_count=factory_ref_count+$6,capture_coverage_count=capture_coverage_count+$7,capture_coverage_bytes=capture_coverage_bytes+$8 WHERE network_key=$1`, t.scope.Network[:], delta.Work, delta.Plans, delta.Bytes, delta.WalletRefs, delta.FactoryRefs, len(newRefs), len(newRefs)*coverageBytes)
+	} else {
+		_, err = t.tx.Exec(t.ctx, `UPDATE ops_admission_v2.creation_capacity SET work_count=work_count+$2,plan_count=plan_count+$3,plan_bytes=plan_bytes+$4,wallet_ref_count=wallet_ref_count+$5,factory_ref_count=factory_ref_count+$6 WHERE network_key=$1`, t.scope.Network[:], delta.Work, delta.Plans, delta.Bytes, delta.WalletRefs, delta.FactoryRefs)
+	}
 	if err != nil {
 		return a.CreationIntentReceipt{}, dbError(err)
 	}

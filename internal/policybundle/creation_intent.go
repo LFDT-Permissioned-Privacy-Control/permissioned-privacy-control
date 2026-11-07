@@ -79,8 +79,8 @@ func (r *RuntimeCatalog) CreationIntentSource() (RuntimeCreationIntentSource, bo
 	return s, true
 }
 
-func (b *catalogBuilder) normalizeCreationFactories(shared []SharedInfrastructure) ([]FactoryAttribution, error) {
-	entries := slices.Clone(b.runtimeCreationIntentSource.CreationAttribution.Factories)
+func (b *catalogBuilder) normalizeCreationFactories(shared []SharedInfrastructure, declared []FactoryAttribution) ([]FactoryAttribution, error) {
+	entries := slices.Clone(declared)
 	bad := func() ([]FactoryAttribution, error) {
 		return nil, fail(InvalidSchema, "", "", "creationAttribution", "invalid approved factory attribution")
 	}

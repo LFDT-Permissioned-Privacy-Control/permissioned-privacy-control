@@ -51,7 +51,7 @@ func validateRestoredCreations(ctx context.Context, tx pgx.Tx, network a.Digest)
 	}
 	var lastHash, lastDigest []byte
 	for {
-		rows, err := tx.Query(ctx, `SELECT tx_hash,plan_digest,CASE WHEN octet_length(payload)<=65536 THEN payload ELSE NULL END,entry_count,root_org::text,manifest_digest,runtime_digest,chain_id,evidence_profile,created_at FROM ops_admission_v2.creation_plans WHERE network_key=$1 AND($2::bytea IS NULL OR(tx_hash,plan_digest)>($2::bytea,$3::bytea)) ORDER BY tx_hash,plan_digest LIMIT 256`, network[:], lastHash, lastDigest)
+		rows, err := tx.Query(ctx, `SELECT tx_hash,plan_digest,CASE WHEN octet_length(payload)<=65536 THEN payload ELSE NULL END,entry_count,root_org::text,manifest_digest,runtime_digest,chain_id,evidence_profile,created_at,version FROM ops_admission_v2.creation_plans WHERE network_key=$1 AND($2::bytea IS NULL OR(tx_hash,plan_digest)>($2::bytea,$3::bytea)) ORDER BY tx_hash,plan_digest LIMIT 256`, network[:], lastHash, lastDigest)
 		if err != nil {
 			return a.ErrUnavailable
 		}
@@ -60,15 +60,19 @@ func validateRestoredCreations(ctx context.Context, tx pgx.Tx, network a.Digest)
 		for rows.Next() {
 			var hash, digest, payload, manifest, runtime []byte
 			var count int
+			var version int
 			var org, chain, evidence string
 			var created time.Time
-			if rows.Scan(&hash, &digest, &payload, &count, &org, &manifest, &runtime, &chain, &evidence, &created) != nil || len(hash) != 32 || len(digest) != 32 || len(manifest) != 32 || len(runtime) != 32 || created.IsZero() || created.Unix() < 0 || created.Unix() > 253402300799 {
+			if rows.Scan(&hash, &digest, &payload, &count, &org, &manifest, &runtime, &chain, &evidence, &created, &version) != nil || len(hash) != 32 || len(digest) != 32 || len(manifest) != 32 || len(runtime) != 32 || created.IsZero() || created.Unix() < 0 || created.Unix() > 253402300799 || (version != 1 && version != 2) {
 				rows.Close()
 				return a.ErrCoverage
 			}
 			key := recoveryPlanKey{hash: common.BytesToHash(hash)}
 			copy(key.digest[:], digest)
 			p, err := a.DecodeCreationPlan(payload, key.digest)
+			if version == 2 {
+				p, err = a.DecodeCapturedCreationPlan(payload, key.digest)
+			}
 			if err != nil || p.Hash != key.hash || p.RootOrg != org || p.Chain != chain || chain != networkChain || p.Evidence != evidence || len(p.Entries) != count {
 				rows.Close()
 				return a.ErrCoverage

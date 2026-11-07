@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"privacy-proxy/internal/creationfacts"
 	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/policycore"
@@ -90,8 +91,23 @@ func CreationSeedSet(wallet, factory *Digest) Digest {
 // DecodeCreationPlan validates present rows and restored rows identically. It
 // validates intent shape and identity; it never claims actual chain inclusion.
 func DecodeCreationPlan(raw []byte, digest Digest) (nativeadmission.CreationPlanData, error) {
+	return decodeCreationPlan(raw, digest, false)
+}
+func DecodeCapturedCreationPlan(raw []byte, digest Digest) (nativeadmission.CreationPlanData, error) {
+	return decodeCreationPlan(raw, digest, true)
+}
+func decodeCreationPlan(raw []byte, digest Digest, captured bool) (nativeadmission.CreationPlanData, error) {
 	var p nativeadmission.CreationPlanData
-	if len(raw) == 0 || len(raw) > nativeadmission.MaxCreationPlanBytes || nativeadmission.CreationPlanDigest(raw) != common.Hash(digest) {
+	if len(raw) == 0 || len(raw) > nativeadmission.MaxCreationPlanBytes {
+		return p, ErrInvalid
+	}
+	wantDigest := nativeadmission.CreationPlanDigest(raw)
+	version := nativeadmission.CreationPlanVersion
+	if captured {
+		wantDigest = nativeadmission.CapturedCreationPlanDigest(raw)
+		version = nativeadmission.CapturedCreationPlanVersion
+	}
+	if len(raw) == 0 || len(raw) > nativeadmission.MaxCreationPlanBytes || wantDigest != common.Hash(digest) {
 		return p, ErrInvalid
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
@@ -104,7 +120,7 @@ func DecodeCreationPlan(raw []byte, digest Digest) (nativeadmission.CreationPlan
 		return p, ErrInvalid
 	}
 	canonical, err := json.Marshal(p)
-	if err != nil || !bytes.Equal(canonical, raw) || p.Version != nativeadmission.CreationPlanVersion || p.Hash == (common.Hash{}) || !ValidUUID(p.RootOrg) || len(p.Entries) < 1 || len(p.Entries) > nativeadmission.MaxCreationEntries || p.Entries == nil || p.Declarations == nil || p.FactoryRoots == nil {
+	if err != nil || !bytes.Equal(canonical, raw) || p.Version != version || (!captured && p.CaptureProfile != "") || (captured && p.CaptureProfile != creationfacts.CaptureProfile) || p.Hash == (common.Hash{}) || !ValidUUID(p.RootOrg) || len(p.Entries) < 1 || len(p.Entries) > nativeadmission.MaxCreationEntries || p.Entries == nil || p.Declarations == nil || p.FactoryRoots == nil {
 		return p, ErrInvalid
 	}
 	if _, err := ParseDigest(p.Manifest); err != nil {
@@ -176,7 +192,13 @@ func DecodeCreationPlan(raw []byte, digest Digest) (nativeadmission.CreationPlan
 // PlanData validates a stored observation envelope, not a caller's permission.
 // A factory has no ActorID; recovery must not invent one to decode its facts.
 func (i CreationIntent) PlanData() (nativeadmission.CreationPlanData, error) {
-	p, err := DecodeCreationPlan(i.Plan, i.PlanDigest)
+	return i.planData(false)
+}
+func (i CreationIntent) CapturedPlanData() (nativeadmission.CreationPlanData, error) {
+	return i.planData(true)
+}
+func (i CreationIntent) planData(captured bool) (nativeadmission.CreationPlanData, error) {
+	p, err := decodeCreationPlan(i.Plan, i.PlanDigest, captured)
 	if err != nil || i.CapturedAt.IsZero() || i.CapturedAt.Unix() < 0 || i.CapturedAt.Unix() > 253402300799 || i.Anchor.Hash == (common.Hash{}) || i.Anchor.ChainID != p.Chain || i.Anchor.OrganizationID != p.RootOrg || i.Anchor.Profile != p.Evidence || (!i.Factory && i.Wallet == nil) || (i.Factory && len(p.FactoryRoots) == 0) {
 		return p, ErrInvalid
 	}
@@ -186,7 +208,13 @@ func (i CreationIntent) PlanData() (nativeadmission.CreationPlanData, error) {
 	return p, nil
 }
 func (i CreationIntent) Validate(scope Scope) (nativeadmission.CreationPlanData, error) {
-	p, err := i.PlanData()
+	return i.validate(scope, false)
+}
+func (i CreationIntent) ValidateCaptured(scope Scope) (nativeadmission.CreationPlanData, error) {
+	return i.validate(scope, true)
+}
+func (i CreationIntent) validate(scope Scope, captured bool) (nativeadmission.CreationPlanData, error) {
+	p, err := i.planData(captured)
 	if err != nil || !scope.Valid() || p.Hash != scope.Hash || p.RootOrg != scope.Organization {
 		return p, ErrInvalid
 	}

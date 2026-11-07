@@ -7,6 +7,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"privacy-proxy/internal/compliance"
 	"privacy-proxy/internal/compliancepolicy"
+	"privacy-proxy/internal/creationcapture"
+	"privacy-proxy/internal/creationfacts"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/policybundle"
@@ -18,6 +20,7 @@ const SignedEvidenceProfile = "geth-prague-signed-call/v1"
 
 type Config struct {
 	Snapshot                *policybundle.CatalogSnapshot
+	CaptureGate             *creationcapture.Gate
 	Clock                   identity.Clock
 	NetworkBinding          NetworkBinding
 	ExpectedState           ExpectedState
@@ -28,6 +31,8 @@ type Config struct {
 }
 type Service struct {
 	creationIntents                  bool
+	creationObserved                 bool
+	captureGate                      *creationcapture.Gate
 	snapshot                         *policybundle.CatalogSnapshot
 	factory                          *runtimepolicy.Factory
 	catalog                          *compliancepolicy.Catalog
@@ -44,20 +49,29 @@ type Service struct {
 }
 type Metadata struct {
 	CreationIntents                              bool
+	CreationObserved                             bool
 	ManifestDigest, ComplianceDigest, NetworkKey Digest
 	Network                                      NetworkBinding
 	EvidenceProfile                              string
 }
 
 func (s *Service) Metadata() Metadata {
-	return Metadata{CreationIntents: s.creationIntents, ManifestDigest: s.manifestDigest, ComplianceDigest: s.complianceDigest, NetworkKey: s.networkKey, Network: s.network, EvidenceProfile: s.evidenceProfile}
+	return Metadata{CreationIntents: s.creationIntents, CreationObserved: s.creationObserved, ManifestDigest: s.manifestDigest, ComplianceDigest: s.complianceDigest, NetworkKey: s.networkKey, Network: s.network, EvidenceProfile: s.evidenceProfile}
 }
 func (s *Service) AdminReady() bool  { return s != nil && s.cursors != nil }
-func New(c Config) (*Service, error) { return newService(c, false) }
+func New(c Config) (*Service, error) { return newService(c, false, false) }
 
-func NewCreationIntents(c Config) (*Service, error) { return newService(c, true) }
+func NewCreationIntents(c Config) (*Service, error) { return newService(c, true, false) }
 
-func newService(c Config, creationIntents bool) (*Service, error) {
+func NewCreationObserved(c Config) (*Service, error) { return newService(c, true, true) }
+func (s *Service) CaptureGate() *creationcapture.Gate {
+	if s == nil {
+		return nil
+	}
+	return s.captureGate
+}
+
+func newService(c Config, creationIntents, observed bool) (*Service, error) {
 	if c.Snapshot == nil || c.Clock == nil || c.Store == nil || !c.ExpectedState.Valid() || !supportedEvidenceProfile(c.ExpectedEvidenceProfile) {
 		return nil, ErrInvalid
 	}
@@ -66,16 +80,30 @@ func newService(c Config, creationIntents bool) (*Service, error) {
 		return nil, err
 	}
 	meta := c.Snapshot.Metadata()
-	if (meta.Profile == policybundle.RuntimeCreationIntentProfileID) != creationIntents {
+	if (meta.Profile == policybundle.RuntimeCreationIntentProfileID || meta.Profile == policybundle.RuntimeCreationObservedProfileID) != creationIntents || (meta.Profile == policybundle.RuntimeCreationObservedProfileID) != observed || (!observed && c.CaptureGate != nil) {
 		return nil, ErrInvalid
 	}
 	if creationIntents {
 		store, ok := c.Store.(CreationIntentStore)
 		runtime, found := c.Snapshot.Runtime()
-		if !ok || store.CreationIntentSchemaVersion() != 2 || !found {
+		if !ok || (store.CreationIntentSchemaVersion() != 2 && store.CreationIntentSchemaVersion() != 3) || !found {
 			return nil, ErrInvalid
 		}
-		if _, ok := runtime.CreationIntentSource(); !ok {
+		if observed {
+			covered, ok := c.Store.(CreationCoveredStore)
+			if !ok || covered.CreationCoveredSchemaVersion() != 3 || c.CaptureGate == nil {
+				return nil, ErrInvalid
+			}
+			if _, ok := runtime.CreationObservedSource(); !ok {
+				return nil, ErrInvalid
+			}
+			gm := c.CaptureGate.Metadata()
+			wantNetwork := creationfacts.Network{Key: creationfacts.Digest(key), Environment: c.NetworkBinding.Environment, ChainID: c.NetworkBinding.ChainID, Genesis: common.HexToHash(c.NetworkBinding.GenesisHash), Deployment: c.NetworkBinding.DeploymentID}
+			wantState := creationfacts.State{Generation: c.ExpectedState.Generation, Coverage: creationfacts.Digest(c.ExpectedState.Coverage)}
+			if gm.Network != wantNetwork || gm.State != wantState {
+				return nil, ErrInvalid
+			}
+		} else if _, ok := runtime.CreationIntentSource(); !ok {
 			return nil, ErrInvalid
 		}
 		expected := rpcexecution.LifecycleSignedProfileID
@@ -114,7 +142,7 @@ func newService(c Config, creationIntents bool) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{creationIntents: creationIntents, snapshot: c.Snapshot, factory: factory, catalog: catalog, clock: c.Clock, network: c.NetworkBinding, networkKey: key, state: c.ExpectedState, store: c.Store, quotes: c.QuoteProvider, evidenceProfile: c.ExpectedEvidenceProfile, manifestDigest: manifest, complianceDigest: policy, orgs: map[string]*orgRuntime{}, cursors: ring}
+	s := &Service{creationIntents: creationIntents, creationObserved: observed, captureGate: c.CaptureGate, snapshot: c.Snapshot, factory: factory, catalog: catalog, clock: c.Clock, network: c.NetworkBinding, networkKey: key, state: c.ExpectedState, store: c.Store, quotes: c.QuoteProvider, evidenceProfile: c.ExpectedEvidenceProfile, manifestDigest: manifest, complianceDigest: policy, orgs: map[string]*orgRuntime{}, cursors: ring}
 	for _, organization := range c.Snapshot.Organizations() {
 		p, ok := catalog.OrgPolicy(organization.ID)
 		if !ok {
@@ -208,6 +236,7 @@ func (r *CommittedResult) Receipt() (*RawReceipt, bool) {
 
 type RawReceipt struct {
 	approval                    *nativeadmission.ApprovedSignedCheck
+	captureResult               *creationcapture.Result
 	creationPlan, creationSeeds Digest
 	service                     *Service
 	view                        *runtimepolicy.View
@@ -229,6 +258,12 @@ func (r *RawReceipt) RequirePublishable() error {
 }
 func (r *RawReceipt) Matches(input TrustedRawInput) bool {
 	if r == nil || !r.valid || input.View == nil || input.Execution == nil || !input.Transaction.Valid() {
+		return false
+	}
+	if r.captureResult != input.CaptureResult {
+		return false
+	}
+	if r.service.creationObserved && input.CaptureResult != nil && input.CaptureResult.RequireMatches(r.service.captureGate, captureRequest(input)) != nil {
 		return false
 	}
 	if r.service.creationIntents {
@@ -253,6 +288,16 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 	defer cancel()
 	if err := s.checkView(input.View, input.OrganizationID); err != nil {
 		return nil, err
+	}
+	if s.creationObserved {
+		if err := s.validateObservedInput(input); err != nil {
+			return nil, err
+		}
+		if input.CaptureResult != nil && input.CaptureResult.RequireMatches(s.captureGate, captureRequest(input)) != nil {
+			return nil, ErrInvalid
+		}
+	} else if input.CaptureResult != nil {
+		return nil, ErrInvalid
 	}
 	var creationPlan *nativeadmission.CreationPlan
 	var creationDigest, creationSeeds Digest
@@ -306,7 +351,18 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 	var decision Decision
 	var at time.Time
 	used := map[string]Quote{}
-	committed, err := s.store.WithRawTransaction(ctx, scope, func(raw RawTx) (CommitKind, error) {
+	write := s.store.WithRawTransaction
+	if s.creationObserved && input.CaptureResult != nil {
+		if ticket, ok := input.CaptureResult.Ticket(); ok {
+			record := ticket.Record()
+			binding := CaptureCommitBinding{ObserverEpoch: record.ObserverEpoch, CaptureEpoch: record.CaptureEpoch, SourceSet: record.SourceSet}
+			store := s.store.(CreationCoveredStore)
+			write = func(ctx context.Context, scope Scope, callback func(RawTx) (CommitKind, error)) (CommitReceipt, error) {
+				return store.WithCoveredRawTransaction(ctx, scope, binding, callback)
+			}
+		}
+	}
+	committed, err := write(ctx, scope, func(raw RawTx) (CommitKind, error) {
 		if err := s.checkView(input.View, input.OrganizationID); err != nil {
 			return 0, err
 		}
@@ -424,11 +480,26 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 			if creationWallet != nil {
 				intent.Wallet = &CreationWalletAuthority{Actor: scope.Actor, Organization: scope.Organization, Witness: creationWallet.ID}
 			}
-			stored, err := writer.PutCreationIntent(intent)
+			var stored CreationIntentReceipt
+			if s.creationObserved {
+				if input.CaptureResult == nil {
+					return 0, ErrCoverage
+				}
+				if !input.CaptureResult.KnownMined() {
+					ticket, ok := input.CaptureResult.Ticket()
+					covered, capable := raw.(CoveredCreationRawTx)
+					if !ok || !capable {
+						return 0, ErrUnavailable
+					}
+					stored, err = covered.PutCoveredCreationIntent(intent, ticket.Record())
+				}
+			} else {
+				stored, err = writer.PutCreationIntent(intent)
+			}
 			if err != nil {
 				return 0, err
 			}
-			if stored.Seeds == (Digest{}) {
+			if stored.Seeds == (Digest{}) && !(s.creationObserved && input.CaptureResult != nil && input.CaptureResult.KnownMined()) {
 				return 0, ErrUnavailable
 			}
 			creationSeeds = stored.Seeds
@@ -449,7 +520,7 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 	}
 	out := &CommittedResult{decision: decision}
 	if decision.Allowed {
-		out.receipt = &RawReceipt{approval: input.ApprovedCheck, creationPlan: creationDigest, creationSeeds: creationSeeds, service: s, view: input.View, scope: scope, audience: audienceDigest, anchor: anchor.Hash, execution: input.Execution, walletActor: input.WalletSnapshot.ActorID(), walletVersion: input.WalletSnapshot.Version(), at: at, used: used, valid: true}
+		out.receipt = &RawReceipt{approval: input.ApprovedCheck, captureResult: input.CaptureResult, creationPlan: creationDigest, creationSeeds: creationSeeds, service: s, view: input.View, scope: scope, audience: audienceDigest, anchor: anchor.Hash, execution: input.Execution, walletActor: input.WalletSnapshot.ActorID(), walletVersion: input.WalletSnapshot.Version(), at: at, used: used, valid: true}
 	}
 	return out, nil
 }

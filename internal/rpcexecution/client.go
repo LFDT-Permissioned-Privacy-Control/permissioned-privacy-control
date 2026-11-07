@@ -38,12 +38,13 @@ type BindingMetadata struct {
 	PragueStartInclusive, PragueEndExclusive uint64
 }
 type Client struct {
-	transport  Transport
-	binding    NodeBinding
-	limits     Limits
-	credential Credential
-	selected   bool
-	ids        *atomic.Uint64
+	transport     Transport
+	binding       NodeBinding
+	limits        Limits
+	credential    Credential
+	credentialRef string
+	selected      bool
+	ids           *atomic.Uint64
 }
 
 func NewClient(transport Transport, binding NodeBinding, limits Limits) (*Client, error) {
@@ -97,11 +98,13 @@ func (c *Client) WithCredential(ref string) (*Client, error) {
 		}
 		selected.credential = credential
 	}
+	selected.credentialRef = ref
 	selected.selected = true
 	return &selected, nil
 }
 
 type CallExecution struct {
+	origin      *Client
 	signed      bool
 	signer      common.Address
 	txHash      common.Hash
@@ -146,6 +149,9 @@ func (c *Client) rpc(ctx context.Context, method string, params []any) (json.Raw
 }
 
 func (c *Client) rpcBounded(ctx context.Context, method string, params []any, maxBytes int64) (json.RawMessage, error) {
+	return c.rpcResultBounded(ctx, method, params, maxBytes, false)
+}
+func (c *Client) rpcResultBounded(ctx context.Context, method string, params []any, maxBytes int64, nullableResult bool) (json.RawMessage, error) {
 	id := c.ids.Add(1)
 	request, _ := json.Marshal(struct {
 		JSONRPC string `json:"jsonrpc"`
@@ -182,7 +188,11 @@ func (c *Client) rpcBounded(ctx context.Context, method string, params []any, ma
 	if int64(len(raw)) > maxBytes {
 		return nil, failure(EvidenceLimit)
 	}
-	fields, err := closedRawObject(raw, 4)
+	var nullable map[string]bool
+	if nullableResult {
+		nullable = map[string]bool{"result": true}
+	}
+	fields, err := nullableRawObject(raw, 4, nullable)
 	if err != nil {
 		return nil, err
 	}
@@ -412,5 +422,5 @@ func (c *Client) finishEvidence(ctx context.Context, call Call, anchor Anchor, t
 	if ctx.Err() != nil {
 		return nil, failure(NodeFailure)
 	}
-	return &CallExecution{call: call, anchor: anchor, tree: tree, codes: codes, raw: bytes.Clone(raw), recordCount: len(records)}, nil
+	return &CallExecution{origin: c, call: call, anchor: anchor, tree: tree, codes: codes, raw: bytes.Clone(raw), recordCount: len(records)}, nil
 }

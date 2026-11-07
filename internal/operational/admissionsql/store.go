@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	a "privacy-proxy/internal/admission"
+	"privacy-proxy/internal/creationfacts"
 )
 
 type Store struct {
@@ -19,6 +20,7 @@ type Store struct {
 	mode           string
 	schemaVersion  int
 	creationLimits a.CreationLimits
+	observerLimits creationfacts.Limits
 }
 
 var _ a.Store = (*Store)(nil)
@@ -45,7 +47,7 @@ func open(ctx context.Context, dsn, mode string) (*Store, error) {
 		return nil, a.ErrUnavailable
 	}
 	version, versionErr := schemaVersion(ctx, pool)
-	s := &Store{pool: pool, mode: mode, schemaVersion: version, creationLimits: a.DefaultCreationLimits()}
+	s := &Store{pool: pool, mode: mode, schemaVersion: version, creationLimits: a.DefaultCreationLimits(), observerLimits: creationfacts.DefaultLimits()}
 	if versionErr != nil || s.CheckSchema(ctx) != nil || s.checkPrivileges(ctx) != nil {
 		pool.Close()
 		return nil, a.ErrUnavailable
@@ -109,6 +111,15 @@ func state(ctx context.Context, q querier, network a.Digest, expected a.Expected
 	return nil
 }
 func (s *Store) WithRawTransaction(ctx context.Context, scope a.Scope, callback func(a.RawTx) (a.CommitKind, error)) (a.CommitReceipt, error) {
+	return s.withRawTransaction(ctx, scope, nil, callback)
+}
+func (s *Store) WithCoveredRawTransaction(ctx context.Context, scope a.Scope, binding a.CaptureCommitBinding, callback func(a.RawTx) (a.CommitKind, error)) (a.CommitReceipt, error) {
+	if s.schemaVersion != 3 || !binding.Valid() {
+		return a.CommitReceipt{}, a.ErrInvalid
+	}
+	return s.withRawTransaction(ctx, scope, &binding, callback)
+}
+func (s *Store) withRawTransaction(ctx context.Context, scope a.Scope, capture *a.CaptureCommitBinding, callback func(a.RawTx) (a.CommitKind, error)) (a.CommitReceipt, error) {
 	if s.mode != "app" || !scope.Valid() || callback == nil {
 		return a.CommitReceipt{}, a.ErrInvalid
 	}
@@ -119,6 +130,11 @@ func (s *Store) WithRawTransaction(ctx context.Context, scope a.Scope, callback 
 		return a.CommitReceipt{}, err
 	}
 	defer rollback(tx)
+	if capture != nil {
+		if err := captureLock(ctx, tx, scope.Network, true); err != nil {
+			return a.CommitReceipt{}, err
+		}
+	}
 	first, second := a.HashLock(scope.Network, scope.Hash)
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::integer,$2::integer)`, first, second); err != nil {
 		return a.CommitReceipt{}, a.ErrUnavailable
@@ -126,7 +142,12 @@ func (s *Store) WithRawTransaction(ctx context.Context, scope a.Scope, callback 
 	if err := state(ctx, tx, scope.Network, scope.State); err != nil {
 		return a.CommitReceipt{}, err
 	}
-	rows := &rawTx{recordReader: recordReader{ctx, tx, scope}, tx: tx, creationLimits: s.creationLimits}
+	if capture != nil {
+		if err := captureDurable(ctx, tx, scope, *capture); err != nil {
+			return a.CommitReceipt{}, err
+		}
+	}
+	rows := &rawTx{recordReader: recordReader{ctx, tx, scope}, tx: tx, creationLimits: s.creationLimits, observerLimits: s.observerLimits, capture: capture}
 	kind, err := callback(rows)
 	if err != nil {
 		return a.CommitReceipt{}, err
@@ -139,6 +160,11 @@ func (s *Store) WithRawTransaction(ctx context.Context, scope a.Scope, callback 
 	}
 	if err := state(ctx, tx, scope.Network, scope.State); err != nil {
 		return a.CommitReceipt{}, err
+	}
+	if capture != nil {
+		if err := captureDurable(ctx, tx, scope, *capture); err != nil {
+			return a.CommitReceipt{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return a.CommitReceipt{}, a.ErrUnavailable
@@ -185,4 +211,6 @@ type rawTx struct {
 	tx             pgx.Tx
 	effects        bool
 	creationLimits a.CreationLimits
+	observerLimits creationfacts.Limits
+	capture        *a.CaptureCommitBinding
 }
