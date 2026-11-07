@@ -26,6 +26,7 @@ import (
 	_ "privacy-proxy/internal/compliancepolicy"
 	_ "privacy-proxy/internal/config"
 	_ "privacy-proxy/internal/disclosurecase"
+	_ "privacy-proxy/internal/disclosuredata"
 	_ "privacy-proxy/internal/disclosurehttp"
 	_ "privacy-proxy/internal/disclosurepolicy"
 	_ "privacy-proxy/internal/executionfacts"
@@ -37,6 +38,7 @@ import (
 	_ "privacy-proxy/internal/identityhttp"
 	_ "privacy-proxy/internal/nativeadmission"
 	_ "privacy-proxy/internal/netguard"
+	_ "privacy-proxy/internal/networkidentity"
 	_ "privacy-proxy/internal/operational/admissionsql"
 	_ "privacy-proxy/internal/operational/disclosuresql"
 	_ "privacy-proxy/internal/operational/identitysql"
@@ -174,7 +176,7 @@ func TestNativeCallRuntimeDependencyBoundary(t *testing.T) {
 			allowed["privacy-proxy/internal/rpcexecution"] = true
 		}
 		if pkg == "privacy-proxy/internal/rpcengine" {
-			for _, name := range []string{"nativeadmission", "admission", "walletadapter", "walletops", "walletproof", "guardbridge", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate"} {
+			for _, name := range []string{"networkidentity", "nativeadmission", "admission", "walletadapter", "walletops", "walletproof", "guardbridge", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate"} {
 				allowed["privacy-proxy/internal/"+name] = true
 			}
 		}
@@ -343,9 +345,9 @@ func TestDisclosureDependencyBoundaries(t *testing.T) {
 			}
 		}
 	}
-	allowed := map[string]bool{"privacy-proxy/internal/disclosurepolicy": true, "privacy-proxy/internal/compliancepolicy": true, "privacy-proxy/internal/compliance": true, "privacy-proxy/internal/brokerpolicy": true, "privacy-proxy/internal/disclosurecase": true, "privacy-proxy/internal/disclosurehttp": true, "privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/policycore": true, "privacy-proxy/internal/policyprofiles": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/strictjson": true, "privacy-proxy/internal/runtimepolicy": true}
+	allowed := map[string]bool{"privacy-proxy/internal/disclosurepolicy": true, "privacy-proxy/internal/compliancepolicy": true, "privacy-proxy/internal/compliance": true, "privacy-proxy/internal/brokerpolicy": true, "privacy-proxy/internal/disclosurecase": true, "privacy-proxy/internal/disclosuredata": true, "privacy-proxy/internal/networkidentity": true, "privacy-proxy/internal/disclosurehttp": true, "privacy-proxy/internal/policybundle": true, "privacy-proxy/internal/policycore": true, "privacy-proxy/internal/policyprofiles": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/strictjson": true, "privacy-proxy/internal/runtimepolicy": true}
 	allowed["privacy-proxy/internal/pricefeedpolicy"] = true
-	for _, pkg := range []string{"privacy-proxy/internal/disclosurepolicy", "privacy-proxy/internal/disclosurecase", "privacy-proxy/internal/disclosurehttp", "privacy-proxy/internal/operational/disclosuresql", "privacy-proxy/cmd/ops-v2-disclosure-migrate"} {
+	for _, pkg := range []string{"privacy-proxy/internal/disclosurepolicy", "privacy-proxy/internal/disclosurecase", "privacy-proxy/internal/disclosuredata", "privacy-proxy/internal/disclosurehttp", "privacy-proxy/internal/operational/disclosuresql", "privacy-proxy/cmd/ops-v2-disclosure-migrate"} {
 		usesSQL := pkg == "privacy-proxy/internal/operational/disclosuresql" || pkg == "privacy-proxy/cmd/ops-v2-disclosure-migrate"
 		for dep := range transitiveDeps(t, root, pkg) {
 			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !allowed[dep] && !(usesSQL && dep == "privacy-proxy/internal/operational/disclosuresql") {
@@ -495,7 +497,7 @@ func TestNativeAdmissionStorageBoundary(t *testing.T) {
 		}
 	}
 	allowed := map[string]bool{}
-	for _, name := range []string{"admission", "compliancehttp", "compliance", "compliancepolicy", "disclosurepolicy", "identity", "strictjson", "policybundle", "policycore", "runtimepolicy", "nativeadmission", "rpcexecution", "executionfacts", "transactioninput", "pricefeedpolicy", "brokerpolicy"} {
+	for _, name := range []string{"networkidentity", "admission", "compliancehttp", "compliance", "compliancepolicy", "disclosurepolicy", "identity", "strictjson", "policybundle", "policycore", "runtimepolicy", "nativeadmission", "rpcexecution", "executionfacts", "transactioninput", "pricefeedpolicy", "brokerpolicy"} {
 		allowed["privacy-proxy/internal/"+name] = true
 	}
 	for _, pkg := range []string{"privacy-proxy/internal/admission", "privacy-proxy/internal/compliancehttp", "privacy-proxy/internal/operational/admissionsql", "privacy-proxy/cmd/ops-v2-admission-migrate"} {
@@ -517,7 +519,7 @@ func TestNativeAdmissionStorageBoundary(t *testing.T) {
 func TestApprovedPriceFeedDependencyBoundary(t *testing.T) {
 	root := moduleRoot(t)
 	allowed := map[string]bool{}
-	for _, name := range []string{"pricefeedpolicy", "quotefeed", "admission", "compliance", "compliancepolicy", "disclosurepolicy", "identity", "strictjson", "policybundle", "policycore", "runtimepolicy", "nativeadmission", "rpcexecution", "executionfacts", "transactioninput", "netguard", "brokerpolicy"} {
+	for _, name := range []string{"networkidentity", "pricefeedpolicy", "quotefeed", "admission", "compliance", "compliancepolicy", "disclosurepolicy", "identity", "strictjson", "policybundle", "policycore", "runtimepolicy", "nativeadmission", "rpcexecution", "executionfacts", "transactioninput", "netguard", "brokerpolicy"} {
 		allowed["privacy-proxy/internal/"+name] = true
 	}
 	for _, pkg := range []string{"privacy-proxy/internal/pricefeedpolicy", "privacy-proxy/internal/quotefeed"} {
@@ -613,6 +615,34 @@ func TestPrivadoProviderDependencyBoundary(t *testing.T) {
 		}
 		if strings.HasPrefix(dep, "github.com/ethereum/go-ethereum/core/") && !transactionPrimitive(dep) {
 			t.Errorf("Privado provider imports EVM/state machinery %s", dep)
+		}
+	}
+}
+
+func TestNetworkIdentityIsStandardLibraryOnly(t *testing.T) {
+	root := moduleRoot(t)
+	cmd := exec.Command("go", "list", "-deps", "-f", `{{if not .Standard}}{{.ImportPath}}{{end}}`, "privacy-proxy/internal/networkidentity")
+	cmd.Dir = root
+	raw, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("network helper dependencies: %v %s", err, raw)
+	}
+	for _, dep := range strings.Fields(string(raw)) {
+		if dep != "privacy-proxy/internal/networkidentity" {
+			t.Errorf("network identity imports nonstdlib %s", dep)
+		}
+	}
+}
+func TestProtectedDataPureBoundary(t *testing.T) {
+	allowed := map[string]bool{"privacy-proxy/internal/disclosuredata": true, "privacy-proxy/internal/disclosurepolicy": true, "privacy-proxy/internal/identity": true, "privacy-proxy/internal/strictjson": true, "privacy-proxy/internal/networkidentity": true}
+	for dep := range transitiveDeps(t, moduleRoot(t), "privacy-proxy/internal/disclosuredata") {
+		if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
+			t.Errorf("pure data imports application machinery %s", dep)
+		}
+		for _, prefix := range []string{"github.com/jackc/", "github.com/redis/", "github.com/ethereum/go-ethereum/core/", "github.com/ethereum/go-ethereum/triedb"} {
+			if strings.HasPrefix(dep, prefix) {
+				t.Errorf("pure data imports persistence/VM %s", dep)
+			}
 		}
 	}
 }

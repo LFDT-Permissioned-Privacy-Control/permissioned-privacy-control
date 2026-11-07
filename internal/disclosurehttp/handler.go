@@ -1,5 +1,5 @@
-// Package disclosurehttp mounts the finite V2 case administration routes. It
-// mounts no data/report, user-directory or end-user approval endpoint.
+// Package disclosurehttp mounts finite case administration and protected-read
+// routes. It has no user directory or end-user approval endpoint.
 package disclosurehttp
 
 import (
@@ -16,15 +16,19 @@ import (
 	"unicode/utf8"
 
 	"privacy-proxy/internal/disclosurecase"
+	d "privacy-proxy/internal/disclosuredata"
 	"privacy-proxy/internal/strictjson"
 )
 
-type Handler struct{ service *disclosurecase.Service }
+type Handler struct {
+	service *disclosurecase.Service
+	data    bool
+}
 
 const MaxRawQueryBytes = 16 << 10
 
 func New(service *disclosurecase.Service) (*Handler, error) {
-	if service == nil {
+	if service == nil || service.DataEnabled() {
 		return nil, disclosurecase.ErrInvalid
 	}
 	return &Handler{service: service}, nil
@@ -35,6 +39,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/disclosure/cases/{id}", h.wrap(h.get))
 	mux.HandleFunc("POST /api/v1/disclosure/cases/{id}/revoke", h.wrap(h.revoke))
 	mux.HandleFunc("GET /api/v1/disclosure/cases/{id}/audit", h.wrap(h.audit))
+	if h.data {
+		mux.HandleFunc("POST /api/v1/disclosure/cases/{id}/read", h.wrap(h.read))
+	}
 }
 
 type operation func(context.Context, string, *http.Request) (*disclosurecase.Response, error)
@@ -53,18 +60,41 @@ func (h *Handler) wrap(op operation) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
+		if h.data {
+			if err := dataBoundary(r); err != nil {
+				writeError(w, err)
+				return
+			}
+		}
 		token, err := bearer(r)
 		if err != nil {
 			writeError(w, err)
 			return
+		}
+		if h.data {
+			release, ok := h.service.TryAdmitHTTP()
+			if !ok {
+				w.Header().Set("Connection", "close")
+				writeError(w, disclosurecase.ErrUnavailable)
+				return
+			}
+			defer release()
+			if err := dataDeadlines(w); err != nil {
+				writeError(w, err)
+				return
+			}
 		}
 		response, err := op(ctx, token, r)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
+		if response.ReportDownload() {
+			w.Header().Set("Content-Disposition", `attachment; filename="ops-disclosure-report.json"`)
+		}
 		writer := &statusWriter{ResponseWriter: w, status: response.Status()}
 		if _, err := response.WriteTo(writer); err != nil && !writer.wrote {
+			w.Header().Del("Content-Disposition")
 			writeError(w, err)
 		}
 	}
@@ -103,7 +133,9 @@ func writeError(w http.ResponseWriter, err error) {
 		status, message = 404, "disclosure case not found"
 	case errors.Is(err, disclosurecase.ErrConflict):
 		status, message = 409, "disclosure context changed"
-	case errors.Is(err, disclosurecase.ErrInvalid):
+	case errors.Is(err, d.ErrTooBroad), errors.Is(err, d.ErrUnsupported):
+		status, message = 422, "protected data scope unavailable"
+	case errors.Is(err, d.ErrInvalid), errors.Is(err, disclosurecase.ErrInvalid):
 		status, message = 400, "invalid disclosure request"
 	}
 	w.WriteHeader(status)

@@ -71,8 +71,9 @@ func (c Case) Response() CaseResponse {
 }
 
 type EventSummary struct {
-	Count       int    `json:"count"`
-	RuleContext string `json:"ruleContext"`
+	Count       int              `json:"count"`
+	RuleContext string           `json:"ruleContext"`
+	Exposure    *ExposureSummary `json:"exposure,omitempty"`
 }
 type Event struct {
 	ID, CaseID, Epoch, Actor, Action, Outcome, RuleID, RuleDigest, BundleDigest, AttemptID string
@@ -159,6 +160,9 @@ func ValidateEvent(e Event) error {
 		return ErrInvalid
 	}
 	if e.Summary.RuleContext != "current" && e.Summary.RuleContext != "original-history" {
+		return ErrInvalid
+	}
+	if e.Summary.Exposure != nil && ValidateExposureEvent(e) != nil {
 		return ErrInvalid
 	}
 	return nil

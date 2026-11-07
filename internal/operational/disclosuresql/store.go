@@ -305,7 +305,13 @@ func (s *Store) Events(ctx context.Context, id, epoch string, after *c.Position,
 		var e c.Event
 		var raw []byte
 		err := rows.Scan(&e.ID, &e.CaseID, &e.Epoch, &e.Actor, &e.Action, &e.Outcome, &e.RuleID, &e.RuleDigest, &e.BundleDigest, &e.CaseVersion, &e.PreparedAt, &raw, &e.AttemptID)
-		if err != nil || decodeSummary(raw, &e.Summary) != nil || c.ValidateEvent(e) != nil {
+		if err != nil {
+			return nil, c.ErrUnavailable
+		}
+		// timestamptz preserves the instant; pgx may attach the process-local
+		// location. Canonicalize the read representation without changing time.
+		e.PreparedAt = e.PreparedAt.UTC()
+		if decodeSummary(raw, &e.Summary) != nil || c.ValidateEvent(e) != nil {
 			return nil, c.ErrUnavailable
 		}
 		out = append(out, e)

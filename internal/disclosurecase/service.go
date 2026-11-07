@@ -29,6 +29,7 @@ type Service struct {
 	store    Store
 	epoch    string
 	cursors  *cursorRing
+	data     *dataState
 }
 
 func New(config Config) (*Service, error) {
@@ -51,19 +52,21 @@ func New(config Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{config.Snapshot, catalog, factory, config.Clock, config.Store, epoch, keys}, nil
+	return &Service{snapshot: config.Snapshot, catalog: catalog, factory: factory, clock: config.Clock, store: config.Store, epoch: epoch, cursors: keys}, nil
 }
 
 // Response exposes bytes only through a final operation-specific time/access
 // check after durable commit. An event can therefore truthfully remain prepared
 // but unsent if access expires before WriteTo. It never proves client receipt.
 type Response struct {
-	body   []byte
-	gate   func() error
-	status int
+	body     []byte
+	gate     func() error
+	status   int
+	download bool
 }
 
-func (r *Response) Status() int { return r.status }
+func (r *Response) Status() int          { return r.status }
+func (r *Response) ReportDownload() bool { return r.download }
 func (r *Response) WriteTo(w io.Writer) (int64, error) {
 	if err := r.gate(); err != nil {
 		return 0, err
@@ -76,7 +79,7 @@ func response(value any, status int, gate func() error) (*Response, error) {
 	if err != nil || len(raw)+1 > MaxResponseBytes {
 		return nil, ErrInvalid
 	}
-	return &Response{append(raw, '\n'), gate, status}, nil
+	return &Response{body: append(raw, '\n'), gate: gate, status: status}, nil
 }
 func (s *Service) view(token string) (*runtimepolicy.View, error) {
 	v, err := s.factory.Build(token)

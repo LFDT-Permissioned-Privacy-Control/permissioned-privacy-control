@@ -22,7 +22,7 @@ func decodeSummary(raw []byte, out *c.EventSummary) error {
 	if _, err := d.Token(); err != io.EOF {
 		return c.ErrUnavailable
 	}
-	if strictjson.ExactDecode(value, out) != nil {
+	if strictjson.ExactDecodeWithOptions(value, out, strictjson.ShapeOptions{OptionalOmitEmpty: true}) != nil {
 		return c.ErrUnavailable
 	}
 	return nil

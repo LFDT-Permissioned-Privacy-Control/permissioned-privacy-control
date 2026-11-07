@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"privacy-proxy/internal/identity"
+	"privacy-proxy/internal/networkidentity"
 )
 
 type Digest [32]byte
@@ -97,15 +98,11 @@ type NetworkBinding struct {
 }
 
 func (n NetworkBinding) Key() (Digest, error) {
-	chain, err := ParseUint256(n.ChainID, true)
-	if err != nil || !chain.IsUint64() || !text(n.Environment, 128, false) || !text(n.DeploymentID, 128, false) || len(n.GenesisHash) != 66 || !strings.HasPrefix(n.GenesisHash, "0x") {
+	key, err := (networkidentity.Binding{Environment: n.Environment, ChainID: n.ChainID, GenesisHash: n.GenesisHash, DeploymentID: n.DeploymentID}).Key()
+	if err != nil {
 		return Digest{}, ErrInvalid
 	}
-	decoded, err := hex.DecodeString(n.GenesisHash[2:])
-	if err != nil || hex.EncodeToString(decoded) != n.GenesisHash[2:] {
-		return Digest{}, ErrInvalid
-	}
-	return HashParts("ops-ledger-network/v1", []byte(n.Environment), []byte(n.ChainID), []byte(n.GenesisHash), []byte(n.DeploymentID)), nil
+	return Digest(key), nil
 }
 
 type ExpectedState struct {
