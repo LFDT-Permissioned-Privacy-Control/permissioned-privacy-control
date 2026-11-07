@@ -19,6 +19,8 @@ type Engine struct {
 	raw             bool
 	multiOrg        bool
 	lifecycle       bool
+	creationIntents bool
+	factories       map[common.Address]policybundle.FactoryAttribution
 	metadata        policybundle.BundleMetadata
 	runtime         *policybundle.RuntimeCatalog
 	owners          map[common.Address]string
@@ -48,6 +50,10 @@ func NewSimulation(snapshot *policybundle.CatalogSnapshot, clock identity.Clock)
 	return newEngine(snapshot, clock, policybundle.RuntimeSimulationProfileID)
 }
 
+func NewCreationIntents(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
+	return newEngine(snapshot, clock, policybundle.RuntimeCreationIntentProfileID)
+}
+
 func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, expectedProfile string) (*Engine, error) {
 	if snapshot == nil || clock == nil {
 		return nil, errors.New("invalid native admission snapshot")
@@ -55,7 +61,7 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, exp
 	metadata := snapshot.Metadata()
 	runtime, ok := snapshot.Runtime()
 	expectedEvaluator := policybundle.NativeV2EvaluatorVersion
-	lifecycle := expectedProfile == policybundle.RuntimeLifecycleProfileID || expectedProfile == policybundle.RuntimeSimulationProfileID
+	lifecycle := expectedProfile == policybundle.RuntimeLifecycleProfileID || expectedProfile == policybundle.RuntimeSimulationProfileID || expectedProfile == policybundle.RuntimeCreationIntentProfileID
 	if expectedProfile == policybundle.RuntimeMultiOrgProfileID {
 		expectedEvaluator = policybundle.NativeV3EvaluatorVersion
 	}
@@ -66,6 +72,17 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, exp
 		return nil, errors.New("invalid native admission snapshot")
 	}
 	n := &Engine{raw: expectedProfile != policybundle.RuntimeCallProfileID, multiOrg: expectedProfile == policybundle.RuntimeMultiOrgProfileID || lifecycle, lifecycle: lifecycle, metadata: metadata, runtime: runtime, owners: map[common.Address]string{}, shared: map[common.Address]*common.Hash{}, work: map[string]map[string]ruleWork{}, associationWork: map[common.Address]uint64{}}
+	n.creationIntents = expectedProfile == policybundle.RuntimeCreationIntentProfileID
+	if n.creationIntents {
+		source, found := runtime.CreationIntentSource()
+		if !found {
+			return nil, errors.New("invalid creation intent snapshot")
+		}
+		n.factories = map[common.Address]policybundle.FactoryAttribution{}
+		for _, f := range source.CreationAttribution.Factories {
+			n.factories[common.HexToAddress(f.Address)] = f
+		}
+	}
 	for _, org := range snapshot.Organizations() {
 		catalog, ok := snapshot.NativeCatalog(org.ID)
 		if !ok {
@@ -137,7 +154,7 @@ func (n *Engine) sharedCode(execution *rpcexecution.CallExecution, address commo
 // Check consumes only a paired opaque acquisition and the captured request
 // View. Supplied-from ownership is enforced here as well as before node work.
 func (n *Engine) Check(ctx context.Context, view *runtimepolicy.View, selectedOrg string, execution *rpcexecution.CallExecution, wallets WalletSnapshot) policycore.Decision {
-	return n.check(ctx, view, selectedOrg, execution, wallets, false)
+	return n.check(ctx, view, selectedOrg, execution, wallets, false, nil)
 }
 
 // CheckSigned accepts only opaque signed acquisition on the explicitly selected
@@ -146,10 +163,10 @@ func (n *Engine) CheckSigned(ctx context.Context, view *runtimepolicy.View, sele
 	if n == nil || !n.raw {
 		return invalid()
 	}
-	return n.check(ctx, view, selectedOrg, execution, wallets, true)
+	return n.check(ctx, view, selectedOrg, execution, wallets, true, nil)
 }
 
-func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOrg string, execution *rpcexecution.CallExecution, wallets WalletSnapshot, signed bool) policycore.Decision {
+func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOrg string, execution *rpcexecution.CallExecution, wallets WalletSnapshot, signed bool, capture *creationCapture) policycore.Decision {
 	if ctx.Err() != nil || n == nil || view == nil || execution == nil || execution.Signed() != signed || execution.Tree() == nil || view.RequireLive() != nil {
 		return invalid()
 	}
@@ -258,7 +275,7 @@ func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOr
 		return invalid()
 	}
 	if n.lifecycle {
-		return n.checkLifecycle(ctx, view, selectedOrg, execution, wallets, signer, work)
+		return n.checkLifecycle(ctx, view, selectedOrg, execution, wallets, signer, work, capture)
 	}
 	if n.multiOrg {
 		return n.checkMultiOrg(ctx, view, selectedOrg, execution, wallets, signer, work)

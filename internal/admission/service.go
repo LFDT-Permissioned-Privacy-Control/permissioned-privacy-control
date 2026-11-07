@@ -8,6 +8,7 @@ import (
 	"privacy-proxy/internal/compliance"
 	"privacy-proxy/internal/compliancepolicy"
 	"privacy-proxy/internal/identity"
+	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/runtimepolicy"
@@ -26,6 +27,7 @@ type Config struct {
 	CursorKeyring           CursorKeyring
 }
 type Service struct {
+	creationIntents                  bool
 	snapshot                         *policybundle.CatalogSnapshot
 	factory                          *runtimepolicy.Factory
 	catalog                          *compliancepolicy.Catalog
@@ -41,16 +43,21 @@ type Service struct {
 	cursors                          *cursorRing
 }
 type Metadata struct {
+	CreationIntents                              bool
 	ManifestDigest, ComplianceDigest, NetworkKey Digest
 	Network                                      NetworkBinding
 	EvidenceProfile                              string
 }
 
 func (s *Service) Metadata() Metadata {
-	return Metadata{s.manifestDigest, s.complianceDigest, s.networkKey, s.network, s.evidenceProfile}
+	return Metadata{CreationIntents: s.creationIntents, ManifestDigest: s.manifestDigest, ComplianceDigest: s.complianceDigest, NetworkKey: s.networkKey, Network: s.network, EvidenceProfile: s.evidenceProfile}
 }
-func (s *Service) AdminReady() bool { return s != nil && s.cursors != nil }
-func New(c Config) (*Service, error) {
+func (s *Service) AdminReady() bool  { return s != nil && s.cursors != nil }
+func New(c Config) (*Service, error) { return newService(c, false) }
+
+func NewCreationIntents(c Config) (*Service, error) { return newService(c, true) }
+
+func newService(c Config, creationIntents bool) (*Service, error) {
 	if c.Snapshot == nil || c.Clock == nil || c.Store == nil || !c.ExpectedState.Valid() || !supportedEvidenceProfile(c.ExpectedEvidenceProfile) {
 		return nil, ErrInvalid
 	}
@@ -59,6 +66,26 @@ func New(c Config) (*Service, error) {
 		return nil, err
 	}
 	meta := c.Snapshot.Metadata()
+	if (meta.Profile == policybundle.RuntimeCreationIntentProfileID) != creationIntents {
+		return nil, ErrInvalid
+	}
+	if creationIntents {
+		store, ok := c.Store.(CreationIntentStore)
+		runtime, found := c.Snapshot.Runtime()
+		if !ok || store.CreationIntentSchemaVersion() != 2 || !found {
+			return nil, ErrInvalid
+		}
+		if _, ok := runtime.CreationIntentSource(); !ok {
+			return nil, ErrInvalid
+		}
+		expected := rpcexecution.LifecycleSignedProfileID
+		if runtime.RawSubmissionMode() == policybundle.RawSubmissionGuardV1 {
+			expected = rpcexecution.LifecycleGuardProfileID
+		}
+		if c.ExpectedEvidenceProfile != expected {
+			return nil, ErrInvalid
+		}
+	}
 	if meta.Environment != c.NetworkBinding.Environment || meta.ChainID != c.NetworkBinding.ChainID {
 		return nil, ErrInvalid
 	}
@@ -87,7 +114,7 @@ func New(c Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{snapshot: c.Snapshot, factory: factory, catalog: catalog, clock: c.Clock, network: c.NetworkBinding, networkKey: key, state: c.ExpectedState, store: c.Store, quotes: c.QuoteProvider, evidenceProfile: c.ExpectedEvidenceProfile, manifestDigest: manifest, complianceDigest: policy, orgs: map[string]*orgRuntime{}, cursors: ring}
+	s := &Service{creationIntents: creationIntents, snapshot: c.Snapshot, factory: factory, catalog: catalog, clock: c.Clock, network: c.NetworkBinding, networkKey: key, state: c.ExpectedState, store: c.Store, quotes: c.QuoteProvider, evidenceProfile: c.ExpectedEvidenceProfile, manifestDigest: manifest, complianceDigest: policy, orgs: map[string]*orgRuntime{}, cursors: ring}
 	for _, organization := range c.Snapshot.Organizations() {
 		p, ok := catalog.OrgPolicy(organization.ID)
 		if !ok {
@@ -180,16 +207,18 @@ func (r *CommittedResult) Receipt() (*RawReceipt, bool) {
 }
 
 type RawReceipt struct {
-	service                    *Service
-	view                       *runtimepolicy.View
-	scope                      Scope
-	audience                   Digest
-	anchor                     common.Hash
-	execution                  *rpcexecution.CallExecution
-	walletActor, walletVersion string
-	at                         time.Time
-	used                       map[string]Quote
-	valid                      bool
+	approval                    *nativeadmission.ApprovedSignedCheck
+	creationPlan, creationSeeds Digest
+	service                     *Service
+	view                        *runtimepolicy.View
+	scope                       Scope
+	audience                    Digest
+	anchor                      common.Hash
+	execution                   *rpcexecution.CallExecution
+	walletActor, walletVersion  string
+	at                          time.Time
+	used                        map[string]Quote
+	valid                       bool
 }
 
 func (r *RawReceipt) RequirePublishable() error {
@@ -202,6 +231,20 @@ func (r *RawReceipt) Matches(input TrustedRawInput) bool {
 	if r == nil || !r.valid || input.View == nil || input.Execution == nil || !input.Transaction.Valid() {
 		return false
 	}
+	if r.service.creationIntents {
+		if r.approval != input.ApprovedCheck || input.ApprovedCheck.RequireMatches(input.View, input.OrganizationID, input.Execution, input.WalletSnapshot) != nil {
+			return false
+		}
+		if plan := input.ApprovedCheck.Plan(); plan != nil {
+			if Digest(plan.Digest()) != r.creationPlan {
+				return false
+			}
+		} else if r.creationPlan != (Digest{}) {
+			return false
+		}
+	} else if input.ApprovedCheck != nil {
+		return false
+	}
 	_, digest, err := NormalizeRecipients(input.Audience)
 	return err == nil && r.scope.Actor == input.View.ActorID() && r.scope.Organization == input.OrganizationID && r.scope.Hash == input.Transaction.Hash() && r.anchor == input.Execution.Anchor().Hash && r.execution == input.Execution && r.walletActor == input.WalletSnapshot.ActorID() && r.walletVersion == input.WalletSnapshot.Version() && r.audience == digest && string(input.View.Metadata().ManifestDigest) == r.service.manifestDigest.String()
 }
@@ -210,6 +253,19 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 	defer cancel()
 	if err := s.checkView(input.View, input.OrganizationID); err != nil {
 		return nil, err
+	}
+	var creationPlan *nativeadmission.CreationPlan
+	var creationDigest, creationSeeds Digest
+	if s.creationIntents {
+		if input.ApprovedCheck.RequireMatches(input.View, input.OrganizationID, input.Execution, input.WalletSnapshot) != nil {
+			return nil, ErrInvalid
+		}
+		creationPlan = input.ApprovedCheck.Plan()
+		if creationPlan != nil {
+			creationDigest = Digest(creationPlan.Digest())
+		}
+	} else if input.ApprovedCheck != nil {
+		return nil, ErrInvalid
 	}
 	if !input.Transaction.Valid() || input.Transaction.ChainID() != s.network.ChainID || input.Execution == nil || !input.Execution.Signed() {
 		return nil, ErrInvalid
@@ -313,6 +369,7 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 			}
 		}
 		ownProvenance := false
+		var creationWallet *Witness
 		if qualified && (!exists || (origin.Actor == scope.Actor && origin.Organization == scope.Organization)) {
 			w := Witness{AnchorHash: anchor.Hash, AnchorNumber: anchor.Number, AnchorTimestamp: anchor.Timestamp, EvidenceProfile: anchor.Profile, WalletVersion: walletVersion, DecisionAt: at, ManifestDigest: s.manifestDigest, ComplianceDigest: s.complianceDigest, WalletEvidenceAt: input.WalletSnapshot.EvidenceAt()}
 			w.ID = w.Digest()
@@ -326,6 +383,20 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 				}
 			}
 			ownProvenance = true
+			if creationPlan != nil {
+				writer, ok := raw.(CreationRawTx)
+				if !ok {
+					return 0, ErrUnavailable
+				}
+				stored, found, err := writer.GetWitness(w.ID)
+				if err != nil {
+					return 0, err
+				}
+				if !found || !stored.StableEqual(w) {
+					return 0, ErrConflict
+				}
+				creationWallet = &stored
+			}
 		}
 		if len(audience) > 0 {
 			if exists && origin.Organization != scope.Organization {
@@ -338,10 +409,29 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 			}
 			ownProvenance = true
 		}
+
 		if request.lastEventID == 0 && !ownProvenance {
 			if _, err := raw.AppendEvent(Event{Scope: scope, Kind: "admission_only", Coverage: decision.Coverage, Decision: "allowed", DecisionAt: at, PolicyDigest: s.complianceDigest, Anchor: anchor}); err != nil {
 				return 0, err
 			}
+		}
+		if creationPlan != nil && (creationWallet != nil || creationPlan.HasFactoryAuthority()) {
+			writer, ok := raw.(CreationRawTx)
+			if !ok {
+				return 0, ErrUnavailable
+			}
+			intent := CreationIntent{Plan: creationPlan.Encoded(), PlanDigest: creationDigest, Anchor: anchor, Factory: creationPlan.HasFactoryAuthority(), CapturedAt: at}
+			if creationWallet != nil {
+				intent.Wallet = &CreationWalletAuthority{Actor: scope.Actor, Organization: scope.Organization, Witness: creationWallet.ID}
+			}
+			stored, err := writer.PutCreationIntent(intent)
+			if err != nil {
+				return 0, err
+			}
+			if stored.Seeds == (Digest{}) {
+				return 0, ErrUnavailable
+			}
+			creationSeeds = stored.Seeds
 		}
 		if err := s.checkTime(input.View, scope.Organization, at, request.used, request.newRecord); err != nil {
 			return 0, err
@@ -359,7 +449,7 @@ func (s *Service) CheckAndRecordRaw(ctx context.Context, input TrustedRawInput) 
 	}
 	out := &CommittedResult{decision: decision}
 	if decision.Allowed {
-		out.receipt = &RawReceipt{service: s, view: input.View, scope: scope, audience: audienceDigest, anchor: anchor.Hash, execution: input.Execution, walletActor: input.WalletSnapshot.ActorID(), walletVersion: input.WalletSnapshot.Version(), at: at, used: used, valid: true}
+		out.receipt = &RawReceipt{approval: input.ApprovedCheck, creationPlan: creationDigest, creationSeeds: creationSeeds, service: s, view: input.View, scope: scope, audience: audienceDigest, anchor: anchor.Hash, execution: input.Execution, walletActor: input.WalletSnapshot.ActorID(), walletVersion: input.WalletSnapshot.Version(), at: at, used: used, valid: true}
 	}
 	return out, nil
 }

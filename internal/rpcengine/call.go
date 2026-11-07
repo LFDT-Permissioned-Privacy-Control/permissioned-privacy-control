@@ -74,6 +74,9 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpce
 	if expectedProfile == policybundle.RuntimeSimulationProfileID {
 		newNative = nativeadmission.NewSimulation
 	}
+	if expectedProfile == policybundle.RuntimeCreationIntentProfileID {
+		newNative = nativeadmission.NewCreationIntents
+	}
 	native, err := newNative(snapshot, clock)
 	if err != nil {
 		return nil, errors.New("invalid RPC engine configuration")
@@ -182,7 +185,7 @@ func methodAuthorized(snapshot *policybundle.CatalogSnapshot, org *runtimepolicy
 
 func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawRequest []byte) Response {
 	parse := parseRequest
-	if e != nil && e.snapshot.Metadata().Profile == policybundle.RuntimeSimulationProfileID {
+	if e != nil && simulationProfile(e.snapshot.Metadata().Profile) {
 		parse = parseSimulationRequest
 	}
 	req, requestError := parse(rawRequest)
@@ -246,7 +249,7 @@ func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawReq
 		return denied(req.id)
 	}
 	var execution *rpcexecution.CallExecution
-	if e.snapshot.Metadata().Profile == policybundle.RuntimeSimulationProfileID {
+	if simulationProfile(e.snapshot.Metadata().Profile) {
 		execution, err = client.AcquireSimulationCall(ctx, req.call, req.block, func(destination common.Address) bool {
 			actual, matched := selectedAddressOrganization(view, explicitOrg, destination)
 			return matched && actual == orgID && ctx.Err() == nil && view.RequireLive() == nil

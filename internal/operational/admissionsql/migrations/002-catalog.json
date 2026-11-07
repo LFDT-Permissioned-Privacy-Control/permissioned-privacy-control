@@ -1,0 +1,602 @@
+{
+  "constraints": [
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_anchor_hash_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(anchor_hash) = 32)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_anchor_number_check",
+      "type": "c",
+      "definition": "CHECK (anchor_number >= 0::numeric AND anchor_number <= '18446744073709551615'::numeric)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_anchor_timestamp_check",
+      "type": "c",
+      "definition": "CHECK (anchor_timestamp >= 0::numeric AND anchor_timestamp <= '18446744073709551615'::numeric)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_branch_check",
+      "type": "c",
+      "definition": "CHECK (branch >= 1 AND branch <= 8)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_check",
+      "type": "c",
+      "definition": "CHECK (kind = 'WALLET'::text AND wallet_actor IS NOT NULL AND wallet_org IS NOT NULL AND witness_id IS NOT NULL OR kind = 'FACTORY'::text AND wallet_actor IS NULL AND wallet_org IS NULL AND witness_id IS NULL)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_evidence_profile_check",
+      "type": "c",
+      "definition": "CHECK (evidence_profile = ANY (ARRAY['geth-prague-lifecycle-signed/v1'::text, 'geth-prague-lifecycle-guard/v1'::text]))"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_kind_check",
+      "type": "c",
+      "definition": "CHECK (kind = ANY (ARRAY['WALLET'::text, 'FACTORY'::text]))"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_manifest_digest_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(manifest_digest) = 32)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_network_key_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(network_key) = 32)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_network_key_tx_hash_kind_branch_key",
+      "type": "u",
+      "definition": "UNIQUE (network_key, tx_hash, kind, branch)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_network_key_tx_hash_plan_digest_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (network_key, tx_hash, plan_digest) REFERENCES ops_admission_v2.creation_plans(network_key, tx_hash, plan_digest) ON DELETE RESTRICT"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (network_key, tx_hash, seed_digest)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_plan_digest_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(plan_digest) = 32)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_runtime_digest_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(runtime_digest) = 32)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_seed_digest_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(seed_digest) = 32)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_tx_hash_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(tx_hash) = 32)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_wallet_actor_check",
+      "type": "c",
+      "definition": "CHECK (wallet_actor IS NULL OR wallet_actor ~ '^ops:p1:[A-Za-z0-9_-]{43}$'::text)"
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "creation_authority_refs_witness_id_check",
+      "type": "c",
+      "definition": "CHECK (witness_id IS NULL OR octet_length(witness_id) = 32)"
+    },
+    {
+      "table": "creation_capacity",
+      "name": "creation_capacity_factory_ref_count_check",
+      "type": "c",
+      "definition": "CHECK (factory_ref_count >= 0 AND factory_ref_count <= 800000)"
+    },
+    {
+      "table": "creation_capacity",
+      "name": "creation_capacity_network_key_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (network_key) REFERENCES ops_admission_v2.network_state(network_key) ON DELETE RESTRICT"
+    },
+    {
+      "table": "creation_capacity",
+      "name": "creation_capacity_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (network_key)"
+    },
+    {
+      "table": "creation_capacity",
+      "name": "creation_capacity_plan_bytes_check",
+      "type": "c",
+      "definition": "CHECK (plan_bytes >= 0 AND plan_bytes <= 1073741824)"
+    },
+    {
+      "table": "creation_capacity",
+      "name": "creation_capacity_plan_count_check",
+      "type": "c",
+      "definition": "CHECK (plan_count >= 0 AND plan_count <= 200000)"
+    },
+    {
+      "table": "creation_capacity",
+      "name": "creation_capacity_wallet_ref_count_check",
+      "type": "c",
+      "definition": "CHECK (wallet_ref_count >= 0 AND wallet_ref_count <= 800000)"
+    },
+    {
+      "table": "creation_capacity",
+      "name": "creation_capacity_work_count_check",
+      "type": "c",
+      "definition": "CHECK (work_count >= 0 AND work_count <= 100000)"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_chain_id_check",
+      "type": "c",
+      "definition": "CHECK (chain_id ~ '^[1-9][0-9]{0,19}$'::text AND chain_id::numeric <= '18446744073709551615'::numeric)"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_entry_count_check",
+      "type": "c",
+      "definition": "CHECK (entry_count >= 1 AND entry_count <= 128)"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_evidence_profile_check",
+      "type": "c",
+      "definition": "CHECK (evidence_profile = ANY (ARRAY['geth-prague-lifecycle-signed/v1'::text, 'geth-prague-lifecycle-guard/v1'::text]))"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_manifest_digest_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(manifest_digest) = 32)"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_network_key_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(network_key) = 32)"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_network_key_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (network_key) REFERENCES ops_admission_v2.creation_capacity(network_key) ON DELETE RESTRICT"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_payload_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(payload) >= 1 AND octet_length(payload) <= 65536)"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (network_key, tx_hash, plan_digest)"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_plan_digest_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(plan_digest) = 32)"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_runtime_digest_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(runtime_digest) = 32)"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_tx_hash_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(tx_hash) = 32)"
+    },
+    {
+      "table": "creation_plans",
+      "name": "creation_plans_version_check",
+      "type": "c",
+      "definition": "CHECK (version = 1)"
+    },
+    {
+      "table": "creation_work",
+      "name": "creation_work_check",
+      "type": "c",
+      "definition": "CHECK (updated_at >= created_at)"
+    },
+    {
+      "table": "creation_work",
+      "name": "creation_work_generation_check",
+      "type": "c",
+      "definition": "CHECK (generation >= 1)"
+    },
+    {
+      "table": "creation_work",
+      "name": "creation_work_network_key_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(network_key) = 32)"
+    },
+    {
+      "table": "creation_work",
+      "name": "creation_work_network_key_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (network_key) REFERENCES ops_admission_v2.creation_capacity(network_key) ON DELETE RESTRICT"
+    },
+    {
+      "table": "creation_work",
+      "name": "creation_work_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (network_key, tx_hash)"
+    },
+    {
+      "table": "creation_work",
+      "name": "creation_work_tx_hash_check",
+      "type": "c",
+      "definition": "CHECK (octet_length(tx_hash) = 32)"
+    }
+  ],
+  "indexes": [
+    {
+      "name": "creation_authority_refs_network_key_tx_hash_kind_branch_key",
+      "definition": "CREATE UNIQUE INDEX creation_authority_refs_network_key_tx_hash_kind_branch_key ON ops_admission_v2.creation_authority_refs USING btree (network_key, tx_hash, kind, branch)"
+    },
+    {
+      "name": "creation_authority_refs_pkey",
+      "definition": "CREATE UNIQUE INDEX creation_authority_refs_pkey ON ops_admission_v2.creation_authority_refs USING btree (network_key, tx_hash, seed_digest)"
+    },
+    {
+      "name": "creation_capacity_pkey",
+      "definition": "CREATE UNIQUE INDEX creation_capacity_pkey ON ops_admission_v2.creation_capacity USING btree (network_key)"
+    },
+    {
+      "name": "creation_plans_pkey",
+      "definition": "CREATE UNIQUE INDEX creation_plans_pkey ON ops_admission_v2.creation_plans USING btree (network_key, tx_hash, plan_digest)"
+    },
+    {
+      "name": "creation_refs_plan",
+      "definition": "CREATE INDEX creation_refs_plan ON ops_admission_v2.creation_authority_refs USING btree (network_key, tx_hash, plan_digest)"
+    },
+    {
+      "name": "creation_work_pkey",
+      "definition": "CREATE UNIQUE INDEX creation_work_pkey ON ops_admission_v2.creation_work USING btree (network_key, tx_hash)"
+    }
+  ],
+  "columns": [
+    {
+      "table": "creation_authority_refs",
+      "name": "network_key",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "tx_hash",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "seed_digest",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "plan_digest",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "kind",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "branch",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "wallet_actor",
+      "notNull": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "wallet_org",
+      "notNull": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "witness_id",
+      "notNull": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "anchor_hash",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "anchor_number",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "anchor_timestamp",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "evidence_profile",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "manifest_digest",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "runtime_digest",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_authority_refs",
+      "name": "captured_at",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_capacity",
+      "name": "network_key",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_capacity",
+      "name": "work_count",
+      "notNull": true,
+      "default": "0",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_capacity",
+      "name": "plan_count",
+      "notNull": true,
+      "default": "0",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_capacity",
+      "name": "plan_bytes",
+      "notNull": true,
+      "default": "0",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_capacity",
+      "name": "wallet_ref_count",
+      "notNull": true,
+      "default": "0",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_capacity",
+      "name": "factory_ref_count",
+      "notNull": true,
+      "default": "0",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "network_key",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "tx_hash",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "plan_digest",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "version",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "payload",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "entry_count",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "root_org",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "manifest_digest",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "runtime_digest",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "chain_id",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "evidence_profile",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_plans",
+      "name": "created_at",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_work",
+      "name": "network_key",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_work",
+      "name": "tx_hash",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_work",
+      "name": "generation",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_work",
+      "name": "created_at",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "table": "creation_work",
+      "name": "updated_at",
+      "notNull": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    }
+  ]
+}

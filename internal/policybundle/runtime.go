@@ -93,67 +93,74 @@ func positiveChain64(raw string) bool {
 	return err == nil && n > 0 && strconv.FormatUint(n, 10) == raw
 }
 
-func decodeRuntimeSource(raw []byte, depth int) (*RuntimeSource, *RuntimeRawSource, *RuntimeMultiOrgSource, *RuntimeLifecycleSource, *RuntimeSimulationSource, error) {
+func decodeRuntimeSource(raw []byte, depth int) (*RuntimeSource, *RuntimeRawSource, *RuntimeMultiOrgSource, *RuntimeLifecycleSource, *RuntimeSimulationSource, *RuntimeCreationIntentSource, error) {
 	value, err := strictValue(raw, depth)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	object, ok := value.(map[string]any)
 	if !ok {
-		return nil, nil, nil, nil, nil, fail(InvalidSchema, "", "", "runtimeCatalog", "runtime source must be an object")
+		return nil, nil, nil, nil, nil, nil, fail(InvalidSchema, "", "", "runtimeCatalog", "runtime source must be an object")
 	}
 	switch object["apiVersion"] {
 	case RuntimeAPIVersion:
 		var source RuntimeSource
 		if err := decodeSource(raw, &source, depth); err != nil {
-			return nil, nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
-		return &source, nil, nil, nil, nil, nil
+		return &source, nil, nil, nil, nil, nil, nil
 	case RuntimeRawAPIVersion:
 		var source RuntimeRawSource
 		if err := decodeSource(raw, &source, depth); err != nil {
-			return nil, nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
-		return nil, &source, nil, nil, nil, nil
+		return nil, &source, nil, nil, nil, nil, nil
 	case RuntimeMultiOrgAPIVersion:
 		var source RuntimeMultiOrgSource
 		if err := decodeSource(raw, &source, depth); err != nil {
-			return nil, nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
-		return nil, nil, &source, nil, nil, nil
+		return nil, nil, &source, nil, nil, nil, nil
 	case RuntimeLifecycleAPIVersion:
 		var source RuntimeLifecycleSource
 		if err := decodeSource(raw, &source, depth); err != nil {
-			return nil, nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
-		return nil, nil, nil, &source, nil, nil
+		return nil, nil, nil, &source, nil, nil, nil
 	case RuntimeSimulationAPIVersion:
 		var source RuntimeSimulationSource
 		if err := decodeSource(raw, &source, depth); err != nil {
-			return nil, nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
-		return nil, nil, nil, nil, &source, nil
+		return nil, nil, nil, nil, &source, nil, nil
+	case RuntimeCreationIntentAPIVersion:
+		var source RuntimeCreationIntentSource
+		if err := decodeSource(raw, &source, depth); err != nil {
+			return nil, nil, nil, nil, nil, nil, err
+		}
+		return nil, nil, nil, nil, nil, &source, nil
 	default:
-		return nil, nil, nil, nil, nil, fail(InvalidSchema, "", "", "apiVersion", "unsupported runtime source version")
+		return nil, nil, nil, nil, nil, nil, fail(InvalidSchema, "", "", "apiVersion", "unsupported runtime source version")
 	}
 }
 
 // RuntimeCatalog is approved immutable source. Its static scopes never enter
 // the registered-contract/native execution or operational ownership indexes.
 type RuntimeCatalog struct {
-	source           RuntimeSource
-	rawSource        *RuntimeRawSource
-	multiOrgSource   *RuntimeMultiOrgSource
-	lifecycleSource  *RuntimeLifecycleSource
-	simulationSource *RuntimeSimulationSource
-	feedDefinition   pricefeedpolicy.Definition
-	feedPlan         pricefeedpolicy.Plan
-	digest           Digest
+	source               RuntimeSource
+	rawSource            *RuntimeRawSource
+	multiOrgSource       *RuntimeMultiOrgSource
+	lifecycleSource      *RuntimeLifecycleSource
+	simulationSource     *RuntimeSimulationSource
+	creationIntentSource *RuntimeCreationIntentSource
+	feedDefinition       pricefeedpolicy.Definition
+	feedPlan             pricefeedpolicy.Plan
+	digest               Digest
 }
 
 // Source returns only detached v1; v2/v3 catalogs return zero, preserving tags.
 func (r *RuntimeCatalog) Source() RuntimeSource {
-	if r == nil || r.rawSource != nil || r.multiOrgSource != nil || r.lifecycleSource != nil || r.simulationSource != nil {
+	if r == nil || r.rawSource != nil || r.multiOrgSource != nil || r.lifecycleSource != nil || r.simulationSource != nil || r.creationIntentSource != nil {
 		return RuntimeSource{}
 	}
 	s := r.source
@@ -233,6 +240,9 @@ func (r *RuntimeCatalog) PriceFeed() (pricefeedpolicy.Definition, pricefeedpolic
 }
 
 func (r *RuntimeCatalog) RawSubmissionMode() string {
+	if r != nil && r.creationIntentSource != nil {
+		return r.creationIntentSource.RawSubmissionMode
+	}
 	if r != nil && r.simulationSource != nil {
 		return r.simulationSource.RawSubmissionMode
 	}
@@ -248,6 +258,9 @@ func (r *RuntimeCatalog) RawSubmissionMode() string {
 	return r.rawSource.RawSubmissionMode
 }
 func (r *RuntimeCatalog) SharedInfrastructure() []SharedInfrastructure {
+	if r.creationIntentSource != nil {
+		return cloneShared(r.creationIntentSource.SharedInfrastructure)
+	}
 	if r.simulationSource != nil {
 		return cloneShared(r.simulationSource.SharedInfrastructure)
 	}
@@ -264,6 +277,9 @@ func (r *RuntimeCatalog) SharedInfrastructure() []SharedInfrastructure {
 }
 func (r *RuntimeCatalog) Digest() Digest { return r.digest }
 func (r *RuntimeCatalog) NodeEvidenceProfile() string {
+	if r != nil && r.creationIntentSource != nil {
+		return r.creationIntentSource.NodeEvidenceProfile
+	}
 	if r.simulationSource != nil {
 		return r.simulationSource.NodeEvidenceProfile
 	}
@@ -280,6 +296,9 @@ func (r *RuntimeCatalog) NodeEvidenceProfile() string {
 }
 
 func (r *RuntimeCatalog) IntraOrgGrantTracing() bool {
+	if r != nil && r.creationIntentSource != nil {
+		return r.creationIntentSource.IntraOrgGrantTracing
+	}
 	if r.simulationSource != nil {
 		return r.simulationSource.IntraOrgGrantTracing
 	}
@@ -296,6 +315,9 @@ func (r *RuntimeCatalog) IntraOrgGrantTracing() bool {
 }
 
 func (r *RuntimeCatalog) ReadProfile() string {
+	if r != nil && r.creationIntentSource != nil {
+		return r.creationIntentSource.ReadProfile
+	}
 	if r.simulationSource != nil {
 		return r.simulationSource.ReadProfile
 	}
@@ -313,7 +335,7 @@ func (r *RuntimeCatalog) ReadProfile() string {
 func (s *CatalogSnapshot) Runtime() (*RuntimeCatalog, bool) { return s.runtime, s.runtime != nil }
 
 func (b *catalogBuilder) compileRuntime(limits Limits) error {
-	if b.runtimeSource == nil && b.runtimeRawSource == nil && b.runtimeMultiOrgSource == nil && b.runtimeLifecycleSource == nil && b.runtimeSimulationSource == nil {
+	if b.runtimeSource == nil && b.runtimeRawSource == nil && b.runtimeMultiOrgSource == nil && b.runtimeLifecycleSource == nil && b.runtimeSimulationSource == nil && b.runtimeCreationIntentSource == nil {
 		return nil
 	}
 	bad := func(field, message string) error { return fail(InvalidSchema, "", "", field, message) }
@@ -322,6 +344,7 @@ func (b *catalogBuilder) compileRuntime(limits Limits) error {
 	modern := b.runtimeMultiOrgSource
 	lifecycle := b.runtimeLifecycleSource != nil
 	simulation := b.runtimeSimulationSource != nil
+	intent := b.runtimeCreationIntentSource != nil
 	expectedProfile, expectedVersion, expectedEvidence := RuntimeMultiOrgProfileID, RuntimeMultiOrgAPIVersion, RuntimeNodeEvidenceProfileID
 	if lifecycle {
 		if modern != nil {
@@ -338,6 +361,14 @@ func (b *catalogBuilder) compileRuntime(limits Limits) error {
 		view := RuntimeMultiOrgSource(*b.runtimeSimulationSource)
 		modern = &view
 		expectedProfile, expectedVersion, expectedEvidence = RuntimeSimulationProfileID, RuntimeSimulationAPIVersion, RuntimeSimulationNodeEvidenceProfileID
+	}
+	if intent {
+		if modern != nil {
+			return bad("runtimeCatalog", "multiple runtime source variants")
+		}
+		view := b.runtimeCreationIntentSource.commonSource()
+		modern = &view
+		expectedProfile, expectedVersion, expectedEvidence = RuntimeCreationIntentProfileID, RuntimeCreationIntentAPIVersion, RuntimeSimulationNodeEvidenceProfileID
 	}
 	if modern != nil {
 		r := modern
@@ -429,7 +460,14 @@ func (b *catalogBuilder) compileRuntime(limits Limits) error {
 			}
 		}
 		catalog.source = RuntimeSource{}
-		if simulation {
+		if intent {
+			factories, err := b.normalizeCreationFactories(s.SharedInfrastructure)
+			if err != nil {
+				return err
+			}
+			owned := creationIntentSource(*r, factories)
+			catalog.creationIntentSource = &owned
+		} else if simulation {
 			owned := RuntimeSimulationSource(*r)
 			catalog.simulationSource = &owned
 		} else if lifecycle {
@@ -438,7 +476,11 @@ func (b *catalogBuilder) compileRuntime(limits Limits) error {
 		} else {
 			catalog.multiOrgSource = r
 		}
-		raw, _ = json.Marshal(r)
+		if intent {
+			raw, _ = json.Marshal(catalog.creationIntentSource)
+		} else {
+			raw, _ = json.Marshal(r)
+		}
 	} else if b.runtimeRawSource != nil {
 		r := &RuntimeRawSource{RuntimeRawAPIVersion, s.Kind, s.ReadProfile, s.IntraOrgGrantTracing, s.SharedInfrastructure, s.AddressScopes, s.NodeEvidenceProfile, b.runtimeRawSource.RawSubmissionMode}
 		catalog.source, catalog.rawSource = RuntimeSource{}, r

@@ -11,7 +11,10 @@ import (
 
 func EmptyCoverage() a.Digest { return a.HashParts("ops-admission-empty-source/v1") }
 func offline(ctx context.Context, dsn string, callback func(context.Context, pgx.Tx) error) error {
-	return offlineConnection(ctx, dsn, 60*time.Second, func(ctx context.Context, tx pgx.Tx) error {
+	return offlineWithTimeout(ctx, dsn, 60*time.Second, callback)
+}
+func offlineWithTimeout(ctx context.Context, dsn string, timeout time.Duration, callback func(context.Context, pgx.Tx) error) error {
+	return offlineConnection(ctx, dsn, timeout, func(ctx context.Context, tx pgx.Tx) error {
 		if err := checkSchema(ctx, tx); err != nil {
 			return err
 		}
@@ -50,7 +53,18 @@ func BootstrapEmpty(ctx context.Context, dsn string, binding a.NetworkBinding, g
 		}
 		coverage := EmptyCoverage()
 		_, err := tx.Exec(ctx, `INSERT INTO ops_admission_v2.network_state(network_key,environment,chain_id,genesis_hash,deployment_id,generation,ready,coverage_digest)VALUES($1,$2,$3,$4,$5,$6::uuid,true,$7)`, key[:], binding.Environment, binding.ChainID, genesis, binding.DeploymentID, generation, coverage[:])
-		return dbError(err)
+		if err != nil {
+			return dbError(err)
+		}
+		version, err := schemaVersion(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if version == 2 {
+			_, err = tx.Exec(ctx, `INSERT INTO ops_admission_v2.creation_capacity(network_key)VALUES($1)`, key[:])
+			return dbError(err)
+		}
+		return nil
 	})
 }
 
@@ -76,14 +90,25 @@ func BeginRecovery(ctx context.Context, dsn string, binding a.NetworkBinding, ge
 
 // FinalizeRecovery publishes an explicit operator completeness attestation. It
 // does not infer missing history from existing rows, mint receipts or resubmit.
-// Restoring five data tables, their constraints and the identity sequence is an
+// Restoring operational tables, constraints and the identity sequence is an
 // offline database operation; incompatible schemas never become ready.
 func FinalizeRecovery(ctx context.Context, dsn string, binding a.NetworkBinding, expected a.ExpectedState, acknowledgeComplete bool) error {
+	return FinalizeRecoveryWithTimeout(ctx, dsn, binding, expected, acknowledgeComplete, 60*time.Second)
+}
+
+// MaxRecoveryTimeout bounds the explicit offline completeness scan. Runtime,
+// connection, individual SQL statement and lock deadlines remain unchanged.
+const MaxRecoveryTimeout = 30 * time.Minute
+
+// FinalizeRecoveryWithTimeout allows a finite offline scan of retained history.
+// It honors an earlier caller deadline. Failure leaves readiness false; a longer
+// budget is not a promise to finish any retained corpus on arbitrary hardware.
+func FinalizeRecoveryWithTimeout(ctx context.Context, dsn string, binding a.NetworkBinding, expected a.ExpectedState, acknowledgeComplete bool, timeout time.Duration) error {
 	key, genesis, err := bindingValues(binding)
-	if err != nil || !expected.Valid() || expected.Coverage == (a.Digest{}) || !acknowledgeComplete {
+	if err != nil || !expected.Valid() || expected.Coverage == (a.Digest{}) || !acknowledgeComplete || timeout <= 0 || timeout > MaxRecoveryTimeout {
 		return a.ErrInvalid
 	}
-	return offline(ctx, dsn, func(ctx context.Context, tx pgx.Tx) error {
+	return offlineWithTimeout(ctx, dsn, timeout, func(ctx context.Context, tx pgx.Tx) error {
 		if err := verifyBinding(ctx, tx, key, binding, genesis); err != nil {
 			return err
 		}
@@ -181,5 +206,13 @@ func validateRestored(ctx context.Context, tx pgx.Tx, key a.Digest, expected a.E
 	if err != nil {
 		return a.ErrUnavailable
 	}
+	version, err := schemaVersion(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if version == 2 {
+		return validateRestoredCreations(ctx, tx, key)
+	}
+
 	return nil
 }

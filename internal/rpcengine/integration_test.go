@@ -48,24 +48,25 @@ const nodeHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const now = int64(1800000000)
 
 type fixture struct {
-	lifecycle      bool
-	simulation     bool
-	clock          *atomic.Int64
-	producer       *faultProducer
-	linkSigner     bool
-	multiOrg       bool
-	bGroups        []policybundle.Group
-	bContracts     []policybundle.Contract
-	bBindings      []policycore.Binding
-	bMappedGroups  []string
-	rawMode        string
-	complianceHook func(*compliancepolicy.Source)
-	groups         []policybundle.Group
-	bindings       []policycore.Binding
-	contracts      []policybundle.Contract
-	runtime        policybundle.RuntimeSource
-	capabilities   []string
-	roles          []string
+	lifecycle           bool
+	creationAttribution *policybundle.CreationAttribution
+	simulation          bool
+	clock               *atomic.Int64
+	producer            *faultProducer
+	linkSigner          bool
+	multiOrg            bool
+	bGroups             []policybundle.Group
+	bContracts          []policybundle.Contract
+	bBindings           []policycore.Binding
+	bMappedGroups       []string
+	rawMode             string
+	complianceHook      func(*compliancepolicy.Source)
+	groups              []policybundle.Group
+	bindings            []policycore.Binding
+	contracts           []policybundle.Contract
+	runtime             policybundle.RuntimeSource
+	capabilities        []string
+	roles               []string
 }
 
 func encoded(t *testing.T, v any) []byte {
@@ -145,7 +146,7 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 		docs["runtime.json"] = encoded(t, policybundle.RuntimeMultiOrgSource{APIVersion: policybundle.RuntimeMultiOrgAPIVersion, Kind: r.Kind, ReadProfile: r.ReadProfile, IntraOrgGrantTracing: r.IntraOrgGrantTracing, SharedInfrastructure: r.SharedInfrastructure, AddressScopes: r.AddressScopes, NodeEvidenceProfile: r.NodeEvidenceProfile, RawSubmissionMode: f.rawMode})
 		f.capability(policybundle.CapabilityMultiOrg)
 	}
-	if f.lifecycle || f.simulation {
+	if f.lifecycle || f.simulation || f.creationAttribution != nil {
 		if f.rawMode == "" {
 			t.Fatal("lifecycle fixture requires an explicit raw mode")
 		}
@@ -157,11 +158,17 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 			f.capability(cap)
 		}
 	}
-	if f.simulation {
+	if f.simulation || f.creationAttribution != nil {
 		profileID, profile = policybundle.RuntimeSimulationProfileID, policybundle.RuntimeSimulationProfile("rpc/v1")
 		r := f.runtime
 		docs["runtime.json"] = encoded(t, policybundle.RuntimeSimulationSource{APIVersion: policybundle.RuntimeSimulationAPIVersion, Kind: r.Kind, ReadProfile: r.ReadProfile, IntraOrgGrantTracing: r.IntraOrgGrantTracing, SharedInfrastructure: r.SharedInfrastructure, AddressScopes: r.AddressScopes, NodeEvidenceProfile: policybundle.RuntimeSimulationNodeEvidenceProfileID, RawSubmissionMode: f.rawMode})
 		f.capability(policybundle.CapabilityUnsignedSimulation)
+	}
+	if f.creationAttribution != nil {
+		profileID, profile = policybundle.RuntimeCreationIntentProfileID, policybundle.RuntimeCreationIntentProfile("rpc/v1")
+		r := f.runtime
+		docs["runtime.json"] = encoded(t, policybundle.RuntimeCreationIntentSource{APIVersion: policybundle.RuntimeCreationIntentAPIVersion, Kind: r.Kind, ReadProfile: r.ReadProfile, IntraOrgGrantTracing: r.IntraOrgGrantTracing, SharedInfrastructure: r.SharedInfrastructure, AddressScopes: r.AddressScopes, NodeEvidenceProfile: policybundle.RuntimeSimulationNodeEvidenceProfileID, RawSubmissionMode: f.rawMode, CreationAttribution: *f.creationAttribution})
+		f.capability(policybundle.CapabilityCreationIntents)
 	}
 	manifest := policybundle.Manifest{APIVersion: policybundle.BundleAPIVersion, Kind: policybundle.BundleKind, Environment: "test", ChainID: "1", EvaluatorVersion: evaluator, Profile: profileID, SourceRevision: "selected", Organizations: []policybundle.Organization{{ID: orgA, Slug: "a", Name: "A"}, {ID: orgB, Slug: "b", Name: "B"}}, RequiredCapabilities: f.capabilities, IdentityCatalog: &policybundle.IdentityCatalogRef{Path: "identity.json", SHA256: policybundle.RawDigest(docs["identity.json"])}, RuntimeCatalog: &policybundle.RuntimeCatalogRef{Path: "runtime.json", SHA256: policybundle.RawDigest(docs["runtime.json"])}}
 	if f.rawMode != "" {
@@ -208,11 +215,16 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 }
 func token(t *testing.T, snapshot *policybundle.CatalogSnapshot, roles []string) string {
 	t.Helper()
+	return tokenSubject(t, snapshot, roles, oid)
+}
+
+func tokenSubject(t *testing.T, snapshot *policybundle.CatalogSnapshot, roles []string, subject string) string {
+	t.Helper()
 	catalog, _ := snapshot.Identity()
 	digest, _ := catalog.ProfileDigest("azure")
 	issuer := "https://login.microsoftonline.com/" + tenant + "/v2.0"
 	h := sha256.New()
-	for _, part := range []string{"azure-v2", issuer, tenant, oid, "human"} {
+	for _, part := range []string{"azure-v2", issuer, tenant, subject, "human"} {
 		var size [4]byte
 		binary.BigEndian.PutUint32(size[:], uint32(len(part)))
 		h.Write(size[:])
@@ -222,7 +234,7 @@ func token(t *testing.T, snapshot *policybundle.CatalogSnapshot, roles []string)
 	for _, role := range roles {
 		facts = append(facts, identity.Fact{Kind: "azure.role", Value: role})
 	}
-	claims := jwt.MapClaims{"iss": "https://ops.test", "aud": "core", "sub": "ops:p1:" + base64.RawURLEncoding.EncodeToString(h.Sum(nil)), "jti": "integration", "iat": now, "nbf": now, "exp": now + 300, "principal_kind": "human", "source_profile": "azure", "source_profile_digest": digest, "identity_authority": issuer, "source_subject": oid, "source_tenant": tenant, "source_verified_at": now, "claims_as_of": now, "source_not_after": now + 3600, "facts": facts}
+	claims := jwt.MapClaims{"iss": "https://ops.test", "aud": "core", "sub": "ops:p1:" + base64.RawURLEncoding.EncodeToString(h.Sum(nil)), "jti": "integration", "iat": now, "nbf": now, "exp": now + 300, "principal_kind": "human", "source_profile": "azure", "source_profile_digest": digest, "identity_authority": issuer, "source_subject": subject, "source_tenant": tenant, "source_verified_at": now, "claims_as_of": now, "source_not_after": now + 3600, "facts": facts}
 	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
 	tok.Header["typ"], tok.Header["kid"] = "ops-access+jwt", "k1"
 	raw, e := tok.SignedString(signingKey())

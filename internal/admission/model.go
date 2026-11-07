@@ -179,6 +179,7 @@ func (s Share) SameBinding(other Share) bool {
 }
 
 type TrustedRawInput struct {
+	ApprovedCheck  *nativeadmission.ApprovedSignedCheck
 	View           *runtimepolicy.View
 	OrganizationID string
 	Transaction    transactioninput.VerifiedTransaction

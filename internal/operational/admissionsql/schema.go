@@ -16,9 +16,43 @@ import (
 //go:embed migrations/001.sql
 var schemaSQL string
 
+//go:embed migrations/002.sql
+var creationSchemaSQL string
+
+func CreationSchemaChecksum() string {
+	sum := sha256.Sum256([]byte(schemaSQL + "\x00" + creationSchemaSQL))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 func SchemaChecksum() string {
 	sum := sha256.Sum256([]byte(schemaSQL))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// SchemaInfo describes the exact validated schema installed in the selected
+// operational database. Migration tools must report it rather than assuming v1.
+type SchemaInfo struct {
+	Version        int    `json:"schemaVersion"`
+	SourceChecksum string `json:"sourceChecksum"`
+}
+
+func InstalledSchema(ctx context.Context, dsn string) (SchemaInfo, error) {
+	var out SchemaInfo
+	err := offline(ctx, dsn, func(ctx context.Context, tx pgx.Tx) error {
+		version, err := schemaVersion(ctx, tx)
+		if err != nil {
+			return err
+		}
+		out = SchemaInfo{Version: version, SourceChecksum: SchemaChecksum()}
+		if version == 2 {
+			out.SourceChecksum = CreationSchemaChecksum()
+		}
+		return nil
+	})
+	if err != nil {
+		return SchemaInfo{}, err
+	}
+	return out, nil
 }
 
 var rolePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,62}$`)
@@ -69,6 +103,13 @@ func Migrate(ctx context.Context, dsn, appRole, readerRole, retentionRole string
 			`GRANT DELETE ON ops_admission_v2.compliance_events TO ` + retention,
 			`GRANT USAGE ON SEQUENCE ops_admission_v2.compliance_events_id_seq TO ` + app,
 			`GRANT EXECUTE ON FUNCTION ops_admission_v2.valid_recipients(text[]) TO ` + app,
+		}
+		version, err := schemaVersion(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if version == 2 {
+			statements = append(statements, creationGrantStatements(app)...)
 		}
 		for _, sql := range statements {
 			if _, err := tx.Exec(ctx, sql); err != nil {
@@ -122,19 +163,98 @@ var expectedColumns = map[string]map[string]string{
 	"tx_shares":               {"network_key": "bytea", "tx_hash": "bytea", "sender_actor_id": "text", "sender_org_id": "uuid", "recipients": "text[]", "recipient_digest": "bytea", "declared_at": "timestamp with time zone", "anchor_hash": "bytea", "anchor_number": "numeric", "anchor_timestamp": "numeric", "manifest_digest": "bytea", "wallet_version": "bytea", "wallet_evidence_at": "timestamp with time zone"},
 }
 
+var creationColumns = map[string]map[string]string{
+	"creation_capacity":       {"network_key": "bytea", "work_count": "bigint", "plan_count": "bigint", "plan_bytes": "bigint", "wallet_ref_count": "bigint", "factory_ref_count": "bigint"},
+	"creation_plans":          {"network_key": "bytea", "tx_hash": "bytea", "plan_digest": "bytea", "version": "integer", "payload": "bytea", "entry_count": "integer", "root_org": "uuid", "manifest_digest": "bytea", "runtime_digest": "bytea", "chain_id": "text", "evidence_profile": "text", "created_at": "timestamp with time zone"},
+	"creation_authority_refs": {"network_key": "bytea", "tx_hash": "bytea", "seed_digest": "bytea", "plan_digest": "bytea", "kind": "text", "branch": "smallint", "wallet_actor": "text", "wallet_org": "uuid", "witness_id": "bytea", "anchor_hash": "bytea", "anchor_number": "numeric", "anchor_timestamp": "numeric", "evidence_profile": "text", "manifest_digest": "bytea", "runtime_digest": "bytea", "captured_at": "timestamp with time zone"},
+	"creation_work":           {"network_key": "bytea", "tx_hash": "bytea", "generation": "bigint", "created_at": "timestamp with time zone", "updated_at": "timestamp with time zone"},
+}
+
+func schemaColumns(version int) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for table, cols := range expectedColumns {
+		out[table] = cols
+	}
+	if version == 2 {
+		for table, cols := range creationColumns {
+			out[table] = cols
+		}
+	}
+	return out
+}
+func schemaVersion(ctx context.Context, q querier) (int, error) {
+	var version, count int
+	var checksum string
+	if err := q.QueryRow(ctx, `SELECT version,source_checksum,(SELECT count(*) FROM ops_admission_v2.schema_version)FROM ops_admission_v2.schema_version WHERE singleton`).Scan(&version, &checksum, &count); err != nil || count != 1 {
+		return 0, a.ErrUnavailable
+	}
+	if version == 1 && checksum == SchemaChecksum() || version == 2 && checksum == CreationSchemaChecksum() {
+		return version, nil
+	}
+	return 0, a.ErrUnavailable
+}
+func creationGrantStatements(app string) []string {
+	return []string{
+		`GRANT INSERT ON ops_admission_v2.creation_plans,ops_admission_v2.creation_authority_refs,ops_admission_v2.creation_work TO ` + app,
+		`GRANT UPDATE(generation,updated_at) ON ops_admission_v2.creation_work TO ` + app,
+		`GRANT UPDATE(work_count,plan_count,plan_bytes,wallet_ref_count,factory_ref_count) ON ops_admission_v2.creation_capacity TO ` + app,
+	}
+}
+
+// MigrateCreationIntents is an explicit offline upgrade. Existing network
+// readiness must already be fenced with old processes stopped. No pool is
+// assumed to be invalidated just by changing a schema version row.
+func MigrateCreationIntents(ctx context.Context, dsn, appRole, readerRole, retentionRole string) error {
+	if err := Migrate(ctx, dsn, appRole, readerRole, retentionRole); err != nil {
+		return err
+	}
+	return offlineConnection(ctx, dsn, 30*time.Second, func(ctx context.Context, tx pgx.Tx) error {
+		if err := checkSchema(ctx, tx); err != nil {
+			return err
+		}
+		var ready bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM ops_admission_v2.network_state WHERE ready)`).Scan(&ready); err != nil {
+			return a.ErrUnavailable
+		}
+		if ready {
+			return a.ErrConflict
+		}
+		version, err := schemaVersion(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if version == 1 {
+			if _, err := tx.Exec(ctx, creationSchemaSQL); err != nil {
+				return a.ErrUnavailable
+			}
+			if _, err := tx.Exec(ctx, `UPDATE ops_admission_v2.schema_version SET version=2,source_checksum=$1 WHERE singleton`, CreationSchemaChecksum()); err != nil {
+				return a.ErrUnavailable
+			}
+		}
+		app, reader := pgx.Identifier{appRole}.Sanitize(), pgx.Identifier{readerRole}.Sanitize()
+		statements := []string{`REVOKE ALL ON ops_admission_v2.creation_capacity,ops_admission_v2.creation_plans,ops_admission_v2.creation_authority_refs,ops_admission_v2.creation_work FROM PUBLIC,` + app + `,` + reader + `,` + pgx.Identifier{retentionRole}.Sanitize(), `GRANT SELECT ON ops_admission_v2.creation_capacity,ops_admission_v2.creation_plans,ops_admission_v2.creation_authority_refs,ops_admission_v2.creation_work TO ` + app + `,` + reader}
+		statements = append(statements, creationGrantStatements(app)...)
+		for _, sql := range statements {
+			if _, err := tx.Exec(ctx, sql); err != nil {
+				return a.ErrUnavailable
+			}
+		}
+		return checkSchema(ctx, tx)
+	})
+}
+
 func (s *Store) CheckSchema(ctx context.Context) error {
 	ctx, cancel := bounded(ctx)
 	defer cancel()
 	return checkSchema(ctx, s.pool)
 }
 func checkSchema(ctx context.Context, q querier) error {
-	var version, count int
-	var checksum string
-	if err := q.QueryRow(ctx, `SELECT version,source_checksum,(SELECT count(*) FROM ops_admission_v2.schema_version)FROM ops_admission_v2.schema_version WHERE singleton`).Scan(&version, &checksum, &count); err != nil || version != 1 || count != 1 || checksum != SchemaChecksum() {
-		return a.ErrUnavailable
+	version, err := schemaVersion(ctx, q)
+	if err != nil {
+		return err
 	}
 	remaining := map[string]map[string]string{}
-	for table, cols := range expectedColumns {
+	for table, cols := range schemaColumns(version) {
 		remaining[table] = map[string]string{}
 		for col, typ := range cols {
 			remaining[table][col] = typ
@@ -169,6 +289,9 @@ func checkSchema(ctx context.Context, q querier) error {
 	if err := q.QueryRow(ctx, `SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='ops_admission_v2' AND i.indisvalid AND i.indisready AND c.relname=ANY($1::text[])`, []string{"travel_scoped_used_hash", "travel_unused_lookup", "travel_org_page", "compliance_org_page", "compliance_scoped_record", "shares_recipients", "qualified_tx_origins_pkey", "extra_privacy_witnesses_pkey", "tx_shares_pkey"}).Scan(&indexes); err != nil || indexes != 9 {
 		return a.ErrUnavailable
 	}
+	if version == 2 {
+		return checkCreationSchema(ctx, q)
+	}
 	return nil
 }
 
@@ -182,9 +305,9 @@ func (s *Store) checkPrivileges(ctx context.Context) error {
  FROM pg_roles r WHERE r.rolname=current_user`).Scan(&unsafe); err != nil || unsafe {
 		return a.ErrUnavailable
 	}
-	for table, cols := range expectedColumns {
+	for table, cols := range schemaColumns(s.schemaVersion) {
 		name := "ops_admission_v2." + table
-		data := table != "schema_version" && table != "network_state"
+		data := table != "schema_version" && table != "network_state" && table != "creation_capacity"
 		for _, privilege := range []string{"INSERT", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"} {
 			want := s.mode == "app" && (privilege == "INSERT" && data || privilege == "DELETE" && table == "travel_records") || s.mode == "retention" && privilege == "DELETE" && (table == "travel_records" || table == "compliance_events")
 			var actual bool
@@ -193,9 +316,9 @@ func (s *Store) checkPrivileges(ctx context.Context) error {
 			}
 		}
 		for col := range cols {
-			selectWant := s.mode != "retention" || !data || table == "travel_records" || table == "compliance_events"
+			selectWant := s.mode != "retention" || table == "schema_version" || table == "network_state" || table == "travel_records" || table == "compliance_events"
 			insertWant := s.mode == "app" && data
-			updateWant := s.mode == "app" && table == "travel_records" && (col == "used_at" || col == "used_tx_hash")
+			updateWant := s.mode == "app" && (table == "travel_records" && (col == "used_at" || col == "used_tx_hash") || table == "creation_work" && (col == "generation" || col == "updated_at") || table == "creation_capacity" && col != "network_key")
 			var sel, ins, upd bool
 			if err := s.pool.QueryRow(ctx, `SELECT has_column_privilege(current_user,$1,$2,'SELECT'),has_column_privilege(current_user,$1,$2,'INSERT'),has_column_privilege(current_user,$1,$2,'UPDATE')`, name, col).Scan(&sel, &ins, &upd); err != nil || sel != selectWant || ins != insertWant || upd != updateWant {
 				return a.ErrUnavailable
