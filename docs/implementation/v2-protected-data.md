@@ -88,6 +88,18 @@ historical authorship or data-organization ownership. The one wallet snapshot
 contains at most 4,096 total tuples across query targets and, when needed, the
 viewer. The viewer cannot add an address to the target scope.
 
+Activity lists and summaries cover qualified audit records already sealed in
+SQL at the captured chain head. Their coverage population is
+`SEALED_RPC_COMPLETIONS_AS_OF_CHAIN_HEAD`. `COMPLETE_AT_CUT` means complete
+within that retained, qualified dataset. It excludes requests still in the local
+buffer and requests that were never recorded or were lost before sealing. Zero
+matching records does not prove that no matching request ran. Consumers must
+label these results as sealed audit records rather than all executed requests.
+
+This limit does not weaken the separate exposure receipt: protected disclosure
+bytes still require a known durable preparation event. `preparedAt` is the
+response preparation time, not the time of the last audit seal.
+
 Source observation time is excluded from stable cut identity. Re-observing
 unchanged facts later does not invalidate pagination or refresh an old proof.
 Owned sources check current freshness, recovery and fault state separately.

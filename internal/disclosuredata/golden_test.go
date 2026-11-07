@@ -37,15 +37,19 @@ func TestIndependentSourceRenderAndQueryGoldens(t *testing.T) {
 	if e != nil || changed != Digest("sha256:874b80884d6abd1937bb67a1bd2d42d95d96bb6b9fea82c8835ac211ec4e917f") || g == changed {
 		t.Fatal("same-ID replacement key material binding", changed, e)
 	}
-	descriptors := []SourceDescriptor{{Version: 1, Kind: ActivitySource, Reference: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NetworkKey: "sha256:308c17e9717958e307cf48c146ecedfe1f51e7e3e712b3cc57ab53fe8b27d44a", Epoch: "sha256:0201792b6eb3575dbb43095d8182ef20df59b4c27d6c7ec7bb0d9bdb342c2674", Generation: "33333333-3333-4333-8333-333333333333", PlanDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", FormatDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", CoverageDigest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", Population: "RECORDED_RPC_COMPLETIONS_AS_OF_VECTOR", AsOf: time.Unix(1900000000, 0).UTC()}}
+	descriptors := []SourceDescriptor{{Version: 1, Kind: ActivitySource, Reference: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NetworkKey: "sha256:308c17e9717958e307cf48c146ecedfe1f51e7e3e712b3cc57ab53fe8b27d44a", Epoch: "sha256:0201792b6eb3575dbb43095d8182ef20df59b4c27d6c7ec7bb0d9bdb342c2674", Generation: "33333333-3333-4333-8333-333333333333", PlanDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", FormatDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", CoverageDigest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", Population: "SEALED_RPC_COMPLETIONS_AS_OF_CHAIN_HEAD", AsOf: time.Unix(1900000000, 0).UTC()}}
 	set, e := SourceSetDigest(descriptors, p.ActivitySummary, Report)
-	if e != nil || set != Digest("sha256:0d87822535896ce0583cc5229dd3ffabdc3c61643af260a8df61f000ed6c6851") {
+	if e != nil || set != Digest("sha256:9f2a493de95d53e3708b59d3b57743d52d2ae706ee951308eb1cbc7678897101") {
 		t.Fatal("source set vector", set, e)
 	}
 	descriptors[0].AsOf = descriptors[0].AsOf.Add(time.Second)
 	later, e := SourceSetDigest(descriptors, p.ActivitySummary, Report)
 	if e != nil || set != later {
 		t.Fatal("volatile source observation invalidated stable cut", e)
+	}
+	descriptors[0].Population = "RECORDED_RPC_COMPLETIONS_AS_OF_VECTOR"
+	if _, e := SourceSetDigest(descriptors, p.ActivitySummary, Report); e == nil {
+		t.Fatal("old vector population accepted as sealed-only data")
 	}
 }
 

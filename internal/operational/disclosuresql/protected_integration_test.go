@@ -53,7 +53,7 @@ type gateSnapshot struct {
 
 func (s *gateSnapshot) Descriptors() []d.SourceDescriptor {
 	kind := d.ActivitySource
-	return []d.SourceDescriptor{{Version: 1, Kind: kind, Reference: d.Digest("sha256:" + strings.Repeat("1", 64)), NetworkKey: s.s.plan.NetworkKey, Epoch: d.Digest("sha256:" + strings.Repeat("2", 64)), Generation: "33333333-3333-4333-8333-333333333333", PlanDigest: s.s.plan.PlanDigest, FormatDigest: d.Digest("sha256:" + strings.Repeat("3", 64)), CoverageDigest: d.Digest("sha256:" + strings.Repeat("4", 64)), AsOf: time.Unix(s.s.clock.Load(), 0).UTC(), Population: "RECORDED_RPC_COMPLETIONS_AS_OF_VECTOR"}}
+	return []d.SourceDescriptor{{Version: 1, Kind: kind, Reference: d.Digest("sha256:" + strings.Repeat("1", 64)), NetworkKey: s.s.plan.NetworkKey, Epoch: d.Digest("sha256:" + strings.Repeat("2", 64)), Generation: "33333333-3333-4333-8333-333333333333", PlanDigest: s.s.plan.PlanDigest, FormatDigest: d.Digest("sha256:" + strings.Repeat("3", 64)), CoverageDigest: d.Digest("sha256:" + strings.Repeat("4", 64)), AsOf: time.Unix(s.s.clock.Load(), 0).UTC(), Population: "SEALED_RPC_COMPLETIONS_AS_OF_CHAIN_HEAD"}}
 }
 func (s *gateSnapshot) Read(ctx context.Context, scope d.ReadScope, after *d.Position) (d.Facts, error) {
 	s.s.reads.Add(1)

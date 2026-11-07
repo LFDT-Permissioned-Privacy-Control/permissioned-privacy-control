@@ -29,7 +29,7 @@ func population(k SourceKind) string {
 	case WalletSource:
 		return "CURRENT_PROVED_ASSOCIATIONS"
 	case ActivitySource:
-		return "RECORDED_RPC_COMPLETIONS_AS_OF_VECTOR"
+		return "SEALED_RPC_COMPLETIONS_AS_OF_CHAIN_HEAD"
 	case HistorySource:
 		return "CURRENT_SCOPED_WALLET_HISTORY"
 	case FinanceSource:
