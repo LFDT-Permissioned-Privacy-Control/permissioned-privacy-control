@@ -33,6 +33,7 @@ import (
 	_ "privacy-proxy/internal/identity"
 	_ "privacy-proxy/internal/identitybroker"
 	_ "privacy-proxy/internal/identitybroker/azure"
+	_ "privacy-proxy/internal/identityhttp"
 	_ "privacy-proxy/internal/nativeadmission"
 	_ "privacy-proxy/internal/netguard"
 	_ "privacy-proxy/internal/operational/admissionsql"
@@ -564,7 +565,7 @@ func TestIdentityBrokerDependencyBoundaries(t *testing.T) {
 	for _, name := range []string{"identitybroker", "policybundle", "policycore", "disclosurepolicy", "compliancepolicy", "compliance", "pricefeedpolicy"} {
 		service["privacy-proxy/internal/"+name] = true
 	}
-	for _, pkg := range []string{"privacy-proxy/internal/brokerpolicy", "privacy-proxy/internal/identitybroker/azure", "privacy-proxy/internal/identitybroker", "privacy-proxy/internal/operational/identitysql", "privacy-proxy/cmd/ops-v2-identity-migrate"} {
+	for _, pkg := range []string{"privacy-proxy/internal/brokerpolicy", "privacy-proxy/internal/identitybroker/azure", "privacy-proxy/internal/identitybroker", "privacy-proxy/internal/identityhttp", "privacy-proxy/internal/operational/identitysql", "privacy-proxy/cmd/ops-v2-identity-migrate"} {
 		allowed := service
 		if pkg == "privacy-proxy/internal/brokerpolicy" {
 			allowed = pure

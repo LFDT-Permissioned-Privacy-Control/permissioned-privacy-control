@@ -124,6 +124,7 @@ func (s *Service) CompleteAzure(ctx context.Context, state, code string, recipie
 			return err
 		}
 		access.familyExpires = &family.AbsoluteExpiresAt
+		access.sessionID = family.ID
 		finalGate = func() error {
 			if err := s.pendingGate(pending, grantStart, ctx); err != nil {
 				return err
@@ -220,6 +221,15 @@ func (s *Service) familyContext(f Family, claims refreshClaims, recipient Recipi
 	return nil
 }
 func (s *Service) RenewAzure(ctx context.Context, handle string, recipient RecipientBinding) (*CommittedRenewal, error) {
+	return s.renewAzure(ctx, handle, recipient, nil)
+}
+func (s *Service) RenewAzureForSession(ctx context.Context, handle string, recipient RecipientBinding, expected ExpectedSession) (*CommittedRenewal, error) {
+	if !expected.Valid() {
+		return nil, ErrInvalid
+	}
+	return s.renewAzure(ctx, handle, recipient, &expected)
+}
+func (s *Service) renewAzure(ctx context.Context, handle string, recipient RecipientBinding, expected *ExpectedSession) (*CommittedRenewal, error) {
 	ctx, cancel := brokerOperation(ctx)
 	defer cancel()
 	now, err := s.now()
@@ -232,6 +242,9 @@ func (s *Service) RenewAzure(ctx context.Context, handle string, recipient Recip
 	claims, err := s.mac.parseRefresh(handle, s.issuer.Issuer, s.scope.State.RecoveryEpoch, now.Unix())
 	if err != nil {
 		return nil, err
+	}
+	if expected != nil && (claims.Actor != expected.ActorID || claims.FamilyID != expected.SessionID) {
+		return nil, ErrSessionChanged
 	}
 	var access *AccessResult
 	var successor string
@@ -289,6 +302,7 @@ func (s *Service) RenewAzure(ctx context.Context, handle string, recipient Recip
 			return FamilyDecision{}, err
 		}
 		access.familyExpires = &family.AbsoluteExpiresAt
+		access.sessionID = family.ID
 		finalGate = func() error {
 			at, err := s.now()
 			if err != nil {
@@ -337,6 +351,15 @@ func revoke(f Family, at time.Time) Family {
 	return f
 }
 func (s *Service) Revoke(ctx context.Context, handle string, recipient RecipientBinding) error {
+	return s.revokeSession(ctx, handle, recipient, nil)
+}
+func (s *Service) RevokeForSession(ctx context.Context, handle string, recipient RecipientBinding, expected ExpectedSession) error {
+	if !expected.Valid() {
+		return ErrInvalid
+	}
+	return s.revokeSession(ctx, handle, recipient, &expected)
+}
+func (s *Service) revokeSession(ctx context.Context, handle string, recipient RecipientBinding, expected *ExpectedSession) error {
 	ctx, cancel := brokerOperation(ctx)
 	defer cancel()
 	now, err := s.now()
@@ -349,6 +372,9 @@ func (s *Service) Revoke(ctx context.Context, handle string, recipient Recipient
 	claims, err := s.mac.parseRefresh(handle, s.issuer.Issuer, s.scope.State.RecoveryEpoch, now.Unix())
 	if err != nil {
 		return err
+	}
+	if expected != nil && (claims.Actor != expected.ActorID || claims.FamilyID != expected.SessionID) {
+		return ErrSessionChanged
 	}
 	committed, err := s.store.WithFamily(ctx, s.scope, claims.FamilyID, func(f Family) (FamilyDecision, error) {
 		now, err := s.now()

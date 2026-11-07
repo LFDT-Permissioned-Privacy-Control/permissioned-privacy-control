@@ -3,7 +3,9 @@
 `internal/identitybroker` exchanges verified Azure evidence for the existing
 `ops-access+jwt` assertion. Core still verifies those assertions locally through
 `internal/identity`; it never queries the provider or a session/user directory.
-This component exposes Go operations, not mounted browser or OAuth routes.
+`internal/identityhttp` adapts those operations to the browser and machine routes
+described in [the HTTP contract](v2-identity-http.md). Production mounting and the
+combined broker/RPC source profile require deliberate runtime composition.
 
 ## Approved source
 
@@ -169,9 +171,9 @@ binding. Raw DSNs and provider/token details are omitted from errors/output.
 
 ## Remaining composition
 
-This component does not establish browser Origin/cookie/CSRF protection, HTTP
-routes, serialized browser renewal, Privado proof verification, enterprise OAuth
-resource delegation, Explorer/UI wiring or real Azure account qualification.
-Those integrations must use the approved source, recipient binding and opaque
-result gates. A complete runtime must deliberately compose the broker and RPC
-profiles and qualify its binary imports, credentials, recovery and deployment.
+The HTTP adapter and browser helper establish their own exact Origin, cookie,
+recipient and serialized-renewal contracts. Privado proof verification,
+enterprise OAuth resource delegation, Explorer/UI wiring, production mounting
+and real Azure tenant/account qualification require separate composition.
+A complete runtime must compose the broker and RPC profiles deliberately and
+qualify its binary imports, credentials, recovery and deployment.

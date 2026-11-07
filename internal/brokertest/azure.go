@@ -32,6 +32,7 @@ type Entra struct {
 	errorCode            string
 	errorStatus          int
 	refreshID            bool
+	subject, redirectURI string
 	keyWait              <-chan struct{}
 	keyStarted, keyEnded chan<- struct{}
 }
@@ -42,13 +43,15 @@ func NewEntra(t testing.TB) *Entra {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &Entra{Key: key, roles: []string{"Reader"}}
+	e := &Entra{Key: key, roles: []string{"Reader"}, subject: f.Subject, redirectURI: BrokerSource().AzureProfiles[0].RedirectURI}
 	e.Clock.Store(f.Now)
 	e.Server = httptest.NewTLSServer(http.HandlerFunc(e.serve))
 	t.Cleanup(e.Server.Close)
 	return e
 }
-func (e *Entra) SetNonce(nonce string) { e.mu.Lock(); defer e.mu.Unlock(); e.nonce = nonce }
+func (e *Entra) SetNonce(nonce string)     { e.mu.Lock(); defer e.mu.Unlock(); e.nonce = nonce }
+func (e *Entra) SetSubject(subject string) { e.mu.Lock(); defer e.mu.Unlock(); e.subject = subject }
+func (e *Entra) SetRedirectURI(uri string) { e.mu.Lock(); defer e.mu.Unlock(); e.redirectURI = uri }
 func (e *Entra) SetRoles(roles ...string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -98,9 +101,10 @@ func (e *Entra) Sign(claims jwt.MapClaims) string {
 func (e *Entra) Access(service bool, mutate func(jwt.MapClaims)) string {
 	e.mu.Lock()
 	roles := append([]string{}, e.roles...)
+	subject := e.subject
 	e.mu.Unlock()
 	now := e.Clock.Load()
-	claims := jwt.MapClaims{"iss": "https://login.microsoftonline.com/" + f.Tenant + "/v2.0", "aud": Audience, "sub": "access-subject", "oid": f.Subject, "tid": f.Tenant, "azp": HumanClient, "ver": "2.0", "iat": now, "nbf": now, "exp": now + 3600, "scp": "access", "roles": roles}
+	claims := jwt.MapClaims{"iss": "https://login.microsoftonline.com/" + f.Tenant + "/v2.0", "aud": Audience, "sub": "access-subject", "oid": subject, "tid": f.Tenant, "azp": HumanClient, "ver": "2.0", "iat": now, "nbf": now, "exp": now + 3600, "scp": "access", "roles": roles}
 	if service {
 		delete(claims, "scp")
 		claims["azp"] = ServiceClient
@@ -114,8 +118,11 @@ func (e *Entra) Access(service bool, mutate func(jwt.MapClaims)) string {
 	return e.Sign(claims)
 }
 func (e *Entra) idToken(nonce string, refresh bool) string {
+	e.mu.Lock()
+	subject := e.subject
+	e.mu.Unlock()
 	now := e.Clock.Load()
-	claims := jwt.MapClaims{"iss": "https://login.microsoftonline.com/" + f.Tenant + "/v2.0", "aud": HumanClient, "sub": "initial-oidc-subject", "oid": f.Subject, "tid": f.Tenant, "iat": now, "exp": now + 3600, "auth_time": f.Now - 100}
+	claims := jwt.MapClaims{"iss": "https://login.microsoftonline.com/" + f.Tenant + "/v2.0", "aud": HumanClient, "sub": "initial-oidc-subject", "oid": subject, "tid": f.Tenant, "iat": now, "exp": now + 3600, "auth_time": f.Now - 100}
 	if !refresh {
 		claims["nonce"] = nonce
 	}
@@ -169,7 +176,7 @@ func (e *Entra) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		e.mu.Lock()
-		code, status, nonce, refreshID := e.errorCode, e.errorStatus, e.nonce, e.refreshID
+		code, status, nonce, refreshID, redirect := e.errorCode, e.errorStatus, e.nonce, e.refreshID, e.redirectURI
 		e.mu.Unlock()
 		if code != "" {
 			w.WriteHeader(status)
@@ -178,7 +185,7 @@ func (e *Entra) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		switch r.Form.Get("grant_type") {
 		case "authorization_code":
-			if r.Form.Get("code_verifier") == "" || r.Form.Get("redirect_uri") != BrokerSource().AzureProfiles[0].RedirectURI {
+			if r.Form.Get("code_verifier") == "" || r.Form.Get("redirect_uri") != redirect {
 				w.WriteHeader(400)
 				return
 			}

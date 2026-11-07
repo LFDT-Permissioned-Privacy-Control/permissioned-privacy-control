@@ -26,11 +26,12 @@ const (
 )
 
 var (
-	ErrInvalid      = errors.New("invalid identity broker request")
-	ErrUnauthorized = errors.New("invalid or expired authentication")
-	ErrRelogin      = errors.New("reauthentication required")
-	ErrUnavailable  = errors.New("identity broker unavailable")
-	ErrConflict     = errors.New("identity state conflict")
+	ErrInvalid        = errors.New("invalid identity broker request")
+	ErrUnauthorized   = errors.New("invalid or expired authentication")
+	ErrRelogin        = errors.New("reauthentication required")
+	ErrUnavailable    = errors.New("identity broker unavailable")
+	ErrConflict       = errors.New("identity state conflict")
+	ErrSessionChanged = errors.New("browser session changed")
 )
 
 type Digest [32]byte
@@ -100,6 +101,14 @@ func (s Scope) Valid() bool { return s.Namespace != (Digest{}) && s.State.Valid(
 type RecipientBinding [32]byte
 
 func (r RecipientBinding) Valid() bool { return r != (RecipientBinding{}) }
+
+// ExpectedSession constrains an existing browser continuation. It is public
+// own-session metadata, never a credential or a directory lookup request.
+type ExpectedSession struct{ ActorID, SessionID string }
+
+func (s ExpectedSession) Valid() bool {
+	return identity.ValidActorID(s.ActorID) && ValidUUID(s.SessionID)
+}
 
 type Pending struct {
 	ID                       string
