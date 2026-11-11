@@ -26,18 +26,21 @@ type Config struct {
 	Engine   *rpcengine.Engine
 	Metadata *rpcengine.MetadataEngine
 	State    *rpcengine.StateEngine
+	History  *rpcengine.HistoryEngine
 	Recorder *activitylog.Recorder
 	Network  networkidentity.Binding
 }
 type Service struct {
-	engine        *rpcengine.Engine
-	metadata      *rpcengine.MetadataEngine
-	state         *rpcengine.StateEngine
-	stateMethods  map[string]bool
-	traceMethods  map[string]bool
-	recorder      *activitylog.Recorder
-	organizations []string
-	slots         chan struct{}
+	engine         *rpcengine.Engine
+	metadata       *rpcengine.MetadataEngine
+	state          *rpcengine.StateEngine
+	stateMethods   map[string]bool
+	traceMethods   map[string]bool
+	history        *rpcengine.HistoryEngine
+	historyMethods map[string]bool
+	recorder       *activitylog.Recorder
+	organizations  []string
+	slots          chan struct{}
 }
 
 var ErrInvalid = errors.New("invalid audited RPC service")
@@ -214,6 +217,8 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 	}
 	if decoded && s.engine != nil && s.traceMethods[stateMethod] {
 		result.trace = s.engine.TraceCallObserved(ctx, assertion, org, raw)
+	} else if decoded && s.history != nil && s.historyMethods[stateMethod] {
+		result.history = s.history.QueryObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, raw)
 	} else if decoded && s.state != nil && s.stateMethods[stateMethod] {
 		result.state = s.state.QueryObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, raw)
 	} else if s.metadata != nil && (s.engine == nil || !decoded || route.Method != "eth_call" && route.Method != "eth_sendRawTransaction") {
@@ -222,6 +227,8 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 		result.native = s.engine.SubmitRawObserved(ctx, assertion, org, raw)
 	} else if s.engine != nil {
 		result.native = s.engine.CallObserved(ctx, assertion, org, raw)
+	} else if s.history != nil {
+		result.history = s.history.QueryObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, raw)
 	} else {
 		result.state = s.state.QueryObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, raw)
 	}

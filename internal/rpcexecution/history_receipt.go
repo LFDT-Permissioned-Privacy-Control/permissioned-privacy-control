@@ -74,6 +74,58 @@ func decodeHistoryLog(raw json.RawMessage, pos includedPosition, tx common.Hash,
 }
 
 func decodeHistoryReceipt(raw []byte, t HistoryTransaction, pos includedPosition, header *types.Header, nextLog *uint32, l HistoryBlockLimits) (HistoryReceipt, int, error) {
+	return decodeHistoryReceiptBody(raw, t, pos, header, nextLog, l, true)
+}
+
+// decodeSparseHistoryReceipt preserves an actual block-global first log ordinal
+// while bounding only this receipt's retained entry count. It proves neither a
+// preceding log population nor complete block coverage.
+func decodeSparseHistoryReceipt(raw []byte, t HistoryTransaction, pos includedPosition, header *types.Header, l HistoryBlockLimits) (HistoryReceipt, int, error) {
+	if header == nil {
+		return HistoryReceipt{}, 0, failure(InvalidEvidence)
+	}
+	if err := historyJSONShape(raw, l, false); err != nil {
+		return HistoryReceipt{}, 0, err
+	}
+	fields, err := nullableRawObject(raw, 24, map[string]bool{"to": true, "contractAddress": true})
+	if err != nil {
+		return HistoryReceipt{}, 0, err
+	}
+	next := uint32(0)
+	first := true
+	err = includedArray(fields["logs"], l.MaxLogs, func(value json.RawMessage) error {
+		if !first {
+			return nil
+		}
+		first = false
+		f, err := closedRawObject(value, 12)
+		if err != nil {
+			return err
+		}
+		n, err := includedQuantity(f["logIndex"], 31)
+		if err != nil {
+			return err
+		}
+		next = uint32(n)
+		return nil
+	})
+	if err != nil {
+		return HistoryReceipt{}, 0, err
+	}
+	receipt, n, err := decodeHistoryReceiptBody(raw, t, pos, header, &next, l, false)
+	if err != nil {
+		return HistoryReceipt{}, 0, err
+	}
+	if receipt.cumulativeGasUsed > header.GasUsed || receipt.cumulativeGasUsed < receipt.gasUsed {
+		return HistoryReceipt{}, 0, failure(InvalidEvidence)
+	}
+	return receipt, n, nil
+}
+
+// The whole-block caller retains its aggregate ordinal/count ceiling. Sparse
+// callers retain the same tuple, contiguity, payload and bloom checks while the
+// bounded array independently counts their local receipt entries.
+func decodeHistoryReceiptBody(raw []byte, t HistoryTransaction, pos includedPosition, header *types.Header, nextLog *uint32, l HistoryBlockLimits, wholeBlock bool) (HistoryReceipt, int, error) {
 	var zero HistoryReceipt
 	if len(raw) > l.MaxReceiptBytes {
 		return zero, 0, failure(EvidenceLimit)
@@ -172,7 +224,7 @@ func decodeHistoryReceipt(raw []byte, t HistoryTransaction, pos includedPosition
 	copy(r.bloom[:], b)
 	charge := 512
 	e = includedArray(f["logs"], l.MaxLogs, func(raw json.RawMessage) error {
-		if uint64(*nextLog) >= uint64(l.MaxLogs) {
+		if wholeBlock && uint64(*nextLog) >= uint64(l.MaxLogs) {
 			return failure(EvidenceLimit)
 		}
 		log, n, e := decodeHistoryLog(raw, pos, t.Hash(), *nextLog, l)
