@@ -57,6 +57,40 @@ func testFact(c Config, actor string, n byte) w.OwnershipFact {
 	return w.OwnershipFact{Namespace: ns, Actor: actor, Address: common.BytesToAddress([]byte{n}), ProofVersion: 2, VerifiedAt: time.UnixMicro(1700000000123456).UTC()}
 }
 
+func TestRetainedPlanKeepsCurrentWalletSemantics(t *testing.T) {
+	now := time.Unix(1800000000, 0).UTC()
+	store := &testStore{}
+	legacy := testConfig(store, &now)
+	if _, err := NewRetained(legacy); !errors.Is(err, d.ErrInvalid) {
+		t.Fatal("retained constructor accepted legacy plan", err)
+	}
+	c := legacy
+	c.Plan.Version = 2
+	c.Plan.Profile = d.RetainedSourceProfile
+	if _, err := New(c); !errors.Is(err, d.ErrInvalid) {
+		t.Fatal("legacy constructor widened", err)
+	}
+	r, err := NewRetained(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, viewer := testActor(1), testActor(2)
+	store.facts = []w.OwnershipFact{testFact(c, target, 1), testFact(c, viewer, 2)}
+	scope := testScope(t, c, []string{target}, viewer, p.SanctionsReport)
+	snapshot, err := r.Open(t.Context(), scope, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desc := snapshot.Descriptor()
+	if desc.Version != 1 || desc.Population != "CURRENT_PROVED_ASSOCIATIONS" || desc.PlanDigest != c.Plan.PlanDigest || len(snapshot.Wallets()) != 2 {
+		t.Fatal("wallet facts were relabelled or recipient union dropped")
+	}
+	store.facts = store.facts[:1]
+	if err = snapshot.CheckCurrent(t.Context()); !errors.Is(err, d.ErrConflict) {
+		t.Fatal("recipient unlink escaped current union check", err)
+	}
+}
+
 func TestColdConfigurationAndScopeFailBeforeRead(t *testing.T) {
 	now := time.Unix(1800000000, 0).UTC()
 	for _, cell := range []struct {

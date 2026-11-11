@@ -20,6 +20,7 @@ type factContext struct {
 	descriptors map[SourceKind]SourceDescriptor
 	targets     map[[20]byte][]string
 	mine        map[[20]byte]bool
+	historyKind string
 }
 
 func scopeAddress(q NormalizedQuery, a [20]byte) bool {
@@ -41,7 +42,11 @@ func (c factContext) provenance(v Provenance, k SourceKind, kind string) bool {
 	return true
 }
 func validateFacts(scope ReadScope, ds []SourceDescriptor, f Facts, after *Position) (factContext, error) {
-	c := factContext{scope: scope, descriptors: map[SourceKind]SourceDescriptor{}, targets: map[[20]byte][]string{}, mine: map[[20]byte]bool{}}
+	return validateFactsForHistory(scope, ds, f, after, "CURRENT_SCOPED_WALLET_HISTORY")
+}
+
+func validateFactsForHistory(scope ReadScope, ds []SourceDescriptor, f Facts, after *Position, historyKind string) (factContext, error) {
+	c := factContext{scope: scope, descriptors: map[SourceKind]SourceDescriptor{}, targets: map[[20]byte][]string{}, mine: map[[20]byte]bool{}, historyKind: historyKind}
 	if e := PositionForQuery(scope.Query, after); e != nil {
 		return c, e
 	}
@@ -225,7 +230,7 @@ func validateFacts(scope ReadScope, ds []SourceDescriptor, f Facts, after *Posit
 }
 func (c factContext) addressFact(a AddressFact) bool {
 	ids := c.targets[a.Address]
-	return len(ids) > 0 && c.provenance(a.Provenance, HistorySource, "CURRENT_SCOPED_WALLET_HISTORY") && slices.Equal(ids, a.Provenance.TargetActorIDs) && (a.ENSName == nil || text(*a.ENSName, 255))
+	return len(ids) > 0 && c.provenance(a.Provenance, HistorySource, c.historyKind) && slices.Equal(ids, a.Provenance.TargetActorIDs) && (a.ENSName == nil || text(*a.ENSName, 255))
 }
 func (c factContext) participants(t TransactionFact) ([]string, [][20]byte) {
 	ids := []string{}
@@ -260,7 +265,7 @@ func (c factContext) direction(t TransactionFact) string {
 func (c factContext) transaction(t TransactionFact) bool {
 	q := c.scope.Query
 	ids, _ := c.participants(t)
-	if len(ids) == 0 || !c.provenance(t.Provenance, HistorySource, "CURRENT_SCOPED_WALLET_HISTORY") || !slices.Equal(ids, t.Provenance.TargetActorIDs) || !countValid(t.BlockNumber) || !countValid(t.GasUsed) || !amountValid(t.Value) || t.Status > 1 || t.BlockTime < q.scope.DataTime.Start || t.BlockTime > q.scope.DataTime.End || t.Direction != c.direction(t) {
+	if len(ids) == 0 || !c.provenance(t.Provenance, HistorySource, c.historyKind) || !slices.Equal(ids, t.Provenance.TargetActorIDs) || !countValid(t.BlockNumber) || !countValid(t.GasUsed) || !amountValid(t.Value) || t.Status > 1 || t.BlockTime < q.scope.DataTime.Start || t.BlockTime > q.scope.DataTime.End || t.Direction != c.direction(t) {
 		return false
 	}
 	if q.view == Detail {

@@ -275,9 +275,23 @@ func Render(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext, readID
 	return render(s, ds, f, c, readID, nil)
 }
 
+// RenderRetained selects only the separately validated whole retained plan.
+// Immutable-only resources retain cut coverage; history-bearing resources
+// expose a live retained basis and never imply an immutable export.
+func RenderRetained(plan SourcePlan, s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext, readID string) (Result, error) {
+	if !ValidRetainedPlan(plan) || s.BundleDigest != plan.BundleDigest {
+		return Result{}, ErrInvalid
+	}
+	return renderProfile(s, ds, f, c, readID, nil, &plan)
+}
+
 // afterBudget is a local stage-order spy for package tests, never configuration
 // or a provider hook. Public Render always uses the actual serializer.
 func render(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext, readID string, afterBudget func()) (Result, error) {
+	return renderProfile(s, ds, f, c, readID, afterBudget, nil)
+}
+
+func renderProfile(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext, readID string, afterBudget func(), retained *SourcePlan) (Result, error) {
 	var result Result
 	if e := CheckFactsBudget(f); e != nil {
 		return result, e
@@ -285,7 +299,13 @@ func render(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext, readID
 	if !digestValid(s.Namespace) || !uuidValid(s.CaseID) || s.CaseVersion < 1 || !actor(s.RecipientActorID) || !uuidValid(s.DataOrganizationID) || !digestValid(s.BundleDigest) || !digestValid(s.RuleDigest) || !uuidValid(readID) || !utc(c.PreparedAt) || !s.EffectiveUntil.After(c.PreparedAt) || c.Namespace != s.Namespace || c.CaseID != s.CaseID || c.DataOrganizationID != s.DataOrganizationID || c.RecipientActorID != s.RecipientActorID || c.Query.digest != s.Query.digest || !c.EffectiveUntil.Equal(s.EffectiveUntil) {
 		return result, ErrInvalid
 	}
-	set, e := SourceSetDigest(ds, s.Query.resource, s.Query.view)
+	var set Digest
+	var e error
+	if retained == nil {
+		set, e = SourceSetDigest(ds, s.Query.resource, s.Query.view)
+	} else {
+		set, e = SourceSetDigestRetained(*retained, ds, s.Query.resource, s.Query.view)
+	}
 	if e != nil {
 		return result, e
 	}
@@ -297,7 +317,12 @@ func render(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext, readID
 	// The provider transfers detached immutable facts; copying after the cheap
 	// preflight also prevents later reuse of its backing slices from changing output.
 	f = cloneValue(reflect.ValueOf(f)).Interface().(Facts)
-	fc, e := validateFacts(s, ds, f, nil)
+	var fc factContext
+	if retained == nil {
+		fc, e = validateFacts(s, ds, f, nil)
+	} else {
+		fc, e = validateFactsForHistory(s, ds, f, nil, RetainedHistoryPopulation)
+	}
 	if e != nil {
 		return result, e
 	}
@@ -317,7 +342,17 @@ func render(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext, readID
 	}
 	slices.Sort(pops)
 	pops = slices.Compact(pops)
-	result = Result{scope: s, readID: readID, coverage: CoverageDTO{"COMPLETE_AT_CUT", pops, set, c.PreparedAt.Unix()}, sourceDigest: set, renderDigest: rd}
+	coverage := CoverageDTO{Status: "COMPLETE_AT_CUT", Populations: pops, SourceCutDigest: set, PreparedAt: c.PreparedAt.Unix()}
+	if retained != nil {
+		kinds, err := RequiredKinds(s.Query.resource)
+		if err != nil {
+			return Result{}, err
+		}
+		if slices.Contains(kinds, HistorySource) {
+			coverage.Status, coverage.SourceCutDigest, coverage.SourceBasisDigest = "RETAINED_AT_READ", "", set
+		}
+	}
+	result = Result{scope: s, readID: readID, coverage: coverage, sourceDigest: set, renderDigest: rd}
 	switch s.Query.resource {
 	case p.AddressHistory:
 		if s.Query.view == Resolve {

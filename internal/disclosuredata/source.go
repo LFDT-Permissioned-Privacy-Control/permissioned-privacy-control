@@ -57,6 +57,10 @@ func SourceSetDigest(ds []SourceDescriptor, r p.Resource, v View) (Digest, error
 	if e != nil {
 		return "", e
 	}
+	return sourceSetDigest(ds, r, v, refs, 1, "ops.disclosure.source-set/v1")
+}
+
+func sourceSetDigest(ds []SourceDescriptor, r p.Resource, v View, refs []SourceRef, version uint8, domain string) (Digest, error) {
 	k, e := RequiredKinds(r)
 	if e != nil {
 		return "", e
@@ -91,13 +95,13 @@ func SourceSetDigest(ds []SourceDescriptor, r p.Resource, v View) (Digest, error
 		Refs        []reference `json:"refs"`
 		Resource    p.Resource  `json:"resource"`
 		View        View        `json:"view"`
-	}{V: 1, Resource: r, View: v, Descriptors: []stable{}, Refs: []reference{}}
+	}{V: version, Resource: r, View: v, Descriptors: []stable{}, Refs: []reference{}}
 	for _, d := range ds {
 		canonical.Descriptors = append(canonical.Descriptors, stable{d.Version, d.Kind, d.Reference, d.NetworkKey, d.Epoch, d.Generation, d.PlanDigest, d.FormatDigest, d.CoverageDigest, d.Population})
 		canonical.Refs = append(canonical.Refs, reference{d.Kind, d.Reference})
 	}
 	raw, _ := jsonBytes(canonical)
-	return hashParts("ops.disclosure.source-set/v1", raw), nil
+	return hashParts(domain, raw), nil
 }
 func cloneKeys(k Keys) (Keys, error) {
 	out := Keys{}

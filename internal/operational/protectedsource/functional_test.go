@@ -1,0 +1,106 @@
+package protectedsource
+
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	d "privacy-proxy/internal/disclosuredata"
+	p "privacy-proxy/internal/disclosurepolicy"
+	f "privacy-proxy/internal/disclosuretest"
+)
+
+func TestActualRetainedSourcesComposeAllResources(t *testing.T) {
+	node := ownedFunctionalNode(t)
+	config := actualFunctionalConfig(t, node)
+	source, err := New(t.Context(), config)
+	if err != nil {
+		t.Fatal("actual source assembly", err)
+	}
+	plan := source.Plan()
+	caseID := uuid.NewString()
+	namespace := digestParts("functional-case-namespace")
+	base := p.Scope{TargetActors: []string{f.Actor(f.Subject)}, Resources: plan.Resources, Addresses: p.Addresses{Mode: "all-target-addresses", Values: []string{}}, DataTime: p.Interval{Start: f.Now - 10, End: f.Now + 10}, Level: p.Full}
+	keys := d.Keys{Active: d.Key{ID: "render", Bytes: bytes.Repeat([]byte{33}, 32)}}
+	var locator string
+	for _, resource := range []p.Resource{p.AddressHistory, p.Transactions, p.ActivityLogs, p.ActivitySummary, p.SanctionsReport, p.ComplianceReport} {
+		t.Run(string(resource), func(t *testing.T) {
+			view := d.Report
+			if resource == p.AddressHistory || resource == p.Transactions || resource == p.ActivityLogs {
+				view = d.List
+			}
+			normalized, err := d.Normalize(d.Query{Version: 1, Resource: resource, View: view}, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := d.ReadScope{Namespace: namespace, CaseID: caseID, CaseVersion: 1, RecipientActorID: f.Actor(f.AdminSubject), DataOrganizationID: f.Org, BundleDigest: plan.BundleDigest, RuleDigest: digestParts("functional-rule"), EffectiveUntil: time.Unix(f.Now+300, 0).UTC(), Query: normalized}
+			read, err := source.OpenRetained(t.Context(), scope, nil, nil, nil)
+			if err != nil {
+				t.Fatal("actual open", err)
+			}
+			defer read.Close()
+			facts, err := read.Read(t.Context(), scope, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resource == p.AddressHistory && len(facts.Addresses) != 1 || resource == p.Transactions && len(facts.Transactions) != 1 {
+				t.Fatal("eligible actual ROOT not returned", facts)
+			}
+			if resource == p.SanctionsReport && (facts.Sanctions == nil || facts.Sanctions.Status != "clear" || facts.Sanctions.ScopedAddressCount != 1) {
+				t.Fatal("whole qualified sanctions set", facts)
+			}
+			if resource == p.ComplianceReport && (facts.Compliance == nil || facts.Compliance.KYC != "not_evaluated" || facts.Compliance.Sanctions.ScopedAddressCount != 1) {
+				t.Fatal("actual source composition", facts)
+			}
+			if err = read.CheckCurrent(t.Context()); err != nil {
+				t.Fatal("actual final source recheck", err)
+			}
+			render, err := d.RenderRetained(plan, scope, read.Descriptors(), facts, d.RenderContext{PreparedAt: config.Clock(), Namespace: scope.Namespace, CaseID: caseID, DataOrganizationID: f.Org, RecipientActorID: scope.RecipientActorID, Keys: keys, Query: normalized, EffectiveUntil: scope.EffectiveUntil}, uuid.NewString())
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(render)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resource == p.AddressHistory {
+				var result struct {
+					Result struct {
+						Items []struct {
+							AddressID string `json:"addressId"`
+						} `json:"items"`
+					} `json:"result"`
+				}
+				if err = json.Unmarshal(raw, &result); err != nil || len(result.Result.Items) != 1 {
+					t.Fatal(err)
+				}
+				locator = result.Result.Items[0].AddressID
+			}
+		})
+	}
+	t.Run("full transaction detail", func(t *testing.T) {
+		hash := node.tx.Hash().Hex()
+		normalized, err := d.Normalize(d.Query{Version: 1, Resource: p.Transactions, View: d.Detail, AddressID: &locator, TransactionHash: &hash}, base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scope := d.ReadScope{Namespace: namespace, CaseID: caseID, CaseVersion: 1, RecipientActorID: f.Actor(f.AdminSubject), DataOrganizationID: f.Org, BundleDigest: plan.BundleDigest, RuleDigest: digestParts("functional-rule"), EffectiveUntil: time.Unix(f.Now+300, 0).UTC(), Query: normalized}
+		read, err := source.OpenRetained(t.Context(), scope, nil, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer read.Close()
+		facts, err := read.Read(t.Context(), scope, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(facts.Transactions) != 1 || facts.Transactions[0].Full == nil || facts.Transactions[0].Full.Input != "0x" {
+			t.Fatal("actual signed detail", facts)
+		}
+		if _, err = d.RenderRetained(plan, scope, read.Descriptors(), facts, d.RenderContext{PreparedAt: config.Clock(), Namespace: scope.Namespace, CaseID: caseID, DataOrganizationID: f.Org, RecipientActorID: scope.RecipientActorID, Keys: keys, Query: normalized, EffectiveUntil: scope.EffectiveUntil}, uuid.NewString()); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
