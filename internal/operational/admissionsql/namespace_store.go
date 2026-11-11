@@ -38,10 +38,17 @@ type NamespaceReader struct {
 	network    h.Digest
 	generation string
 	era        h.ModelEra
+	limits     h.ReadLimits
 }
 
 func OpenNamespaceReader(ctx context.Context, dsn string, binding a.NetworkBinding, generation string, era h.ModelEra) (*NamespaceReader, error) {
-	if ctx == nil || !h.UUID(generation) || !era.Valid() {
+	return OpenNamespaceReaderWithLimits(ctx, dsn, binding, generation, era, h.DefaultReadLimits())
+}
+
+// OpenNamespaceReaderWithLimits permits lower-only whole-pass ceilings. It
+// changes neither source grants nor the C1 startup readiness/catalog checks.
+func OpenNamespaceReaderWithLimits(ctx context.Context, dsn string, binding a.NetworkBinding, generation string, era h.ModelEra, limits h.ReadLimits) (*NamespaceReader, error) {
+	if ctx == nil || !h.UUID(generation) || !era.Valid() || !limits.Valid() {
 		return nil, h.ErrInvalid
 	}
 	key, genesis, err := bindingValues(binding)
@@ -51,10 +58,18 @@ func OpenNamespaceReader(ctx context.Context, dsn string, binding a.NetworkBindi
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	config, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
+	if err != nil || config.ConnConfig.ValidateConnect != nil {
+		// target_session_attrs modes other than default/any install
+		// connection-validation SQL outside the bounded read counter.
+		// Reject them without silently changing their target-selection meaning.
 		return nil, h.ErrUnavailable
 	}
 	config.ConnConfig.ConnectTimeout = 3 * time.Second
+	// One budgeted operation uses one protocol roundtrip per SQL command.
+	// Preparing statements or an implicit pool Ping would consume additional
+	// synchronization boundaries outside the read transaction's counter.
+	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+	config.ShouldPing = func(context.Context, pgxpool.ShouldPingParams) bool { return false }
 	config.MaxConns = 4
 	config.MinConns = 0
 	config.MinIdleConns = 0
@@ -66,7 +81,7 @@ func OpenNamespaceReader(ctx context.Context, dsn string, binding a.NetworkBindi
 	if err != nil {
 		return nil, h.ErrUnavailable
 	}
-	r := &NamespaceReader{pool: pool, binding: binding, network: h.Digest(key), generation: generation, era: era}
+	r := &NamespaceReader{pool: pool, binding: binding, network: h.Digest(key), generation: generation, era: era, limits: limits}
 	fail := func(tx pgx.Tx) (*NamespaceReader, error) {
 		if tx != nil {
 			rollback(tx)

@@ -244,13 +244,19 @@ func semanticDigest(domain string, value any) (Digest, error) {
 	if err != nil {
 		return Digest{}, ErrInvalid
 	}
+	return semanticDigestBytes(domain, raw), nil
+}
+
+// semanticDigestBytes shares the exact domain+NUL+canonical JSON framing.
+// Callers pass only bytes just produced by the owned canonical encoder.
+func semanticDigestBytes(domain string, raw []byte) Digest {
 	h := sha256.New()
 	h.Write([]byte(domain))
 	h.Write([]byte{0})
 	h.Write(raw)
 	var d Digest
 	copy(d[:], h.Sum(nil))
-	return d, nil
+	return d
 }
 
 func compareDigest(a, b Digest) int { return bytes.Compare(a[:], b[:]) }

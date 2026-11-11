@@ -150,3 +150,99 @@ nine existing creation-fact tables. It has no user, travel-record, mutation,
 sequence or custom-function access. Startup checks effective PUBLIC, inherited
 and column privileges, ownership, RLS, triggers and exact schema definitions.
 The owner credential belongs exclusively to offline operations.
+
+## Coherent namespace fact reads
+
+The minimal reader also provides `DiscoverRequirements` and `ResolvePass` for a
+bounded scope of actual included ROOT request coordinates. These are internal
+fact APIs. They do not implement a protected-data source, mount a route, grant
+current permissions or certify a complete transaction population.
+
+The trusted acquisition caller supplies the exact network/model era, canonical
+view identity and head, and sorted unique ROOT hash/block/index/time/target
+coordinates. It is responsible for actual signed ROOT membership and target
+acquisition. These Go DTOs are not unforgeable proof objects. A state-only read
+has no included ROOT; callers cannot manufacture one to claim state authority.
+
+Discovery reads all relevant assertions, original creation associations and deny
+barriers. It returns only digests and required canonical block **numbers**, with
+claimed hashes as metadata. The caller acquires actual canonical-at-number
+headers and hash-list transaction counts outside SQL. An old orphan hash is not
+a direction to fetch and bless that orphan. A header alone supplies no count.
+
+Resolve independently reads and re-derives the whole requirements set and
+compares its exact expected digest before using the supplied canonical context.
+A new or changed requirement, missing count, wrong ROOT binding or unavailable
+context fails without a fallback lookup or automatic discovery retry. Each pass
+holds one read-only REPEATABLE READ transaction for the entire scope, including
+every internal chunk of at most 64 addresses. No node, file or mutable provider
+callback runs under that transaction.
+
+All qualified positive assertions for an address/model are compared before
+choosing a runtime key. A later valid birth may contradict a claim that ordinary
+runtime pre-existed era entry, while supplying no earlier runtime support.
+Ordinary calls must be strictly after birth by block and transaction index.
+Factory CALL roots use their own target; they cannot borrow a child birth.
+Root creation uses only its exact surviving automatic record-zero birth.
+
+A finite assertion supports its `[Start, End)` interval only at an in-model
+ROOT or applicable edge. A canonical End beyond the model end remains exclusive
+boundary metadata and cannot prove post-era persistence. Its exact hash/count
+is still required; an invalid or missing End is not clipped away. A checkpoint
+supports ROOT calls only after block K, and transfer cuts at END-K's actual
+transaction count or later. It cannot supply an earlier same-K cut.
+
+Each transfer needs an independently eligible original basis at its own cut,
+and a qualified, strictly increasing parent chain. Known applicable transfer
+and deny barriers remain relevant after the original basis is revoked. A later
+checkpoint cannot reset the namespace to the initial label. The same rule
+applies across different normalized keys for the same address and continuous
+model; orphan cuts, other models and ended pre-era physical UUIDs are separate.
+Divergent positive histories conflict regardless of insertion order, including
+histories that happen to end at the same label.
+
+Current base and namespace readiness must match the reader's expected recovery
+generation. Original immutable coverage retains its historical generation,
+coverage digest and capture epoch. Valid historical evidence is not expired by
+ordinary worker-head progress, capture heartbeat or lease expiry. Permanent
+original epoch denies and durable observer quarantine still apply. Recovery
+never rewrites original capture provenance.
+
+A detached result is `KnownOrg`, `KnownPublic`, `Unknown` or `Conflict`, with
+basis/transfer references and exact scope, requirements, canonical-context and
+whole relevant authority digests. `KnownPublic` has no owning organization.
+Protected organization cases must exclude public-only rows, address resolution,
+aliases, counts and sanctions-address input; a public transaction does not make
+an Actor-to-wallet association public. Unknown relevant population cannot be
+reported as a complete empty result. Current Git ownership, current wallets and
+Actor membership are not fallback namespace facts.
+
+The acquisition caller must repeat the **whole** scoped pass before exposure
+and compare its authority digest alongside its canonical and complete ROOT
+population bindings. Independently valid 64-address snapshots cannot be
+concatenated. No query state is persisted.
+
+Per-pass ceilings are 10,000 roots, 32,768 canonical block requirements/candidates,
+4 MiB canonical input, 8 MiB canonical candidate payloads, 4 MiB discovery output
+or 2 MiB resolution output, 512 physical SQL commands, 2,000,000 qualification
+work units and one earlier-parent deadline of at most five seconds. SQL lock
+waits are capped at 500 ms. `OpenNamespaceReaderWithLimits` permits lower positive
+ceilings; the original constructor keeps these defaults. The limits are
+conjunctive: a maximum root count does not promise every proof/result shape fits
+the independent byte and work bounds. Exact bytes used for digests are capped;
+this does not claim an exact peak heap or RSS bound.
+
+One discovery, one initial resolution and one required before-exposure repeat
+permit at most three scans under the caller's one earlier deadline: 1,536 SQL
+commands, 15 seconds, 6,000,000 work units and 44 MiB of bounded canonical
+input/candidate/output payload work. The caller owns that composition and the
+separate canonical acquisition budget; this reader performs zero network RPCs.
+Failure returns no partial discovery or pass, including a final query-budget or
+transaction-completion failure.
+
+The dedicated reader uses a single-roundtrip query mode and no implicit pool
+Ping. Its physical command budget includes BEGIN and the final COMMIT or
+ROLLBACK; a limit of one fails before opening a transaction. Connection target
+selection through `target_session_attrs` supports default or `any` only: the
+other modes issue additional connection-validation SQL and are rejected at
+startup rather than silently ignored. TLS connection settings are preserved.
