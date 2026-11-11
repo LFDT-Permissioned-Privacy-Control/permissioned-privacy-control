@@ -350,6 +350,10 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 			e.raw.bindings[org][ref] = binding
 		}
 	}
+	if err := e.initClientTrace(); err != nil {
+		e.Close()
+		return bad()
+	}
 	return e, nil
 }
 

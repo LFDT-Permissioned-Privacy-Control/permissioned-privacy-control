@@ -214,6 +214,9 @@ func (n *Engine) CheckSigned(ctx context.Context, view *runtimepolicy.View, sele
 }
 
 func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOrg string, execution *rpcexecution.CallExecution, wallets WalletSnapshot, signed bool, capture *creationCapture) policycore.Decision {
+	return n.checkBudget(ctx, view, selectedOrg, execution, wallets, signed, capture, 0, "")
+}
+func (n *Engine) checkBudget(ctx context.Context, view *runtimepolicy.View, selectedOrg string, execution *rpcexecution.CallExecution, wallets WalletSnapshot, signed bool, capture *creationCapture, extra uint64, traceOrg string) policycore.Decision {
 	if ctx.Err() != nil || n == nil || view == nil || n.currentView != nil && n.currentView != view || execution == nil || execution.Signed() != signed || execution.Tree() == nil || view.RequireLive() != nil {
 		return invalid()
 	}
@@ -260,7 +263,7 @@ func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOr
 	}
 	var weight ruleWork
 	orgIDs := []string{selectedOrg}
-	if n.multiOrg {
+	if n.multiOrg && traceOrg == "" {
 		orgIDs = view.OrgIDs()
 	}
 	var totalGroups uint64
@@ -306,6 +309,10 @@ func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOr
 	}
 	work, valid := admissionWork(uint64(execution.RecordCount()), totalGroups, weight, uint64(len(wallets.addresses)))
 	if !valid {
+		return invalid()
+	}
+	work, valid = add(work, extra)
+	if !valid || work > MaxAdmissionWork {
 		return invalid()
 	}
 	if n.lifecycle {

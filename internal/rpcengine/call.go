@@ -44,6 +44,7 @@ type Engine struct {
 	raw          *rawEngine
 	network      networkidentity.Binding
 	current      *nativeAddressSource
+	traceMethods map[string]bool
 }
 
 func New(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpcexecution.Client, wallets WalletResolver, clock identity.Clock) (*Engine, error) {
