@@ -4,6 +4,7 @@ import { multiPair, readMultiMarker } from '../auth/multiContext'
 import { AccessOutcome, Candidate, MultiAccess, MultiSession, Pending, sameSession } from '../auth/multiProtocol'
 import { AuthError, session } from '../auth/protocol'
 import { completeFlow, Flow, FLOW_KEY, inspectFlow, ownSelf, readContinuation, saveContinuation, Self } from './protocol'
+import { forgetRemembered, remember, remembered } from './remembered'
 
 export type Phase = 'booting' | 'anonymous' | 'selected' | 'proof-pending' | 'context-changed' | 'failed'
 type Profiles = Awaited<ReturnType<MultiBrowserAuthClient['providers']>>
@@ -133,6 +134,10 @@ export class Controller {
     this.set({ phase: 'selected', self, pending: null, candidate: null, busy: false, error: null })
     clearTimeout(this.expiryTimer)
     this.expiryTimer = setTimeout(this.tick, Math.max(1, self.expiresAt * 1000 - Date.now()))
+    const flow = this.state.flow, pair = this.selected && { ...this.selected }, epoch = this.epoch, revision = this.revision
+    if (flow && pair && remembered(flow, self, pair)) queueMicrotask(() => {
+      if (this.alive && epoch === this.epoch && revision === this.revision && this.state.flow === flow && this.state.self === self && this.selected && sameSession(pair, this.selected)) void this.finish(true)
+    })
   }
   private async outcome(op: Owner, result: AccessOutcome): Promise<void> {
     if (result.status === 'access') { await this.accept(op, result.access); return }
@@ -212,9 +217,13 @@ export class Controller {
     if (!id) return
     await this.work('cancel', async op => { await this.client.cancelPrivado(id); this.check(op) })
   }
-  continue = async (): Promise<void> => {
+  continue = async (): Promise<void> => this.finish(false)
+  forgetAppChoices = (): void => { forgetRemembered() }
+  private finish = async (automatic: boolean): Promise<void> => {
     const pair = this.selected && { ...this.selected }, flow = this.state.flow
     if (!pair || !flow || this.completing || this.state.busy || this.state.phase !== 'selected') return
+    const self = this.state.self
+    if (automatic && (!self || !remembered(flow, self, pair))) return
     this.completing = true; this.set({ busy: true, error: null })
     await this.work('complete', async op => {
       try {
@@ -224,6 +233,7 @@ export class Controller {
           return redirect
         }); this.check(op)
         if (result.status !== 'completed') { this.completing = false; await this.outcome(op, result); return }
+        if (!automatic && self && self === this.state.self) remember(flow, self, pair)
         sessionStorage.removeItem(FLOW_KEY)
         this.check(op)
         location.replace(result.value) // No await between final fence and navigation.

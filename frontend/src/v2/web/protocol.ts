@@ -7,7 +7,7 @@ export interface Self {
   sourceProfileDigest: string; expiresAt: number
   organizations: { id: string; slug: string; name: string; isOrgAdmin: boolean; isOrgReadonlyAdmin: boolean }[]
 }
-export interface Flow { id: string; expiresAt: number; displayName: string }
+export interface Flow { id: string; clientId: string; expiresAt: number; displayName: string }
 export const FLOW_KEY = 'ops-v2.sso-continuation'
 
 // No credential-bearing body, URL or error is exposed to logs or storage.
@@ -60,8 +60,8 @@ export async function ownSelf(access: MultiAccess, signal: AbortSignal): Promise
 export async function inspectFlow(id: string, signal: AbortSignal): Promise<Flow> {
   if (!session(id)) throw new AuthError('invalid_response')
   const v = object(await request('/api/v2/sso/flow', { action: 'inspect', flowId: id }, null, signal, 2048), ['clientId', 'displayName', 'expiresAt', 'phase'])
-  if (!text(v.clientId, 128) || !text(v.displayName, 256) || !liveExpiry(v.expiresAt) || v.phase !== 'pending') throw new AuthError('invalid_response')
-  return { id, displayName: v.displayName, expiresAt: v.expiresAt }
+  if (!text(v.clientId, 128) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(v.clientId) || !text(v.displayName, 256) || !liveExpiry(v.expiresAt) || v.phase !== 'pending') throw new AuthError('invalid_response')
+  return { id, clientId: v.clientId, displayName: v.displayName, expiresAt: v.expiresAt }
 }
 export async function completeFlow(flow: Flow, access: MultiSession, token: string, signal: AbortSignal): Promise<string> {
   const v = object(await request('/api/v2/sso/flow', { action: 'complete', flowId: flow.id,

@@ -38,6 +38,8 @@ function App() {
         <strong>{org.name}</strong> ({org.slug}){org.isOrgAdmin ? ' · Organization admin' : org.isOrgReadonlyAdmin ? ' · Read-only organization admin' : ''}
       </li>)}</ul> : <p>No organizations are assigned by the current approved rules.</p>}
       {state.flow && <button disabled={state.busy} onClick={() => void controller.continue()}>Continue to application</button>}
+      <p>After you continue, this app can reopen automatically for the same verified Azure account and OPS session for up to 24 hours. Privado always needs a fresh proof.</p>
+      <button disabled={state.busy} onClick={() => controller.forgetAppChoices()}>Forget remembered app choices</button>
       <button disabled={state.busy} onClick={() => void controller.refresh()}>Refresh session</button>
       <button disabled={state.busy} onClick={() => void controller.logout()}>Sign out of OPS</button>
     </section>}

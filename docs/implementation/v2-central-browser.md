@@ -60,3 +60,19 @@ name bytes at six escaped bytes each, is 448,505 bytes including newline. Its
 response cap is 512 KiB; no organizations or valid names are truncated. The
 pure self package has a permanent dependency check excluding broker, SQL,
 legacy RBAC and EVM execution dependencies.
+
+After the first explicit successful app handoff, the browser can remember that
+client for the exact verified Azure Actor, source profile and digest, and OPS
+browser family. A later flow for that same client may complete automatically
+only after actual helper restoration/provider refresh and independent Core self
+verification match the saved selection. The E1 current family, client catalog,
+full-bearer trust and eligibility checks still run. This remembers a UI choice,
+not identity, permissions or disclosure consent.
+
+The noncredential local marker contains at most 32 clients, at most 2 KiB per
+entry and 64 KiB overall. Each choice keeps its original 24-hour expiry; automatic
+handoffs never extend it. Account, profile, digest or family changes require
+explicit Continue again. **Forget remembered app choices** removes these markers.
+An ambiguous completion is retired without retry. Privado never uses automatic
+handoff: a new document still requires genuine fresh proof and explicit holder
+selection. No JWT or cached proof is reconstructed from a cookie.
