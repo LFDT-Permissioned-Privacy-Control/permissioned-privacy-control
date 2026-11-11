@@ -1,0 +1,142 @@
+package rpcactivity
+
+import (
+	"context"
+	"encoding/hex"
+	"slices"
+
+	"privacy-proxy/internal/activitylog"
+	"privacy-proxy/internal/policybundle"
+	"privacy-proxy/internal/rpcengine"
+)
+
+// New binds the actual engine(s) to one recorder and one output-lifetime gate.
+// Metadata-only construction creates no native admission/wallet/Guard resource.
+func New(c Config) (*Service, error) {
+	if c.Metadata == nil {
+		return newNativeService(c)
+	}
+	key, err := c.Network.Key()
+	if err != nil || c.Recorder == nil || c.Recorder.Healthy() != nil {
+		return nil, ErrInvalid
+	}
+	binding := c.Metadata.OperationBinding()
+	m, bounds := c.Recorder.Metadata(), c.Recorder.Bounds()
+	if binding.Profile != policybundle.RuntimeCreationObservedProfileID || binding.Environment != c.Network.Environment || binding.ChainID != c.Network.ChainID || binding.NetworkKey != "sha256:"+hex.EncodeToString(key[:]) || len(binding.ManifestDigest) != 71 || len(binding.PolicyDigest) != 71 || len(binding.OrganizationIDs) == 0 || m.NetworkKey != activitylog.Digest(key) || m.Format != activitylog.Format() || !activitylog.CanonicalUUID(m.SourceID) || !activitylog.CanonicalUUID(m.Generation) || m.Configuration == (activitylog.Digest{}) || !bounds.Valid() {
+		return nil, ErrInvalid
+	}
+	var service *Service
+	needed := map[string]bool{"rpc.invalid_request": true, "rpc.invalid_transport": true}
+	if c.Engine != nil {
+		service, err = newNativeService(c)
+		if err != nil || !c.Metadata.SharesSnapshot(c.Engine) {
+			return nil, ErrInvalid
+		}
+		native := c.Engine.OperationBinding()
+		if native.Environment != binding.Environment || native.ChainID != binding.ChainID || native.Profile != binding.Profile || native.NetworkKey != binding.NetworkKey || native.ManifestDigest != binding.ManifestDigest || !slices.Equal(native.OrganizationIDs, binding.OrganizationIDs) {
+			return nil, ErrInvalid
+		}
+		for _, name := range labels {
+			needed[name] = true
+		}
+	} else {
+		service = &Service{recorder: c.Recorder, organizations: slices.Clone(binding.OrganizationIDs), slots: make(chan struct{}, bounds.InFlight)}
+	}
+	for _, name := range binding.Methods {
+		if !activitylog.ValidMethod(name) {
+			return nil, ErrInvalid
+		}
+		needed[name] = true
+	}
+	if len(needed) > 512 {
+		return nil, ErrInvalid
+	}
+	methods := c.Recorder.Methods()
+	for name := range needed {
+		if !slices.Contains(methods, name) {
+			return nil, ErrInvalid
+		}
+	}
+	service.metadata = c.Metadata
+	return service, nil
+}
+
+// The union is private and concrete; callers cannot supply operation callbacks
+// or a detached success response to bypass the real owned result and View.
+type observedOperation struct {
+	native   *rpcengine.OperationResult
+	metadata *rpcengine.MetadataOperationResult
+}
+
+func (o observedOperation) valid() bool { return (o.native == nil) != (o.metadata == nil) }
+func (o observedOperation) notification(s *Service) (bool, error) {
+	if !o.valid() {
+		return false, ErrInvalid
+	}
+	if o.metadata != nil {
+		return o.metadata.IsNotificationFor(s.metadata)
+	}
+	return false, nil
+}
+func (o observedOperation) completion(s *Service, remote string) (activitylog.Completion, error) {
+	invalid, _ := completion(rpcengine.OperationMetadata{}, remote)
+	if !o.valid() {
+		return invalid, ErrInvalid
+	}
+	if o.native != nil {
+		m, err := o.native.MetadataFor(s.engine)
+		if err != nil {
+			return invalid, err
+		}
+		return completion(m, remote)
+	}
+	m, err := o.metadata.MetadataFor(s.metadata)
+	if err != nil {
+		return invalid, err
+	}
+	c, err := completion(rpcengine.OperationMetadata{Class: m.Class, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
+	if err != nil || !activitylog.ValidMethod(m.Method) {
+		return c, ErrInvalid
+	}
+	c.Method = m.Method
+	return c, nil
+}
+func (o observedOperation) preflight(s *Service) error {
+	if !o.valid() {
+		return ErrInvalid
+	}
+	if o.native != nil {
+		return o.native.PreflightFor(s.engine)
+	}
+	return o.metadata.PreflightFor(s.metadata)
+}
+func (o observedOperation) marshal(s *Service) ([]byte, error) {
+	if !o.valid() {
+		return nil, ErrInvalid
+	}
+	if o.native != nil {
+		return o.native.MarshalResponseFor(s.engine)
+	}
+	return o.metadata.MarshalResponseFor(s.metadata)
+}
+func (o observedOperation) recordingFailure(s *Service) ([]byte, error) {
+	if !o.valid() {
+		return nil, ErrInvalid
+	}
+	if o.native != nil {
+		return o.native.MarshalRecordingFailureFor(s.engine)
+	}
+	return o.metadata.MarshalRecordingFailureFor(s.metadata)
+}
+func (o observedOperation) deliver(ctx context.Context, s *Service) error {
+	if !o.valid() {
+		return ErrInvalid
+	}
+	if o.native != nil {
+		return o.native.RequireDeliverable(ctx, s.engine)
+	}
+	if s.recorder.Healthy() != nil {
+		return ErrInvalid
+	}
+	return o.metadata.RequireDeliverable(ctx, s.metadata)
+}

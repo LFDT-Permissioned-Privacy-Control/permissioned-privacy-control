@@ -1,4 +1,4 @@
-package proxy
+package rpcenvelope
 
 import (
 	"encoding/json"
@@ -15,6 +15,15 @@ var bs = string(rune(92))
 // maxEnvelopeDepth is encoding/json's nesting limit, which json.Valid (and so
 // ParseEnvelope) enforces.
 const maxEnvelopeDepth = 10000
+
+// Exact legacy proxy request shape, retained here as the independent decoding
+// oracle without importing the application proxy into this standard-library leaf.
+type JSONRPCRequest struct {
+	JSONRPC string        `json:"jsonrpc"`
+	Method  string        `json:"method"`
+	Params  []interface{} `json:"params"`
+	ID      interface{}   `json:"id"`
+}
 
 // ambiguousEnvelopes covers duplicate and case-variant request members.
 // Envelope validation rejects each case before forwarding.

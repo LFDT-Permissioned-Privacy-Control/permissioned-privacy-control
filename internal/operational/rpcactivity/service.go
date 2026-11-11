@@ -23,11 +23,13 @@ import (
 
 type Config struct {
 	Engine   *rpcengine.Engine
+	Metadata *rpcengine.MetadataEngine
 	Recorder *activitylog.Recorder
 	Network  networkidentity.Binding
 }
 type Service struct {
 	engine        *rpcengine.Engine
+	metadata      *rpcengine.MetadataEngine
 	recorder      *activitylog.Recorder
 	organizations []string
 	slots         chan struct{}
@@ -36,7 +38,7 @@ type Service struct {
 var ErrInvalid = errors.New("invalid audited RPC service")
 var labels = []string{"eth_call", "eth_sendRawTransaction", "rpc.invalid_request", "rpc.invalid_transport"}
 
-func New(c Config) (*Service, error) {
+func newNativeService(c Config) (*Service, error) {
 	key, err := c.Network.Key()
 	if err != nil || c.Engine == nil || c.Recorder == nil || c.Recorder.Healthy() != nil {
 		return nil, ErrInvalid
@@ -181,47 +183,56 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 	var route struct {
 		Method string `json:"method"`
 	}
-	var result *rpcengine.OperationResult
-	if json.Unmarshal(raw, &route) == nil && route.Method == "eth_sendRawTransaction" {
-		result = s.engine.SubmitRawObserved(ctx, assertion, org, raw)
+	var result observedOperation
+	decoded := json.Unmarshal(raw, &route) == nil
+	if s.metadata != nil && (s.engine == nil || !decoded || route.Method != "eth_call" && route.Method != "eth_sendRawTransaction") {
+		result.metadata = s.metadata.QueryObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, raw)
+	} else if decoded && route.Method == "eth_sendRawTransaction" {
+		result.native = s.engine.SubmitRawObserved(ctx, assertion, org, raw)
 	} else {
-		result = s.engine.CallObserved(ctx, assertion, org, raw)
+		result.native = s.engine.CallObserved(ctx, assertion, org, raw)
 	}
 	raw = nil
 	assertion = ""
-	meta, err := result.MetadataFor(s.engine)
-	c, completionErr := completion(meta, r.RemoteAddr)
-	preflightErr := result.PreflightFor(s.engine)
-	if err != nil || completionErr != nil || preflightErr != nil {
+	notification, notificationErr := result.notification(s)
+	respond := func(status int, body []byte) {
+		if notification {
+			body = nil
+		}
+		write(w, status, body)
+	}
+	c, completionErr := result.completion(s, r.RemoteAddr)
+	preflightErr := result.preflight(s)
+	if notificationErr != nil || completionErr != nil || preflightErr != nil {
 		// An internal invalid response still settles the reservation; it cannot
 		// publish data or be retried. Existing captured outcome is never rewritten.
 		_, _ = slot.Complete(c)
-		write(w, 503, busy)
+		respond(503, busy)
 		return
 	}
 	if _, err := slot.Complete(c); err != nil {
-		body, failureErr := result.MarshalRecordingFailureFor(s.engine)
+		body, failureErr := result.recordingFailure(s)
 		if failureErr != nil {
-			write(w, 503, busy)
+			respond(503, busy)
 		} else {
-			write(w, 503, body)
+			respond(503, body)
 		}
 		return
 	}
-	body, err := result.MarshalResponseFor(s.engine)
+	body, err := result.marshal(s)
 	if err != nil {
-		write(w, 503, busy)
+		respond(503, busy)
 		return
 	}
-	if err := result.RequireDeliverable(ctx, s.engine); err != nil {
+	if err := result.deliver(ctx, s); err != nil {
 		body = nil
-		body, err = result.MarshalRecordingFailureFor(s.engine)
+		body, err = result.recordingFailure(s)
 		if err != nil {
-			write(w, 503, busy)
+			respond(503, busy)
 		} else {
-			write(w, 503, body)
+			respond(503, body)
 		}
 		return
 	}
-	write(w, 200, body)
+	respond(200, body)
 }

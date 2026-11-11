@@ -11,6 +11,7 @@ import (
 	stdnet "net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,7 +27,7 @@ import (
 	"privacy-proxy/internal/policybundle"
 )
 
-func rpcRecorder(t *testing.T, x *database, clock func() time.Time, hook func(uint64) error) *a.Recorder {
+func rpcRecorder(t *testing.T, x *database, clock func() time.Time, hook func(uint64) error, extraMethods ...string) *a.Recorder {
 	t.Helper()
 	writer, err := s.OpenWriter(t.Context(), x.writer, x.scope)
 	if err != nil {
@@ -34,6 +35,9 @@ func rpcRecorder(t *testing.T, x *database, clock func() time.Time, hook func(ui
 	}
 	t.Cleanup(writer.Close)
 	c := a.Config{Network: x.registration.Network, SourceID: x.scope.SourceID, ExpectedGeneration: x.scope.ExpectedGeneration, ProducerID: uuid.NewString(), Configuration: a.Digest(x.registration.Configuration), Clock: clock, BufferDirectory: t.TempDir(), Methods: []string{"eth_call", "eth_sendRawTransaction", "rpc.invalid_request", "rpc.invalid_transport"}, Limits: a.Limits{InFlight: 1, BufferedEntries: 64, BufferedBytes: 64 * a.MaxEncodedBytes, SealBatch: 16}}
+	c.Methods = append(c.Methods, extraMethods...)
+	slices.Sort(c.Methods)
+	c.Methods = slices.Compact(c.Methods)
 	var options []buffer.Option
 	if hook != nil {
 		options = append(options, buffer.WithBeforeSetForTest(hook))

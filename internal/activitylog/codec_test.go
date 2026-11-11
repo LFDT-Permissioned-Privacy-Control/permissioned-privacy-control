@@ -143,3 +143,41 @@ func TestClosedCanonicalCodecRejectsMalformedVariants(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectedPolicyWithoutOrganizationRoundTripsAndGrantsNoOrg(t *testing.T) {
+	original, _ := normalEnvelope(t)
+	for _, actor := range []string{original.ActorID, ""} {
+		e := original
+		e.ActorID, e.DataOrg = actor, ""
+		raw, _ := json.Marshal(e)
+		decoded, err := DecodeEnvelope(raw)
+		if err != nil || decoded.ActorID != actor || decoded.DataOrg != "" || decoded.Policy != original.Policy {
+			t.Fatal("selected org-free policy lost", decoded, err)
+		}
+		e.BufferSeq = ""
+		record := toRecord(e)
+		spool, err := EncodeSpool(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		round, err := DecodeSpool(spool)
+		if err != nil || round.Fields().ActorID != actor || round.Fields().DataOrg != "" || round.Fields().Policy != original.Policy {
+			t.Fatal("org-free spool changed authority", round.Fields(), err)
+		}
+		sealed, err := SealEnvelope(round, 1<<40+1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeEnvelope(sealed); err != nil {
+			t.Fatal(err)
+		}
+		for _, policy := range []string{"bad", strings.Repeat("0", 64), strings.Repeat("A", 64), strings.Repeat("1", 63), "sha256:" + original.Policy} {
+			invalid := original
+			invalid.ActorID, invalid.DataOrg, invalid.Policy = actor, "", policy
+			raw, _ := json.Marshal(invalid)
+			if _, err := DecodeEnvelope(raw); err == nil {
+				t.Fatal("invalid policy admitted with empty org", policy)
+			}
+		}
+	}
+}

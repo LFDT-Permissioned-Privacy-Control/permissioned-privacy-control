@@ -33,6 +33,15 @@ func (c *MetadataClient) Source() MetadataSourceMetadata {
 	return c.source
 }
 
+// Bounds reports configured limits, including response and timeout caps which
+// are not carried by the immutable parameter query.
+func (c *MetadataClient) Bounds() MetadataLimits {
+	if c == nil {
+		return MetadataLimits{}
+	}
+	return c.limits
+}
+
 // MetadataObservation is a validated result, not forwarding permission. Source
 // is configured metadata; a local Keccak result observes no live node at all.
 type MetadataObservation struct {
@@ -58,6 +67,15 @@ func (o *MetadataObservation) ResultJSON() []byte {
 		return nil
 	}
 	return bytes.Clone(o.result)
+}
+
+// ResultSize permits bounded preflight without cloning a large result while
+// synchronous audit recording is still pending.
+func (o *MetadataObservation) ResultSize() int64 {
+	if o == nil {
+		return 0
+	}
+	return int64(len(o.result))
 }
 
 // Query performs zero I/O for Keccak, two RPCs for chain ID and at most three

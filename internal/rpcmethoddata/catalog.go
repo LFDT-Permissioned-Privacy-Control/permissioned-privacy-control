@@ -4,6 +4,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strings"
 )
 
 const Version = "rpc-method-catalog/v1"
@@ -32,6 +33,28 @@ func RequiredClaim(name string) string { return requiredClaims[name] }
 
 func IsBlocked(name string) bool {
 	return BlockedWith(name, blockedMethods, blockedPrefixes, blockExemptions)
+}
+
+var canonicalBuiltins = func() map[string]string {
+	index := map[string]string{}
+	for _, set := range []map[string]bool{readMethods, writeMethods, traceMethods} {
+		for name := range set {
+			index[strings.ToLower(name)] = name
+		}
+	}
+	for _, name := range exactOnlyMethods {
+		index[strings.ToLower(name)] = name
+	}
+	return index
+}()
+
+// CanonicalBuiltin matches the original static builtin spelling normalization.
+// It deliberately neither trims whitespace nor incorporates mutable extensions.
+func CanonicalBuiltin(name string) (string, bool) {
+	if canonical, known := canonicalBuiltins[strings.ToLower(name)]; known {
+		return canonical, true
+	}
+	return name, false
 }
 
 // BuiltinCatalog returns fresh copies. Legacy namespace registration, exported

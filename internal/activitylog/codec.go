@@ -121,15 +121,17 @@ func validEnvelope(e Envelope, sealed bool) bool {
 	if e.ActorID != "" && !identity.ValidActorID(e.ActorID) {
 		return false
 	}
-	if e.DataOrg != "" {
-		if e.ActorID == "" || !CanonicalUUID(e.DataOrg) {
-			return false
-		}
+	// Selected policy attribution also exists for org-free and anonymous RPCs.
+	// A digest alone grants neither an organization nor a principal predicate.
+	if e.Policy != "" {
 		if d, err := ParseDigestHex(e.Policy); err != nil || d == (Digest{}) {
 			return false
 		}
-	} else if e.Policy != "" {
-		return false
+	}
+	if e.DataOrg != "" {
+		if e.ActorID == "" || !CanonicalUUID(e.DataOrg) || e.Policy == "" {
+			return false
+		}
 	}
 	if len(e.IP) > 45 {
 		return false
