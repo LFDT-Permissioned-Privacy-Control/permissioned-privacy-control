@@ -4,9 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net/url"
-	"strings"
-	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -19,22 +16,13 @@ type MetadataClient struct {
 }
 
 func NewMetadataClient(transport Transport, source MetadataSource, credential Credential, limits MetadataLimits) (*MetadataClient, error) {
-	key, err := source.Network.Key()
-	u, parseErr := url.Parse(source.URL)
-	if transport == nil || !limits.valid() || err != nil || common.HexToHash(source.Network.GenesisHash) == (common.Hash{}) || parseErr != nil || len(source.URL) > 2048 || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" || credential.Header != source.CredentialHeader {
+	if !limits.valid() {
 		return nil, failure(InvalidBinding)
 	}
-	if source.CredentialRef == "" {
-		if !source.AllowUnauthenticated || credential != (Credential{}) || source.CredentialHeader != "" {
-			return nil, failure(InvalidBinding)
-		}
-	} else if len(source.CredentialRef) > 256 || !headerName(credential.Header) || credential.Value == "" || len(credential.Value) > 8192 || strings.ContainsAny(credential.Value, "\r\n\x00") {
-		return nil, failure(InvalidBinding)
+	wire, meta, err := newReadWire(transport, source, credential, metadataReadSource)
+	if err != nil {
+		return nil, err
 	}
-	meta := MetadataSourceMetadata{source.Network, key, source.URL, source.CredentialRef, source.CredentialHeader, "rpc-metadata/v1"}
-	// This private client reuses only the bounded no-replay wire operation.
-	// Its metadata profile cannot activate any existing execution acquisition.
-	wire := &Client{transport: transport, binding: NodeBinding{URL: source.URL, ChainID: source.Network.ChainID, Profile: meta.Profile}, credential: credential, ids: &atomic.Uint64{}}
 	return &MetadataClient{wire: wire, source: meta, limits: limits}, nil
 }
 
@@ -94,23 +82,9 @@ func (c *MetadataClient) Query(ctx context.Context, q MetadataQuery) (*MetadataO
 		}
 		return &MetadataObservation{c.source, q.method, raw}, nil
 	}
-	chain, err := c.wire.rpcBounded(ctx, "eth_chainId", []any{}, 4<<10)
+	chain, err := verifyReadNetwork(ctx, c.wire, c.source)
 	if err != nil {
 		return nil, err
-	}
-	v, err := metadataJSON(chain)
-	s, stringOK := v.(string)
-	n, valid := quantity(s, 64)
-	if err != nil || !stringOK || !valid || n.Sign() <= 0 || s != strings.ToLower(s) || n.String() != c.source.Network.ChainID {
-		return nil, failure(InvalidEvidence)
-	}
-	genesis, err := c.wire.rpcBounded(ctx, "eth_getHeaderByNumber", []any{"0x0"}, 16<<10)
-	if err != nil {
-		return nil, err
-	}
-	header, err := decodeQualifiedHeader(genesis)
-	if err != nil || header.Number != 0 || header.Hash.Hex() != c.source.Network.GenesisHash {
-		return nil, failure(InvalidEvidence)
 	}
 	raw := chain
 	if q.method != MetadataChainID {
