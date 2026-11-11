@@ -30,6 +30,7 @@ type QualifiedPrepared struct {
 	prepared  *nodeapproval.Prepared // original sealed request-local result; never reconstructed for delivery.
 	execution *rpcexecution.CallExecution
 	binding   rpcexecution.BindingMetadata
+	source    *rpcexecution.Client
 }
 
 func (q *QualifiedPrepared) Execution() *rpcexecution.CallExecution {
@@ -99,6 +100,11 @@ func (p *Pair) acquireSigned(ctx context.Context, tx transactioninput.VerifiedTr
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	if _, bound := p.client.BoundNetwork(); bound {
+		if err := p.client.RequireBoundNetwork(ctx); err != nil {
+			return nil, err
+		}
+	}
 	prepared, err := p.service.Prepare(ctx, tx.RawHex())
 	if err != nil {
 		return nil, errors.New("Guard preflight unavailable")
@@ -119,7 +125,7 @@ func (p *Pair) qualify(ctx context.Context, prepared *nodeapproval.Prepared, tx 
 	if err != nil {
 		return nil, errors.New("unqualified Guard evidence")
 	}
-	return &QualifiedPrepared{origin: p, prepared: prepared, execution: execution, binding: p.client.Metadata()}, nil
+	return &QualifiedPrepared{origin: p, prepared: prepared, execution: execution, binding: p.client.Metadata(), source: p.client}, nil
 }
 
 // NewDeliveryPair owns the same selected node credential for preflight,

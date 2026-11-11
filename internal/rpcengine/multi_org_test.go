@@ -187,7 +187,11 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	if len(creationOptions) > 0 && creationOptions[0].wrap != nil {
 		financialStore = creationOptions[0].wrap(store)
 	}
-	financial, err := newFinancial(admission.Config{Snapshot: snapshot, Clock: clock, NetworkBinding: network, ExpectedState: admission.ExpectedState{Generation: gen, Coverage: admissionsql.EmptyCoverage()}, Store: financialStore, ExpectedEvidenceProfile: profile, CursorKeyring: admission.CursorKeyring{Active: admission.CursorKey{ID: "test", Key: bytes.Repeat([]byte{8}, 32)}}, CaptureGate: captureGate})
+	var quotes admission.QuoteProvider
+	if len(creationOptions) > 0 {
+		quotes = creationOptions[0].quoteProvider
+	}
+	financial, err := newFinancial(admission.Config{Snapshot: snapshot, Clock: clock, NetworkBinding: network, ExpectedState: admission.ExpectedState{Generation: gen, Coverage: admissionsql.EmptyCoverage()}, Store: financialStore, QuoteProvider: quotes, ExpectedEvidenceProfile: profile, CursorKeyring: admission.CursorKeyring{Active: admission.CursorKey{ID: "test", Key: bytes.Repeat([]byte{8}, 32)}}, CaptureGate: captureGate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,6 +235,26 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 		rawNodes = map[string]rpcengine.RawNodeOptions{}
 	}
 	options := rpcengine.RawOptions{CallClients: clients, RawNodes: rawNodes, Wallets: resolver, WalletBinding: binding, WalletState: walletState, Admission: financial, Clock: clock, CaptureGate: captureGate}
+	if f.creationObserved {
+		u, _ := url.Parse(d.ownerDSN)
+		u.User = url.UserPassword("raw_facts", "raw-test-only")
+		facts, err := admissionsql.OpenCreationFacts(t.Context(), u.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(facts.Close)
+		m := captureGate.Metadata()
+		b := creationfacts.AddressReadBinding{Network: m.Network, State: m.State, SourceSet: m.SourceSet, Reference: m.Reference, Profile: creationfacts.CurrentAddressProfile, Limits: creationfacts.DefaultAddressReadLimits()}
+		reader, err := admissionsql.NewAddressReader(facts, b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		options.Associations, options.AssociationBinding = reader, b
+	}
+	if len(creationOptions) > 0 && creationOptions[0].configure != nil {
+		creationOptions[0].configure(&options)
+	}
+
 	constructor := rpcengine.NewRaw
 	if multiOrg {
 		if _, err := rpcengine.NewRaw(snapshot, options); err == nil {

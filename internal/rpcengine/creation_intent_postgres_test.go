@@ -15,6 +15,7 @@ import (
 	"privacy-proxy/internal/compliancepolicy"
 	"privacy-proxy/internal/operational/admissionsql"
 	"privacy-proxy/internal/policybundle"
+	"privacy-proxy/internal/rpcengine"
 	"privacy-proxy/internal/runtimepolicy"
 	"privacy-proxy/internal/walletops"
 )
@@ -23,6 +24,8 @@ type creationMountOptions struct {
 	limits        *admission.CreationLimits
 	wrap          func(*admissionsql.Store) admission.Store
 	walletService func(*walletops.Service)
+	configure     func(*rpcengine.RawOptions)
+	quoteProvider admission.QuoteProvider
 }
 
 type creationCommitFault struct {

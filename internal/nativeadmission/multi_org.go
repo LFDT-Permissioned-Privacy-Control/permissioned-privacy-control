@@ -60,7 +60,7 @@ func (n *Engine) checkMultiOrg(ctx context.Context, view *runtimepolicy.View, ro
 		if frame.CodeAddress != frame.StorageAddress && frame.CodeOrg != "" && frame.CodeOrg != frame.StorageOrg {
 			if !foreign[frame.CodeAddress] {
 				foreign[frame.CodeAddress] = true
-				cost, known := n.associationWork[frame.CodeAddress]
+				cost, known := n.associationCost(frame.CodeAddress)
 				if !known || cost == 0 {
 					return invalid()
 				}
@@ -84,7 +84,7 @@ func (n *Engine) checkMultiOrg(ctx context.Context, view *runtimepolicy.View, ro
 		_, member := view.Org(owner)
 		accessible := member
 		if member && n.runtime.IntraOrgGrantTracing() {
-			actualOwner, actualMember, associated, registered := view.ContractAssociation(address)
+			actualOwner, actualMember, associated, registered := n.contractAssociation(view, address)
 			accessible = registered && actualOwner == owner && actualMember && associated
 		}
 		codeAccess[address] = accessible

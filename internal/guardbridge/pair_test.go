@@ -47,6 +47,7 @@ type node struct {
 	t            *testing.T
 	tx           transactioninput.VerifiedTransaction
 	headerFields string
+	fullHeader   *types.Header
 	storage      string
 	methods      []string
 	calls, pre   string
@@ -77,17 +78,25 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var result string
+	headerHash := anchor
+	if n.fullHeader != nil {
+		headerHash = n.fullHeader.Hash().Hex()
+	}
 	switch q.Method {
 	case "eth_chainId":
 		result = `"0x1"`
 	case "eth_getHeaderByNumber":
 		result = `{"hash":"` + anchor + `"` + n.headerFields + `}`
+		if n.fullHeader != nil {
+			b, _ := json.Marshal(n.fullHeader)
+			result = string(b)
+		}
 	case "debug_traceCall":
 		var opts map[string]any
 		json.Unmarshal(q.Params[2], &opts)
 		var block string
 		json.Unmarshal(q.Params[1], &block)
-		if block != anchor {
+		if block != headerHash {
 			n.t.Error("unanchored trace")
 		}
 		if opts["tracer"] == "muxTracer" {
@@ -98,7 +107,7 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "eth_getCode":
 		var b map[string]any
 		json.Unmarshal(q.Params[1], &b)
-		if b["blockHash"] != anchor {
+		if b["blockHash"] != headerHash {
 			n.t.Error("unanchored supplement")
 		}
 		result = `"0x6000"`
@@ -120,7 +129,7 @@ func pair(t *testing.T, n *node, limits rpcexecution.Limits) *Pair {
 	t.Helper()
 	s := httptest.NewServer(n)
 	t.Cleanup(s.Close)
-	b := rpcexecution.NodeBinding{OrganizationID: org, URL: s.URL, ChainID: "1", Profile: rpcexecution.GuardRetainedProfileID, PragueStartInclusive: 0, PragueEndExclusive: 20, Credentials: map[string]rpcexecution.Credential{"key": {Header: "X-Key", Value: "selected"}}}
+	b := rpcexecution.NodeBinding{OrganizationID: org, URL: s.URL, ChainID: "1", Profile: rpcexecution.GuardRetainedProfileID, PragueStartInclusive: 0, PragueEndExclusive: 20, Credentials: map[string]rpcexecution.Credential{"key": {Header: "X-Key", Value: "selected"}, "other": {Header: "X-Key", Value: "other"}}}
 	p, err := NewPair(b, "key", s.Client().Transport, nodeapproval.HashCalls, limits)
 	if err != nil {
 		t.Fatal(err)

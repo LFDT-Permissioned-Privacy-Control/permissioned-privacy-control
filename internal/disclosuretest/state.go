@@ -21,6 +21,8 @@ type StateFixture struct {
 	Contracts       map[string][]policybundle.Contract
 	Methods         policybundle.MethodCatalog
 	IdentityCatalog *identity.SourceCatalog
+	Execution       map[string]*policycore.Policy
+	Runtime         *policybundle.RuntimeCreationObservedSource
 }
 
 func DefaultStateFixture(t testing.TB) StateFixture {
@@ -62,6 +64,10 @@ func StateSnapshot(t testing.TB, f StateFixture) *policybundle.CatalogSnapshot {
 		}
 	}
 	for i, org := range []string{Org, OtherOrg} {
+		execution := &policycore.Policy{APIVersion: policycore.NativeV4APIVersion, Kind: policycore.Kind, Org: org, NestedCalls: policycore.NestedCallsRequireOwnRule, Bindings: []policycore.Binding{}}
+		if f.Execution[org] != nil {
+			execution = f.Execution[org]
+		}
 		prefix := []string{"a", "b"}[i]
 		for _, item := range []struct {
 			kind policybundle.Kind
@@ -70,7 +76,7 @@ func StateSnapshot(t testing.TB, f StateFixture) *policybundle.CatalogSnapshot {
 		}{
 			{policybundle.Groups, "groups", policybundle.GroupsSpec{Groups: f.Groups[org]}},
 			{policybundle.ContractRegistry, "registry", policybundle.RegistrySpec{Contracts: f.Contracts[org]}},
-			{policybundle.ExecutionRules, "execution", policybundle.ExecutionSpec{Policy: &policycore.Policy{APIVersion: policycore.NativeV4APIVersion, Kind: policycore.Kind, Org: org, NestedCalls: policycore.NestedCallsRequireOwnRule, Bindings: []policycore.Binding{}}}},
+			{policybundle.ExecutionRules, "execution", policybundle.ExecutionSpec{Policy: execution}},
 		} {
 			name := prefix + "-" + item.name + ".json"
 			draft.Documents = append(draft.Documents, policybundle.DraftDocument{Kind: item.kind, OrganizationID: org, Path: name})
@@ -78,7 +84,11 @@ func StateSnapshot(t testing.TB, f StateFixture) *policybundle.CatalogSnapshot {
 		}
 	}
 	write("identity.json", identitySource)
-	write("runtime.json", policybundle.RuntimeCreationObservedSource{APIVersion: policybundle.RuntimeCreationObservedAPIVersion, Kind: policybundle.RuntimeKind, ReadProfile: "standard", IntraOrgGrantTracing: true, SharedInfrastructure: []policybundle.SharedInfrastructure{}, AddressScopes: []policybundle.AddressScope{}, NodeEvidenceProfile: policybundle.RuntimeSimulationNodeEvidenceProfileID, RawSubmissionMode: policybundle.RawSubmissionOPSPreflight, CreationAttribution: policybundle.CreationAttribution{Factories: []policybundle.FactoryAttribution{}}, CaptureReadinessProfile: "same-node-caught-up/v1"})
+	runtime := policybundle.RuntimeCreationObservedSource{APIVersion: policybundle.RuntimeCreationObservedAPIVersion, Kind: policybundle.RuntimeKind, ReadProfile: "standard", IntraOrgGrantTracing: true, SharedInfrastructure: []policybundle.SharedInfrastructure{}, AddressScopes: []policybundle.AddressScope{}, NodeEvidenceProfile: policybundle.RuntimeSimulationNodeEvidenceProfileID, RawSubmissionMode: policybundle.RawSubmissionOPSPreflight, CreationAttribution: policybundle.CreationAttribution{Factories: []policybundle.FactoryAttribution{}}, CaptureReadinessProfile: "same-node-caught-up/v1"}
+	if f.Runtime != nil {
+		runtime = *f.Runtime
+	}
+	write("runtime.json", runtime)
 	compliance := compliancepolicy.Source{APIVersion: compliancepolicy.APIVersion, Kind: compliancepolicy.Kind, Organizations: []compliancepolicy.OrganizationPolicy{}, Sanctions: []compliancepolicy.SourceSanction{}}
 	for _, org := range []string{Org, OtherOrg} {
 		compliance.Organizations = append(compliance.Organizations, compliancepolicy.OrganizationPolicy{OrganizationID: org, RecordMaxSeconds: 86400, PriceMaxAgeSeconds: 600, Spec: compliancepolicy.SourceSpec{Settings: compliancepolicy.SourceSettings{Currency: "usd", ThresholdFiat: 100, UnknownPricePolicy: "forbidden", EnforcementMode: "enforce"}, AddressThresholds: []compliancepolicy.SourceThreshold{}, TokenPrices: []compliancepolicy.SourceTokenPrice{}}})

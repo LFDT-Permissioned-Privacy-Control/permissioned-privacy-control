@@ -43,6 +43,7 @@ type Engine struct {
 	needsWallets bool
 	raw          *rawEngine
 	network      networkidentity.Binding
+	current      *nativeAddressSource
 }
 
 func New(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpcexecution.Client, wallets WalletResolver, clock identity.Clock) (*Engine, error) {
@@ -193,6 +194,11 @@ func (e *Engine) Call(ctx context.Context, assertion, explicitOrg string, rawReq
 }
 
 func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawRequest []byte, observation *OperationResult) Response {
+	ctx, cancel, operationErr := e.startNative(ctx, observation)
+	if operationErr != nil {
+		return responseError(nil, -32002, "execution unavailable")
+	}
+	defer cancel()
 	parse := parseRequest
 	if e != nil && e.snapshot != nil && simulationProfile(e.snapshot.Metadata().Profile) {
 		parse = parseSimulationRequest
@@ -211,6 +217,10 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 		return observation.failure(UnauthenticatedCompletion, denied(req.id))
 	}
 	observation.accept(view)
+	if len(view.OrgIDs()) == 0 {
+		return observation.failure(DeniedCompletion, denied(req.id))
+	}
+	current := e.currentPass(view)
 	var orgID string
 	var ok bool
 	if req.call.Creation() {
@@ -223,7 +233,14 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 		}
 		_, ok = view.Org(orgID)
 	} else {
-		orgID, ok = selectedOrganization(view, explicitOrg, req.call)
+		if current != nil {
+			orgID, ok, err = current.selectOrg(ctx, explicitOrg, req.call.To())
+			if err != nil {
+				return responseError(req.id, -32002, "execution unavailable")
+			}
+		} else {
+			orgID, ok = selectedOrganization(view, explicitOrg, req.call)
+		}
 	}
 	if !ok {
 		return observation.failure(DeniedCompletion, denied(req.id))
@@ -261,9 +278,16 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	var execution *rpcexecution.CallExecution
+	var scopeSourceErr error
 	if simulationProfile(e.snapshot.Metadata().Profile) {
 		execution, err = client.AcquireSimulationCall(ctx, req.call, req.block, func(destination common.Address) bool {
-			actual, matched := selectedAddressOrganization(view, explicitOrg, destination)
+			var actual string
+			var matched bool
+			if current != nil {
+				actual, matched, scopeSourceErr = current.selectOrg(ctx, explicitOrg, destination)
+			} else {
+				actual, matched = selectedAddressOrganization(view, explicitOrg, destination)
+			}
 			return matched && actual == orgID && ctx.Err() == nil && view.RequireLive() == nil
 		})
 	} else {
@@ -275,7 +299,7 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 	}
 	if err != nil {
 		var category *rpcexecution.Error
-		if errors.As(err, &category) && category.Code == rpcexecution.RootScopeDenied {
+		if scopeSourceErr == nil && errors.As(err, &category) && category.Code == rpcexecution.RootScopeDenied {
 			return observation.failure(DeniedCompletion, denied(req.id))
 		}
 		return responseError(req.id, -32002, "execution unavailable")
@@ -285,7 +309,16 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 		if !known || !creation.Address.Known {
 			return responseError(req.id, -32002, "execution unavailable")
 		}
-		actual, matched := selectedAddressOrganization(view, explicitOrg, creation.Address.Value)
+		var actual string
+		var matched bool
+		if current != nil {
+			actual, matched, err = current.selectOrg(ctx, explicitOrg, creation.Address.Value)
+			if err != nil {
+				return responseError(req.id, -32002, "execution unavailable")
+			}
+		} else {
+			actual, matched = selectedAddressOrganization(view, explicitOrg, creation.Address.Value)
+		}
 		if !matched || actual != orgID {
 			return observation.failure(DeniedCompletion, denied(req.id))
 		}
@@ -293,7 +326,20 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 	if view.RequireLive() != nil {
 		return observation.failure(DeniedCompletion, denied(req.id))
 	}
-	decision := e.native.Check(ctx, view, orgID, execution, wallet)
+	native := e.native
+	if current != nil {
+		if current.collect(ctx, execution) != nil {
+			return responseError(req.id, -32002, "execution unavailable")
+		}
+		if current.requireExecution(ctx, client) != nil {
+			return responseError(req.id, -32002, "execution unavailable")
+		}
+		native, err = current.engine()
+		if err != nil {
+			return observation.failure(DeniedCompletion, denied(req.id))
+		}
+	}
+	decision := native.Check(ctx, view, orgID, execution, wallet)
 	if !decision.Allowed {
 		return observation.failure(nativeClass(decision), denied(req.id))
 	}
@@ -302,7 +348,8 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 			// Retain only the small original source, not its execution tree or
 			// raw mux while the real Recorder append may block.
 			observation.callSource = client
-		} else if client.RequireBoundNetwork(ctx) != nil {
+			observation.current = current
+		} else if current != nil && current.requireCall(ctx, e, client) != nil || current == nil && client.RequireBoundNetwork(ctx) != nil {
 			return responseError(req.id, -32002, "execution unavailable")
 		}
 	}

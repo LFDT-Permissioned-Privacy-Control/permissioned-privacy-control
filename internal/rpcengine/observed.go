@@ -74,6 +74,8 @@ type OperationResult struct {
 	phase      uint8
 	signedHash string
 	callSource *rpcexecution.Client
+	current    *nativeAddressPass
+	fence      *nativeOperationFence
 }
 
 const (
@@ -131,6 +133,9 @@ func (r *OperationResult) finish(ctx context.Context, out Response) *OperationRe
 	} else if r.view != nil && r.view.RequireLive() != nil {
 		r.metadata.Class = UnauthenticatedCompletion
 	}
+	if r.fence != nil && !r.fence.live() {
+		r.metadata.Class = UnavailableCompletion
+	}
 	return r
 }
 func (e *Engine) CallObserved(ctx context.Context, assertion, org string, raw []byte) *OperationResult {
@@ -166,6 +171,9 @@ func (r *OperationResult) PreflightFor(e *Engine) error {
 			return errOperation
 		}
 	}
+	if r.current != nil && (r.current.owner != e || r.current.view != r.view || r.callSource == nil || r.fence == nil) {
+		return errOperation
+	}
 	return preflightResponse(r.response)
 }
 func (r *OperationResult) MarshalResponseFor(e *Engine) ([]byte, error) {
@@ -178,7 +186,19 @@ func (r *OperationResult) RequireDeliverable(ctx context.Context, e *Engine) err
 	if !r.owned(e) || ctx == nil || ctx.Err() != nil || e.raw == nil || e.raw.closed.Load() || r.PreflightFor(e) != nil {
 		return errOperation
 	}
-	if r.callSource != nil && r.callSource.RequireBoundNetwork(ctx) != nil {
+	if r.fence != nil {
+		bounded, cancel, err := r.fence.context(ctx)
+		if err != nil {
+			return errOperation
+		}
+		defer cancel()
+		ctx = bounded
+	}
+	if r.current != nil {
+		if r.current.requireCall(ctx, e, r.callSource) != nil {
+			return errOperation
+		}
+	} else if r.callSource != nil && r.callSource.RequireBoundNetwork(ctx) != nil {
 		return errOperation
 	}
 	// This must remain after every potentially blocking source probe. Future

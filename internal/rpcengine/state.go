@@ -127,7 +127,11 @@ func NewState(c StateConfig) (*StateEngine, error) {
 	if !ok {
 		return nil, errMetadata
 	}
-	for _, scope := range runtime.Source().AddressScopes {
+	observedSource, observed := runtime.CreationObservedSource()
+	if !observed {
+		return nil, errMetadata
+	}
+	for _, scope := range observedSource.AddressScopes {
 		address := common.HexToAddress(scope.Address)
 		if owner, known := owners[address]; known && owner != scope.OrganizationID {
 			return nil, errMetadata
