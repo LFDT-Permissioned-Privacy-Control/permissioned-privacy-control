@@ -45,6 +45,7 @@ type Engine struct {
 	network      networkidentity.Binding
 	current      *nativeAddressSource
 	traceMethods map[string]bool
+	mined        *minedTraceEngine
 }
 
 func New(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpcexecution.Client, wallets WalletResolver, clock identity.Clock) (*Engine, error) {

@@ -3,11 +3,10 @@ package nativeadmission
 import (
 	"privacy-proxy/internal/executionfacts"
 	"privacy-proxy/internal/policycore"
-	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/runtimepolicy"
 )
 
-func (n *Engine) materialize(org *runtimepolicy.OrgView, execution *rpcexecution.CallExecution) ([]policycore.Frame, bool) {
+func (n *Engine) materialize(org *runtimepolicy.OrgView, execution executionEvidence) ([]policycore.Frame, bool) {
 	records := execution.Tree().Records()
 	if len(records) == 0 {
 		return nil, false
@@ -38,7 +37,7 @@ func setFrameMasks(frame *policycore.Frame, masks []runtimepolicy.GroupMask, qua
 
 // qualifyFrame is shared by all native versions; routing cannot relabel its
 // anchored owner/code/caller facts or manufacture a different execution.
-func (n *Engine) qualifyFrame(record executionfacts.Record, execution *rpcexecution.CallExecution) (policycore.Frame, bool) {
+func (n *Engine) qualifyFrame(record executionfacts.Record, execution executionEvidence) (policycore.Frame, bool) {
 	var zero policycore.Frame
 	var callType policycore.CallType
 	switch record.Kind {

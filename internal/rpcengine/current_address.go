@@ -180,6 +180,15 @@ func (p *nativeAddressPass) selectOrg(ctx context.Context, explicit string, addr
 // prestate accounts or repeat point queries for repeated frames. Fresh runtime
 // namespaces stay in the existing lifecycle materializer, not persisted A3.
 func (p *nativeAddressPass) collect(ctx context.Context, e *rpcexecution.CallExecution) error {
+	if e == nil {
+		return errOperation
+	}
+	return p.collectEvidence(ctx, e, nil)
+}
+func (p *nativeAddressPass) collectMined(ctx context.Context, e *rpcexecution.MinedExecution) error {
+	return p.collectEvidence(ctx, e, e)
+}
+func (p *nativeAddressPass) collectEvidence(ctx context.Context, e nativeExecutionEvidence, mined *rpcexecution.MinedExecution) error {
 	if p == nil {
 		return nil
 	}
@@ -280,7 +289,13 @@ func (p *nativeAddressPass) collect(ctx context.Context, e *rpcexecution.CallExe
 		return err
 	}
 	for address, code := range p.runtimeSamples {
-		used, err := n.ValidateCurrentRuntime(p.view, address, code, e.Anchor())
+		var used bool
+		var err error
+		if mined != nil {
+			used, err = n.ValidateMinedRuntime(p.view, address, code, mined)
+		} else {
+			used, err = n.ValidateCurrentRuntime(p.view, address, code, e.Anchor())
+		}
 		if err != nil {
 			return err
 		}
