@@ -6,6 +6,7 @@
 *.dylib
 bin/
 dist/
+/frontend/dist-v2/
 
 # Test binary
 *.test
@@ -16,7 +17,7 @@ coverage/
 
 # Dependency directories
 vendor/
-node_modules/
+node_modules
 .go/
 
 # Database
