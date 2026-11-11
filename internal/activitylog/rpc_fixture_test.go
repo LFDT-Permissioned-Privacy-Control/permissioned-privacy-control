@@ -79,6 +79,8 @@ const nodeHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const now = int64(1800000000)
 
 type fixture struct {
+	methodCatalog       *policybundle.MethodCatalog
+	loadedDirectory     *string
 	creationObserved    bool
 	readOnly            bool
 	lifecycle           bool
@@ -124,6 +126,9 @@ func (f *fixture) capability(name string) {
 func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 	t.Helper()
 	directory := t.TempDir()
+	if f.loadedDirectory != nil {
+		*f.loadedDirectory = directory
+	}
 	mappings := []identity.Mapping{}
 	for i, group := range f.groups {
 		mappings = append(mappings, identity.Mapping{ID: fmt.Sprintf("role-%d", i), ProfileID: "azure", OrganizationID: orgA, PrincipalKind: identity.Human, Fact: identity.Fact{Kind: "azure.role", Value: group.ID}, GroupIDs: []string{group.ID}})
@@ -245,7 +250,11 @@ func (f fixture) load(t *testing.T) *policybundle.CatalogSnapshot {
 	if e := os.WriteFile(filepath.Join(directory, "manifest.json"), raw, 0600); e != nil {
 		t.Fatal(e)
 	}
-	snapshot, e := policybundle.LoadDirectory(t.Context(), policybundle.Selection{Directory: directory, ExpectedManifestDigest: policybundle.RawDigest(raw), ExpectedEnvironment: "test", ExpectedChainID: "1"}, policybundle.Options{Limits: policybundle.DefaultLimits(), Profile: profile, Methods: policybundle.MethodCatalog{Version: "rpc/v1", Assignable: assignable, Aliases: map[string]string{"alias_call": "eth_call"}, Wildcard: []string{"eth_call", "eth_getCode"}, RequiredClaims: map[string]string{}}, IdentityLimits: identity.DefaultLimits(), ComplianceLimits: limits})
+	methods := policybundle.MethodCatalog{Version: "rpc/v1", Assignable: assignable, Aliases: map[string]string{"alias_call": "eth_call"}, Wildcard: []string{"eth_call", "eth_getCode"}, RequiredClaims: map[string]string{}}
+	if f.methodCatalog != nil {
+		methods = *f.methodCatalog
+	}
+	snapshot, e := policybundle.LoadDirectory(t.Context(), policybundle.Selection{Directory: directory, ExpectedManifestDigest: policybundle.RawDigest(raw), ExpectedEnvironment: "test", ExpectedChainID: "1"}, policybundle.Options{Limits: policybundle.DefaultLimits(), Profile: profile, Methods: methods, IdentityLimits: identity.DefaultLimits(), ComplianceLimits: limits})
 	if e != nil {
 		t.Fatal(e)
 	}

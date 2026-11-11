@@ -28,3 +28,31 @@ func (s *CatalogSnapshot) Method(name string) (MethodInfo, bool) {
 	sort.Strings(claims)
 	return MethodInfo{Name: name, Canonical: canonical, RequiredClaims: claims}, true
 }
+
+// Methods returns the actual selected method declarations, including aliases
+// and their combined required claims. It creates no dispatch or grant.
+func (s *CatalogSnapshot) Methods() []MethodInfo {
+	if s == nil {
+		return nil
+	}
+	methods := make([]MethodInfo, 0, len(s.methods.assignable))
+	for name := range s.methods.assignable {
+		method, _ := s.Method(name)
+		methods = append(methods, method)
+	}
+	sort.Slice(methods, func(i, j int) bool { return methods[i].Name < methods[j].Name })
+	return methods
+}
+
+// GroupIDs returns sorted detached identifiers without copying contract ABIs.
+func (s *CatalogSnapshot) GroupIDs(orgID string) []string {
+	if s == nil {
+		return nil
+	}
+	groups := make([]string, 0, len(s.groups[orgID]))
+	for id := range s.groups[orgID] {
+		groups = append(groups, id)
+	}
+	sort.Strings(groups)
+	return groups
+}

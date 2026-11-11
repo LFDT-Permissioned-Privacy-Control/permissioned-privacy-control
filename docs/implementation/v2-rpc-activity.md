@@ -1,7 +1,8 @@
-# Recorded native RPC operations
+# Recorded RPC operations
 
 `internal/operational/rpcactivity` wraps the native RPC engine and the durable
-activity recorder. It supports `eth_call` and `eth_sendRawTransaction` on the
+activity recorder. It supports `eth_call`, `eth_sendRawTransaction` and the
+optional twelve-operation [metadata engine](v2-node-metadata.md) on the
 `RuntimeCreationObserved` profile. It is a library: it does not mount a production
 listener or replace the other authentication and operational HTTP handlers.
 Existing direct engine constructors, methods and HTTP adapters keep their
@@ -13,10 +14,17 @@ configured strong network and the recorder. Environment and chain ID alone are
 insufficient: genesis and deployment also contribute to the key. This is a
 configuration binding, not an independent probe of the connected node. Actual
 node/network qualification belongs to the assembly that activates a listener.
-The recorder must contain the four approved method labels and have a healthy,
-qualified source. A handler accepts a configured organization ID or empty
+The recorder must contain the configured engines' approved method labels and the
+two fixed invalid labels, and have a healthy, qualified source. A handler accepts a configured organization ID or empty
 organization inference. Per-request membership and permission still come only
 from the original accepted runtime View.
+
+`Config.Metadata` can be used by itself without constructing native admission,
+wallet or Guard resources. Supplying both engines requires the very same
+snapshot pointer as well as matching network, profile, manifest and organization
+metadata. An equal manifest string cannot disguise different method maps.
+Both engines and every mounted alias share one recorder and one HTTP limit.
+The native-only constructor path retains its existing behavior.
 
 ## Operation and delivery
 
@@ -63,13 +71,22 @@ A local receipt proves synced local append, not SQL sealing, mining or delivery.
 
 ## Metadata and bounds
 
-The recognized labels are `eth_call` and `eth_sendRawTransaction`. Strict parser
+The native labels are `eth_call` and `eth_sendRawTransaction`. Metadata adds its
+canonical builtin labels and exact approved aliases, bounded by the recorder's
+existing 512-label and 100-byte grammar limits. Strict parser
 rejections use the fixed label `rpc.invalid_request`; HTTP method/body failures
 use `rpc.invalid_transport`. These labels do not claim an unknown method actually
 executed. The recorder never receives arbitrary caller method names, paths,
 parameters, token claims or error text. Normalized outcomes distinguish invalid,
 unauthenticated, denied, evaluation failure, unavailable, unconfirmed and success.
 HTTP 200 with a JSON-RPC error is not success.
+
+Metadata records the composite effective permission digest. Its authenticated
+org-free builtins retain the actual actor and an empty organization; approved
+anonymous metadata has neither actor nor organization. A policy digest identifies
+the selected rules and does not by itself establish an organization or principal.
+Valid notifications still settle once through the actual recorder and emit no
+response body, including when recording or later delivery fails.
 
 Only a valid direct `RemoteAddr` supplies IP metadata. Forwarding headers add no
 authority. Invalid or zoned addresses become unknown/empty. Valid mapped IPs are
@@ -78,6 +95,8 @@ and its hash stay unchanged; the protected source normalizes equivalent IPs when
 projecting output. Empty IP stays absent, and lower disclosure levels redact IP.
 
 Request limits stay at the engine's existing one MiB call and two MiB raw limits.
+Metadata applies its stricter one MiB envelope limit after the shared outer body
+read, and drops request metadata before typed acquisition.
 A canonical escaped JSON ID can occupy almost six or twelve MiB respectively.
 The sealed response has a checked aggregate preflight and a sixteen MiB final
 wire ceiling, including newline. Only the known result/error branches are

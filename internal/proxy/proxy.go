@@ -184,40 +184,6 @@ func (p *Proxy) forward(ctx context.Context, reqBody []byte, headerName, apiKey,
 	return body, resp.StatusCode, resp.Header, nil
 }
 
-// ErrBatchRequest is returned when a batch JSON-RPC request is detected.
-// Batch requests are not supported for security reasons.
-var ErrBatchRequest = fmt.Errorf("batch JSON-RPC requests are not supported")
-
-// IsBatchRequest checks if the body contains a JSON-RPC batch request (array format).
-func IsBatchRequest(body []byte) bool {
-	// Trim whitespace and check if it starts with '['
-	trimmed := bytes.TrimSpace(body)
-	return len(trimmed) > 0 && trimmed[0] == '['
-}
-
-// ParseMethod extracts the method name from a JSON-RPC request. It applies
-// the same unambiguity rules as ParseEnvelope.
-func ParseMethod(body []byte) (string, error) {
-	env, err := ParseEnvelope(body)
-	if err != nil {
-		return "", err
-	}
-	return env.Method, nil
-}
-
-// ParseRequest extracts method and params from a JSON-RPC request.
-// Returns ErrBatchRequest if the request is a batch (array) request and
-// ErrAmbiguousRequest if its member names can be read more than one way.
-// A caller that forwards the request must forward ParseEnvelope's Canonical
-// body, not the bytes it parsed.
-func ParseRequest(body []byte) (string, []interface{}, error) {
-	env, err := ParseEnvelope(body)
-	if err != nil {
-		return "", nil, err
-	}
-	return env.Method, env.Params, nil
-}
-
 // HealthStatus contains the health check result for the target node
 type HealthStatus struct {
 	Status    string `json:"status"`

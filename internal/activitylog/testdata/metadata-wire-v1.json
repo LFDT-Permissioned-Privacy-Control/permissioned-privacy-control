@@ -1,0 +1,265 @@
+[
+  {
+    "name": "ordinary",
+    "request_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}",
+    "authorization": "valid token, zero mapped orgs",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}\n",
+    "audit_org": "",
+    "audit_method": "eth_chainId",
+    "physical_rpcs": 2
+  },
+  {
+    "name": "missing-version-and-params",
+    "request_utf8": "{\"id\":1,\"method\":\"eth_chainId\"}",
+    "authorization": "valid token, zero mapped orgs",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}\n",
+    "physical_rpcs": 2
+  },
+  {
+    "name": "null-version-and-params",
+    "request_utf8": "{\"jsonrpc\":null,\"id\":1,\"method\":\"eth_chainId\",\"params\":null}",
+    "authorization": "valid token, zero mapped orgs",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}\n"
+  },
+  {
+    "name": "mixed-builtin-case",
+    "request_utf8": "{\"id\":1,\"method\":\"ETH_CHAINID\"}",
+    "authorization": "valid token, zero mapped orgs",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}\n",
+    "audit_method": "eth_chainId"
+  },
+  {
+    "name": "notification",
+    "request_utf8": "{\"method\":\"eth_chainId\"}",
+    "authorization": "valid token, zero mapped orgs",
+    "http_status": 200,
+    "response_utf8": "",
+    "physical_rpcs": 2,
+    "audit_class": "success"
+  },
+  {
+    "name": "null-id-response",
+    "request_utf8": "{\"id\":null,\"method\":\"eth_chainId\"}",
+    "authorization": "absent (explicit policy allows)",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":null,\"result\":\"0x1\"}\n",
+    "physical_rpcs": 2,
+    "audit_actor": "",
+    "audit_org": ""
+  },
+  {
+    "name": "numeric-id-no-rounding",
+    "request_utf8": "{\"id\":9007199254740993,\"method\":\"eth_chainId\"}",
+    "authorization": "valid token",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":9007199254740993,\"result\":\"0x1\"}\n"
+  },
+  {
+    "name": "empty-string-id",
+    "request_utf8": "{\"id\":\"\",\"method\":\"eth_chainId\"}",
+    "authorization": "valid token",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":\"\",\"result\":\"0x1\"}\n"
+  },
+  {
+    "name": "string-id-escaping",
+    "request_utf8": "{\"id\":\"a\\nb\",\"method\":\"eth_chainId\"}",
+    "authorization": "valid token",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":\"a\\nb\",\"result\":\"0x1\"}\n"
+  },
+  {
+    "name": "overflow-id",
+    "request_utf8": "{\"id\":1e309,\"method\":\"eth_chainId\"}",
+    "authorization": "any",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n",
+    "physical_rpcs": 0,
+    "audit_method": "rpc.invalid_request",
+    "audit_class": "invalid"
+  },
+  {
+    "name": "object-id",
+    "request_utf8": "{\"id\":{},\"method\":\"eth_chainId\"}",
+    "authorization": "any",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n",
+    "physical_rpcs": 0,
+    "audit_method": "rpc.invalid_request",
+    "audit_class": "invalid"
+  },
+  {
+    "name": "missing-method",
+    "request_utf8": "{\"id\":1}",
+    "authorization": "any",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n",
+    "physical_rpcs": 0,
+    "audit_method": "rpc.invalid_request",
+    "audit_class": "invalid"
+  },
+  {
+    "name": "null-method",
+    "request_utf8": "{\"id\":1,\"method\":null}",
+    "authorization": "any",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n",
+    "physical_rpcs": 0,
+    "audit_method": "rpc.invalid_request",
+    "audit_class": "invalid"
+  },
+  {
+    "name": "bad-version",
+    "request_utf8": "{\"id\":1,\"method\":\"eth_chainId\",\"jsonrpc\":\"1.0\"}",
+    "authorization": "any",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n",
+    "physical_rpcs": 0,
+    "audit_method": "rpc.invalid_request",
+    "audit_class": "invalid"
+  },
+  {
+    "name": "duplicate-case",
+    "request_utf8": "{\"id\":1,\"method\":\"eth_chainId\",\"Method\":\"eth_accounts\"}",
+    "authorization": "any",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n",
+    "physical_rpcs": 0,
+    "audit_method": "rpc.invalid_request",
+    "audit_class": "invalid"
+  },
+  {
+    "name": "params-object",
+    "request_utf8": "{\"id\":1,\"method\":\"eth_chainId\",\"params\":{}}",
+    "authorization": "any",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n",
+    "physical_rpcs": 0,
+    "audit_method": "rpc.invalid_request",
+    "audit_class": "invalid"
+  },
+  {
+    "name": "batch",
+    "request_utf8": "[{\"id\":1,\"method\":\"eth_chainId\"}]",
+    "authorization": "any",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n",
+    "physical_rpcs": 0,
+    "audit_method": "rpc.invalid_request",
+    "audit_class": "invalid"
+  },
+  {
+    "name": "invalid-array-params",
+    "request_utf8": "{\"id\":1,\"method\":\"eth_chainId\",\"params\":[1]}",
+    "authorization": "valid token",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"invalid params\"}}\n",
+    "physical_rpcs": 0,
+    "audit_method": "eth_chainId",
+    "audit_class": "invalid"
+  },
+  {
+    "name": "unknown-method",
+    "request_utf8": "{\"id\":1,\"method\":\"evil_random\"}",
+    "authorization": "any",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}\n",
+    "physical_rpcs": 0,
+    "audit_method": "rpc.invalid_request",
+    "audit_class": "invalid"
+  },
+  {
+    "name": "unknown-notification",
+    "request_utf8": "{\"method\":\"evil_random\"}",
+    "authorization": "any",
+    "http_status": 200,
+    "response_utf8": "",
+    "physical_rpcs": 0,
+    "audit_method": "rpc.invalid_request",
+    "audit_class": "invalid"
+  },
+  {
+    "name": "invalid-params-notification",
+    "request_utf8": "{\"method\":\"eth_chainId\",\"params\":[1]}",
+    "authorization": "valid token",
+    "http_status": 200,
+    "response_utf8": "",
+    "physical_rpcs": 0,
+    "audit_class": "invalid"
+  },
+  {
+    "name": "invalid-present-header-no-anonymous",
+    "request_utf8": "{\"id\":1,\"method\":\"eth_chainId\"}",
+    "authorization": "one EMPTY header value (present)",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32001,\"message\":\"not authorized\"}}\n",
+    "physical_rpcs": 0,
+    "audit_class": "unauthenticated"
+  },
+  {
+    "name": "multiple-headers-no-anonymous",
+    "request_utf8": "{\"id\":1,\"method\":\"eth_chainId\"}",
+    "authorization": "two header values",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32001,\"message\":\"not authorized\"}}\n",
+    "physical_rpcs": 0,
+    "audit_class": "unauthenticated"
+  },
+  {
+    "name": "unlisted-anonymous",
+    "request_utf8": "{\"id\":1,\"method\":\"eth_accounts\"}",
+    "authorization": "absent",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32001,\"message\":\"not authorized\"}}\n",
+    "physical_rpcs": 0,
+    "audit_actor": "",
+    "audit_org": ""
+  },
+  {
+    "name": "known-alias-not-orgfree",
+    "request_utf8": "{\"id\":1,\"method\":\"bank_chainId\"}",
+    "authorization": "valid token, zero mapped orgs; alias added in secondary fixture",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32001,\"message\":\"not authorized\"}}\n",
+    "physical_rpcs": 0,
+    "audit_method": "bank_chainId"
+  },
+  {
+    "name": "local-keccak",
+    "request_utf8": "{\"id\":1,\"method\":\"web3_sha3\",\"params\":[\"0x\"]}",
+    "authorization": "valid token, exact mapped org+grant+emptyref explicit client",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470\"}\n",
+    "physical_rpcs": 0
+  },
+  {
+    "name": "proxy-metadata-dropped",
+    "request_utf8": "{\"id\":1,\"method\":\"eth_chainId\",\"unknown\":{\"x\":1},\"visibleTo\":[\"invalid\"],\"privateFor\":[]}",
+    "authorization": "valid token",
+    "http_status": 200,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}\n",
+    "forwarded_proxy_metadata": false
+  },
+  {
+    "name": "same-view-expiry-after-append",
+    "request_utf8": "{\"id\":1,\"method\":\"eth_chainId\"}",
+    "authorization": "valid at query, original View expires during actualAppend",
+    "http_status": 503,
+    "response_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"unavailable\"}}\n",
+    "audit_class": "success",
+    "audit_means": "selected query success, delivery withheld; no second record/action"
+  },
+  {
+    "name": "audit-failure-notification",
+    "request_utf8": "{\"method\":\"eth_chainId\"}",
+    "authorization": "valid token",
+    "http_status": 503,
+    "response_utf8": "",
+    "physical_rpcs": 2,
+    "protected_bytes": 0
+  }
+]
