@@ -115,17 +115,25 @@ func historyAuthorizations(raw json.RawMessage, l HistoryBlockLimits) error {
 }
 
 func decodeHistoryTransaction(raw []byte, pos includedPosition, chain string, header *types.Header, l HistoryBlockLimits) (HistoryTransaction, int, error) {
+	return decodeHistoryTransactionValue(raw, pos, chain, header, l, false)
+}
+
+// pending is a distinct ordinary-history parse, never an included/C2 proof.
+// Its caller validates and preserves the actual all-null or pending-body tuple.
+func decodeHistoryTransactionValue(raw []byte, pos includedPosition, chain string, header *types.Header, l HistoryBlockLimits, pending bool) (HistoryTransaction, int, error) {
 	var zero HistoryTransaction
 	if len(raw) > l.MaxTransactionBytes {
 		return zero, 0, failure(EvidenceLimit)
 	}
-	f, e := nullableRawObject(raw, 32, map[string]bool{"to": true, "gasPrice": true, "maxFeePerGas": true, "maxPriorityFeePerGas": true, "chainId": true})
+	f, e := nullableRawObject(raw, 32, map[string]bool{"to": true, "gasPrice": true, "maxFeePerGas": true, "maxPriorityFeePerGas": true, "chainId": true, "blockHash": pending, "blockNumber": pending, "transactionIndex": pending, "blockTimestamp": pending})
 	if e != nil {
 		return zero, 0, e
 	}
-	actual, e := decodeIncludedPosition(f)
-	if e != nil || actual.Hash != pos.Hash || actual.Number != pos.Number || actual.Index != pos.Index || actual.TimestampKnown && actual.Timestamp != header.Time {
-		return zero, 0, failure(InvalidEvidence)
+	if !pending {
+		actual, e := decodeIncludedPosition(f)
+		if e != nil || header == nil || actual.Hash != pos.Hash || actual.Number != pos.Number || actual.Index != pos.Index || actual.TimestampKnown && actual.Timestamp != header.Time {
+			return zero, 0, failure(InvalidEvidence)
+		}
 	}
 	kind, e := includedQuantity(f["type"], 8)
 	if e != nil {
@@ -284,9 +292,20 @@ func decodeHistoryTransaction(raw []byte, pos includedPosition, chain string, he
 		return zero, 0, failure(InvalidEvidence)
 	}
 	t := HistoryTransaction{&tx, from, binary}
-	price, e := historyEffectivePrice(t, header.BaseFee)
-	if e != nil {
-		return zero, 0, e
+	var price *big.Int
+	if pending && header == nil {
+		if tx.GasTipCap().Cmp(tx.GasFeeCap()) > 0 {
+			return zero, 0, failure(InvalidEvidence)
+		}
+		price = tx.GasFeeCap()
+	} else {
+		if header == nil {
+			return zero, 0, failure(InvalidEvidence)
+		}
+		price, e = historyEffectivePrice(t, header.BaseFee)
+		if e != nil {
+			return zero, 0, e
+		}
 	}
 	if v, ok := f["gasPrice"]; ok {
 		n, e := historyBig(v)

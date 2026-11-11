@@ -131,6 +131,13 @@ func (f *Factory) Begin(ctx context.Context, rawJWT, selectedOrg, method string)
 	if err != nil {
 		return nil, ErrUnavailable
 	}
+	if selectedOrg == "" {
+		ids := view.OrgIDs()
+		if len(ids) != 1 {
+			return nil, ErrUnavailable
+		}
+		selectedOrg = ids[0]
+	}
 	org, ok := view.Org(selectedOrg)
 	if !ok || !org.GroupAllowsMethod(method) {
 		return nil, ErrUnavailable
@@ -231,6 +238,16 @@ func (c *Current) Bind(ctx context.Context) (context.Context, context.CancelFunc
 // WithShares returns a new immutable context. It is called only once, after
 // bounded candidate acquisition and outside any other database transaction.
 func (c *Current) WithShares(ctx context.Context, hashes []common.Hash) (*Current, error) {
+	if c == nil || c.owner == nil {
+		return nil, ErrInvalid
+	}
+	return c.WithSharesWithin(ctx, hashes, c.owner.config.MaxBytes-c.charged)
+}
+
+// WithSharesWithin lets an owning operation reserve a lower fixed allowance
+// before SQL decoding. The pass retains this same allowance for its recheck.
+// The original WithShares API keeps its original selected-facts ceiling.
+func (c *Current) WithSharesWithin(ctx context.Context, hashes []common.Hash, maxBytes int) (*Current, error) {
 	if c == nil || c.owner == nil || c.shares != nil {
 		return nil, ErrInvalid
 	}
@@ -243,7 +260,7 @@ func (c *Current) WithShares(ctx context.Context, hashes []common.Hash) (*Curren
 		next := *c
 		return &next, nil
 	}
-	remaining := c.owner.config.MaxBytes - c.charged
+	remaining := min(c.owner.config.MaxBytes-c.charged, maxBytes)
 	if remaining <= 0 || len(hashes) > MaxShareHashes || 256+64*len(hashes) > remaining {
 		return nil, ErrTooBroad
 	}
@@ -259,7 +276,7 @@ func (c *Current) WithShares(ctx context.Context, hashes []common.Hash) (*Curren
 	if err != nil {
 		return nil, err
 	}
-	if pass.ValidateFor(c.owner.shareIdentity, c.owner.config.ShareExpected) != nil || !slices.Equal(pass.Query().Hashes, q.Hashes) {
+	if pass.ValidateFor(c.owner.shareIdentity, c.owner.config.ShareExpected) != nil || !slices.Equal(pass.Query().Hashes, q.Hashes) || pass.Query().ByteLimit() != q.ByteLimit() || pass.ChargedBytes() > remaining {
 		return nil, ErrUnavailable
 	}
 	if c.charged+pass.ChargedBytes() > c.owner.config.MaxBytes {
@@ -367,7 +384,11 @@ func (c *Current) Emitter(address common.Address) Emitter {
 // AdminForDataset requires a positively registered owning contract. Selecting
 // an org, an unknown native-transfer row or an EOA is not positive attribution.
 func (c *Current) AdminForDataset(ownerContract common.Address) bool {
-	return !c.Profile().Strict() && c.Emitter(ownerContract).Admin
+	if c == nil || c.view == nil || c.Profile().Strict() {
+		return false
+	}
+	owner, admin, registered := c.view.ContractReadAdmin(ownerContract)
+	return registered && owner == c.org && admin
 }
 
 // Recheck is the final fact gate AFTER the actual Recorder append. It performs
