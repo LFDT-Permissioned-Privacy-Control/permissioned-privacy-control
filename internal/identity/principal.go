@@ -19,6 +19,18 @@ func (p *RequestPrincipal) ActorID() string      { return p.actor }
 func (p *RequestPrincipal) Kind() Kind           { return p.kind }
 func (p *RequestPrincipal) ExpiresAt() time.Time { return p.expires }
 func (p *RequestPrincipal) Facts() []Fact        { return slices.Clone(p.facts) }
+
+// SourceProfile returns the immutable profile used to verify this token.
+func (p *RequestPrincipal) SourceProfile() (id, digest string) {
+	if p == nil || p.catalog == nil {
+		return "", ""
+	}
+	digest, ok := p.catalog.ProfileDigest(p.profile)
+	if !ok {
+		return "", ""
+	}
+	return p.profile, digest
+}
 func (p *RequestPrincipal) Groups(org string) []string {
 	set := map[string]bool{}
 	groups := []string{}
