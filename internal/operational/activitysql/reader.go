@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	a "privacy-proxy/internal/activitylog"
+	"privacy-proxy/internal/activitymethoddata"
 	"privacy-proxy/internal/identity"
 )
 
@@ -40,14 +41,15 @@ type MethodCount struct {
 	Total, Successful, Failed uint64
 }
 type ReadSnapshot struct {
-	reader *Reader
-	tx     pgx.Tx
-	ctx    context.Context
-	cancel context.CancelFunc
-	cut    Cut
-	from   int64
-	mu     sync.Mutex
-	closed bool
+	reader   *Reader
+	requests bool
+	tx       pgx.Tx
+	ctx      context.Context
+	cancel   context.CancelFunc
+	cut      Cut
+	from     int64
+	mu       sync.Mutex
+	closed   bool
 }
 
 func framedHash(domain string, parts ...[]byte) string {
@@ -121,6 +123,16 @@ func resolveCut(ctx context.Context, tx pgx.Tx, s sourceState, reference string)
 // Open pins one committed SQL prefix. It never waits for local producers or
 // claims that the prefix contains unlogged or still buffered RPC requests.
 func (r *Reader) Open(ctx context.Context, reference string, fromMicros int64) (*ReadSnapshot, error) {
+	return r.openPopulation(ctx, reference, fromMicros, false)
+}
+
+// OpenRequests selects only registered RPC and the closed compiled Explorer
+// completion labels. The default Open remains RPC-only. Selection is immutable
+// for this snapshot, including every page, lookahead and summary query.
+func (r *Reader) OpenRequests(ctx context.Context, reference string, fromMicros int64) (*ReadSnapshot, error) {
+	return r.openPopulation(ctx, reference, fromMicros, true)
+}
+func (r *Reader) openPopulation(ctx context.Context, reference string, fromMicros int64, requests bool) (*ReadSnapshot, error) {
 	if r == nil || r.store == nil || fromMicros < 0 || fromMicros > a.MaxObservedMicros {
 		return nil, a.ErrInvalid
 	}
@@ -147,9 +159,28 @@ func (r *Reader) Open(ctx context.Context, reference string, fromMicros int64) (
 		cancel()
 		return nil, err
 	}
-	return &ReadSnapshot{reader: r, tx: tx, ctx: ctx, cancel: cancel, cut: makeCut(s, id, hash, time.Now()), from: fromMicros}, nil
+	return &ReadSnapshot{reader: r, requests: requests, tx: tx, ctx: ctx, cancel: cancel, cut: makeCut(s, id, hash, time.Now()), from: fromMicros}, nil
 }
 func (s *ReadSnapshot) Cut() Cut { return s.cut }
+func (s *ReadSnapshot) Population() string {
+	if s == nil || s.reader == nil {
+		return ""
+	}
+	if s.requests {
+		return activitymethoddata.PopulationRequests
+	}
+	return activitymethoddata.PopulationRPC
+}
+
+// Population predicates precede LIMIT/GROUP. The additional array is compiled
+// data, never a request parameter, query fragment or mutable caller selection.
+func (s *ReadSnapshot) populationPredicate(parameter int) (string, []any) {
+	const rpc = "lower(left(method,9))<>'explorer.'"
+	if !s.requests {
+		return rpc, nil
+	}
+	return "(" + rpc + " OR method=ANY($" + strconv.Itoa(parameter) + "::text[]))", []any{activitymethoddata.ExplorerLabels()}
+}
 func (s *ReadSnapshot) Close() {
 	if s == nil {
 		return
@@ -189,7 +220,10 @@ func (s *ReadSnapshot) ReadPage(ctx context.Context, q ReadQuery, after *PageKey
 	if after != nil {
 		k = *after
 	}
-	rows, err := s.tx.Query(s.ctx, `SELECT `+logColumns+` FROM ops_activity_v1.qualified_logs WHERE chain_name=$1 AND id<=$2 AND activity_kind=1 AND org_id=$3 AND external_id=ANY($4::text[]) AND activity_observed_us>=$5 AND activity_observed_us<=$6 AND ($7::boolean OR(activity_observed_us,activity_producer_id,activity_run_id,activity_ordinal,activity_record_id)>($8,$9::uuid,$10::uuid,$11,$12::uuid)) ORDER BY activity_observed_us,activity_producer_id,activity_run_id,activity_ordinal,activity_record_id LIMIT $13`, s.reader.state.chain, s.cut.HeadID, q.Organization, q.Actors, q.FromMicros, q.ThroughMicros, after == nil, k.ObservedMicros, k.ProducerID, k.RunID, k.Ordinal, k.RecordID, q.Limit+1)
+	predicate, popArgs := s.populationPredicate(14)
+	args := []any{s.reader.state.chain, s.cut.HeadID, q.Organization, q.Actors, q.FromMicros, q.ThroughMicros, after == nil, k.ObservedMicros, k.ProducerID, k.RunID, k.Ordinal, k.RecordID, q.Limit + 1}
+	args = append(args, popArgs...)
+	rows, err := s.tx.Query(s.ctx, `SELECT `+logColumns+` FROM ops_activity_v1.qualified_logs WHERE chain_name=$1 AND id<=$2 AND activity_kind=1 AND org_id=$3 AND external_id=ANY($4::text[]) AND activity_observed_us>=$5 AND activity_observed_us<=$6 AND `+predicate+` AND ($7::boolean OR(activity_observed_us,activity_producer_id,activity_run_id,activity_ordinal,activity_record_id)>($8,$9::uuid,$10::uuid,$11,$12::uuid)) ORDER BY activity_observed_us,activity_producer_id,activity_run_id,activity_ordinal,activity_record_id LIMIT $13`, args...)
 	if err != nil {
 		return nil, false, a.ErrUnavailable
 	}
@@ -236,7 +270,10 @@ func (s *ReadSnapshot) Summary(ctx context.Context, q ReadQuery) ([]MethodCount,
 	if s.closed || s.ctx.Err() != nil || ctx.Err() != nil {
 		return nil, a.ErrUnavailable
 	}
-	rows, err := s.tx.Query(s.ctx, `SELECT method,count(*),count(*)FILTER(WHERE activity_outcome='success'),count(*)FILTER(WHERE activity_outcome<>'success') FROM ops_activity_v1.qualified_logs WHERE chain_name=$1 AND id<=$2 AND activity_kind=1 AND org_id=$3 AND external_id=ANY($4::text[]) AND activity_observed_us>=$5 AND activity_observed_us<=$6 GROUP BY method ORDER BY method COLLATE "C" LIMIT 513`, s.reader.state.chain, s.cut.HeadID, q.Organization, q.Actors, q.FromMicros, q.ThroughMicros)
+	predicate, popArgs := s.populationPredicate(7)
+	args := []any{s.reader.state.chain, s.cut.HeadID, q.Organization, q.Actors, q.FromMicros, q.ThroughMicros}
+	args = append(args, popArgs...)
+	rows, err := s.tx.Query(s.ctx, `SELECT method,count(*),count(*)FILTER(WHERE activity_outcome='success'),count(*)FILTER(WHERE activity_outcome<>'success') FROM ops_activity_v1.qualified_logs WHERE chain_name=$1 AND id<=$2 AND activity_kind=1 AND org_id=$3 AND external_id=ANY($4::text[]) AND activity_observed_us>=$5 AND activity_observed_us<=$6 AND `+predicate+` GROUP BY method ORDER BY method COLLATE "C" LIMIT 513`, args...)
 	if err != nil {
 		return nil, a.ErrUnavailable
 	}

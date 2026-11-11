@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"privacy-proxy/internal/activitymethoddata"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/strictjson"
 )
@@ -67,18 +68,8 @@ func positive(v string) (uint64, bool) {
 	n, err := strconv.ParseUint(v, 10, 63)
 	return n, err == nil && n > 0 && strconv.FormatUint(n, 10) == v
 }
-func ValidMethod(v string) bool {
-	if len(v) < 1 || len(v) > 100 {
-		return false
-	}
-	for i, b := range []byte(v) {
-		letter := b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
-		if !letter && (i == 0 || !(b >= '0' && b <= '9' || b == '_' || b == '.')) {
-			return false
-		}
-	}
-	return true
-}
+func ValidMethod(v string) bool { return activitymethoddata.ValidMethod(v) }
+
 func status(o string) uint16 {
 	switch Outcome(o) {
 	case Success:
