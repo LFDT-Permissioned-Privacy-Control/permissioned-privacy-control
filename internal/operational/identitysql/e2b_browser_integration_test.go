@@ -71,24 +71,35 @@ func e2bApp(t *testing.T, x *browserFixture, build, app string, sso *ssoFixture)
 		t.Fatal(e)
 	}
 	scanner := bufio.NewScanner(stdout)
-	ready := make(chan bool, 1)
+	type startupResult struct {
+		ready      bool
+		diagnostic string
+	}
+	ready := make(chan startupResult, 1)
 	go func() {
 		found := false
+		// Child testing failures are written to stdout. Retain only bounded
+		// pre-listener fixture diagnostics; no browser credential request exists.
+		var startup strings.Builder
 		for scanner.Scan() {
 			if scanner.Text() == "E2B_APP_READY" && !found {
 				found = true
-				ready <- true
+				ready <- startupResult{ready: true}
+			}
+			if !found && startup.Len() < 4096 {
+				startup.WriteString(scanner.Text())
+				startup.WriteByte('\n')
 			}
 		}
 		if !found {
-			ready <- false
+			ready <- startupResult{diagnostic: startup.String()}
 		}
 	}()
 	select {
-	case ok := <-ready:
-		if !ok {
+	case result := <-ready:
+		if !result.ready {
 			_ = cmd.Wait()
-			t.Fatal("owned actual BFF startup failed", diagnostics.String())
+			t.Fatal("owned actual BFF startup failed", result.diagnostic, diagnostics.String())
 		}
 	case <-time.After(35 * time.Second):
 		_ = cmd.Process.Kill()

@@ -25,11 +25,17 @@ func New(service *walletops.Service) (*Handler, error) {
 	return &Handler{service}, nil
 }
 func (h *Handler) Register(mux *http.ServeMux) {
+	h.RegisterLinks(mux)
+	mux.HandleFunc("POST /api/v2/eth/addresses/{address}/refresh-ens", h.wrap(h.ens))
+}
+
+// RegisterLinks mounts the four native ownership operations without the
+// optional ENS resolver surface. The selected V2 composition uses this set.
+func (h *Handler) RegisterLinks(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v2/eth/link/challenge", h.wrap(h.issue))
 	mux.HandleFunc("POST /api/v2/eth/link/verify", h.wrap(h.verify))
 	mux.HandleFunc("GET /api/v2/eth/addresses", h.wrap(h.own))
 	mux.HandleFunc("DELETE /api/v2/eth/addresses/{address}", h.wrap(h.unlink))
-	mux.HandleFunc("POST /api/v2/eth/addresses/{address}/refresh-ens", h.wrap(h.ens))
 }
 
 type operation func(context.Context, string, *http.Request) (*walletops.Response, error)

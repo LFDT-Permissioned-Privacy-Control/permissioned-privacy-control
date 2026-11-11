@@ -81,6 +81,9 @@ func Migrate(ctx context.Context, dsn, appRole, readerRole, retentionRole string
 	}
 	a, r, t := pgx.Identifier{appRole}.Sanitize(), pgx.Identifier{readerRole}.Sanitize(), pgx.Identifier{retentionRole}.Sanitize()
 	statements := []string{
+		// Trigger execution does not require callers to execute this function
+		// directly. PUBLIC EXECUTE also breaks co-located restricted stores.
+		`REVOKE ALL ON FUNCTION ops_wallet_v2.wallet_link_monotonic() FROM PUBLIC`,
 		`REVOKE ALL ON ALL TABLES IN SCHEMA ops_wallet_v2 FROM PUBLIC`,
 		`REVOKE ALL ON ALL TABLES IN SCHEMA ops_wallet_v2 FROM ` + a + `,` + r + `,` + t,
 		`GRANT USAGE ON SCHEMA ops_wallet_v2 TO ` + a + `,` + r + `,` + t,

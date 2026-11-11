@@ -5,6 +5,8 @@ import { AccessOutcome, Candidate, MultiAccess, MultiSession, Pending, sameSessi
 import { AuthError, session } from '../auth/protocol'
 import { completeFlow, Flow, FLOW_KEY, inspectFlow, ownSelf, readContinuation, saveContinuation, Self } from './protocol'
 import { forgetRemembered, remember, remembered } from './remembered'
+import { WalletController, WalletHTTPError, WalletScope } from './wallet'
+import { walletRequest } from './walletTransport'
 
 export type Phase = 'booting' | 'anonymous' | 'selected' | 'proof-pending' | 'context-changed' | 'failed'
 type Profiles = Awaited<ReturnType<MultiBrowserAuthClient['providers']>>
@@ -32,15 +34,73 @@ export class Controller {
   private tickTimer: ReturnType<typeof setInterval> | undefined
   private expiryTimer: ReturnType<typeof setTimeout> | undefined
   private completing = false
-  constructor(client = NewMultiClient(), private flushSuspension: (clear: () => void) => void = clear => clear()) { this.client = client }
+  readonly wallet: WalletController
+  private walletRevision = 0
+  private walletScopes = new Set<AbortController>()
+  constructor(client = NewMultiClient(), private flushSuspension: (clear: () => void) => void = clear => clear()) {
+    this.client = client
+    this.wallet = new WalletController(signal => this.captureWallet(signal), { flush: clear => this.flushSuspension(clear) })
+  }
   snapshot = (): State => this.state
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener) }
   private set(next: Partial<State>): void { this.state = { ...this.state, ...next }; for (const f of this.listeners) f() }
   private invalidate(): void {
+    this.retireWallet()
     this.epoch++; this.revision++
     for (const op of this.latest.values()) op.abort.abort()
     this.latest.clear(); clearTimeout(this.pollTimer); this.completing = false
     clearTimeout(this.expiryTimer)
+  }
+  private retireWallet(): void {
+    this.walletRevision++
+    for (const scope of this.walletScopes) scope.abort()
+    this.walletScopes.clear(); this.wallet.cancel()
+  }
+  private async captureWallet(signal: AbortSignal): Promise<WalletScope> {
+    if (!this.alive || !this.selected || !this.state.self || this.state.phase !== 'selected' || this.state.flow || this.state.pending) throw new Stale()
+    const op = this.owner('wallet-warmup'), pair = { ...this.selected }, walletRevision = this.walletRevision
+    const warm = () => { this.check(op); if (signal.aborted || walletRevision !== this.walletRevision) throw new Stale() }
+    try {
+      warm()
+      // One explicit pre-scope warm-up. Confirm never invokes a helper again.
+      const result = await this.client.needAccess(pair); warm()
+      if (result.status !== 'access') { await this.outcome(op, result); throw new Stale() }
+      const access = result.access
+      const self = await ownSelf(access, AbortSignal.any([signal, this.signal(op)])); warm()
+      const marker = readMultiMarker()
+      if (!marker || marker.phase !== 'active' || !sameSession(pair, multiPair(marker)) || !sameSession(pair, access) || self.actorId !== access.actorId || self.sourceProfile !== access.sourceProfile || self.expiresAt !== access.expiresAt) throw new Stale()
+      Object.freeze(self)
+      this.set({ self })
+      clearTimeout(this.expiryTimer)
+      this.expiryTimer = setTimeout(this.tick, Math.max(1, self.expiresAt * 1000 - Date.now()))
+      warm()
+      const epoch = this.epoch, revision = this.revision, abort = new AbortController(), token = access.accessToken, originalExpiry = self.expiresAt
+      this.walletScopes.add(abort)
+      const check = () => {
+        if (!this.alive || abort.signal.aborted || epoch !== this.epoch || revision !== this.revision || walletRevision !== this.walletRevision || this.state.self !== self || originalExpiry <= Date.now() / 1000 || !this.selected || !sameSession(pair, this.selected)) throw new Stale()
+        const current = readMultiMarker()
+        if (!current || current.phase !== 'active' || !sameSession(pair, multiPair(current))) { this.changed(); throw new Stale() }
+      }
+      const scope: WalletScope = Object.freeze({
+        identity: Object.freeze({ actor: self.actorId, expires: originalExpiry }), signal: abort.signal, check,
+        request: async <T,>(endpoint: string, options: RequestInit = {}): Promise<T> => {
+          check()
+          try {
+            const value = await walletRequest(token, endpoint, options, abort.signal, check); check()
+            return value as T
+          } catch (error) {
+            check()
+            if (error instanceof WalletHTTPError && error.status === 401) this.changed()
+            throw error
+          }
+        },
+        dispose: () => { abort.abort(); this.walletScopes.delete(abort) },
+      })
+      check(); return scope
+    } catch (error) {
+      if (this.owns(op) && !signal.aborted && walletRevision === this.walletRevision && error instanceof AuthError && (error.code === 'login_required' || error.code === 'session_changed')) this.error(op, error)
+      throw error
+    } finally { if (this.latest.get(op.kind) === op) this.latest.delete(op.kind) }
   }
   private changed(): void {
     this.invalidate(); this.selected = null
@@ -180,6 +240,7 @@ export class Controller {
   }
   refresh = async (): Promise<void> => {
     if (!this.selected || this.state.busy || this.state.phase === 'context-changed') return
+    this.retireWallet()
     this.set({ busy: true, error: null })
     const expected = { ...this.selected }
     await this.work('refresh', async op => {
@@ -205,6 +266,7 @@ export class Controller {
   confirm = async (): Promise<void> => {
     const candidate = this.state.candidate
     if (!candidate || this.state.busy) return
+    this.retireWallet()
     clearTimeout(this.pollTimer); this.set({ busy: true, error: null })
     await this.work('confirm', async op => {
       const result = await this.client.confirmPrivado(candidate); this.check(op); await this.accept(op, result)
@@ -224,6 +286,7 @@ export class Controller {
     if (!pair || !flow || this.completing || this.state.busy || this.state.phase !== 'selected') return
     const self = this.state.self
     if (automatic && (!self || !remembered(flow, self, pair))) return
+    this.retireWallet()
     this.completing = true; this.set({ busy: true, error: null })
     await this.work('complete', async op => {
       try {
@@ -257,7 +320,11 @@ export class Controller {
     })
   }
   private storage = (event: StorageEvent): void => {
-    if (event.key !== CONTEXT_KEY && event.key !== null || !this.selected) return
+    if (event.key !== CONTEXT_KEY && event.key !== null) return
+    // A completed same-pair renewal may restore byte-identical marker bytes.
+    // Every relevant foreign event still retires wallet work, never adopts it.
+    this.flushSuspension(() => this.retireWallet())
+    if (!this.selected) return
     try { const m = readMultiMarker(); if (!m || !sameSession(this.selected, multiPair(m))) this.changed() }
     catch { this.changed() }
   }
@@ -278,7 +345,7 @@ export class Controller {
       this.invalidate()
       this.set({ self: null, pending: null, candidate: null, busy: false, phase: 'anonymous', error: 'login_required' }); return
     }
-    if (this.state.self && this.state.self.expiresAt <= Date.now() / 1000) this.set({ self: null })
+    if (this.state.self && this.state.self.expiresAt <= Date.now() / 1000) { this.retireWallet(); this.set({ self: null }) }
     if (this.selected && this.state.phase === 'selected' && !this.state.busy && document.visibilityState !== 'hidden' &&
       (!this.state.self || this.state.self.expiresAt <= Date.now() / 1000 + 5)) void this.refresh()
   }

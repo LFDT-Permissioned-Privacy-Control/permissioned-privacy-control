@@ -4,6 +4,7 @@ import { flushSync } from 'react-dom'
 import { QRCodeSVG } from 'qrcode.react'
 import { Controller } from './web/controller'
 import { walletLinks } from './web/protocol'
+import { WalletPanel } from './web/WalletPanel'
 import './web/style.css'
 
 // Deliberately document-owned, outside React/StrictMode effects. Azure query
@@ -42,6 +43,7 @@ function App() {
       <button disabled={state.busy} onClick={() => controller.forgetAppChoices()}>Forget remembered app choices</button>
       <button disabled={state.busy} onClick={() => void controller.refresh()}>Refresh session</button>
       <button disabled={state.busy} onClick={() => void controller.logout()}>Sign out of OPS</button>
+      {!state.flow && state.phase === 'selected' && <WalletPanel wallet={controller.wallet} />}
     </section>}
     {state.pending && <section aria-label="Pending authentication">
       <h2>{state.pending.status === 'proof_required' ? 'Verify your current account again' : 'Complete sign in'}</h2>

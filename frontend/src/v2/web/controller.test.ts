@@ -2,12 +2,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MultiAccess } from '../auth/multiProtocol'
 import { MultiBrowserAuthClient } from '../auth/multiClient'
 import { activeMulti, writeMultiMarker } from '../auth/multiContext'
+import { deniedMulti } from '../auth/multiContext'
+import { hexToString, Hex } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
+import { WalletProvider } from './wallet'
 import { Controller } from './controller'
 import { FLOW_KEY } from './protocol'
 
-const mocks = vi.hoisted(() => ({ next: null as unknown, own: vi.fn(), inspect: vi.fn(), complete: vi.fn() }))
+const mocks = vi.hoisted(() => ({ next: null as unknown, own: vi.fn(), inspect: vi.fn(), complete: vi.fn(), wallet: vi.fn() }))
 vi.mock('../auth/multiClient', () => ({ NewMultiClient: () => mocks.next }))
 vi.mock('./protocol', async original => ({ ...await original<typeof import('./protocol')>(), ownSelf: mocks.own, inspectFlow: mocks.inspect, completeFlow: mocks.complete }))
+vi.mock('./walletTransport', () => ({ walletRequest: mocks.wallet }))
 const a: MultiAccess = { accessToken: 'never-persist-this-token', tokenType: 'Bearer', actorId: 'ops:p1:' + 'A'.repeat(43),
   principalKind: 'human', provider: 'privado', sourceProfile: 'bank', browserSessionId: '11111111-1111-1111-1111-111111111111', expiresAt: 0 }
 const b = { ...a, actorId: 'ops:p1:' + 'B'.repeat(42) + 'A', browserSessionId: '22222222-2222-2222-2222-222222222222' }
@@ -34,8 +39,9 @@ beforeEach(() => {
   a.expiresAt = b.expiresAt = Math.floor(Date.now() / 1000) + 300
   localStorage.clear(); sessionStorage.clear(); history.replaceState(null, '', '/login')
   mocks.own.mockReset().mockImplementation(async v => self(v)); mocks.inspect.mockReset(); mocks.complete.mockReset()
+  mocks.wallet.mockReset()
 })
-afterEach(() => { controller?.stop(); vi.useRealTimers(); vi.unstubAllGlobals() })
+afterEach(() => { controller?.stop(); delete (window as unknown as { ethereum?: unknown }).ethereum; vi.useRealTimers(); vi.unstubAllGlobals() })
 describe('document context and flow ownership', () => {
   it('restores once and requires explicit acceptance of an external account change', async () => {
     const first = fake(); mocks.next = first; controller = new Controller(first as unknown as MultiBrowserAuthClient)
@@ -131,5 +137,108 @@ describe('document context and flow ownership', () => {
     window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); await flush()
     expect(controller.snapshot().self).toBeNull(); expect(reload).toHaveBeenCalledTimes(1)
     await controller.useCurrent(); expect(controller.snapshot().self).toBeNull()
+  })
+})
+
+const walletSigner = privateKeyToAccount(('0x' + '17'.repeat(32)) as Hex)
+const walletAddress = walletSigner.address.toLowerCase()
+const walletUTC = (at: number) => new Date(at * 1000).toISOString().replace('.000Z', 'Z')
+function walletProof() {
+  const nonce = 'ab'.repeat(32), issued = Math.floor(Date.now() / 1000), expiresAt = walletUTC(issued + 300)
+  return { nonce, expiresAt, message: ['OPS wallet link v1', 'Service: https://wallet-source.test', 'Network: sha256:' + 'a'.repeat(64), 'Actor: ' + a.actorId, 'Address: ' + walletAddress, 'Nonce: ' + nonce, 'IssuedAt: ' + walletUTC(issued), 'ExpiresAt: ' + expiresAt, '', 'I authorize this wallet to be linked to this OPS identity. This does not authorize a transaction.'].join('\n') }
+}
+function installWallet(sign?: (message: string) => Promise<string>) {
+  let linked = false
+  const request = vi.fn(async ({ method, params }: { method: string; params?: unknown[] }) => {
+    if (method === 'eth_accounts' || method === 'eth_requestAccounts') return [walletAddress]
+    if (method === 'personal_sign') {
+      expect(params?.[1]).toBe(walletAddress)
+      const message = hexToString(params?.[0] as Hex)
+      expect(message).toBe(walletProof().message)
+      return sign ? sign(message) : walletSigner.signMessage({ message })
+    }
+    throw Error('unexpected wallet provider method')
+  })
+  const provider: WalletProvider = { request }
+  Object.defineProperty(window, 'ethereum', { configurable: true, value: provider })
+  mocks.wallet.mockImplementation(async (_token, path, _options, _signal, check) => {
+    check()
+    if (path === '/eth/link/challenge') return walletProof()
+    if (path === '/eth/link/verify') { linked = true; return { address: walletAddress, status: 'linked' } }
+    if (path === '/eth/addresses/' + walletAddress) { linked = false; return { address: walletAddress, status: 'revoked' } }
+    if (path === '/eth/addresses') return linked ? [{ address: walletAddress, verifiedAt: walletUTC(Math.floor(Date.now() / 1000)), proofVersion: 2 }] : []
+    throw Error('unexpected wallet path')
+  })
+  return request
+}
+async function openWallet() { await controller.wallet.connect(); await controller.wallet.select(walletAddress) }
+
+describe('central immutable wallet operation and renewal boundary', () => {
+  it('warms up exactly once with actual Self, then keeps one token across challenge/confirm/own', async () => {
+    installWallet()
+    const access = { ...a, accessToken: 'new-original-token' }, client = fake()
+    client.needAccess.mockImplementation(async () => { writeMultiMarker(deniedMulti(a)); writeMultiMarker(activeMulti(a)); return { status: 'access', access } })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    await openWallet(); expect(client.needAccess).toHaveBeenCalledTimes(1); expect(mocks.own).toHaveBeenCalledTimes(2)
+    access.accessToken = 'a-later-mutated-helper-value'
+    await controller.wallet.sign(); expect(controller.wallet.snapshot().stage).toBe('confirm')
+    await controller.wallet.confirm()
+    expect(mocks.wallet.mock.calls.map(c => c[1])).toEqual(['/eth/link/challenge', '/eth/link/verify', '/eth/addresses'])
+    expect(mocks.wallet.mock.calls.every(c => c[0] === 'new-original-token')).toBe(true)
+    expect(client.needAccess).toHaveBeenCalledTimes(1)
+    expect(controller.wallet.snapshot().links[0].address).toBe(walletAddress)
+  })
+  it('queued same-pair require-login and active events retire held prompt even when final bytes are original', async () => {
+    const held = deferred<string>(), request = installWallet(() => held.promise), client = fake()
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await openWallet()
+    const pending = controller.wallet.sign(); await flush()
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ method: 'personal_sign' }))
+    const original = localStorage.getItem('ops-v2.browser-context')
+    writeMultiMarker(deniedMulti(a)); writeMultiMarker(activeMulti(a))
+    expect(localStorage.getItem('ops-v2.browser-context')).toBe(original)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'ops-v2.browser-context', newValue: original }))
+    expect(controller.wallet.snapshot().message).toBeNull(); expect(controller.snapshot().self?.actorId).toBe(a.actorId)
+    held.resolve(await walletSigner.signMessage({ message: walletProof().message })); await pending; await controller.wallet.confirm()
+    expect(mocks.wallet.mock.calls.map(c => c[1])).toEqual(['/eth/link/challenge'])
+  })
+  it('local refresh retires a prompt BEFORE awaiting same-pair helper renewal', async () => {
+    const heldSign = deferred<string>(), heldRenew = deferred<{ status: 'access'; access: MultiAccess }>(), client = fake()
+    installWallet(() => heldSign.promise); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await openWallet()
+    const signing = controller.wallet.sign(); await flush(); client.needAccess.mockReturnValueOnce(heldRenew.promise)
+    const refreshing = controller.refresh()
+    expect(controller.wallet.snapshot().message).toBeNull(); expect(controller.wallet.snapshot().busy).toBe(false)
+    heldRenew.resolve({ status: 'access', access: a }); await refreshing
+    heldSign.resolve(await walletSigner.signMessage({ message: walletProof().message })); await signing; await controller.wallet.confirm()
+    expect(mocks.wallet.mock.calls.map(c => c[1])).toEqual(['/eth/link/challenge'])
+  })
+  it('pending Privado warm-up stops the wallet action before provider calls or nonce creation', async () => {
+    const request = installWallet(), client = fake()
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    client.needAccess.mockResolvedValueOnce({ status: 'proof_required', ...a, mode: 'renew', requestId: '44444444-4444-4444-4444-444444444444', requestUri: location.origin + '/api/v2/auth/privado/requests/44444444-4444-4444-4444-444444444444' } as never)
+    await controller.wallet.connect()
+    expect(controller.snapshot().phase).toBe('proof-pending'); expect(request).not.toHaveBeenCalled(); expect(mocks.wallet).not.toHaveBeenCalled(); expect(mocks.own).toHaveBeenCalledTimes(1)
+    expect(controller.wallet.snapshot().busy).toBe(false)
+  })
+  it('stale warm-up cannot revive a canceled prompt or erase newer wallet work', async () => {
+    installWallet(); const client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const held = deferred<ReturnType<typeof self>>(); mocks.own.mockReturnValueOnce(held.promise)
+    const old = controller.wallet.connect(); await flush(); await controller.wallet.load()
+    const current = controller.wallet.snapshot(); held.resolve(self(a)); await old
+    expect(controller.wallet.snapshot()).toBe(current); expect(current.stage).toBe('idle'); expect(current.busy).toBe(false)
+    expect(mocks.wallet.mock.calls.map(c => c[1])).toEqual(['/eth/addresses'])
+  })
+  it('an unavailable warm-up leaves no stuck busy state and does not request a signature', async () => {
+    const request = installWallet(), client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    client.needAccess.mockRejectedValueOnce(new Error('bounded fixture unavailable'))
+    await controller.wallet.connect(); expect(controller.wallet.snapshot().busy).toBe(false); expect(controller.wallet.snapshot().error).toBeTruthy(); expect(request).not.toHaveBeenCalled()
+  })
+  it('unknown verify output cannot replay the action; explicit refreshed own lookup reconciles it', async () => {
+    installWallet(); const client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await openWallet(); await controller.wallet.sign()
+    const original = mocks.wallet.getMockImplementation()!
+    mocks.wallet.mockImplementationOnce(async (...args) => { await original(...args); throw Error('owned withheld reply') })
+    await controller.wallet.confirm(); await controller.wallet.confirm()
+    expect(mocks.wallet.mock.calls.map(c => c[1])).toEqual(['/eth/link/challenge', '/eth/link/verify'])
+    await controller.wallet.load(); expect(mocks.wallet.mock.calls.map(c => c[1])).toEqual(['/eth/link/challenge', '/eth/link/verify', '/eth/addresses'])
+    expect(controller.wallet.snapshot().links[0].address).toBe(walletAddress)
   })
 })

@@ -7,9 +7,15 @@ import (
 	"testing"
 	"time"
 
-	f "privacy-proxy/internal/disclosuretest"
 	w "privacy-proxy/internal/walletops"
 )
+
+// Fixed structural-import test values. Keep this same-package test independent
+// of disclosuretest, whose actual wallet fixture imports this SQL package.
+const recoveryTestTenant = "88888888-8888-8888-8888-888888888888"
+const recoveryTestSubject = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+const recoveryTestActor = "ops:p1:a23DyhIF4x-0g9VeggdAsED-9d70PqKfsMPhfv3bDoU"
+const recoveryTestNow = int64(1800000000)
 
 func batchFixture(t *testing.T) (RevocationBatch, w.Namespace) {
 	t.Helper()
@@ -18,7 +24,7 @@ func batchFixture(t *testing.T) (RevocationBatch, w.Namespace) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return RevocationBatch{APIVersion: "ops.wallet-revocations/v1", Kind: "WalletRevocationBatch", Namespace: ns.String(), SourceExportDigest: DigestString(sha256.Sum256([]byte("source"))), Aliases: []Alias{{LegacySubject: "did:source:a", ActorID: f.Actor(f.Subject), EvidenceDigest: DigestString(sha256.Sum256([]byte("alias"))), IdentityAuthority: "https://login.microsoftonline.com/" + f.Tenant + "/v2.0", SourceTenant: f.Tenant, SourceKind: "human"}}, Revocations: []Revocation{{LegacySubject: "did:source:a", Address: "0x" + strings.Repeat("a", 40), RevokedAt: time.Unix(f.Now-1, 0).UTC().Format(time.RFC3339)}}}, ns
+	return RevocationBatch{APIVersion: "ops.wallet-revocations/v1", Kind: "WalletRevocationBatch", Namespace: ns.String(), SourceExportDigest: DigestString(sha256.Sum256([]byte("source"))), Aliases: []Alias{{LegacySubject: "did:source:a", ActorID: recoveryTestActor, EvidenceDigest: DigestString(sha256.Sum256([]byte("alias"))), IdentityAuthority: "https://login.microsoftonline.com/" + recoveryTestTenant + "/v2.0", SourceTenant: recoveryTestTenant, SourceKind: "human"}}, Revocations: []Revocation{{LegacySubject: "did:source:a", Address: "0x" + strings.Repeat("a", 40), RevokedAt: time.Unix(recoveryTestNow-1, 0).UTC().Format(time.RFC3339)}}}, ns
 }
 func TestStrictRevocationImportAndAliasCoalescing(t *testing.T) {
 	b, ns := batchFixture(t)
@@ -33,7 +39,7 @@ func TestStrictRevocationImportAndAliasCoalescing(t *testing.T) {
 		func(b *RevocationBatch) { b.Aliases[0].ActorID = "did:legacy:a" },
 		func(b *RevocationBatch) { b.Aliases[0].SourceKind = "admin" },
 		func(b *RevocationBatch) { b.Aliases[0].SourceTenant = "" },
-		func(b *RevocationBatch) { b.Aliases[0].SourceTenant = f.Subject },
+		func(b *RevocationBatch) { b.Aliases[0].SourceTenant = recoveryTestSubject },
 		func(b *RevocationBatch) {
 			b.Aliases[0].IdentityAuthority = "https://login.microsoftonline.com/common/v2.0"
 		},
@@ -71,11 +77,11 @@ func TestStrictRevocationImportAndAliasCoalescing(t *testing.T) {
 	b.Aliases = append(b.Aliases, second)
 	r := b.Revocations[0]
 	r.LegacySubject = second.LegacySubject
-	r.RevokedAt = time.Unix(f.Now-20, 0).UTC().Format(time.RFC3339)
+	r.RevokedAt = time.Unix(recoveryTestNow-20, 0).UTC().Format(time.RFC3339)
 	b.Revocations = append(b.Revocations, r)
 	encoded, _ := json.Marshal(b)
 	_, rows, err := decodeBatch(encoded, ns)
-	if err != nil || len(rows) != 1 || rows[0].at.Unix() != f.Now-20 {
+	if err != nil || len(rows) != 1 || rows[0].at.Unix() != recoveryTestNow-20 {
 		t.Fatal("aliases not coalesced at earliest revocation", err)
 	}
 }
@@ -84,8 +90,8 @@ func TestSupportedAliasFamiliesAreStructuralAttestations(t *testing.T) {
 	b, ns := batchFixture(t)
 	for _, a := range []Alias{
 		b.Aliases[0],
-		{LegacySubject: "service:opaque", ActorID: f.Actor(f.Subject), EvidenceDigest: b.Aliases[0].EvidenceDigest, IdentityAuthority: b.Aliases[0].IdentityAuthority, SourceTenant: f.Tenant, SourceKind: "service"},
-		{LegacySubject: "did:iden3:opaque", ActorID: f.Actor(f.Subject), EvidenceDigest: b.Aliases[0].EvidenceDigest, IdentityAuthority: "privado", SourceTenant: "", SourceKind: "human"},
+		{LegacySubject: "service:opaque", ActorID: recoveryTestActor, EvidenceDigest: b.Aliases[0].EvidenceDigest, IdentityAuthority: b.Aliases[0].IdentityAuthority, SourceTenant: recoveryTestTenant, SourceKind: "service"},
+		{LegacySubject: "did:iden3:opaque", ActorID: recoveryTestActor, EvidenceDigest: b.Aliases[0].EvidenceDigest, IdentityAuthority: "privado", SourceTenant: "", SourceKind: "human"},
 	} {
 		b.Aliases = []Alias{a}
 		b.Revocations[0].LegacySubject = a.LegacySubject
