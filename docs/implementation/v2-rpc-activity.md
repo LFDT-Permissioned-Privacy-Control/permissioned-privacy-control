@@ -100,7 +100,7 @@ Metadata applies its stricter one MiB envelope limit after the shared outer body
 read, and drops request metadata before typed acquisition. State applies the
 same envelope limit only after family dispatch; enabling state does not reduce
 the native raw-transaction two MiB body limit. A3-backed state delivery rechecks
-its original SQL facts and numeric node ancestor before the final same-View
+its original SQL facts, any original wallet snapshot, and then its numeric node ancestor before the final same-View
 check, under the original operation fence.
 A canonical escaped JSON ID can occupy almost six or twelve MiB respectively.
 The sealed response has a checked aggregate preflight and a sixteen MiB final

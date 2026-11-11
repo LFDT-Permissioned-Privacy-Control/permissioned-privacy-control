@@ -1,0 +1,6 @@
+{
+  "raw": "{\n  \"apiVersion\": \"ops.rpc-state-policy/v1\",\n  \"kind\": \"StatePolicy\",\n  \"bundleManifestDigest\": \"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\n  \"anonymousMethods\": [\n    \"eth_getBalance\",\n    \"eth_getCode\"\n  ],\n  \"preRegisteredAddresses\": [\n    {\n      \"address\": \"0x2222222222222222222222222222222222222222\",\n      \"organizationId\": \"33333333-3333-3333-3333-333333333333\"\n    }\n  ],\n  \"linkedWalletBasics\": true\n}\n",
+  "rawSHA": "sha256:e2017de6cb8157b86e6ce137f13852f79e00b41ab9ceccd009447ab42ea56811",
+  "definitionSHA": "sha256:4bb479b45db9ad1b3690638e400e677b871ba1f0b15c74649ec31013535e6865",
+  "effectiveSHA": "sha256:0b3d65a1d40ae581e99b2665ff4d95b7b58c0b88a58a95a65a7a13819e78a26e"
+}
