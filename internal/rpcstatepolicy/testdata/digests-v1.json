@@ -1,0 +1,182 @@
+{
+  "raw": "{\n  \"apiVersion\": \"ops.rpc-state-policy/v1\",\n  \"kind\": \"StatePolicy\",\n  \"bundleManifestDigest\": \"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\n  \"anonymousMethods\": [\n    \"eth_getBalance\",\n    \"eth_getCode\"\n  ],\n  \"preRegisteredAddresses\": [\n    {\n      \"address\": \"0x2222222222222222222222222222222222222222\",\n      \"organizationId\": \"33333333-3333-3333-3333-333333333333\"\n    }\n  ]\n}\n",
+  "rawSHA": "sha256:c8aa536665dcf90237228c74b981de56ce62f01814580f14a6f21f1f1053c405",
+  "definitionSHA": "sha256:2e68a3a231b47867e44e3f79b03a4e8bf979092e53c794a1f3966e41b482afb7",
+  "methodSet": {
+    "version": "rpc-method-catalog/v1",
+    "methods": [
+      {
+        "name": "debug_traceCall",
+        "canonical": "debug_traceCall",
+        "requiredClaims": []
+      },
+      {
+        "name": "debug_traceTransaction",
+        "canonical": "debug_traceTransaction",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_accounts",
+        "canonical": "eth_accounts",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_blockNumber",
+        "canonical": "eth_blockNumber",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_call",
+        "canonical": "eth_call",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_chainId",
+        "canonical": "eth_chainId",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_createAccessList",
+        "canonical": "eth_createAccessList",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_estimateGas",
+        "canonical": "eth_estimateGas",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_feeHistory",
+        "canonical": "eth_feeHistory",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_gasPrice",
+        "canonical": "eth_gasPrice",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getBalance",
+        "canonical": "eth_getBalance",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getBlockByHash",
+        "canonical": "eth_getBlockByHash",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getBlockByNumber",
+        "canonical": "eth_getBlockByNumber",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getBlockReceipts",
+        "canonical": "eth_getBlockReceipts",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getBlockTransactionCountByHash",
+        "canonical": "eth_getBlockTransactionCountByHash",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getBlockTransactionCountByNumber",
+        "canonical": "eth_getBlockTransactionCountByNumber",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getCode",
+        "canonical": "eth_getCode",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getLogs",
+        "canonical": "eth_getLogs",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getProof",
+        "canonical": "eth_getProof",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getStorageAt",
+        "canonical": "eth_getStorageAt",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getTransactionByBlockHashAndIndex",
+        "canonical": "eth_getTransactionByBlockHashAndIndex",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getTransactionByBlockNumberAndIndex",
+        "canonical": "eth_getTransactionByBlockNumberAndIndex",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getTransactionByHash",
+        "canonical": "eth_getTransactionByHash",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getTransactionCount",
+        "canonical": "eth_getTransactionCount",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_getTransactionReceipt",
+        "canonical": "eth_getTransactionReceipt",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_maxPriorityFeePerGas",
+        "canonical": "eth_maxPriorityFeePerGas",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_sendRawTransaction",
+        "canonical": "eth_sendRawTransaction",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_sendTransaction",
+        "canonical": "eth_sendTransaction",
+        "requiredClaims": []
+      },
+      {
+        "name": "eth_syncing",
+        "canonical": "eth_syncing",
+        "requiredClaims": []
+      },
+      {
+        "name": "net_listening",
+        "canonical": "net_listening",
+        "requiredClaims": []
+      },
+      {
+        "name": "net_peerCount",
+        "canonical": "net_peerCount",
+        "requiredClaims": []
+      },
+      {
+        "name": "net_version",
+        "canonical": "net_version",
+        "requiredClaims": []
+      },
+      {
+        "name": "web3_clientVersion",
+        "canonical": "web3_clientVersion",
+        "requiredClaims": []
+      },
+      {
+        "name": "web3_sha3",
+        "canonical": "web3_sha3",
+        "requiredClaims": []
+      }
+    ]
+  },
+  "methodSetSHA": "sha256:9fc4ac616dbd26a5eea4a2cea094d0a800448b66a07817319e0925abc8dfeff5",
+  "effectiveSHA": "sha256:ffdb2d96834c7fa8cd89e17582a365c523c87aa0297fa0a561c1a365cdd1ffcd"
+}

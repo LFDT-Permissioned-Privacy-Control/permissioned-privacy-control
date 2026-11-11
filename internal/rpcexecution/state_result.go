@@ -1,11 +1,20 @@
 package rpcexecution
 
+import "github.com/ethereum/go-ethereum/common"
+
 // stateResult validates structure and request pairing, retaining the wire-owned
 // bytes. A Merkle proof's opaque nodes can contain unrequested inlined leaves;
 // this validator supplies no proof-node confidentiality or permission verdict.
 func stateResult(q StateQuery, raw []byte, l StateLimits) ([]byte, error) {
+	result, _, _, err := stateResultWithPresence(q, raw, l)
+	return result, err
+}
+func stateResultWithPresence(q StateQuery, raw []byte, l StateLimits) ([]byte, ProofAccountPresence, bool, error) {
+	bad := func(err error) ([]byte, ProofAccountPresence, bool, error) {
+		return nil, ProofAccountPresence{}, false, err
+	}
 	if !q.validFor(l) || int64(len(raw)) > l.MaxResultBytes {
-		return nil, failure(EvidenceLimit)
+		return bad(failure(EvidenceLimit))
 	}
 	remainingNodes := l.MaxTotalProofNodes
 	v, err := readJSONFieldArrays(raw, func(depth int, field string) int {
@@ -25,7 +34,7 @@ func stateResult(q StateQuery, raw []byte, l StateLimits) ([]byte, error) {
 		return 0
 	})
 	if err != nil {
-		return nil, err
+		return bad(err)
 	}
 	ok := false
 	switch q.method {
@@ -41,9 +50,17 @@ func stateResult(q StateQuery, raw []byte, l StateLimits) ([]byte, error) {
 		ok = stateProofResult(q, v, l)
 	}
 	if !ok {
-		return nil, failure(InvalidEvidence)
+		return bad(failure(InvalidEvidence))
 	}
-	return raw, nil
+	var presence ProofAccountPresence
+	if q.method == StateProof {
+		object := v.(map[string]any)
+		nonce, _ := quantity(object["nonce"].(string), 64)
+		balance, _ := quantity(object["balance"].(string), 256)
+		proofs, _ := object["accountProof"].([]any) // S1a permits a null absence witness.
+		presence = ProofAccountPresence{AccountProofNodes: len(proofs), NonceNonzero: nonce.Sign() > 0, BalanceNonzero: balance.Sign() > 0, CodeHash: common.HexToHash(object["codeHash"].(string)), StorageHash: common.HexToHash(object["storageHash"].(string))}
+	}
+	return raw, presence, q.method == StateProof, nil
 }
 
 func stateData(v any, min, max int) bool {

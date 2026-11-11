@@ -65,6 +65,7 @@ import (
 	_ "privacy-proxy/internal/rpcengine"
 	_ "privacy-proxy/internal/rpcexecution"
 	_ "privacy-proxy/internal/rpcmethoddata"
+	_ "privacy-proxy/internal/rpcstatepolicy"
 	_ "privacy-proxy/internal/runtimepolicy"
 	_ "privacy-proxy/internal/server/middleware"
 	_ "privacy-proxy/internal/ssopolicy"
@@ -194,7 +195,7 @@ func TestNativeCallRuntimeDependencyBoundary(t *testing.T) {
 			allowed["privacy-proxy/internal/rpcexecution"] = true
 		}
 		if pkg == "privacy-proxy/internal/rpcengine" {
-			for _, name := range []string{"networkidentity", "nativeadmission", "admission", "walletadapter", "walletops", "walletproof", "guardbridge", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate", "creationcapture", "rpcenvelope", "rpcmetadatapolicy", "rpcmethoddata"} {
+			for _, name := range []string{"networkidentity", "nativeadmission", "admission", "walletadapter", "walletops", "walletproof", "guardbridge", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate", "creationcapture", "rpcenvelope", "rpcmetadatapolicy", "rpcmethoddata", "rpcstatepolicy"} {
 				allowed["privacy-proxy/internal/"+name] = true
 			}
 		}
@@ -266,6 +267,21 @@ func TestPolicyBundleDependencyBoundary(t *testing.T) {
 					t.Errorf("strictjson must use only the standard library: %s", dep)
 				}
 			}
+		}
+	}
+}
+
+func TestStatePolicyHasOnlyPureMethodPolicyDependency(t *testing.T) {
+	const pkg = "privacy-proxy/internal/rpcstatepolicy"
+	cmd := exec.Command("go", "list", "-deps", "-f", "{{if not .Standard}}{{.ImportPath}}{{end}}", pkg)
+	cmd.Dir = moduleRoot(t)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("state policy closure: %v\n%s", err, out)
+	}
+	for _, dep := range strings.Fields(string(out)) {
+		if dep != pkg && dep != "privacy-proxy/internal/rpcmetadatapolicy" {
+			t.Errorf("state policy imports infrastructure %s", dep)
 		}
 	}
 }
