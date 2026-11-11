@@ -1,0 +1,1278 @@
+{
+  "columns": [
+    {
+      "table_name": "state",
+      "attnum": 1,
+      "attname": "singleton",
+      "type": "boolean",
+      "not_null": true,
+      "generated": "",
+      "default_expr": "true"
+    },
+    {
+      "table_name": "state",
+      "attnum": 2,
+      "attname": "schema_version",
+      "type": "smallint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 3,
+      "attname": "schema_checksum",
+      "type": "text",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 4,
+      "attname": "namespace",
+      "type": "bytea",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 5,
+      "attname": "epoch",
+      "type": "uuid",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 6,
+      "attname": "broker_namespace",
+      "type": "bytea",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 7,
+      "attname": "broker_epoch",
+      "type": "uuid",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 8,
+      "attname": "ready",
+      "type": "boolean",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 9,
+      "attname": "app_role",
+      "type": "name",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 10,
+      "attname": "retention_role",
+      "type": "name",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 11,
+      "attname": "max_active_rows",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 12,
+      "attname": "max_ready_rows",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 13,
+      "attname": "max_active_bytes",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 14,
+      "attname": "max_all_rows",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 15,
+      "attname": "max_metadata_bytes",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 16,
+      "attname": "audit_retention_seconds",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "state",
+      "attnum": 17,
+      "attname": "active_rows",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": "0"
+    },
+    {
+      "table_name": "state",
+      "attnum": 18,
+      "attname": "ready_rows",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": "0"
+    },
+    {
+      "table_name": "state",
+      "attnum": 19,
+      "attname": "active_bytes",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": "0"
+    },
+    {
+      "table_name": "state",
+      "attnum": 20,
+      "attname": "all_rows",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": "0"
+    },
+    {
+      "table_name": "state",
+      "attnum": 21,
+      "attname": "metadata_bytes",
+      "type": "bigint",
+      "not_null": false,
+      "generated": "s",
+      "default_expr": "(all_rows * 2048)"
+    },
+    {
+      "table_name": "state",
+      "attnum": 22,
+      "attname": "last_gc_us",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": "0"
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 1,
+      "attname": "id",
+      "type": "uuid",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 2,
+      "attname": "namespace",
+      "type": "bytea",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 3,
+      "attname": "epoch",
+      "type": "uuid",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 4,
+      "attname": "broker_epoch",
+      "type": "uuid",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 5,
+      "attname": "phase",
+      "type": "smallint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 6,
+      "attname": "client_id",
+      "type": "text",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 7,
+      "attname": "client_catalog_digest",
+      "type": "bytea",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 8,
+      "attname": "identity_digest",
+      "type": "bytea",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 9,
+      "attname": "recipient",
+      "type": "bytea",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 10,
+      "attname": "state_hash",
+      "type": "bytea",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 11,
+      "attname": "redirect_hash",
+      "type": "bytea",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 12,
+      "attname": "pkce_s256",
+      "type": "bytea",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 13,
+      "attname": "context_key_id",
+      "type": "text",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 14,
+      "attname": "context_ciphertext",
+      "type": "bytea",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 15,
+      "attname": "created_us",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 16,
+      "attname": "expires_us",
+      "type": "bigint",
+      "not_null": true,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 17,
+      "attname": "code_hash",
+      "type": "bytea",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 18,
+      "attname": "code_expires_us",
+      "type": "bigint",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 19,
+      "attname": "grant_key_id",
+      "type": "text",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 20,
+      "attname": "grant_ciphertext",
+      "type": "bytea",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 21,
+      "attname": "actor_id",
+      "type": "text",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 22,
+      "attname": "profile_id",
+      "type": "text",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 23,
+      "attname": "profile_digest",
+      "type": "bytea",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 24,
+      "attname": "family_id",
+      "type": "uuid",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 25,
+      "attname": "family_generation",
+      "type": "bigint",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 26,
+      "attname": "family_handle_hash",
+      "type": "bytea",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 27,
+      "attname": "access_digest",
+      "type": "bytea",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 28,
+      "attname": "access_expires_us",
+      "type": "bigint",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 29,
+      "attname": "family_expires_us",
+      "type": "bigint",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 30,
+      "attname": "ready_us",
+      "type": "bigint",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 31,
+      "attname": "code_response_digest",
+      "type": "bytea",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 32,
+      "attname": "code_response_bytes",
+      "type": "integer",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 33,
+      "attname": "consumed_us",
+      "type": "bigint",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 34,
+      "attname": "token_response_digest",
+      "type": "bytea",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 35,
+      "attname": "token_response_bytes",
+      "type": "integer",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 36,
+      "attname": "retain_until_us",
+      "type": "bigint",
+      "not_null": false,
+      "generated": "",
+      "default_expr": null
+    },
+    {
+      "table_name": "transactions",
+      "attnum": 37,
+      "attname": "active_bytes",
+      "type": "bigint",
+      "not_null": false,
+      "generated": "s",
+      "default_expr": "\nCASE\n    WHEN (phase = ANY (ARRAY[1, 2])) THEN ((COALESCE(octet_length(context_ciphertext), 0))::bigint + (COALESCE(octet_length(grant_ciphertext), 0))::bigint)\n    ELSE (0)::bigint\nEND"
+    }
+  ],
+  "constraints": [
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_active_bytes_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (active_bytes >= 0)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_active_rows_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (active_rows >= 0)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_all_rows_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (all_rows >= 0)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_audit_retention_seconds_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (audit_retention_seconds >= 3600 AND audit_retention_seconds <= 31536000)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_broker_epoch_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (broker_epoch <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_broker_namespace_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(broker_namespace) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (app_role <> retention_role)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_check1",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (max_ready_rows <= max_active_rows AND max_active_rows <= max_all_rows)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_check2",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (active_rows <= max_active_rows AND ready_rows <= max_ready_rows AND ready_rows <= active_rows AND active_rows <= all_rows)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_check3",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (active_bytes <= max_active_bytes AND metadata_bytes <= max_metadata_bytes)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_check4",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((active_rows = 0) = (active_bytes = 0))"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_check5",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (active_bytes >= (28 * active_rows + 28 * ready_rows))"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_epoch_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (epoch <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_last_gc_us_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (last_gc_us >= 0 AND last_gc_us <= '253402300799999999'::bigint)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_max_active_bytes_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (max_active_bytes >= 28672 AND max_active_bytes <= '17179869184'::bigint)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_max_active_rows_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (max_active_rows >= 1 AND max_active_rows <= 1000000)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_max_all_rows_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (max_all_rows >= 1 AND max_all_rows <= 1000000000)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_max_metadata_bytes_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (max_metadata_bytes >= 2048 AND max_metadata_bytes <= '2199023255552'::bigint)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_max_ready_rows_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (max_ready_rows >= 1 AND max_ready_rows <= 1000000)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_namespace_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(namespace) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_namespace_key",
+      "type": "u",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "UNIQUE (namespace)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_pkey",
+      "type": "p",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (singleton)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_ready_rows_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (ready_rows >= 0)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_schema_checksum_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (length(schema_checksum) = 71)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_schema_version_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (schema_version = 1)"
+    },
+    {
+      "table_name": "ops_sso_v1.state",
+      "name": "state_singleton_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (singleton)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_access_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (access_digest IS NULL OR octet_length(access_digest) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_access_expires_us_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (access_expires_us IS NULL OR access_expires_us <= '253402300799999999'::bigint)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_actor_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (actor_id IS NULL OR actor_id ~ '^ops:p1:[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$'::text)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_broker_epoch_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (broker_epoch <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (expires_us > created_us AND expires_us <= '253402300799999999'::bigint AND (expires_us - created_us) <= 300000000)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_check1",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((phase = ANY (ARRAY[1, 2])) = (context_ciphertext IS NOT NULL))"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_check2",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((phase = 2) = (grant_ciphertext IS NOT NULL))"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_check3",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (phase = 1 AND num_nonnulls(code_hash, code_expires_us, grant_key_id, actor_id, profile_id, profile_digest, family_id, family_generation, family_handle_hash, access_digest, access_expires_us, family_expires_us, ready_us, code_response_digest, code_response_bytes, retain_until_us) = 0 OR (phase = ANY (ARRAY[2, 3, 4])) AND num_nonnulls(code_hash, code_expires_us, grant_key_id, actor_id, profile_id, profile_digest, family_id, family_generation, family_handle_hash, access_digest, access_expires_us, family_expires_us, ready_us, code_response_digest, code_response_bytes, retain_until_us) = 16)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_check4",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (phase = 3 AND consumed_us IS NOT NULL AND token_response_digest IS NOT NULL AND token_response_bytes IS NOT NULL OR phase <> 3 AND consumed_us IS NULL AND token_response_digest IS NULL AND token_response_bytes IS NULL)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_check5",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (ready_us IS NULL OR ready_us >= created_us AND ready_us < expires_us AND code_expires_us > ready_us AND (code_expires_us - ready_us) <= 60000000 AND code_expires_us <= expires_us AND code_expires_us <= access_expires_us AND code_expires_us <= family_expires_us AND access_expires_us > ready_us AND (access_expires_us - ready_us) <= 300000000 AND family_expires_us > ready_us AND retain_until_us >= (code_expires_us + '3600000000'::bigint) AND (retain_until_us - code_expires_us) <= '31536000000000'::bigint AND retain_until_us <= '253402300799999999'::bigint)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_check6",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (consumed_us IS NULL OR consumed_us >= ready_us AND consumed_us < code_expires_us)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_client_catalog_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(client_catalog_digest) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_client_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (client_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'::text)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_code_expires_us_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (code_expires_us IS NULL OR code_expires_us <= '253402300799999999'::bigint)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_code_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (code_hash IS NULL OR octet_length(code_hash) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_code_response_bytes_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (code_response_bytes IS NULL OR code_response_bytes >= 1 AND code_response_bytes <= 32768)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_code_response_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (code_response_digest IS NULL OR octet_length(code_response_digest) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_context_ciphertext_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (context_ciphertext IS NULL OR octet_length(context_ciphertext) >= 28 AND octet_length(context_ciphertext) <= 4096)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_context_key_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (context_key_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'::text)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_created_us_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (created_us >= 0 AND created_us <= '253402300799999999'::bigint)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_epoch_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (epoch <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_family_expires_us_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (family_expires_us IS NULL OR family_expires_us <= '253402300799999999'::bigint)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_family_generation_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (family_generation IS NULL OR family_generation >= 0)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_family_handle_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (family_handle_hash IS NULL OR octet_length(family_handle_hash) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_family_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (family_id IS NULL OR family_id <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_grant_ciphertext_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (grant_ciphertext IS NULL OR octet_length(grant_ciphertext) >= 28 AND octet_length(grant_ciphertext) <= 24576)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_grant_key_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (grant_key_id IS NULL OR grant_key_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'::text)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_identity_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(identity_digest) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_namespace_fkey",
+      "type": "f",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "FOREIGN KEY (namespace) REFERENCES ops_sso_v1.state(namespace)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_phase_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (phase = ANY (ARRAY[1, 2, 3, 4]))"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_pkce_s256_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(pkce_s256) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_pkey",
+      "type": "p",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_profile_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (profile_digest IS NULL OR octet_length(profile_digest) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_profile_id_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (profile_id IS NULL OR octet_length(profile_id) >= 1 AND octet_length(profile_id) <= 128 AND profile_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]*$'::text)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_recipient_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(recipient) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_redirect_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(redirect_hash) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_state_hash_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (octet_length(state_hash) = 32)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_token_response_bytes_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (token_response_bytes IS NULL OR token_response_bytes >= 1 AND token_response_bytes <= 32768)"
+    },
+    {
+      "table_name": "ops_sso_v1.transactions",
+      "name": "transactions_token_response_digest_check",
+      "type": "c",
+      "validated": true,
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (token_response_digest IS NULL OR octet_length(token_response_digest) = 32)"
+    }
+  ],
+  "indexes": [
+    {
+      "name": "state_namespace_key",
+      "definition": "CREATE UNIQUE INDEX state_namespace_key ON ops_sso_v1.state USING btree (namespace)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "state_pkey",
+      "definition": "CREATE UNIQUE INDEX state_pkey ON ops_sso_v1.state USING btree (singleton)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "transactions_code",
+      "definition": "CREATE UNIQUE INDEX transactions_code ON ops_sso_v1.transactions USING btree (code_hash) WHERE (code_hash IS NOT NULL)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "transactions_pending_expiry",
+      "definition": "CREATE INDEX transactions_pending_expiry ON ops_sso_v1.transactions USING btree (expires_us, id) WHERE (phase = 1)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "transactions_pkey",
+      "definition": "CREATE UNIQUE INDEX transactions_pkey ON ops_sso_v1.transactions USING btree (id)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "transactions_ready_expiry",
+      "definition": "CREATE INDEX transactions_ready_expiry ON ops_sso_v1.transactions USING btree (code_expires_us, id) WHERE (phase = 2)",
+      "valid": true,
+      "ready": true
+    },
+    {
+      "name": "transactions_retention",
+      "definition": "CREATE INDEX transactions_retention ON ops_sso_v1.transactions USING btree (retain_until_us, id) WHERE (phase = ANY (ARRAY[3, 4]))",
+      "valid": true,
+      "ready": true
+    }
+  ],
+  "triggers": [
+    {
+      "name": "guard_transaction",
+      "table_name": "ops_sso_v1.transactions",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER guard_transaction BEFORE INSERT OR UPDATE ON ops_sso_v1.transactions FOR EACH ROW EXECUTE FUNCTION ops_sso_v1.guard_transaction()"
+    }
+  ],
+  "functions": [
+    {
+      "name": "guard_transaction",
+      "security_definer": false,
+      "volatility": "v",
+      "config": [
+        "search_path=pg_catalog, ops_sso_v1"
+      ],
+      "language": "plpgsql",
+      "body": "\nDECLARE owner_role text;\nBEGIN\n SELECT pg_get_userbyid(nspowner) INTO STRICT owner_role FROM pg_catalog.pg_namespace WHERE nspname='ops_sso_v1';\n IF current_user=owner_role THEN RETURN NEW;END IF;\n IF TG_OP='INSERT' THEN\n   IF NEW.phase<>1 THEN RAISE EXCEPTION 'SSO initial phase';END IF;\n   RETURN NEW;\n END IF;\n IF (to_jsonb(NEW)-ARRAY['phase','code_hash','code_expires_us','grant_key_id','grant_ciphertext','actor_id','profile_id','profile_digest','family_id','family_generation','family_handle_hash','access_digest','access_expires_us','family_expires_us','ready_us','code_response_digest','code_response_bytes','consumed_us','token_response_digest','token_response_bytes','retain_until_us','context_ciphertext','active_bytes'])\n    IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['phase','code_hash','code_expires_us','grant_key_id','grant_ciphertext','actor_id','profile_id','profile_digest','family_id','family_generation','family_handle_hash','access_digest','access_expires_us','family_expires_us','ready_us','code_response_digest','code_response_bytes','consumed_us','token_response_digest','token_response_bytes','retain_until_us','context_ciphertext','active_bytes']) THEN\n   RAISE EXCEPTION 'SSO immutable input';\n END IF;\n IF OLD.phase=1 AND NEW.phase=2 THEN\n   IF NEW.context_ciphertext IS DISTINCT FROM OLD.context_ciphertext THEN RAISE EXCEPTION 'SSO context changed';END IF;\n ELSIF OLD.phase=2 AND NEW.phase IN(3,4) THEN\n   IF (to_jsonb(NEW)-ARRAY['phase','context_ciphertext','grant_ciphertext','consumed_us','token_response_digest','token_response_bytes','active_bytes'])\n      IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['phase','context_ciphertext','grant_ciphertext','consumed_us','token_response_digest','token_response_bytes','active_bytes']) THEN RAISE EXCEPTION 'SSO prepared metadata changed';END IF;\n ELSE RAISE EXCEPTION 'SSO nonmonotone phase';\n END IF;\n RETURN NEW;\nEND"
+    }
+  ],
+  "relations": [
+    {
+      "name": "state",
+      "kind": "r",
+      "persistence": "p",
+      "partition": false,
+      "rls": false,
+      "force_rls": false,
+      "matching_owner": true
+    },
+    {
+      "name": "state_namespace_key",
+      "kind": "i",
+      "persistence": "p",
+      "partition": false,
+      "rls": false,
+      "force_rls": false,
+      "matching_owner": true
+    },
+    {
+      "name": "state_pkey",
+      "kind": "i",
+      "persistence": "p",
+      "partition": false,
+      "rls": false,
+      "force_rls": false,
+      "matching_owner": true
+    },
+    {
+      "name": "transactions",
+      "kind": "r",
+      "persistence": "p",
+      "partition": false,
+      "rls": false,
+      "force_rls": false,
+      "matching_owner": true
+    },
+    {
+      "name": "transactions_code",
+      "kind": "i",
+      "persistence": "p",
+      "partition": false,
+      "rls": false,
+      "force_rls": false,
+      "matching_owner": true
+    },
+    {
+      "name": "transactions_pending_expiry",
+      "kind": "i",
+      "persistence": "p",
+      "partition": false,
+      "rls": false,
+      "force_rls": false,
+      "matching_owner": true
+    },
+    {
+      "name": "transactions_pkey",
+      "kind": "i",
+      "persistence": "p",
+      "partition": false,
+      "rls": false,
+      "force_rls": false,
+      "matching_owner": true
+    },
+    {
+      "name": "transactions_ready_expiry",
+      "kind": "i",
+      "persistence": "p",
+      "partition": false,
+      "rls": false,
+      "force_rls": false,
+      "matching_owner": true
+    },
+    {
+      "name": "transactions_retention",
+      "kind": "i",
+      "persistence": "p",
+      "partition": false,
+      "rls": false,
+      "force_rls": false,
+      "matching_owner": true
+    }
+  ]
+}

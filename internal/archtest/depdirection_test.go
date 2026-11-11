@@ -53,6 +53,7 @@ import (
 	_ "privacy-proxy/internal/operational/disclosuresql"
 	_ "privacy-proxy/internal/operational/identitysql"
 	_ "privacy-proxy/internal/operational/rpcactivity"
+	_ "privacy-proxy/internal/operational/ssosql"
 	_ "privacy-proxy/internal/operational/walletsql"
 	_ "privacy-proxy/internal/policybundle"
 	_ "privacy-proxy/internal/policycli"
@@ -65,6 +66,8 @@ import (
 	_ "privacy-proxy/internal/rpcmethoddata"
 	_ "privacy-proxy/internal/runtimepolicy"
 	_ "privacy-proxy/internal/server/middleware"
+	_ "privacy-proxy/internal/ssopolicy"
+	_ "privacy-proxy/internal/ssotransaction"
 	_ "privacy-proxy/internal/strictjson"
 	_ "privacy-proxy/internal/transactioninput"
 	_ "privacy-proxy/internal/walletadapter"
@@ -757,6 +760,40 @@ func TestRPCActivityOwnedBoundary(t *testing.T) {
 	for dep := range operational {
 		if strings.HasPrefix(dep, "privacy-proxy/internal/server") || strings.HasPrefix(dep, "privacy-proxy/internal/db") || strings.HasPrefix(dep, "privacy-proxy/internal/operational/admissionsql") || strings.HasPrefix(dep, "github.com/jackc/pgx") {
 			t.Fatal("RPC hook imports legacy handle or SQL adapter", dep)
+		}
+	}
+}
+
+// Storage remains an operational component; structural/cold catalogs grant no
+// session authority and cannot acquire provider, legacy or database closures.
+func TestSSOStorageBoundaries(t *testing.T) {
+	root := moduleRoot(t)
+	for _, pkg := range []string{"privacy-proxy/internal/ssopolicy", "privacy-proxy/internal/ssotransaction", "privacy-proxy/internal/operational/ssosql"} {
+		cmd := exec.Command("go", "list", "-deps", "-f", "{{if not .Standard}}{{.ImportPath}}{{end}}", pkg)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("SSO dependency check: %v %s", err, out)
+		}
+		for _, dep := range strings.Fields(string(out)) {
+			allowed := dep == pkg
+			if pkg == "privacy-proxy/internal/ssopolicy" {
+				allowed = allowed || dep == "privacy-proxy/internal/identity" || dep == "privacy-proxy/internal/strictjson" || dep == "github.com/golang-jwt/jwt/v5"
+			}
+			if pkg == "privacy-proxy/internal/operational/ssosql" {
+				allowed = allowed || dep == "privacy-proxy/internal/ssotransaction"
+				for _, prefix := range []string{"github.com/jackc/pgx/v5", "github.com/jackc/puddle/v2", "github.com/jackc/pgpassfile", "github.com/jackc/pgservicefile", "golang.org/x/crypto/", "golang.org/x/sync/", "golang.org/x/text/"} {
+					allowed = allowed || dep == prefix || strings.HasPrefix(dep, prefix+"/") || strings.HasSuffix(prefix, "/") && strings.HasPrefix(dep, prefix)
+				}
+			}
+			if !allowed {
+				t.Fatal(pkg, "crosses owned SSO boundary", dep)
+			}
+		}
+	}
+	for dep := range transitiveDeps(t, root, "privacy-proxy/internal/rpcengine") {
+		if strings.HasPrefix(dep, "privacy-proxy/internal/operational/ssosql") {
+			t.Fatal("Core acquired SSO SQL", dep)
 		}
 	}
 }
