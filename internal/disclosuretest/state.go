@@ -21,6 +21,7 @@ type StateFixture struct {
 	Contracts       map[string][]policybundle.Contract
 	Methods         policybundle.MethodCatalog
 	IdentityCatalog *identity.SourceCatalog
+	ReadProfile     string
 }
 
 func DefaultStateFixture(t testing.TB) StateFixture {
@@ -78,7 +79,11 @@ func StateSnapshot(t testing.TB, f StateFixture) *policybundle.CatalogSnapshot {
 		}
 	}
 	write("identity.json", identitySource)
-	write("runtime.json", policybundle.RuntimeCreationObservedSource{APIVersion: policybundle.RuntimeCreationObservedAPIVersion, Kind: policybundle.RuntimeKind, ReadProfile: "standard", IntraOrgGrantTracing: true, SharedInfrastructure: []policybundle.SharedInfrastructure{}, AddressScopes: []policybundle.AddressScope{}, NodeEvidenceProfile: policybundle.RuntimeSimulationNodeEvidenceProfileID, RawSubmissionMode: policybundle.RawSubmissionOPSPreflight, CreationAttribution: policybundle.CreationAttribution{Factories: []policybundle.FactoryAttribution{}}, CaptureReadinessProfile: "same-node-caught-up/v1"})
+	readProfile := f.ReadProfile
+	if readProfile == "" {
+		readProfile = "standard"
+	}
+	write("runtime.json", policybundle.RuntimeCreationObservedSource{APIVersion: policybundle.RuntimeCreationObservedAPIVersion, Kind: policybundle.RuntimeKind, ReadProfile: readProfile, IntraOrgGrantTracing: true, SharedInfrastructure: []policybundle.SharedInfrastructure{}, AddressScopes: []policybundle.AddressScope{}, NodeEvidenceProfile: policybundle.RuntimeSimulationNodeEvidenceProfileID, RawSubmissionMode: policybundle.RawSubmissionOPSPreflight, CreationAttribution: policybundle.CreationAttribution{Factories: []policybundle.FactoryAttribution{}}, CaptureReadinessProfile: "same-node-caught-up/v1"})
 	compliance := compliancepolicy.Source{APIVersion: compliancepolicy.APIVersion, Kind: compliancepolicy.Kind, Organizations: []compliancepolicy.OrganizationPolicy{}, Sanctions: []compliancepolicy.SourceSanction{}}
 	for _, org := range []string{Org, OtherOrg} {
 		compliance.Organizations = append(compliance.Organizations, compliancepolicy.OrganizationPolicy{OrganizationID: org, RecordMaxSeconds: 86400, PriceMaxAgeSeconds: 600, Spec: compliancepolicy.SourceSpec{Settings: compliancepolicy.SourceSettings{Currency: "usd", ThresholdFiat: 100, UnknownPricePolicy: "forbidden", EnforcementMode: "enforce"}, AddressThresholds: []compliancepolicy.SourceThreshold{}, TokenPrices: []compliancepolicy.SourceTokenPrice{}}})
