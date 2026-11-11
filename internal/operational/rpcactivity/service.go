@@ -35,6 +35,7 @@ type Service struct {
 	state         *rpcengine.StateEngine
 	stateMethods  map[string]bool
 	traceMethods  map[string]bool
+	minedMethods  map[string]bool
 	recorder      *activitylog.Recorder
 	organizations []string
 	slots         chan struct{}
@@ -67,6 +68,19 @@ func newNativeService(c Config) (*Service, error) {
 			traceNames[name] = true
 		}
 	}
+	mined := c.Engine.MinedTraceOperationBinding()
+	minedNames := map[string]bool{}
+	if len(mined.Methods) > 0 {
+		if mined.Profile != binding.Profile || mined.ManifestDigest != binding.ManifestDigest || mined.NetworkKey != binding.NetworkKey || mined.ChainID != binding.ChainID || mined.Environment != binding.Environment || !slices.Equal(mined.OrganizationIDs, binding.OrganizationIDs) {
+			return nil, ErrInvalid
+		}
+		for _, name := range mined.Methods {
+			if !activitylog.ValidMethod(name) {
+				return nil, ErrInvalid
+			}
+			minedNames[name] = true
+		}
+	}
 	methods := c.Recorder.Methods()
 	for _, label := range labels {
 		if !slices.Contains(methods, label) {
@@ -78,7 +92,12 @@ func newNativeService(c Config) (*Service, error) {
 			return nil, ErrInvalid
 		}
 	}
-	return &Service{engine: c.Engine, traceMethods: traceNames, recorder: c.Recorder, organizations: slices.Clone(binding.OrganizationIDs), slots: make(chan struct{}, n.InFlight)}, nil
+	for name := range minedNames {
+		if !slices.Contains(methods, name) {
+			return nil, ErrInvalid
+		}
+	}
+	return &Service{engine: c.Engine, minedMethods: minedNames, traceMethods: traceNames, recorder: c.Recorder, organizations: slices.Clone(binding.OrganizationIDs), slots: make(chan struct{}, n.InFlight)}, nil
 }
 func (s *Service) Handler(selectedOrg string) (http.Handler, error) {
 	if s == nil || selectedOrg != "" && !slices.Contains(s.organizations, selectedOrg) {
@@ -212,7 +231,9 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 	if canonical, known := rpcmethoddata.CanonicalBuiltin(stateMethod); known {
 		stateMethod = canonical
 	}
-	if decoded && s.engine != nil && s.traceMethods[stateMethod] {
+	if decoded && s.engine != nil && s.minedMethods[stateMethod] {
+		result.mined = s.engine.TraceTransactionObserved(ctx, assertion, org, raw)
+	} else if decoded && s.engine != nil && s.traceMethods[stateMethod] {
 		result.trace = s.engine.TraceCallObserved(ctx, assertion, org, raw)
 	} else if decoded && s.state != nil && s.stateMethods[stateMethod] {
 		result.state = s.state.QueryObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, raw)

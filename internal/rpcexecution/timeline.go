@@ -46,28 +46,46 @@ type codeTimeline struct {
 }
 
 func (e *CallExecution) FrameCode(index int) (CodeInfo, bool) {
-	if e == nil || e.timeline == nil || index < 0 || index >= len(e.timeline.frames) {
+	if e == nil {
 		return CodeInfo{}, false
 	}
-	return e.timeline.frames[index], e.timeline.frameKnown[index]
+	return timelineFrame(e.timeline, index)
+}
+func timelineFrame(t *codeTimeline, index int) (CodeInfo, bool) {
+	if t == nil || index < 0 || index >= len(t.frames) {
+		return CodeInfo{}, false
+	}
+	return t.frames[index], t.frameKnown[index]
 }
 func (e *CallExecution) RuntimeCodeAt(index int, address common.Address) (CodeInfo, bool) {
-	if e == nil || e.timeline == nil || index < 0 || index >= len(e.timeline.entry) {
+	if e == nil {
 		return CodeInfo{}, false
 	}
-	changes := e.timeline.changes[address]
-	i := sort.Search(len(changes), func(i int) bool { return changes[i].ordinal > e.timeline.entry[index] })
+	return timelineRuntime(e.timeline, e.codes, index, address)
+}
+func timelineRuntime(t *codeTimeline, codes map[common.Address]CodeInfo, index int, address common.Address) (CodeInfo, bool) {
+	if t == nil || index < 0 || index >= len(t.entry) {
+		return CodeInfo{}, false
+	}
+	changes := t.changes[address]
+	i := sort.Search(len(changes), func(i int) bool { return changes[i].ordinal > t.entry[index] })
 	if i > 0 {
 		return changes[i-1].state.code, true
 	}
-	code, known := e.codes[address]
+	code, known := codes[address]
 	return code, known
 }
 func (e *CallExecution) CreationContext(index int) (CreationContext, bool) {
-	if e == nil || e.timeline == nil || index < 0 || index >= len(e.timeline.creations) {
+	if e == nil {
 		return CreationContext{}, false
 	}
-	c := e.timeline.creations[index]
+	return timelineCreation(e.timeline, index)
+}
+func timelineCreation(t *codeTimeline, index int) (CreationContext, bool) {
+	if t == nil || index < 0 || index >= len(t.creations) {
+		return CreationContext{}, false
+	}
+	c := t.creations[index]
 	return c, c.Kind != ""
 }
 func (e *CallExecution) QualificationWork() uint64 {

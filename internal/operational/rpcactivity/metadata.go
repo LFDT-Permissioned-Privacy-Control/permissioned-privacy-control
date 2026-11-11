@@ -66,12 +66,16 @@ func newMetadataService(c Config) (*Service, error) {
 type observedOperation struct {
 	native   *rpcengine.OperationResult
 	trace    *rpcengine.TraceOperationResult
+	mined    *rpcengine.MinedTraceOperationResult
 	metadata *rpcengine.MetadataOperationResult
 	state    *rpcengine.StateOperationResult
 }
 
 func (o observedOperation) valid() bool {
 	n := 0
+	if o.mined != nil {
+		n++
+	}
 	if o.trace != nil {
 		n++
 	}
@@ -90,6 +94,9 @@ func (o observedOperation) notification(s *Service) (bool, error) {
 	if !o.valid() {
 		return false, ErrInvalid
 	}
+	if o.mined != nil {
+		return o.mined.IsNotificationFor(s.engine)
+	}
 	if o.trace != nil {
 		return o.trace.IsNotificationFor(s.engine)
 	}
@@ -105,6 +112,18 @@ func (o observedOperation) completion(s *Service, remote string) (activitylog.Co
 	invalid, _ := completion(rpcengine.OperationMetadata{}, remote)
 	if !o.valid() {
 		return invalid, ErrInvalid
+	}
+	if o.mined != nil {
+		m, err := o.mined.MetadataFor(s.engine)
+		if err != nil {
+			return invalid, err
+		}
+		c, err := completion(rpcengine.OperationMetadata{Class: m.Class, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
+		if err != nil || !activitylog.ValidMethod(m.Method) {
+			return c, ErrInvalid
+		}
+		c.Method = m.Method
+		return c, nil
 	}
 	if o.trace != nil {
 		m, err := o.trace.MetadataFor(s.engine)
@@ -152,6 +171,9 @@ func (o observedOperation) preflight(s *Service) error {
 	if !o.valid() {
 		return ErrInvalid
 	}
+	if o.mined != nil {
+		return o.mined.PreflightFor(s.engine)
+	}
 	if o.trace != nil {
 		return o.trace.PreflightFor(s.engine)
 	}
@@ -166,6 +188,9 @@ func (o observedOperation) preflight(s *Service) error {
 func (o observedOperation) marshal(s *Service) ([]byte, error) {
 	if !o.valid() {
 		return nil, ErrInvalid
+	}
+	if o.mined != nil {
+		return o.mined.MarshalResponseFor(s.engine)
 	}
 	if o.trace != nil {
 		return o.trace.MarshalResponseFor(s.engine)
@@ -182,6 +207,9 @@ func (o observedOperation) recordingFailure(s *Service) ([]byte, error) {
 	if !o.valid() {
 		return nil, ErrInvalid
 	}
+	if o.mined != nil {
+		return o.mined.MarshalRecordingFailureFor(s.engine)
+	}
 	if o.trace != nil {
 		return o.trace.MarshalRecordingFailureFor(s.engine)
 	}
@@ -196,6 +224,12 @@ func (o observedOperation) recordingFailure(s *Service) ([]byte, error) {
 func (o observedOperation) deliver(ctx context.Context, s *Service) error {
 	if !o.valid() {
 		return ErrInvalid
+	}
+	if o.mined != nil {
+		if s.recorder.Healthy() != nil {
+			return ErrInvalid
+		}
+		return o.mined.RequireDeliverable(ctx, s.engine)
 	}
 	if o.trace != nil {
 		if s.recorder.Healthy() != nil {

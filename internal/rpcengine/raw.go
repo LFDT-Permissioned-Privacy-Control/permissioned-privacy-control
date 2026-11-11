@@ -162,7 +162,13 @@ func lifecycleProfile(id string) bool {
 }
 
 func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expectedProfile string) (*Engine, error) {
+	return newRawConfigured(snapshot, options, expectedProfile, nil)
+}
+func newRawConfigured(snapshot *policybundle.CatalogSnapshot, options RawOptions, expectedProfile string, mined *MinedTraceOptions) (*Engine, error) {
 	bad := func() (*Engine, error) { return nil, errors.New("invalid raw RPC configuration") }
+	if mined != nil && expectedProfile != policybundle.RuntimeCreationObservedProfileID {
+		return bad()
+	}
 	if snapshot == nil || options.Admission == nil || options.Wallets == nil || options.Clock == nil || !options.WalletState.Valid() {
 		return bad()
 	}
@@ -320,6 +326,12 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 		e.current = current
 	}
 	e.raw = &rawEngine{readProfile: runtime.ReadProfile(), sendEnabled: len(refs) > 0, wallets: options.Wallets, admission: options.Admission, captureGate: options.CaptureGate, bindings: map[string]map[string]rawBinding{}}
+	if mined != nil {
+		if err := e.initMinedTrace(*mined); err != nil {
+			e.Close()
+			return bad()
+		}
+	}
 	// Source bindings and aggregate budgets are checked before producer startup.
 	for org, needed := range refs {
 		n := options.RawNodes[org]

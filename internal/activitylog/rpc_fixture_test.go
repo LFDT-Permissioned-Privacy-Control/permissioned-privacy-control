@@ -308,6 +308,7 @@ type node struct {
 	nonce                       string
 	captureMined                bool
 	captureUnavailable          bool
+	mined                       *minedActivityNode
 	genesisHeader, anchorHeader *types.Header
 }
 
@@ -331,6 +332,9 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.methods = append(n.methods, req.Method)
+	if n.mined != nil && n.mined.respond(n, w, req.ID, req.Method, req.Params) {
+		return
+	}
 	if req.Method == n.failMethod {
 		w.WriteHeader(503)
 		return
@@ -570,6 +574,7 @@ type creationMountOptions struct {
 	wrap          func(*admissionsql.Store) admission.Store
 	walletService func(*walletops.Service)
 	configure     func(*rpcengine.RawOptions)
+	constructor   func(*policybundle.CatalogSnapshot, rpcengine.RawOptions) (*rpcengine.Engine, error)
 }
 
 func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg bool, creationOptions ...creationMountOptions) (*rpcengine.Engine, string, *admission.Service, *policybundle.CatalogSnapshot) {
@@ -807,6 +812,9 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 	}
 	if f.creationObserved {
 		constructor = rpcengine.NewCreationObserved
+	}
+	if len(creationOptions) > 0 && creationOptions[0].constructor != nil {
+		constructor = creationOptions[0].constructor
 	}
 	e, err := constructor(snapshot, options)
 	if err != nil {

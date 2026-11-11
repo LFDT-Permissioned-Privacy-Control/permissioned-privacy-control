@@ -8,7 +8,6 @@ import (
 
 	"privacy-proxy/internal/executionfacts"
 	"privacy-proxy/internal/policycore"
-	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/runtimepolicy"
 )
 
@@ -19,7 +18,7 @@ type routedFrame struct {
 
 // checkMultiOrg plans one complete dispatch before association scans or native
 // matching. Root anchor/node/financial selection remain unchanged throughout.
-func (n *Engine) checkMultiOrg(ctx context.Context, view *runtimepolicy.View, rootOrg string, execution *rpcexecution.CallExecution, wallets WalletSnapshot, signer common.Address, work uint64) policycore.Decision {
+func (n *Engine) checkMultiOrg(ctx context.Context, view *runtimepolicy.View, rootOrg string, execution executionEvidence, wallets WalletSnapshot, signer common.Address, work uint64) policycore.Decision {
 	records := execution.Tree().Records()
 	if len(records) == 0 {
 		return invalid()

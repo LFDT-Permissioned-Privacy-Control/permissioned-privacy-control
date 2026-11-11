@@ -129,6 +129,9 @@ func (n *Engine) validateRuntimeBasis(address common.Address, code rpcexecution.
 	if !ok || code.Delegated() || anchor.ChainID != n.metadata.ChainID || anchor.Hash == (common.Hash{}) || anchor.Number < basis.Number || anchor.Number == basis.Number && anchor.Hash != basis.InclusionHash || code.Hash() != basis.Hash || code.Length() != basis.Length {
 		return false, errors.New("invalid current runtime basis")
 	}
+	if n.minedPoint != nil && (n.minedPoint.number != anchor.Number || n.minedPoint.hash != anchor.Hash || basis.Number == anchor.Number && basis.Index >= n.minedPoint.index) {
+		return false, errors.New("invalid mined runtime birth ordinal")
+	}
 	return true, nil
 }
 func (n *Engine) runtimeOwnerFor(address common.Address, code rpcexecution.CodeInfo, anchor rpcexecution.Anchor) string {

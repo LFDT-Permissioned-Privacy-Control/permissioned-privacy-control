@@ -25,18 +25,27 @@ func (n *Engine) CheckClientTrace(ctx context.Context, view *runtimepolicy.View,
 	if n == nil || !n.creationObserved || n.currentView != view || view == nil || e == nil || e.Signed() || e.Tree() == nil || e.Anchor().OrganizationID != selectedOrg || ctx.Err() != nil || view.RequireLive() != nil {
 		return invalid()
 	}
+	targets, extra, ok := n.clientTraceTargets(ctx, view, selectedOrg, e)
+	if !ok {
+		return invalid()
+	}
+	decision := n.checkBudget(ctx, view, selectedOrg, e, wallets, false, nil, extra, selectedOrg)
+	return n.finishClientTrace(ctx, view, selectedOrg, targets, decision)
+}
+
+func (n *Engine) clientTraceTargets(ctx context.Context, view *runtimepolicy.View, selectedOrg string, e executionEvidence) (map[common.Address]bool, uint64, bool) {
 	records := e.Tree().Records()
 	targets := map[common.Address]bool{}
 	extra := uint64(len(records)) * 12 // Strict scope and private-value context queries.
 	for i, r := range records {
 		if ctx.Err() != nil || view.RequireLive() != nil {
-			return invalid()
+			return nil, 0, false
 		}
 		if _, created := e.CreationContext(i); created {
 			if r.To.Known {
 				owner := n.registeredOwner(r.To.Value)
 				if owner != "" && owner != selectedOrg {
-					return invalid()
+					return nil, 0, false
 				}
 				registered := n.owners[r.To.Value] != "" || n.currentObserved[r.To.Value]
 				if registered {
@@ -52,11 +61,11 @@ func (n *Engine) CheckClientTrace(ctx context.Context, view *runtimepolicy.View,
 			code, known = e.RuntimeCodeAt(i, address)
 		}
 		if !known {
-			return invalid()
+			return nil, 0, false
 		}
 		shared, valid := n.temporalShared(address, code)
 		if !valid {
-			return invalid()
+			return nil, 0, false
 		}
 		if (r.Kind == executionfacts.Call || r.Kind == executionfacts.StaticCall) && shared && r.NominalCodeAddress == r.StorageAddress {
 			continue
@@ -66,20 +75,20 @@ func (n *Engine) CheckClientTrace(ctx context.Context, view *runtimepolicy.View,
 		}
 		owner := n.registeredOwner(address)
 		if owner != "" && owner != selectedOrg {
-			return invalid()
+			return nil, 0, false
 		}
 		storage := r.StorageAddress.Value
 		if r.Kind == executionfacts.SelfDestruct {
 			storage = address
 		}
 		if n.registeredOwner(storage) != selectedOrg {
-			return invalid()
+			return nil, 0, false
 		}
 		// Native creation namespaces are not persistent client read grants.
 		if _, fresh := code.CreationRecordIndex(); fresh {
 			git := n.owners[storage] != ""
 			if !git {
-				return invalid()
+				return nil, 0, false
 			}
 		}
 		targets[storage] = true
@@ -87,15 +96,18 @@ func (n *Engine) CheckClientTrace(ctx context.Context, view *runtimepolicy.View,
 	for a := range targets {
 		cost, known := n.associationCost(a)
 		if !known || cost == 0 {
-			return invalid()
+			return nil, 0, false
 		}
 		var ok bool
 		extra, ok = add(extra, 2*cost)
 		if !ok || extra > MaxAdmissionWork {
-			return invalid()
+			return nil, 0, false
 		}
 	}
-	decision := n.checkBudget(ctx, view, selectedOrg, e, wallets, false, nil, extra, selectedOrg)
+	return targets, extra, true
+}
+
+func (n *Engine) finishClientTrace(ctx context.Context, view *runtimepolicy.View, selectedOrg string, targets map[common.Address]bool, decision policycore.Decision) policycore.Decision {
 	if !decision.Allowed {
 		return decision
 	}
@@ -118,6 +130,9 @@ func (n *Engine) ClientTracePrivateStorage(view *runtimepolicy.View, org string,
 	if n == nil || n.currentView != view || view == nil || view.RequireLive() != nil || e == nil || e.Tree() == nil || e.Signed() || e.Anchor().OrganizationID != org {
 		return nil, errors.New("invalid trace storage scope")
 	}
+	return n.clientTracePrivateStorage(view, org, e)
+}
+func (n *Engine) clientTracePrivateStorage(view *runtimepolicy.View, org string, e executionEvidence) (map[common.Address]bool, error) {
 	records := e.Tree().Records()
 	contexts := make([]common.Address, len(records))
 	out := map[common.Address]bool{}

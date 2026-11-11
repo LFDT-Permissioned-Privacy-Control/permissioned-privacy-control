@@ -36,6 +36,7 @@ type Engine struct {
 	currentWork       map[common.Address]uint64
 	scopes            map[common.Address]string
 	currentBasis      map[common.Address]runtimeBasis
+	minedPoint        *minedRuntimePoint
 }
 
 func New(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
@@ -172,7 +173,7 @@ func (n *Engine) registeredOwner(address common.Address) string {
 	return ""
 }
 
-func (n *Engine) qualifiedRuntimeOwner(execution *rpcexecution.CallExecution, address common.Address) string {
+func (n *Engine) qualifiedRuntimeOwner(execution executionEvidence, address common.Address) string {
 	code, ok := execution.Code(address)
 	if !ok || !code.HasCode() || code.Precompile() || code.Delegated() {
 		return ""
@@ -180,7 +181,7 @@ func (n *Engine) qualifiedRuntimeOwner(execution *rpcexecution.CallExecution, ad
 	return n.runtimeOwnerFor(address, code, execution.Anchor())
 }
 
-func (n *Engine) sharedCode(execution *rpcexecution.CallExecution, address common.Address) (bool, bool) {
+func (n *Engine) sharedCode(execution executionEvidence, address common.Address) (bool, bool) {
 	pin, configured := n.shared[address]
 	if !configured {
 		return false, true
@@ -253,6 +254,10 @@ func (n *Engine) checkBudget(ctx context.Context, view *runtimepolicy.View, sele
 	if anchor.ChainID != metadata.ChainID || anchor.OrganizationID != selectedOrg || anchor.Profile != expectedEvidence {
 		return invalid()
 	}
+	return n.checkPrepared(ctx, view, selectedOrg, execution, wallets, signer, !signed && execution.Call().FromSupplied(), execution.Call().From(), capture, extra, traceOrg)
+}
+
+func (n *Engine) checkPrepared(ctx context.Context, view *runtimepolicy.View, selectedOrg string, execution executionEvidence, wallets WalletSnapshot, signer common.Address, needsFromProof bool, from common.Address, capture *creationCapture, extra uint64, traceOrg string) policycore.Decision {
 	org, ok := view.Org(selectedOrg)
 	if !ok {
 		return invalid()
@@ -297,14 +302,13 @@ func (n *Engine) checkBudget(ctx context.Context, view *runtimepolicy.View, sele
 			}
 		}
 	}
-	needsFromProof := !signed && execution.Call().FromSupplied()
 	if (needsFromProof || weight.linked > 0) && (!wallets.valid || wallets.actorID != view.ActorID()) {
 		return invalid()
 	}
 	if wallets.valid && wallets.actorID != view.ActorID() {
 		return invalid()
 	}
-	if needsFromProof && !wallets.Contains(execution.Call().From()) {
+	if needsFromProof && !wallets.Contains(from) {
 		return invalid()
 	}
 	work, valid := admissionWork(uint64(execution.RecordCount()), totalGroups, weight, uint64(len(wallets.addresses)))
