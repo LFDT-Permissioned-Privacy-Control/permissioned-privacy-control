@@ -1,5 +1,5 @@
 # ── Dev image (Vite dev server with hot-reload) ───────────────────────────────
-FROM node:24.22.1-alpine AS dev
+FROM node:24.22.3-alpine3.23 AS dev
 
 RUN apk add --no-cache wget
 
@@ -14,7 +14,7 @@ EXPOSE 5173
 CMD ["npm", "run", "dev"]
 
 # ── Production build ──────────────────────────────────────────────────────────
-FROM node:24.22.1-alpine AS builder-prod
+FROM node:24.22.3-alpine3.23 AS builder-prod
 
 WORKDIR /app
 
