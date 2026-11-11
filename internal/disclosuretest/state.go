@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"privacy-proxy/internal/compliancepolicy"
+	p "privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/policycore"
@@ -17,13 +18,16 @@ import (
 )
 
 type StateFixture struct {
-	Groups          map[string][]policybundle.Group
-	Contracts       map[string][]policybundle.Contract
-	Methods         policybundle.MethodCatalog
-	IdentityCatalog *identity.SourceCatalog
-	ReadProfile     string
-	Execution       map[string]*policycore.Policy
-	Runtime         *policybundle.RuntimeCreationObservedSource
+	Groups           map[string][]policybundle.Group
+	Contracts        map[string][]policybundle.Contract
+	Methods          policybundle.MethodCatalog
+	IdentityCatalog  *identity.SourceCatalog
+	ReadProfile      string
+	Execution        map[string]*policycore.Policy
+	Runtime          *policybundle.RuntimeCreationObservedSource
+	HistoryConsumer  bool
+	DeliveryConsumer bool
+	DisclosureRules  []p.RuleSource
 }
 
 func DefaultStateFixture(t testing.TB) StateFixture {
@@ -52,11 +56,19 @@ func StateSnapshot(t testing.TB, f StateFixture) *policybundle.CatalogSnapshot {
 		identitySource = *f.IdentityCatalog
 	}
 	options, description, err := policyprofiles.Options(policybundle.RuntimeCreationObservedProfileID)
+	if f.DeliveryConsumer {
+		options, description, err = policyprofiles.DeliveryOptions(policybundle.RuntimeCreationObservedProfileID)
+	} else if f.HistoryConsumer {
+		options, description, err = policyprofiles.HistoryOptions(policybundle.RuntimeCreationObservedProfileID)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	options.Methods = f.Methods
 	draft := policybundle.Draft{APIVersion: policybundle.DraftAPIVersion, Kind: policybundle.DraftKind, Environment: "test", ChainID: "1", EvaluatorVersion: description.EvaluatorVersion, Profile: policybundle.RuntimeCreationObservedProfileID, SourceRevision: "state-fixture", Organizations: base.Organizations(), Documents: []policybundle.DraftDocument{}, IdentityCatalog: &policybundle.DraftIdentity{Path: "identity.json"}, RuntimeCatalog: &policybundle.DraftRuntime{Path: "runtime.json"}, ComplianceCatalog: &policybundle.DraftIdentity{Path: "compliance.json"}}
+	if f.DeliveryConsumer {
+		draft.DisclosureCatalog = &policybundle.DraftIdentity{Path: "disclosure.json"}
+	}
 	sourceDir := t.TempDir()
 	write := func(name string, v any) {
 		t.Helper()
@@ -85,6 +97,13 @@ func StateSnapshot(t testing.TB, f StateFixture) *policybundle.CatalogSnapshot {
 		}
 	}
 	write("identity.json", identitySource)
+	if f.DeliveryConsumer {
+		rules := f.DisclosureRules
+		if rules == nil {
+			rules = []p.RuleSource{DefaultRule()}
+		}
+		write("disclosure.json", p.Source{APIVersion: p.APIVersion, Kind: p.Kind, Rules: rules})
+	}
 	readProfile := f.ReadProfile
 	if readProfile == "" {
 		readProfile = "standard"

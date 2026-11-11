@@ -26,6 +26,9 @@ const help = `OPS policy files
 Results and errors are JSON. Profiles are compiled support, not Git approval or
 runtime readiness. Preparation writes a new proposal directory; it never updates
 an existing or active directory. Use the same source release as the deployment.
+History preparation/check/inspect additionally requires --consumer history with
+the creation-observed profile. Use that same trusted selection at server load;
+the approved manifest explicitly declares runtime.history-read/v1.
 `
 
 type Report struct {
@@ -66,6 +69,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	profile := flags.String("profile", "", "explicit compiled profile ID")
+	consumer := flags.String("consumer", "", "explicit compiled consumer: history or delivery (creation-observed only)")
 	var source, output, bundle, digest, environment, chain string
 	if command == "prepare" {
 		flags.StringVar(&source, "source", "", "flat draft source directory")
@@ -86,7 +90,19 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if flags.NArg() != 0 || *profile == "" {
 		return reportError(stderr, "usage", errors.New("an explicit profile and named flags are required"), 2)
 	}
-	options, description, err := policyprofiles.Options(*profile)
+	var options policybundle.Options
+	var description policyprofiles.Description
+	var err error
+	switch *consumer {
+	case "":
+		options, description, err = policyprofiles.Options(*profile)
+	case "history":
+		options, description, err = policyprofiles.HistoryOptions(*profile)
+	case "delivery":
+		options, description, err = policyprofiles.DeliveryOptions(*profile)
+	default:
+		return reportError(stderr, "usage", errors.New("unknown compiled consumer"), 2)
+	}
 	if err != nil {
 		return reportError(stderr, "profile", err, 2)
 	}

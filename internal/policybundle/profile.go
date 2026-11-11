@@ -66,54 +66,58 @@ const (
 
 // ValidationProfile is opaque: files cannot register validators or enable
 // deferred features. The fixed profiles remain validation-only libraries.
-type ValidationProfile struct{ id, evaluatorVersion, methodCatalogVersion string }
+type ValidationProfile struct {
+	id, evaluatorVersion, methodCatalogVersion string
+	historyConsumer                            bool
+	disclosureConsumer                         bool
+}
 
 func FoundationProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{FoundationProfileID, NativeEvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: FoundationProfileID, evaluatorVersion: NativeEvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 func IdentityProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{IdentityProfileID, NativeEvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: IdentityProfileID, evaluatorVersion: NativeEvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 // NativeV2Profile validates native-v2 depth bounds with identity and the same
 // bounded static rule matrix. It does not enable operational target classes.
 func NativeV2Profile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{NativeV2ProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: NativeV2ProfileID, evaluatorVersion: NativeV2EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 // RuntimeCallProfile selects only the qualified eth_call integration. Other
 // runtime methods and lifecycle/deployment evidence require successor profiles.
 func RuntimeCallProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{RuntimeCallProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: RuntimeCallProfileID, evaluatorVersion: NativeV2EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 // RuntimeRawSendProfile composes the call and bounded signed CALL consumers
 // with approved compliance. Deployment and lifecycle inputs remain unsupported.
 func RuntimeRawSendProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{RuntimeRawSendProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: RuntimeRawSendProfileID, evaluatorVersion: NativeV2EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 // RuntimeMultiOrgProfile adds qualified private calls across mapped orgs and
 // approved optional feed definitions. Lifecycle/history still require successors.
 func RuntimeMultiOrgProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{RuntimeMultiOrgProfileID, NativeV3EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: RuntimeMultiOrgProfileID, evaluatorVersion: NativeV3EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 func RuntimeLifecycleProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{RuntimeLifecycleProfileID, NativeV4EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: RuntimeLifecycleProfileID, evaluatorVersion: NativeV4EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 func RuntimeSimulationProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{RuntimeSimulationProfileID, NativeV4EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: RuntimeSimulationProfileID, evaluatorVersion: NativeV4EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 func RuntimeCreationIntentProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{RuntimeCreationIntentProfileID, NativeV4EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: RuntimeCreationIntentProfileID, evaluatorVersion: NativeV4EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 func RuntimeCreationObservedProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{RuntimeCreationObservedProfileID, NativeV4EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: RuntimeCreationObservedProfileID, evaluatorVersion: NativeV4EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 func lifecycleRuntimeProfile(id string) bool {
@@ -135,19 +139,19 @@ func rawRuntimeProfile(id string) bool {
 // DisclosureProfile validates explicit rules and identity with the native-v2
 // static matrix. It does not attest operational stores or data/report handlers.
 func DisclosureProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{DisclosureProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: DisclosureProfileID, evaluatorVersion: NativeV2EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 func ComplianceProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{ComplianceProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: ComplianceProfileID, evaluatorVersion: NativeV2EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 func BrokerMultiProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{BrokerMultiProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: BrokerMultiProfileID, evaluatorVersion: NativeV2EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 func BrokerProfile(methodCatalogVersion string) ValidationProfile {
-	return ValidationProfile{BrokerProfileID, NativeV2EvaluatorVersion, methodCatalogVersion}
+	return ValidationProfile{id: BrokerProfileID, evaluatorVersion: NativeV2EvaluatorVersion, methodCatalogVersion: methodCatalogVersion}
 }
 
 // MethodCatalog is trusted startup data. Names are exact; aliases carry no
@@ -183,6 +187,12 @@ type methodIndex struct {
 
 func prepareOptions(options Options) (methodIndex, error) {
 	p := options.Profile
+	if p.historyConsumer && p.id != RuntimeCreationObservedProfileID {
+		return methodIndex{}, fail(InvalidSelection, "", "", "options", "history consumer requires the creation-observed profile")
+	}
+	if p.disclosureConsumer && (p.id != RuntimeCreationObservedProfileID || !p.historyConsumer || !options.DisclosureLimits.Valid()) {
+		return methodIndex{}, fail(InvalidSelection, "", "", "options", "delivery disclosure consumer requires explicit creation-observed history and disclosure limits")
+	}
 	expectedEvaluator := NativeEvaluatorVersion
 	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID || p.id == RuntimeRawSendProfileID || p.id == DisclosureProfileID || p.id == ComplianceProfileID || p.id == BrokerProfileID || p.id == BrokerMultiProfileID {
 		expectedEvaluator = NativeV2EvaluatorVersion

@@ -81,7 +81,7 @@ func validateManifest(m Manifest, s Selection, o Options) error {
 	if runtimeProfile(o.Profile.id) != (m.RuntimeCatalog != nil) {
 		return fail(UnsupportedFeature, "", "", "runtimeCatalog", "runtime source must match the explicitly selected profile")
 	}
-	if (o.Profile.id == DisclosureProfileID) != (m.DisclosureCatalog != nil) {
+	if (o.Profile.id == DisclosureProfileID || o.Profile.disclosureConsumer) != (m.DisclosureCatalog != nil) {
 		return fail(UnsupportedFeature, "", "", "disclosureCatalog", "disclosure source must match the explicitly selected profile")
 	}
 	if (o.Profile.id == ComplianceProfileID || rawRuntimeProfile(o.Profile.id)) != (m.ComplianceCatalog != nil) {

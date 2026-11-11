@@ -69,3 +69,7 @@ func (f Fence) Bind(parent context.Context) (context.Context, context.CancelFunc
 	}
 	return ctx, cancel, nil
 }
+
+// Original returns only the existing absolute deadline and caller cancellation
+// channel. It retains no context values and never renews the owning lifetime.
+func (f Fence) Original() (time.Time, <-chan struct{}) { return f.deadline, f.done }

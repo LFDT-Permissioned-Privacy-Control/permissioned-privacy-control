@@ -10,7 +10,7 @@ import (
 
 // New composes concrete operations with one actual recorder and output gate.
 // The original native-only and metadata constructors keep their behavior.
-func New(c Config) (*Service, error) {
+func newStateService(c Config) (*Service, error) {
 	if c.State == nil {
 		return newMetadataService(c)
 	}

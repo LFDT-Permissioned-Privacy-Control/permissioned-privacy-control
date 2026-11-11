@@ -47,11 +47,20 @@ func (c *HistoryBlockClient) Source() creationfacts.Source {
 // AcquireBlock counts all ten possible physical requests and raw response bytes
 // under one child deadline. The selected hash is finally checked by NUMBER.
 func (c *HistoryBlockClient) AcquireBlock(ctx context.Context, selector HistoryBlockSelector) (*HistoryBlockObservation, error) {
+	if ctx == nil {
+		return nil, failure(InvalidCall)
+	}
+	deadline, _ := ctx.Deadline()
+	return c.acquireBlockWithin(ctx, selector, deadline, ctx.Done())
+}
+
+// Only the ordinary-history owner uses this private composition hook. It keeps
+// the original operation fence when its bounded acquisition child is canceled;
+// public standalone AcquireBlock retains its original caller semantics.
+func (c *HistoryBlockClient) acquireBlockWithin(ctx context.Context, selector HistoryBlockSelector, callerDeadline time.Time, callerDone <-chan struct{}) (*HistoryBlockObservation, error) {
 	if c == nil || ctx == nil || !c.limits.valid() || !selector.valid() {
 		return nil, failure(InvalidCall)
 	}
-	callerDone := ctx.Done()
-	callerDeadline, _ := ctx.Deadline()
 	ctx, cancel := context.WithTimeout(ctx, c.limits.Timeout)
 	defer cancel()
 	if ctx.Err() != nil {
