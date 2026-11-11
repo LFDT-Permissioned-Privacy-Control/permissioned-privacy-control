@@ -91,3 +91,17 @@ func (v *View) contractAssociation(registered registeredContract, collect bool) 
 	}
 	return true, associated, admin, grants
 }
+
+// ContractReadAdmin is the current target-specific read-admin metadata without
+// copying ABI/grant payloads. It performs the same mapped-group calculation.
+func (v *View) ContractReadAdmin(address common.Address) (owner string, admin, registered bool) {
+	if v == nil || v.factory == nil {
+		return "", false, false
+	}
+	c, ok := v.factory.contracts[address]
+	if !ok {
+		return "", false, false
+	}
+	_, _, admin, _ = v.contractAssociation(c, false)
+	return c.owner, admin, true
+}

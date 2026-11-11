@@ -10,7 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	a "privacy-proxy/internal/admission"
-	h "privacy-proxy/internal/historyfacts"
+	h "privacy-proxy/internal/admissionsharedata"
 )
 
 // ShareReader borrows an existing restricted reader Store. It owns neither a

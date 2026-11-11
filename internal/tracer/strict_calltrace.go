@@ -50,6 +50,18 @@ type strictFrame struct {
 //   - the returned payload is the re-marshaled strictFrame, never the node's
 //     raw bytes.
 func ParseStrictCallTrace(raw json.RawMessage) (json.RawMessage, *TraceResult, error) {
+	return parseStrictCallTrace(raw, 0)
+}
+
+// ParseStrictCallTraceBounded is the same projection with a public-output
+// allocation ceiling. Existing callers retain the legacy wrapper semantics.
+func ParseStrictCallTraceBounded(raw json.RawMessage, maxBytes int) (json.RawMessage, *TraceResult, error) {
+	if maxBytes <= 0 || len(raw) > 8<<20 {
+		return nil, nil, ErrUntrustedTrace
+	}
+	return parseStrictCallTrace(raw, maxBytes)
+}
+func parseStrictCallTrace(raw json.RawMessage, maxBytes int) (json.RawMessage, *TraceResult, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return nil, nil, ErrUntrustedTrace
@@ -57,6 +69,9 @@ func ParseStrictCallTrace(raw json.RawMessage) (json.RawMessage, *TraceResult, e
 	var root strictFrame
 	if err := json.Unmarshal(trimmed, &root); err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrUntrustedTrace, err)
+	}
+	if maxBytes > 0 && !strictOutputBudget(&root, maxBytes) {
+		return nil, nil, ErrUntrustedTrace
 	}
 	result := &TraceResult{CallTargets: make([]CallTarget, 0), Error: root.Error}
 	if root.GasUsed != "" {
@@ -135,4 +150,33 @@ func isStrictAddress(s string) bool {
 		}
 	}
 	return true
+}
+
+// Budget before whole Marshal or conversion. Fixed framing includes calls and
+// all four proxy redaction marker strings. Per-string marshaling is bounded by
+// the already bounded input field; no whole output is allocated by this pass.
+func strictOutputBudget(root *strictFrame, maxBytes int) bool {
+	left, count := maxBytes, 0
+	var walk func(*strictFrame, int) bool
+	walk = func(f *strictFrame, depth int) bool {
+		count++
+		if depth > maxTraceDepth || count > 4096 || left < 512 {
+			return false
+		}
+		left -= 512
+		for _, s := range []string{f.Type, f.From, f.To, f.Value, f.Gas, f.GasUsed, f.Input, f.Output, f.Error, f.RevertReason} {
+			b, err := json.Marshal(s)
+			if err != nil || len(b) > left {
+				return false
+			}
+			left -= len(b)
+		}
+		for i := range f.Calls {
+			if !walk(&f.Calls[i], depth+1) {
+				return false
+			}
+		}
+		return true
+	}
+	return root != nil && walk(root, 0)
 }

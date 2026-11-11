@@ -188,6 +188,9 @@ type ssoFixture struct {
 }
 
 func attachSSO(t *testing.T, x *browserFixture, trust []string, profileMode bool) *ssoFixture {
+	return attachSSOAt(t, x, trust, profileMode, "https://app.test/callback")
+}
+func attachSSOAt(t *testing.T, x *browserFixture, trust []string, profileMode bool, callback string) *ssoFixture {
 	t.Helper()
 	for _, role := range []string{"sso_app", "sso_retention"} {
 		if _, e := x.db.owner.Exec(t.Context(), `CREATE ROLE `+pgx.Identifier{role}.Sanitize()+` LOGIN NOINHERIT PASSWORD 'sso-test-only'`); e != nil {
@@ -208,7 +211,7 @@ func attachSSO(t *testing.T, x *browserFixture, trust []string, profileMode bool
 	}
 	source := ssopolicy.Source{APIVersion: ssopolicy.APIVersion, Kind: ssopolicy.Kind, Clients: []ssopolicy.ClientSource{}}
 	for _, row := range []struct{ id, ref string }{{"app-a", "SSO_APP_A"}, {"app-b", "SSO_APP_B"}} {
-		client := ssopolicy.ClientSource{ID: row.id, DisplayName: "App " + row.id, Authentication: "client_secret_basic", Secret: ssopolicy.SecretRef{FromEnv: row.ref}, TrustMode: "first-party-full-core-bearer", TrustedOrganizationIDs: trust, EligibleGroups: []ssopolicy.GroupRef{{OrganizationID: d.Org, GroupID: d.AuditorGroup}}, Eligibility: ssopolicy.GroupEligibility, AllowedProfiles: []string{f.HumanProfile, f.PrivadoRoleProfile}, RedirectURIs: []string{"https://app.test/callback"}}
+		client := ssopolicy.ClientSource{ID: row.id, DisplayName: "App " + row.id, Authentication: "client_secret_basic", Secret: ssopolicy.SecretRef{FromEnv: row.ref}, TrustMode: "first-party-full-core-bearer", TrustedOrganizationIDs: trust, EligibleGroups: []ssopolicy.GroupRef{{OrganizationID: d.Org, GroupID: d.AuditorGroup}}, Eligibility: ssopolicy.GroupEligibility, AllowedProfiles: []string{f.HumanProfile, f.PrivadoRoleProfile}, RedirectURIs: []string{callback}}
 		if profileMode {
 			client.Eligibility = ssopolicy.ProfileEligibility
 			client.EligibleGroups = []ssopolicy.GroupRef{}

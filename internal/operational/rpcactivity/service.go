@@ -34,6 +34,7 @@ type Service struct {
 	metadata      *rpcengine.MetadataEngine
 	state         *rpcengine.StateEngine
 	stateMethods  map[string]bool
+	traceMethods  map[string]bool
 	recorder      *activitylog.Recorder
 	organizations []string
 	slots         chan struct{}
@@ -53,13 +54,31 @@ func newNativeService(c Config) (*Service, error) {
 	if binding.Profile != policybundle.RuntimeCreationObservedProfileID || binding.Environment != c.Network.Environment || binding.ChainID != c.Network.ChainID || binding.NetworkKey != "sha256:"+hex.EncodeToString(key[:]) || m.NetworkKey != activitylog.Digest(key) || m.Format != activitylog.Format() || !activitylog.CanonicalUUID(m.SourceID) || !activitylog.CanonicalUUID(m.Generation) || m.Configuration == (activitylog.Digest{}) || !n.Valid() || len(binding.OrganizationIDs) == 0 || len(binding.ManifestDigest) != 71 || !slices.Equal(binding.Methods, []rpcengine.CapturedMethod{rpcengine.EthCall, rpcengine.EthSendRawTransaction}) {
 		return nil, ErrInvalid
 	}
+	trace := c.Engine.TraceOperationBinding()
+	traceNames := map[string]bool{}
+	if len(trace.Methods) > 0 {
+		if trace.Profile != binding.Profile || trace.ManifestDigest != binding.ManifestDigest || trace.NetworkKey != binding.NetworkKey || trace.ChainID != binding.ChainID || trace.Environment != binding.Environment || !slices.Equal(trace.OrganizationIDs, binding.OrganizationIDs) {
+			return nil, ErrInvalid
+		}
+		for _, name := range trace.Methods {
+			if !activitylog.ValidMethod(name) {
+				return nil, ErrInvalid
+			}
+			traceNames[name] = true
+		}
+	}
 	methods := c.Recorder.Methods()
 	for _, label := range labels {
 		if !slices.Contains(methods, label) {
 			return nil, ErrInvalid
 		}
 	}
-	return &Service{engine: c.Engine, recorder: c.Recorder, organizations: slices.Clone(binding.OrganizationIDs), slots: make(chan struct{}, n.InFlight)}, nil
+	for name := range traceNames {
+		if !slices.Contains(methods, name) {
+			return nil, ErrInvalid
+		}
+	}
+	return &Service{engine: c.Engine, traceMethods: traceNames, recorder: c.Recorder, organizations: slices.Clone(binding.OrganizationIDs), slots: make(chan struct{}, n.InFlight)}, nil
 }
 func (s *Service) Handler(selectedOrg string) (http.Handler, error) {
 	if s == nil || selectedOrg != "" && !slices.Contains(s.organizations, selectedOrg) {
@@ -193,7 +212,9 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 	if canonical, known := rpcmethoddata.CanonicalBuiltin(stateMethod); known {
 		stateMethod = canonical
 	}
-	if decoded && s.state != nil && s.stateMethods[stateMethod] {
+	if decoded && s.engine != nil && s.traceMethods[stateMethod] {
+		result.trace = s.engine.TraceCallObserved(ctx, assertion, org, raw)
+	} else if decoded && s.state != nil && s.stateMethods[stateMethod] {
 		result.state = s.state.QueryObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, raw)
 	} else if s.metadata != nil && (s.engine == nil || !decoded || route.Method != "eth_call" && route.Method != "eth_sendRawTransaction") {
 		result.metadata = s.metadata.QueryObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, raw)

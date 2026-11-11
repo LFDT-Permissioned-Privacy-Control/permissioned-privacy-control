@@ -19,6 +19,7 @@ import (
 	// gate.
 	_ "privacy-proxy/internal/activitylog"
 	_ "privacy-proxy/internal/admission"
+	_ "privacy-proxy/internal/admissionsharedata"
 	_ "privacy-proxy/internal/apimodels"
 	_ "privacy-proxy/internal/audit"
 	_ "privacy-proxy/internal/audit/chainlock"
@@ -544,7 +545,7 @@ func TestNativeAdmissionStorageBoundary(t *testing.T) {
 		for dep := range transitiveDeps(t, root, pkg) {
 			// The operational adapter consumes the opaque included proposal;
 			// pure admission/HTTP must not acquire this observer dependency.
-			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !allowed[dep] && !(usesSQL && (dep == "privacy-proxy/internal/operational/admissionsql" || dep == "privacy-proxy/internal/creationobserver" || dep == "privacy-proxy/internal/disclosuredata")) {
+			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !allowed[dep] && !(usesSQL && (dep == "privacy-proxy/internal/operational/admissionsql" || dep == "privacy-proxy/internal/creationobserver" || dep == "privacy-proxy/internal/disclosuredata" || dep == "privacy-proxy/internal/admissionsharedata")) {
 				t.Errorf("%s imports unapproved application infrastructure %s", pkg, dep)
 			}
 			if !usesSQL && (strings.HasPrefix(dep, "github.com/jackc/pgx") || strings.HasPrefix(dep, "github.com/jackc/tern")) {
@@ -745,7 +746,7 @@ func TestCreationObservationDependencyBoundaries(t *testing.T) {
 	for _, pkg := range []string{"privacy-proxy/internal/creationfacts", "privacy-proxy/internal/creationcapture", "privacy-proxy/internal/creationobserver", "privacy-proxy/cmd/ops-creation-observer"} {
 		usesSQL := pkg == "privacy-proxy/cmd/ops-creation-observer"
 		for dep := range transitiveDeps(t, root, pkg) {
-			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !allowed[dep] && !(usesSQL && (dep == "privacy-proxy/internal/operational/admissionsql" || dep == "privacy-proxy/internal/disclosuredata")) {
+			if strings.HasPrefix(dep, "privacy-proxy/") && dep != pkg && !allowed[dep] && !(usesSQL && (dep == "privacy-proxy/internal/operational/admissionsql" || dep == "privacy-proxy/internal/disclosuredata" || dep == "privacy-proxy/internal/admissionsharedata")) {
 				t.Errorf("%s imports unapproved infrastructure %s", pkg, dep)
 			}
 			if !usesSQL && (strings.HasPrefix(dep, "github.com/jackc/pgx") || strings.HasPrefix(dep, "github.com/jackc/tern")) {

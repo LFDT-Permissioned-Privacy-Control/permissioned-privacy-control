@@ -106,6 +106,14 @@ func (c *Client) WithCredential(ref string) (*Client, error) {
 	return &selected, nil
 }
 
+// AcquisitionLimits exposes detached scalar bounds, never transport or credentials.
+func (c *Client) AcquisitionLimits() Limits {
+	if c == nil {
+		return Limits{}
+	}
+	return c.limits
+}
+
 type CallExecution struct {
 	origin      *Client
 	signed      bool
@@ -118,6 +126,7 @@ type CallExecution struct {
 	tree        *executionfacts.Tree
 	codes       map[common.Address]CodeInfo
 	raw         []byte
+	clientTrace []byte // Original owned unsigned callTracer child; never prestate.
 	timeline    *codeTimeline
 }
 
@@ -126,8 +135,18 @@ func (e *CallExecution) Anchor() Anchor                         { return e.ancho
 func (e *CallExecution) Tree() *executionfacts.Tree             { return e.tree }
 func (e *CallExecution) Code(a common.Address) (CodeInfo, bool) { c, ok := e.codes[a]; return c, ok }
 func (e *CallExecution) RawEvidence() []byte                    { return bytes.Clone(e.raw) }
-func (e *CallExecution) RecordCount() int                       { return e.recordCount }
-func (e *CallExecution) Signed() bool                           { return e != nil && e.signed }
+
+// CallTraceJSON detaches only the original acquisition child. Re-decoding the
+// mux here would unnecessarily copy private prestate as well.
+func (e *CallExecution) CallTraceJSON() ([]byte, error) {
+	if e == nil || e.signed || e.anchor.Profile != SimulationCallProfileID || len(e.clientTrace) == 0 || len(e.clientTrace) > 8<<20 {
+		return nil, failure(InvalidEvidence)
+	}
+	return bytes.Clone(e.clientTrace), nil
+}
+
+func (e *CallExecution) RecordCount() int { return e.recordCount }
+func (e *CallExecution) Signed() bool     { return e != nil && e.signed }
 func (e *CallExecution) VerifiedSigner() (common.Address, bool) {
 	if e == nil || !e.signed {
 		return common.Address{}, false
@@ -364,15 +383,21 @@ func (c *Client) acquireScopedProfile(ctx context.Context, call Call, block Bloc
 	if err != nil {
 		return nil, err
 	}
+	var result *CallExecution
 	if lifecycle {
 		if call.creationNonceKnown {
 			if sender, present := codes[call.from]; present && (!sender.nonceKnown || sender.nonce != call.creationNonce) {
 				return nil, failure(InvalidEvidence)
 			}
 		}
-		return c.finishLifecycle(ctx, call, anchor, tree, codes, total, mux, lookups)
+		result, err = c.finishLifecycle(ctx, call, anchor, tree, codes, total, mux, lookups)
+	} else {
+		result, err = c.finishEvidence(ctx, call, anchor, tree, codes, total, mux)
 	}
-	return c.finishEvidence(ctx, call, anchor, tree, codes, total, mux)
+	if err == nil && !call.signedInput && c.binding.Profile == SimulationCallProfileID {
+		result.clientTrace = parts["callTracer"]
+	}
+	return result, err
 }
 
 func (c *Client) finishEvidence(ctx context.Context, call Call, anchor Anchor, tree *executionfacts.Tree, codes map[common.Address]CodeInfo, total int, raw []byte) (*CallExecution, error) {

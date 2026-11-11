@@ -117,9 +117,21 @@ func TraceValueOwners(sanitized json.RawMessage) ([]string, error) {
 // storage contexts whose values the viewer may see; any other context,
 // including an empty one, is hidden.
 func RedactStrictCallTrace(sanitized json.RawMessage, readable map[string]bool) (json.RawMessage, error) {
+	return redactStrictCallTrace(sanitized, readable, 0)
+}
+func RedactStrictCallTraceBounded(sanitized json.RawMessage, readable map[string]bool, maxBytes int) (json.RawMessage, error) {
+	if maxBytes <= 0 || len(sanitized) > maxBytes || len(readable) > 4096 {
+		return nil, ErrUntrustedTrace
+	}
+	return redactStrictCallTrace(sanitized, readable, maxBytes)
+}
+func redactStrictCallTrace(sanitized json.RawMessage, readable map[string]bool, maxBytes int) (json.RawMessage, error) {
 	root, err := decodeSanitizedTrace(sanitized)
 	if err != nil {
 		return nil, err
+	}
+	if maxBytes > 0 && !strictOutputBudget(root, maxBytes) {
+		return nil, ErrUntrustedTrace
 	}
 	canRead := func(addr string) bool {
 		addr = strings.ToLower(addr)
