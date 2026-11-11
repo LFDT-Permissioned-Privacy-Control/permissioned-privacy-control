@@ -8,7 +8,7 @@ import (
 
 func TestActivityRecorderHasNoSQLOrLegacyAuthority(t *testing.T) {
 	allowed := map[string]bool{}
-	for _, name := range []string{"activitylog", "audit/buffer", "audit/sealer", "identity", "networkidentity", "strictjson"} {
+	for _, name := range []string{"activitylog", "activitymethoddata", "audit/buffer", "audit/sealer", "identity", "networkidentity", "strictjson"} {
 		allowed["privacy-proxy/internal/"+name] = true
 	}
 	for dep := range transitiveDeps(t, moduleRoot(t), "privacy-proxy/internal/activitylog") {

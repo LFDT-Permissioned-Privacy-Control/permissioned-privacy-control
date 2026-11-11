@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
+	"privacy-proxy/internal/activitymethoddata"
 	"privacy-proxy/internal/audit/buffer"
 	"privacy-proxy/internal/audit/sealer"
 )
@@ -86,7 +87,7 @@ func newRecorder(ctx context.Context, c Config, store Store, options []buffer.Op
 		return nil, ErrInvalid
 	}
 	for i, m := range c.Methods {
-		if !ValidMethod(m) || i > 0 && c.Methods[i-1] >= m {
+		if activitymethoddata.Classify(m) == activitymethoddata.Unknown || i > 0 && c.Methods[i-1] >= m {
 			return nil, ErrInvalid
 		}
 	}
