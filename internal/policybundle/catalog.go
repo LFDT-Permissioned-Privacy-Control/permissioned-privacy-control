@@ -18,19 +18,20 @@ import (
 // CatalogSnapshot owns all backing state. Its foundation metadata is explicitly
 // validation-only; this type has no Ready or activation method.
 type CatalogSnapshot struct {
-	metadata        BundleMetadata
-	organizations   []Organization
-	groups          map[string]map[string]Group
-	contracts       map[string]map[common.Address]Contract
-	execution       map[string]*policycore.Validated
-	requirements    Requirements
-	identity        *identity.Catalog
-	disclosure      *disclosurepolicy.Catalog
-	compliance      *compliancepolicy.Catalog
-	methods         methodIndex
-	runtime         *RuntimeCatalog
-	auth            *brokerpolicy.Catalog
-	historyConsumer bool
+	metadata           BundleMetadata
+	organizations      []Organization
+	groups             map[string]map[string]Group
+	contracts          map[string]map[common.Address]Contract
+	execution          map[string]*policycore.Validated
+	requirements       Requirements
+	identity           *identity.Catalog
+	disclosure         *disclosurepolicy.Catalog
+	compliance         *compliancepolicy.Catalog
+	methods            methodIndex
+	runtime            *RuntimeCatalog
+	auth               *brokerpolicy.Catalog
+	historyConsumer    bool
+	disclosureConsumer bool
 }
 
 func (s *CatalogSnapshot) Metadata() BundleMetadata {
@@ -176,6 +177,7 @@ type catalogBuilder struct {
 func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
 	s := &CatalogSnapshot{metadata: BundleMetadata{ManifestDigest: digest, Environment: m.Environment, ChainID: m.ChainID, EvaluatorVersion: m.EvaluatorVersion, Profile: m.Profile, MethodCatalogVersion: o.Methods.Version, SourceRevision: m.SourceRevision}, organizations: slices.Clone(m.Organizations), groups: map[string]map[string]Group{}, contracts: map[string]map[common.Address]Contract{}, execution: map[string]*policycore.Validated{}}
 	s.historyConsumer = o.Profile.historyConsumer
+	s.disclosureConsumer = o.Profile.disclosureConsumer
 	sort.Slice(s.organizations, func(i, j int) bool { return s.organizations[i].ID < s.organizations[j].ID })
 	for _, org := range m.Organizations {
 		s.groups[org.ID] = map[string]Group{}
@@ -184,6 +186,9 @@ func newCatalogBuilder(m Manifest, digest Digest, o Options) *catalogBuilder {
 	b := &catalogBuilder{profile: o.Profile, snapshot: s, policies: map[string]*policycore.Policy{}, capabilities: map[string]bool{CapabilityNativeValidate: true}, secrets: map[string]bool{}, addresses: map[string]string{}, groupOwners: map[string]string{}, resourceIDs: map[string]bool{}, identityLimits: o.IdentityLimits, disclosureLimits: o.DisclosureLimits, complianceLimits: o.ComplianceLimits, limits: o.Limits}
 	if o.Profile.historyConsumer {
 		b.capabilities[CapabilityRuntimeHistory] = true
+	}
+	if o.Profile.disclosureConsumer {
+		b.capabilities[CapabilityRuntimeDisclosure] = true
 	}
 	if runtimeProfile(o.Profile.id) {
 		for _, capability := range []string{CapabilityRuntimeCall, CapabilityPrincipal, CapabilityFrames, CapabilityAnchoredCode, CapabilityClassification, CapabilityOwnership} {

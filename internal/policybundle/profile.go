@@ -69,6 +69,7 @@ const (
 type ValidationProfile struct {
 	id, evaluatorVersion, methodCatalogVersion string
 	historyConsumer                            bool
+	disclosureConsumer                         bool
 }
 
 func FoundationProfile(methodCatalogVersion string) ValidationProfile {
@@ -188,6 +189,9 @@ func prepareOptions(options Options) (methodIndex, error) {
 	p := options.Profile
 	if p.historyConsumer && p.id != RuntimeCreationObservedProfileID {
 		return methodIndex{}, fail(InvalidSelection, "", "", "options", "history consumer requires the creation-observed profile")
+	}
+	if p.disclosureConsumer && (p.id != RuntimeCreationObservedProfileID || !p.historyConsumer || !options.DisclosureLimits.Valid()) {
+		return methodIndex{}, fail(InvalidSelection, "", "", "options", "delivery disclosure consumer requires explicit creation-observed history and disclosure limits")
 	}
 	expectedEvaluator := NativeEvaluatorVersion
 	if p.id == NativeV2ProfileID || p.id == RuntimeCallProfileID || p.id == RuntimeRawSendProfileID || p.id == DisclosureProfileID || p.id == ComplianceProfileID || p.id == BrokerProfileID || p.id == BrokerMultiProfileID {

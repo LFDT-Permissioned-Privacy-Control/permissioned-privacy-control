@@ -69,7 +69,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	profile := flags.String("profile", "", "explicit compiled profile ID")
-	consumer := flags.String("consumer", "", "explicit compiled consumer: history (creation-observed only)")
+	consumer := flags.String("consumer", "", "explicit compiled consumer: history or delivery (creation-observed only)")
 	var source, output, bundle, digest, environment, chain string
 	if command == "prepare" {
 		flags.StringVar(&source, "source", "", "flat draft source directory")
@@ -98,6 +98,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		options, description, err = policyprofiles.Options(*profile)
 	case "history":
 		options, description, err = policyprofiles.HistoryOptions(*profile)
+	case "delivery":
+		options, description, err = policyprofiles.DeliveryOptions(*profile)
 	default:
 		return reportError(stderr, "usage", errors.New("unknown compiled consumer"), 2)
 	}
