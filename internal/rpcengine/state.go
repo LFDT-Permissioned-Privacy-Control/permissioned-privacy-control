@@ -22,6 +22,8 @@ import (
 	"privacy-proxy/internal/rpcmethoddata"
 	"privacy-proxy/internal/rpcstatepolicy"
 	"privacy-proxy/internal/runtimepolicy"
+	"privacy-proxy/internal/walletadapter"
+	"privacy-proxy/internal/walletops"
 )
 
 type StateBindingKey struct{ OrganizationID, CredentialRef string }
@@ -33,6 +35,9 @@ type StateConfig struct {
 	Clients            map[StateBindingKey]*rpcexecution.StateClient
 	Associations       creationfacts.CurrentAddressReader
 	AssociationBinding creationfacts.AddressReadBinding
+	Wallets            *walletadapter.Resolver
+	WalletBinding      walletops.ServiceBinding
+	WalletState        walletops.ExpectedState
 	QueryLimits        rpcexecution.StateLimits
 	Clock              identity.Clock
 }
@@ -54,6 +59,7 @@ type StateEngine struct {
 	owners              map[common.Address]string
 	associations        creationfacts.CurrentAddressReader
 	associationMetadata creationfacts.AddressReaderMetadata
+	wallets             *walletadapter.Resolver
 	limits              rpcexecution.StateLimits
 }
 
@@ -190,6 +196,23 @@ func NewState(c StateConfig) (*StateEngine, error) {
 		if !b.Valid() || e.associationMetadata.Binding != b || !e.associationMetadata.Identity.Valid() || n.Key != creationfacts.Digest(key) || n.Environment != c.Network.Environment || n.ChainID != c.Network.ChainID || n.Genesis.Hex() != c.Network.GenesisHash || n.Deployment != c.Network.DeploymentID {
 			return nil, errMetadata
 		}
+	}
+	if c.Policy.LinkedWalletBasicsEnabled() {
+		if c.Wallets == nil || !c.WalletState.Valid() || c.Associations == nil {
+			return nil, errMetadata
+		}
+		b := c.WalletBinding
+		if b.Environment != c.Network.Environment || b.ChainID != c.Network.ChainID || b.GenesisHash != c.Network.GenesisHash || b.DeploymentID != c.Network.DeploymentID {
+			return nil, errMetadata
+		}
+		namespace, err := b.Namespace()
+		metadata := c.Wallets.Metadata()
+		if err != nil || metadata.Namespace != namespace || metadata.ExpectedState != c.WalletState {
+			return nil, errMetadata
+		}
+		e.wallets = c.Wallets
+	} else if c.Wallets != nil || c.WalletBinding != (walletops.ServiceBinding{}) || c.WalletState != (walletops.ExpectedState{}) {
+		return nil, errMetadata
 	}
 	return e, nil
 }
@@ -365,6 +388,7 @@ func (e *StateEngine) QueryObserved(ctx context.Context, assertion MetadataAsser
 			}
 		}
 		authorized, admin := false, false
+		walletEligible := e.wallets != nil && (d.method == rpcexecution.StateBalance || d.method == rpcexecution.StateNonce)
 		if registered && orgID == owner && contract.Associated() {
 			authorized, admin = true, contract.AdminForRead()
 		}
@@ -393,17 +417,20 @@ func (e *StateEngine) QueryObserved(ctx context.Context, assertion MetadataAsser
 				return r.fail(DeniedCompletion, -32001)
 			}
 			if owner == "" {
-				if len(namespaces) != 1 {
+				if len(namespaces) > 1 || len(namespaces) == 0 && !walletEligible {
 					return r.fail(DeniedCompletion, -32001)
 				}
 				for namespace := range namespaces {
 					owner = namespace
 				}
-				if _, member := view.Org(owner); !member {
+				if _, member := view.Org(owner); owner != "" && !member {
 					return r.fail(DeniedCompletion, -32001)
 				}
 			}
 			if orgID == "" {
+				if owner == "" {
+					return r.fail(DeniedCompletion, -32001)
+				}
 				orgID = owner
 				org, _ = view.Org(orgID)
 				if !stateMethodGranted(org, name, d) {
@@ -417,6 +444,20 @@ func (e *StateEngine) QueryObserved(ctx context.Context, assertion MetadataAsser
 			if actors[view.ActorID()] && owner != "" {
 				authorized = true
 			}
+			if !authorized && walletEligible && len(namespaces) > 1 {
+				return r.fail(DeniedCompletion, -32001)
+			}
+		}
+		if !authorized && walletEligible && org != nil && (owner == "" || owner == orgID) {
+			wallet, err := e.wallets.Load(ctx, view.ActorID())
+			if err != nil {
+				return r.fail(UnavailableCompletion, -32002)
+			}
+			if wallet.ActorID() != view.ActorID() || !wallet.Contains(q.Target()) {
+				return r.fail(DeniedCompletion, -32001)
+			}
+			r.wallet = &wallet
+			authorized = true
 		}
 		if !authorized || org == nil {
 			return r.fail(DeniedCompletion, -32001)

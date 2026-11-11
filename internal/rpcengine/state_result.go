@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"privacy-proxy/internal/creationfacts"
+	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/runtimepolicy"
@@ -30,6 +31,7 @@ type StateOperationResult struct {
 	client                *rpcexecution.StateClient
 	query                 rpcexecution.StateQuery
 	association           *creationfacts.AddressAssociations
+	wallet                *nativeadmission.WalletSnapshot
 	id                    json.RawMessage
 	notification          bool
 	completedNotification bool
@@ -40,6 +42,7 @@ type StateOperationResult struct {
 func (r *StateOperationResult) fail(class CompletionClass, code int32) *StateOperationResult {
 	r.observation = nil
 	r.association = nil
+	r.wallet = nil
 	r.completedNotification = false
 	r.code = code
 	r.metadata.Class = class
@@ -91,6 +94,9 @@ func (r *StateOperationResult) PreflightFor(e *StateEngine) error {
 	if r.metadata.Class != SuccessfulCompletion || r.view == nil && !r.anonymous {
 		return errMetadata
 	}
+	if r.wallet != nil && (e.wallets == nil || r.view == nil || r.wallet.ActorID() != r.metadata.ActorID || r.wallet.Version() == "" || !r.wallet.Contains(r.query.Target())) {
+		return errMetadata
+	}
 	if r.notification && r.completedNotification && r.observation == nil {
 		return nil
 	}
@@ -109,9 +115,20 @@ func (r *StateOperationResult) RequireDeliverable(ctx context.Context, e *StateE
 		return errMetadata
 	}
 	if r.association != nil {
-		if e.associations == nil || r.client == nil || r.client.Source() != r.source || r.association.ValidateFor(e.associationMetadata.Identity, e.associationMetadata.Binding, r.query.Target()) != nil || e.associations.RecheckAddressAssociations(ctx, r.association) != nil || r.client.RequireCanonicalHeader(ctx, r.association.ObserverHead()) != nil {
+		if e.associations == nil || r.client == nil || r.client.Source() != r.source || r.association.ValidateFor(e.associationMetadata.Identity, e.associationMetadata.Binding, r.query.Target()) != nil || e.associations.RecheckAddressAssociations(ctx, r.association) != nil {
 			return errMetadata
 		}
+	}
+	if r.wallet != nil {
+		current, err := e.wallets.Load(ctx, r.wallet.ActorID())
+		if err != nil || current.ActorID() != r.wallet.ActorID() || current.Version() != r.wallet.Version() || !current.Contains(r.query.Target()) {
+			return errMetadata
+		}
+	}
+	// Every blocking SQL check, including the original wallet recheck, precedes
+	// this last sampled canonicality observation on the SAME selected client.
+	if r.association != nil && r.client.RequireCanonicalHeader(ctx, r.association.ObserverHead()) != nil {
+		return errMetadata
 	}
 	// This gate is deliberately AFTER both potentially blocking SQL and the
 	// same original selected node's final ancestor-canonicality recheck.

@@ -127,6 +127,56 @@ rights. Current readiness, generation, source, revocation and canonical
 evidence are checked separately. Unknown accounts receive no general public
 balance/nonce fallback from sparse creation evidence.
 
+## Owned wallet balances and nonces
+
+StatePolicy can explicitly enable `linkedWalletBasics: true`. The optional flag
+defaults to false; false or absent preserves the previous normalized policy
+digest. True changes that digest and requires the existing operational wallet
+resolver, independently bound wallet namespace/state, and the scoped A3 reader.
+It adds no SQL schema, user directory, policy table or endpoint.
+
+After the same mapped-org, current-owner, raw-method, combined-claim and exact
+credential checks, a genuine operational link for the **same verified Actor**
+can permit `eth_getBalance` and `eth_getTransactionCount` on that exact address.
+It grants no code, storage, proof or administrative access. Original numeric,
+hash and object input still has the historical org-admin floor. Actual pending
+stays pending, so an owned signing wallet can obtain its transaction nonce.
+An empty A3 projection is never the permission; the independent positive wallet
+proof is. Unavailable or conflicting A3 facts cannot become public access.
+
+Current Git grants perform no A3 or wallet read. An existing positive A3 grant
+keeps its original read/recheck/node checks and performs no wallet load. Only
+the linked-wallet branch loads the bounded original wallet snapshot and retains
+its actor/version. After actual Append, it reloads that actor from the same
+resolver and requires the original version and target membership. Revocation,
+recovery mismatch, source failure or even an unrelated wallet-set change can
+therefore withhold output without rewriting the selected recorded outcome.
+
+All blocking SQL, including the final wallet reload, finishes **before** the
+last original-head sample on the same selected StateClient. The same original
+View and request context are checked after all of it. A reorg during a slow
+wallet reload cannot rely on an earlier node sample. The original twenty-second
+HTTP fence is never restarted. There are at most two existing wallet loads,
+each shortened by the earlier parent deadline, and one retained snapshot of at
+most 4096 addresses / 128 KiB; SQL/encoding working buffers are additional.
+
+This is a deliberate difference from V1's automatic balance/nonce permission
+for arbitrary addresses its SQL lookup considered unregistered. An unrelated
+watch address needs an existing approved registry ReadGrant; an entry with
+ABI `[]` can represent a shared wallet target. A transfer does not itself need
+permission to read the recipient's balance, but a wallet or Explorer screen
+that displays that balance must handle a denial or use an approved grant.
+Explicit anonymous balance/nonce configuration exposes those methods for all
+target addresses and remains an intentional public-deployment choice, rather
+than the normal bank setting.
+
+Configured service identities can use the same operational EIP191 proof; the
+wallet service has no Human-only linking gate. This does not implement EIP1271
+custody. Watch-only/shared custody can use approved target grants. Existing
+limits remain: 4096 retained link rows per Actor, including revoked rows, and
+finite registry/document bounds. Revoked addresses cannot simply be linked
+again through the existing API. This is not an unbounded custody directory.
+
 The association also retains the original observer head's number and hash
 from that same SQL snapshot. After SQL recheck, the exact originally selected
 StateClient checks that head by number on its own backend, validating and
@@ -159,7 +209,7 @@ typed trusted-node observation is not Merkle-proof or consensus verification.
 The [recorded wrapper](v2-rpc-activity.md) shares one exact snapshot pointer,
 recorder and HTTP limit across native, metadata and state engines. State retains
 the original View and credential source, completes the real Pebble append once,
-rechecks any original creation association, and checks the same original View
+rechecks any original creation association and wallet snapshot, and checks the same original View
 and context again after all SQL and node recheck I/O before protected output. It never refreshes
 identity, retries an action or replaces the selected recorded outcome after
 late delivery failure. Notifications settle once and return no body. State

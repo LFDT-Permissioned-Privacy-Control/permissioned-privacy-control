@@ -209,6 +209,7 @@ func stateReadSnapshot(t *testing.T, change func(*d.StateFixture)) *policybundle
 type stateFacts struct {
 	meta            f.AddressReaderMetadata
 	rows            []f.AddressAssociation
+	head            f.Header
 	reads, rechecks atomic.Int32
 	fail            bool
 	recheck         func(context.Context) error
@@ -220,7 +221,7 @@ func (s *stateFacts) ReadAddressAssociations(ctx context.Context, target common.
 	if s.fail || ctx.Err() != nil {
 		return nil, errors.New("owned source unavailable")
 	}
-	return f.NewAddressAssociations(s.meta.Identity, s.meta.Binding, target, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 0, f.Header{Number: 2, Hash: s.rows[0].Inclusion.Hash}, s.rows)
+	return f.NewAddressAssociations(s.meta.Identity, s.meta.Binding, target, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 0, s.head, s.rows)
 }
 func (s *stateFacts) RecheckAddressAssociations(ctx context.Context, p *f.AddressAssociations) error {
 	s.rechecks.Add(1)
@@ -251,7 +252,7 @@ func stateFactsFixture(n *metadataNode, target common.Address, namespace, actor 
 	n.headers["0x2"] = head
 	n.mu.Unlock()
 	row := f.AddressAssociation{Namespace: namespace, Kind: kind, WalletActor: actor, Address: target, Creator: common.HexToAddress(addressC), CreationKind: "CREATE", Record: 1, Inclusion: f.Header{Number: 2, Hash: head.Hash()}, TransactionHash: common.Hash{3}, OutputHash: common.Hash{4}, Proof: common.Hash{5}, OutputLength: 2, Seed: f.Digest{6}, Plan: f.Digest{7}, Manifest: f.Digest{8}, Runtime: f.Digest{9}, Qualification: f.Digest{10}, PlannedEntry: 0, Branch: 1, OriginalProfile: "geth-prague-lifecycle-signed/v1", OriginalAnchor: anchor, OriginalCoverage: coverage}
-	return &stateFacts{meta: f.AddressReaderMetadata{Binding: b, Identity: f.NewAddressReaderIdentity()}, rows: []f.AddressAssociation{row}}
+	return &stateFacts{meta: f.AddressReaderMetadata{Binding: b, Identity: f.NewAddressReaderIdentity()}, rows: []f.AddressAssociation{row}, head: f.Header{Number: 2, Hash: head.Hash()}}
 }
 
 func TestStateAuthorityActualApprovedJWTAndTLS(t *testing.T) {

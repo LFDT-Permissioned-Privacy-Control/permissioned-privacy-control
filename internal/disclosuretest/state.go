@@ -10,15 +10,17 @@ import (
 	"testing"
 
 	"privacy-proxy/internal/compliancepolicy"
+	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/policycore"
 	"privacy-proxy/internal/policyprofiles"
 )
 
 type StateFixture struct {
-	Groups    map[string][]policybundle.Group
-	Contracts map[string][]policybundle.Contract
-	Methods   policybundle.MethodCatalog
+	Groups          map[string][]policybundle.Group
+	Contracts       map[string][]policybundle.Contract
+	Methods         policybundle.MethodCatalog
+	IdentityCatalog *identity.SourceCatalog
 }
 
 func DefaultStateFixture(t testing.TB) StateFixture {
@@ -43,6 +45,9 @@ func StateSnapshot(t testing.TB, f StateFixture) *policybundle.CatalogSnapshot {
 	base := Snapshot(t, nil)
 	identityCatalog, _ := base.Identity()
 	identitySource := identityCatalog.Source()
+	if f.IdentityCatalog != nil {
+		identitySource = *f.IdentityCatalog
+	}
 	options, description, err := policyprofiles.Options(policybundle.RuntimeCreationObservedProfileID)
 	if err != nil {
 		t.Fatal(err)

@@ -3,6 +3,7 @@ package rbac
 import (
 	"context"
 	"log/slog"
+	"privacy-proxy/internal/readprivacyabi"
 	"slices"
 	"strings"
 	"sync"
@@ -686,57 +687,7 @@ func unionFunctions(a, b []FunctionRule) []FunctionRule {
 // If one is deny → return the other.
 // Both have rules → union by topic0 (existing merge logic).
 func unionEventRules(a, b *EventRulesField) *EventRulesField {
-	// nil means deny — no contribution
-	aDeny := a == nil || a.IsDeny()
-	bDeny := b == nil || b.IsDeny()
-
-	// If either is wildcard, result is wildcard
-	if a != nil && a.IsWildcard() {
-		return a
-	}
-	if b != nil && b.IsWildcard() {
-		return b
-	}
-
-	// Both deny → deny
-	if aDeny && bDeny {
-		return nil
-	}
-	// One deny → return the other
-	if aDeny {
-		return b
-	}
-	if bDeny {
-		return a
-	}
-
-	// Both have rules — union them by topic0
-	aRules := a.GetRules()
-	bRules := b.GetRules()
-
-	seen := make(map[string]EventRule, len(aRules))
-	for _, rule := range aRules {
-		seen[strings.ToLower(rule.Topic0)] = rule
-	}
-	for _, rule := range bRules {
-		key := strings.ToLower(rule.Topic0)
-		if existing, ok := seen[key]; ok {
-			// Both sides allow this event. If either side has no param rules,
-			// the union is the less restrictive one (no param rules).
-			if len(existing.ParamRules) == 0 || len(rule.ParamRules) == 0 {
-				seen[key] = EventRule{Topic0: rule.Topic0, Name: rule.Name}
-			}
-			// else: both have param rules, keep existing (arbitrary but consistent)
-		} else {
-			seen[key] = rule
-		}
-	}
-
-	rules := make([]EventRule, 0, len(seen))
-	for _, rule := range seen {
-		rules = append(rules, rule)
-	}
-	return &EventRulesField{Rules: rules}
+	return readprivacyabi.UnionEventRules(a, b)
 }
 
 // unionContractAccess merges two ContractAccess maps, taking the UNION of claims and functions.

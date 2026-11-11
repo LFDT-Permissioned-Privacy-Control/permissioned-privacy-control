@@ -35,11 +35,13 @@ type Source struct {
 	BundleManifestDigest   string                 `json:"bundleManifestDigest"`
 	AnonymousMethods       []string               `json:"anonymousMethods"`
 	PreRegisteredAddresses []PreRegisteredAddress `json:"preRegisteredAddresses"`
+	LinkedWalletBasics     bool                   `json:"linkedWalletBasics,omitempty"`
 }
 type Definition struct {
-	manifest, digest Digest
-	anonymous        []string
-	preregistered    []PreRegisteredAddress
+	manifest, digest   Digest
+	anonymous          []string
+	preregistered      []PreRegisteredAddress
+	linkedWalletBasics bool
 }
 
 var orgID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -87,6 +89,13 @@ func Compile(raw []byte, expectedRawSHA Digest) (*Definition, error) {
 		}
 		seen[name] = true
 		switch name {
+		case "linkedWalletBasics":
+			token, err := d.Token()
+			value, ok := token.(bool)
+			if err != nil || !ok {
+				return nil, ErrInvalid
+			}
+			s.LinkedWalletBasics = value
 		case "apiVersion", "kind", "bundleManifestDigest":
 			value, err := readString(d)
 			if err != nil {
@@ -162,7 +171,7 @@ func Compile(raw []byte, expectedRawSHA Digest) (*Definition, error) {
 			return nil, ErrInvalid
 		}
 	}
-	if v, e := d.Token(); e != nil || v != json.Delim('}') || len(seen) != 5 || s.APIVersion != APIVersion || s.Kind != Kind {
+	if v, e := d.Token(); e != nil || v != json.Delim('}') || len(seen) < 5 || len(seen) > 6 || !seen["apiVersion"] || !seen["kind"] || !seen["bundleManifestDigest"] || !seen["anonymousMethods"] || !seen["preRegisteredAddresses"] || s.APIVersion != APIVersion || s.Kind != Kind {
 		return nil, ErrInvalid
 	}
 	if _, e := d.Token(); e != io.EOF {
@@ -183,8 +192,9 @@ func Compile(raw []byte, expectedRawSHA Digest) (*Definition, error) {
 	h.Write(canonical)
 	var digest Digest
 	copy(digest[:], h.Sum(nil))
-	return &Definition{manifest, digest, s.AnonymousMethods, s.PreRegisteredAddresses}, nil
+	return &Definition{manifest, digest, s.AnonymousMethods, s.PreRegisteredAddresses, s.LinkedWalletBasics}, nil
 }
+func (d *Definition) LinkedWalletBasicsEnabled() bool { return d != nil && d.linkedWalletBasics }
 func (d *Definition) ManifestDigest() Digest {
 	if d == nil {
 		return Digest{}

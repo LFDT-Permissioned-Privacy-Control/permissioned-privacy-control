@@ -13,6 +13,7 @@ import (
 
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/nativeadmission"
+	"privacy-proxy/internal/networkidentity"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/policycore"
 	"privacy-proxy/internal/rpcexecution"
@@ -41,6 +42,7 @@ type Engine struct {
 	wallets      WalletResolver
 	needsWallets bool
 	raw          *rawEngine
+	network      networkidentity.Binding
 }
 
 func New(snapshot *policybundle.CatalogSnapshot, bindings map[string]*rpcexecution.Client, wallets WalletResolver, clock identity.Clock) (*Engine, error) {
@@ -294,6 +296,15 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 	decision := e.native.Check(ctx, view, orgID, execution, wallet)
 	if !decision.Allowed {
 		return observation.failure(nativeClass(decision), denied(req.id))
+	}
+	if _, bound := client.BoundNetwork(); bound {
+		if observation != nil {
+			// Retain only the small original source, not its execution tree or
+			// raw mux while the real Recorder append may block.
+			observation.callSource = client
+		} else if client.RequireBoundNetwork(ctx) != nil {
+			return responseError(req.id, -32002, "execution unavailable")
+		}
 	}
 	if ctx.Err() != nil || view.RequireLive() != nil {
 		return observation.failure(DeniedCompletion, denied(req.id))
