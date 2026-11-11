@@ -32,6 +32,7 @@ type addressIndex struct {
 }
 type resolver struct {
 	pass          *RootPass
+	rangeScope    *RangeScope // nonnil only for the separate ordinal purpose
 	facts         *preparedFacts
 	addresses     map[Address]*addressIndex
 	edges         map[Digest]TransferFact
@@ -163,6 +164,12 @@ func (r *resolver) canonicalCut(c Cut) (bool, error) {
 func (r *resolver) inEra(number uint64) bool {
 	b, ok := r.pass.blocks[number]
 	e := r.pass.scope.data.Era
+	if !ok && r.rangeScope != nil {
+		// Range construction qualifies the original head strictly before the
+		// era end. Canonical monotonic time makes intervening ordinals lie
+		// in this era without inventing an included ROOT or sparse header.
+		return number >= e.EntryNumber && number <= r.rangeScope.data.Head.Number
+	}
 	return ok && number >= e.EntryNumber && b.Timestamp >= e.EntryTimestamp && b.Timestamp < e.EndTimestampExclusive
 }
 func (r *resolver) physicalValid(p *PhysicalStart) (bool, error) {

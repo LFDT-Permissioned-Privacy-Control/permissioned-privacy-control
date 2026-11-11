@@ -26,9 +26,12 @@ type CodeInfo struct {
 
 func (c CodeInfo) Bytes() []byte     { return bytes.Clone(c.code) }
 func (c CodeInfo) Hash() common.Hash { return c.hash }
-func (c CodeInfo) HasCode() bool     { return len(c.code) > 0 }
-func (c CodeInfo) Precompile() bool  { return c.precompile }
-func (c CodeInfo) Delegated() bool   { return delegation(c.code) }
+
+// Length observes the owned code size without cloning its bytecode.
+func (c CodeInfo) Length() int      { return len(c.code) }
+func (c CodeInfo) HasCode() bool    { return len(c.code) > 0 }
+func (c CodeInfo) Precompile() bool { return c.precompile }
+func (c CodeInfo) Delegated() bool  { return delegation(c.code) }
 
 type CodeOrigin string
 

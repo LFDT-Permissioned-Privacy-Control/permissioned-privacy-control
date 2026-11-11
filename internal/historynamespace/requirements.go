@@ -65,6 +65,13 @@ func DiscoverRequirements(ctx context.Context, scope *RootScope, snapshot Snapsh
 }
 
 func prepareFacts(ctx context.Context, scope *RootScope, input Snapshot, limits ReadLimits, extraWork int) (*preparedFacts, error) {
+	return prepareFactsForPurpose(ctx, scope, input, limits, extraWork, nil, "ops-history-requirements/v1")
+}
+
+// extraNumbers are real canonical-number lookup requirements, not claimed
+// hashes, included ROOTs or authority. Only the separate range purpose uses
+// them; the existing point path retains its exact digest and required set.
+func prepareFactsForPurpose(ctx context.Context, scope *RootScope, input Snapshot, limits ReadLimits, extraWork int, extraNumbers []uint64, domain string) (*preparedFacts, error) {
 	if ctx == nil || scope == nil || !limits.Valid() || input.Network != scope.data.Network || input.Era != scope.data.Era ||
 		!UUID(input.Generation) || input.NamespaceRevision < 1 || input.Completeness == (Digest{}) || input.AdmissionCoverage == (Digest{}) || !input.Ready {
 		return nil, ErrUnavailable
@@ -117,6 +124,20 @@ func prepareFacts(ctx context.Context, scope *RootScope, input Snapshot, limits 
 	}
 	if err := add(scope.data.Era.EntryNumber, scope.data.Era.EntryHash, false); err != nil {
 		return nil, err
+	}
+	for _, number := range extraNumbers {
+		if err := p.budget.use(1); err != nil {
+			return nil, err
+		}
+		if number > scope.data.Head.Number {
+			return nil, ErrUnavailable
+		}
+		if required[number] == nil {
+			if len(required) >= limits.MaxBlocks {
+				return nil, ErrTooBroad
+			}
+			required[number] = &BlockRequirement{Number: number}
+		}
 	}
 	for _, root := range scope.data.Roots {
 		if err := add(root.Number, root.BlockHash, true); err != nil {
@@ -342,7 +363,7 @@ func prepareFacts(ctx context.Context, scope *RootScope, input Snapshot, limits 
 	if err := p.budget.use(1 + (outputBytes+15)/16); err != nil {
 		return nil, err
 	}
-	r.digest, _, err = boundedReadDigest("ops-history-requirements/v1", struct {
+	r.digest, _, err = boundedReadDigest(domain, struct {
 		Scope                           Digest
 		Generation                      string
 		Revision                        int64

@@ -106,14 +106,15 @@ func (r AddressAssociation) valid(target common.Address, network Digest) bool {
 // AddressAssociations deliberately has no Complete, Unregistered or Public bit.
 // An empty pass is lack of positive association, never a permission fallback.
 type AddressAssociations struct {
-	owner         *AddressReaderIdentity
-	binding       AddressReadBinding
-	target        common.Address
-	observerEpoch string
-	reorgEpoch    int64
-	observerHead  Header
-	digest        Digest
-	rows          []AddressAssociation
+	owner          *AddressReaderIdentity
+	binding        AddressReadBinding
+	target         common.Address
+	observerEpoch  string
+	reorgEpoch     int64
+	observerHead   Header
+	digest         Digest
+	rows           []AddressAssociation
+	candidateBytes int
 }
 
 // NewAddressAssociations compiles bounded trusted-adapter observations, not an
@@ -157,7 +158,29 @@ func NewAddressAssociations(owner *AddressReaderIdentity, binding AddressReadBin
 	if err != nil {
 		return nil, ErrInvalid
 	}
-	return &AddressAssociations{owner, binding, target, observerEpoch, reorgEpoch, observerHead, Hash("ops-current-address-candidates/v1", raw), rowsOut}, nil
+	return &AddressAssociations{owner, binding, target, observerEpoch, reorgEpoch, observerHead, Hash("ops-current-address-candidates/v1", raw), rowsOut, bytesUsed}, nil
+}
+
+// AddressReadStamp identifies one original observer/reorg generation. A caller
+// joining several point observations must not combine different generations.
+type AddressReadStamp struct {
+	ObserverEpoch string
+	ReorgEpoch    int64
+}
+
+func (p *AddressAssociations) ObservationStamp() AddressReadStamp {
+	if p == nil {
+		return AddressReadStamp{}
+	}
+	return AddressReadStamp{p.observerEpoch, p.reorgEpoch}
+}
+
+// CandidateBytes counts canonical candidate evidence, not total process memory.
+func (p *AddressAssociations) CandidateBytes() int {
+	if p == nil {
+		return 0
+	}
+	return p.candidateBytes
 }
 func (p *AddressAssociations) ValidateFor(owner *AddressReaderIdentity, binding AddressReadBinding, target common.Address) error {
 	if p == nil || !owner.Valid() || p.owner != owner || p.binding != binding || p.target != target || p.digest == (Digest{}) || !UUID(p.observerEpoch) || p.reorgEpoch < 0 || !p.observerHead.Valid() || len(p.rows) > binding.Limits.MaxCandidates {

@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"privacy-proxy/internal/admission"
+	facts "privacy-proxy/internal/creationfacts"
 	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/policycore"
@@ -191,5 +192,80 @@ func TestCreationIntentCaptureLimitsAndOneFactoryRootSet(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// The native code object below is acquired through the actual lifecycle
+// materializer. A persisted namespace must not qualify this fresh code epoch.
+func TestCurrentBirthNeverQualifiesFreshLifecycleRuntime(t *testing.T) {
+	f := creationIntentRuntimeFixture()
+	f.creationObserved = true
+	snapshot := f.load(t)
+	clock := func() time.Time { return time.Unix(now, 0) }
+	factory, err := runtimepolicy.NewFactory(snapshot, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := factory.Build(token(t, snapshot, f.roles))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := nativeadmission.NewCreationObserved(snapshot, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := rawTransaction(t, []byte{1, 2})
+	n := &node{pre: map[string]any{createdAddress: map[string]any{}, tx.Signer().Hex(): map[string]any{"nonce": tx.Nonce()}}}
+	n.mutate = func(root map[string]any) {
+		root["calls"] = []any{creationFrame(addressA, createdAddress), intentCallFrame(addressA, createdAddress, []any{})}
+	}
+	server := httptest.NewServer(n)
+	defer server.Close()
+	client, err := rpcexecution.NewClient(server.Client().Transport, rpcexecution.NodeBinding{OrganizationID: orgA, URL: server.URL, ChainID: "1", Profile: rpcexecution.LifecycleSignedProfileID, PragueStartInclusive: 10, PragueEndExclusive: 20, AllowUnauthenticated: true}, rpcexecution.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err = client.WithCredential("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := client.AcquireLifecycleSigned(t.Context(), tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, ok := execution.FrameCode(2)
+	if !ok || !code.HasCode() {
+		t.Fatal("actual fresh child runtime missing")
+	}
+	if _, fresh := code.CreationRecordIndex(); !fresh {
+		t.Fatal("actual lifecycle origin was not fresh")
+	}
+	epoch := "11111111-1111-1111-1111-111111111111"
+	network := facts.Network{Key: facts.Digest{1}, Environment: "test", ChainID: "1", Genesis: common.Hash{1}, Deployment: "fresh-shape"}
+	binding := facts.AddressReadBinding{Network: network, State: facts.State{Generation: epoch}, SourceSet: facts.Digest{2}, Reference: facts.Digest{3}, Profile: facts.CurrentAddressProfile, Limits: facts.DefaultAddressReadLimits()}
+	metadata := facts.AddressReaderMetadata{Binding: binding, Identity: facts.NewAddressReaderIdentity()}
+	anchor := facts.Header{Number: 1, Hash: common.Hash{2}}
+	at := time.Unix(100, 0)
+	coverage := facts.CoverageRecord{Version: 1, Policy: facts.CaptureProfile, Network: network.Key, State: binding.State, ObserverEpoch: epoch, CaptureEpoch: epoch, SourceSet: facts.Digest{4}, Reference: facts.Digest{5}, Ingress: facts.Digest{6}, HighWater: anchor, Latest: anchor, HeaderVersion: 1, LeaseFence: 1, ProbeStarted: at, ProbeFinished: at.Add(time.Millisecond), ValidUntil: at.Add(time.Second)}
+	target := common.HexToAddress(createdAddress)
+	row := facts.AddressAssociation{Namespace: orgA, Kind: "FACTORY", Address: target, Creator: common.HexToAddress(addressA), CreationKind: "CREATE", Record: 1, Inclusion: facts.Header{Number: 2, Hash: common.Hash{3}}, TransactionHash: common.Hash{4}, OutputHash: code.Hash(), Proof: common.Hash{6}, OutputLength: code.Length(), Seed: facts.Digest{7}, Plan: facts.Digest{8}, Manifest: facts.Digest{9}, Runtime: facts.Digest{10}, Qualification: facts.Digest{11}, OriginalProfile: rpcexecution.LifecycleSignedProfileID, OriginalAnchor: anchor, OriginalCoverage: coverage, Branch: 1}
+	pass, err := facts.NewAddressAssociations(metadata.Identity, binding, target, epoch, 0, row.Inclusion, []facts.AddressAssociation{row})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned, err := engine.WithCurrentAddressFacts(view, metadata, binding, []*facts.AddressAssociations{pass})
+	if err != nil {
+		t.Fatal(err)
+	}
+	used, err := owned.ValidateCurrentRuntime(view, target, code, execution.Anchor())
+	if err != nil || used {
+		t.Fatal("persisted namespace qualified fresh runtime", used, err)
+	}
+	wallets, err := nativeadmission.NewWalletSnapshot(view.ActorID(), "fresh-snapshot", clock(), []common.Address{tx.Signer()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.CheckSignedWithCreationPlan(t.Context(), view, orgA, execution, wallets); err != nil {
+		t.Fatal("existing same-operation lifecycle authorization changed", err)
 	}
 }

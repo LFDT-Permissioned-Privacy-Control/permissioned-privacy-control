@@ -62,14 +62,17 @@ type RawNodeOptions struct {
 }
 
 type RawOptions struct {
-	CallClients   map[string]*rpcexecution.Client
-	RawNodes      map[string]RawNodeOptions
-	Wallets       *walletadapter.Resolver
-	WalletBinding walletops.ServiceBinding
-	WalletState   walletops.ExpectedState
-	Admission     *admission.Service
-	CaptureGate   *creationcapture.Gate
-	Clock         identity.Clock
+	CallClients          map[string]*rpcexecution.Client
+	RawNodes             map[string]RawNodeOptions
+	Wallets              *walletadapter.Resolver
+	WalletBinding        walletops.ServiceBinding
+	WalletState          walletops.ExpectedState
+	Admission            *admission.Service
+	CaptureGate          *creationcapture.Gate
+	Clock                identity.Clock
+	Associations         creationfacts.CurrentAddressReader
+	AssociationBinding   creationfacts.AddressReadBinding
+	CurrentAddressLimits NativeAddressLimits
 }
 
 type rawBinding struct {
@@ -168,6 +171,9 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 	if !ok || meta.Profile != expectedProfile {
 		return bad()
 	}
+	if expectedProfile != policybundle.RuntimeCreationObservedProfileID && (options.Associations != nil || options.AssociationBinding != (creationfacts.AddressReadBinding{}) || options.CurrentAddressLimits != (NativeAddressLimits{})) {
+		return bad()
+	}
 	_, rawSource := runtime.RawSource()
 	_, multiOrgSource := runtime.MultiOrgSource()
 	_, lifecycleSource := runtime.LifecycleSource()
@@ -201,6 +207,7 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 	if err != nil || financial.ManifestDigest.String() != string(meta.ManifestDigest) || financial.ComplianceDigest.String() != compliance.Digest() || financial.EvidenceProfile != profile || financial.Network != network || financial.NetworkKey != key || network.Environment != meta.Environment || network.ChainID != meta.ChainID {
 		return bad()
 	}
+	expectedNetwork := networkidentity.Binding{Environment: network.Environment, ChainID: network.ChainID, GenesisHash: network.GenesisHash, DeploymentID: network.DeploymentID}
 	namespace, err := wb.Namespace()
 	walletMeta := options.Wallets.Metadata()
 	if err != nil || walletMeta.Namespace != namespace || walletMeta.ExpectedState != options.WalletState {
@@ -213,6 +220,24 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 	prepared := map[string]map[string]*rpcexecution.Client{}
 	var captureSources []creationfacts.Source
 	captureNetwork := creationfacts.Network{Key: creationfacts.Digest(key), Environment: network.Environment, ChainID: network.ChainID, Genesis: common.HexToHash(network.GenesisHash), Deployment: network.DeploymentID}
+	var current *nativeAddressSource
+	if creationObservedSource {
+		limits := options.CurrentAddressLimits
+		if limits == (NativeAddressLimits{}) {
+			limits = DefaultNativeAddressLimits()
+		}
+		if options.Associations == nil || !options.AssociationBinding.Valid() || !limits.valid() {
+			return bad()
+		}
+		metadata := options.Associations.Metadata()
+		if metadata.Binding != options.AssociationBinding || !metadata.Identity.Valid() || metadata.Binding.Network != captureNetwork {
+			return bad()
+		}
+		current = &nativeAddressSource{options.Associations, metadata, limits, map[common.Address]bool{}}
+		for _, shared := range runtime.SharedInfrastructure() {
+			current.shared[common.HexToAddress(shared.Address)] = true
+		}
+	}
 	budget := rawBudget{}
 	for org, needed := range refs {
 		if len(needed) < 1 || len(needed) > MaxRawRefsPerOrg {
@@ -239,6 +264,12 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 			selected, err := client.WithCredential(ref)
 			if err != nil {
 				return bad()
+			}
+			if creationObservedSource {
+				selected, err = selected.WithNetwork(expectedNetwork)
+				if err != nil {
+					return bad()
+				}
 			}
 			prepared[org][ref] = selected
 			if creationObservedSource {
@@ -270,7 +301,6 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 		}
 	}
 	callClients := options.CallClients
-	expectedNetwork := networkidentity.Binding{Environment: network.Environment, ChainID: network.ChainID, GenesisHash: network.GenesisHash, DeploymentID: network.DeploymentID}
 	if creationObservedSource {
 		callClients = make(map[string]*rpcexecution.Client, len(options.CallClients))
 		for org, original := range options.CallClients {
@@ -287,6 +317,7 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 	}
 	if creationObservedSource {
 		e.network = expectedNetwork
+		e.current = current
 	}
 	e.raw = &rawEngine{readProfile: runtime.ReadProfile(), sendEnabled: len(refs) > 0, wallets: options.Wallets, admission: options.Admission, captureGate: options.CaptureGate, bindings: map[string]map[string]rawBinding{}}
 	// Source bindings and aggregate budgets are checked before producer startup.
@@ -304,6 +335,15 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 				if err != nil {
 					e.Close()
 					return bad()
+				}
+				if creationObservedSource {
+					bound, err := pair.WithNetwork(expectedNetwork)
+					if err != nil {
+						pair.Close()
+						e.Close()
+						return bad()
+					}
+					pair = bound
 				}
 				binding.pair = pair
 			}
@@ -351,6 +391,11 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 }
 
 func (e *Engine) submitRaw(ctx context.Context, assertion, explicitOrg string, raw []byte, observation *OperationResult) Response {
+	ctx, cancel, operationErr := e.startNative(ctx, observation)
+	if operationErr != nil {
+		return responseError(nil, -32002, "unavailable")
+	}
+	defer cancel()
 	req, parseError := parseRawRequest(raw)
 	if parseError != nil {
 		return observation.failure(InvalidCompletion, responseError(req.id, parseError.Code, parseError.Message))
@@ -379,6 +424,10 @@ func (e *Engine) submitRaw(ctx context.Context, assertion, explicitOrg string, r
 		return observation.failure(UnauthenticatedCompletion, denied(req.id))
 	}
 	observation.accept(view)
+	if len(view.OrgIDs()) == 0 {
+		return observation.failure(DeniedCompletion, denied(req.id))
+	}
+	current := e.currentPass(view)
 	tx, err := transactioninput.DecodeRaw(req.rawHex, e.snapshot.Metadata().ChainID, transactioninput.ProtectedEVMProfile(), transactioninput.DefaultLimits())
 	if err != nil {
 		return observation.failure(InvalidCompletion, responseError(req.id, -32602, "invalid params"))
@@ -395,7 +444,16 @@ func (e *Engine) submitRaw(ctx context.Context, assertion, explicitOrg string, r
 			return observation.failure(DeniedCompletion, denied(req.id))
 		}
 	}
-	orgID, ok := selectedAddressOrganization(view, explicitOrg, to)
+	var orgID string
+	var ok bool
+	if current != nil {
+		orgID, ok, err = current.selectOrg(ctx, explicitOrg, to)
+		if err != nil {
+			return responseError(req.id, -32002, "unavailable")
+		}
+	} else {
+		orgID, ok = selectedAddressOrganization(view, explicitOrg, to)
+	}
 	if !ok {
 		return observation.failure(DeniedCompletion, denied(req.id))
 	}
@@ -452,13 +510,32 @@ func (e *Engine) submitRaw(ctx context.Context, assertion, explicitOrg string, r
 	if err != nil {
 		return responseError(req.id, -32002, "unavailable")
 	}
+	native := e.native
+	if current != nil {
+		if current.collect(ctx, execution) != nil {
+			return responseError(req.id, -32002, "unavailable")
+		}
+		if current.executionHead != (creationfacts.Header{}) {
+			if binding.pair != nil {
+				if binding.pair.RequireCanonicalExecution(ctx, prepared, e.network, current.executionHead) != nil {
+					return responseError(req.id, -32002, "unavailable")
+				}
+			} else if current.requireExecution(ctx, binding.client) != nil {
+				return responseError(req.id, -32002, "unavailable")
+			}
+		}
+		native, err = current.engine()
+		if err != nil {
+			return observation.failure(DeniedCompletion, denied(req.id))
+		}
+	}
 	var approvedCheck *nativeadmission.ApprovedSignedCheck
 	if e.snapshot.Metadata().Profile == policybundle.RuntimeCreationIntentProfileID || e.snapshot.Metadata().Profile == policybundle.RuntimeCreationObservedProfileID {
 		if observation == nil {
-			approvedCheck, err = e.native.CheckSignedWithCreationPlan(ctx, view, orgID, execution, wallet)
+			approvedCheck, err = native.CheckSignedWithCreationPlan(ctx, view, orgID, execution, wallet)
 		} else {
 			var decision policycore.Decision
-			decision, approvedCheck, err = e.native.CheckSignedWithCreationPlanObserved(ctx, view, orgID, execution, wallet)
+			decision, approvedCheck, err = native.CheckSignedWithCreationPlanObserved(ctx, view, orgID, execution, wallet)
 			observation.class(nativeClass(decision))
 			if err != nil && decision.Allowed {
 				observation.class(EvaluationFailedCompletion)
@@ -468,7 +545,7 @@ func (e *Engine) submitRaw(ctx context.Context, assertion, explicitOrg string, r
 			return denied(req.id)
 		}
 		observation.class(UnavailableCompletion)
-	} else if !e.native.CheckSigned(ctx, view, orgID, execution, wallet).Allowed {
+	} else if !native.CheckSigned(ctx, view, orgID, execution, wallet).Allowed {
 		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	if len(actors) > 0 {
@@ -521,8 +598,33 @@ func (e *Engine) submitRaw(ctx context.Context, assertion, explicitOrg string, r
 	if ctx.Err() != nil || e.raw.closed.Load() {
 		return responseError(req.id, -32002, "unavailable")
 	}
+	// All capture and finance SQL completed. No source work runs inside that
+	// transaction. A prepared row can survive this denial without an enqueue.
+	if current != nil {
+		if current.recheck(ctx, e) != nil {
+			return responseError(req.id, -32002, "unavailable")
+		}
+		if binding.pair != nil {
+			if binding.pair.RequireCurrentSource(ctx, prepared, e.network, current.head, current.executionHead) != nil {
+				return responseError(req.id, -32002, "unavailable")
+			}
+		} else {
+			if binding.client.RequireBoundNetwork(ctx) != nil {
+				return responseError(req.id, -32002, "unavailable")
+			}
+			if current.head != (creationfacts.Header{}) && binding.client.RequireCanonicalAncestor(ctx, current.head) != nil {
+				return responseError(req.id, -32002, "unavailable")
+			}
+			if current.executionHead != current.head && current.requireExecution(ctx, binding.client) != nil {
+				return responseError(req.id, -32002, "unavailable")
+			}
+		}
+	}
 	if err := receipt.RequirePublishable(); err != nil {
 		return observation.rawFailure(req.id, err)
+	}
+	if ctx.Err() != nil || e.raw.closed.Load() || view.RequireLive() != nil {
+		return responseError(req.id, -32002, "unavailable")
 	}
 	if binding.pair != nil {
 		observation.effect(guardEffect)

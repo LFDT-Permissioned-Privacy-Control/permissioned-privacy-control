@@ -246,3 +246,36 @@ ROLLBACK; a limit of one fails before opening a transaction. Connection target
 selection through `target_session_attrs` supports default or `any` only: the
 other modes issue additional connection-validation SQL and are rejected at
 startup rather than silently ignored. TLS connection settings are preserved.
+
+## Namespace range predicates
+
+`PrepareRangeScope`, `DiscoverRangeRequirements`, `PrepareRangePass` and
+`ResolveRangePass` classify a bounded set of contract addresses over a block
+range. `NamespaceReader` exposes the same two read operations through its
+existing restricted pool and read-only snapshot protocol. The selected original
+head must precede the configured model era's end. Canonical monotonic block time
+then permits sparse ordinal classification between the qualified factual cuts.
+The point reader continues to require actual included transaction coordinates.
+
+Range results contain half-open intervals in block and transaction-index order,
+with explicit organization, public, unknown or conflicting classifications and
+their original authority references. Automatic ordinary-call support starts
+after birth. Exact record-zero creation coordinates are returned separately;
+the eventual data source must match their transaction hash, block hash, index
+and created address to an actual ROOT. A next-block exclusive end is an ordinal
+boundary, not a fabricated block header. Missing retained transfer support fails
+the whole pass, including when an earlier interval had positive support.
+
+One operation allows at most 4,096 addresses and 16,384 intervals plus creation
+coordinates, subject to the existing independent candidate, work and encoded
+byte ceilings. Discovery and resolution each establish an earlier-parent
+deadline of at most five seconds; the caller owns the original deadline across
+its complete source operation and before-exposure repeat. No query state or
+positive interval cache is persisted. Returned values are detached and range
+scope, requirements and authority digests have separate purpose domains.
+
+These predicates establish historical namespace classification. Actual indexer
+rows, canonical inclusion, financial values, retained population coverage and
+current case, wallet and permission checks remain responsibilities of the
+concrete data source. Unknown, conflicting and public intervals supply no
+organization-positive predicate or sanctions-clear result.

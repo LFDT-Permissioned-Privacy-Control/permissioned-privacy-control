@@ -569,6 +569,7 @@ type creationMountOptions struct {
 	limits        *admission.CreationLimits
 	wrap          func(*admissionsql.Store) admission.Store
 	walletService func(*walletops.Service)
+	configure     func(*rpcengine.RawOptions)
 }
 
 func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg bool, creationOptions ...creationMountOptions) (*rpcengine.Engine, string, *admission.Service, *policybundle.CatalogSnapshot) {
@@ -759,6 +760,26 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 		rawNodes = map[string]rpcengine.RawNodeOptions{}
 	}
 	options := rpcengine.RawOptions{CallClients: clients, RawNodes: rawNodes, Wallets: resolver, WalletBinding: binding, WalletState: walletState, Admission: financial, Clock: clock, CaptureGate: captureGate}
+	if f.creationObserved {
+		u, _ := url.Parse(d.ownerDSN)
+		u.User = url.UserPassword("raw_facts", "raw-test-only")
+		facts, err := admissionsql.OpenCreationFacts(t.Context(), u.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(facts.Close)
+		m := captureGate.Metadata()
+		b := creationfacts.AddressReadBinding{Network: m.Network, State: m.State, SourceSet: m.SourceSet, Reference: m.Reference, Profile: creationfacts.CurrentAddressProfile, Limits: creationfacts.DefaultAddressReadLimits()}
+		reader, err := admissionsql.NewAddressReader(facts, b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		options.Associations, options.AssociationBinding = reader, b
+	}
+	if len(creationOptions) > 0 && creationOptions[0].configure != nil {
+		creationOptions[0].configure(&options)
+	}
+
 	constructor := rpcengine.NewRaw
 	if multiOrg {
 		if _, err := rpcengine.NewRaw(snapshot, options); err == nil {

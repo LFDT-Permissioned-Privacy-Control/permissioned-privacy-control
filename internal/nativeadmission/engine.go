@@ -16,18 +16,26 @@ import (
 )
 
 type Engine struct {
-	raw              bool
-	multiOrg         bool
-	lifecycle        bool
-	creationIntents  bool
-	creationObserved bool
-	factories        map[common.Address]policybundle.FactoryAttribution
-	metadata         policybundle.BundleMetadata
-	runtime          *policybundle.RuntimeCatalog
-	owners           map[common.Address]string
-	shared           map[common.Address]*common.Hash
-	work             map[string]map[string]ruleWork
-	associationWork  map[common.Address]uint64
+	raw               bool
+	multiOrg          bool
+	lifecycle         bool
+	creationIntents   bool
+	creationObserved  bool
+	factories         map[common.Address]policybundle.FactoryAttribution
+	metadata          policybundle.BundleMetadata
+	runtime           *policybundle.RuntimeCatalog
+	owners            map[common.Address]string
+	shared            map[common.Address]*common.Hash
+	work              map[string]map[string]ruleWork
+	associationWork   map[common.Address]uint64
+	currentView       *runtimepolicy.View
+	qualifiedOwners   map[common.Address]string
+	currentAssociated map[common.Address]bool
+	currentObserved   map[common.Address]bool
+	currentOwners     map[common.Address]string
+	currentWork       map[common.Address]uint64
+	scopes            map[common.Address]string
+	currentBasis      map[common.Address]runtimeBasis
 }
 
 func New(snapshot *policybundle.CatalogSnapshot, clock identity.Clock) (*Engine, error) {
@@ -130,6 +138,20 @@ func newEngine(snapshot *policybundle.CatalogSnapshot, clock identity.Clock, exp
 		}
 		n.shared[common.HexToAddress(entry.Address)] = pin
 	}
+	if n.creationObserved {
+		source, ok := runtime.CreationObservedSource()
+		if !ok {
+			return nil, errors.New("invalid native scope source")
+		}
+		n.scopes = map[common.Address]string{}
+		for _, scope := range source.AddressScopes {
+			address := common.HexToAddress(scope.Address)
+			if owner := n.owners[address]; owner != "" && owner != scope.OrganizationID {
+				return nil, errors.New("invalid native scope source")
+			}
+			n.scopes[address] = scope.OrganizationID
+		}
+	}
 	return n, nil
 }
 
@@ -137,14 +159,25 @@ func invalid() policycore.Decision { return policycore.Decision{Code: policycore
 
 // registeredOwner is an isolation label even when an account currently has no
 // code. It is separate from evidence capable of supplying operational claims.
-func (n *Engine) registeredOwner(address common.Address) string { return n.owners[address] }
+func (n *Engine) registeredOwner(address common.Address) string {
+	if owner := n.owners[address]; owner != "" {
+		return owner
+	}
+	if n.currentView != nil {
+		if owner := n.scopes[address]; owner != "" {
+			return owner
+		}
+		return n.currentOwners[address]
+	}
+	return ""
+}
 
 func (n *Engine) qualifiedRuntimeOwner(execution *rpcexecution.CallExecution, address common.Address) string {
 	code, ok := execution.Code(address)
 	if !ok || !code.HasCode() || code.Precompile() || code.Delegated() {
 		return ""
 	}
-	return n.owners[address]
+	return n.runtimeOwnerFor(address, code, execution.Anchor())
 }
 
 func (n *Engine) sharedCode(execution *rpcexecution.CallExecution, address common.Address) (bool, bool) {
@@ -181,7 +214,7 @@ func (n *Engine) CheckSigned(ctx context.Context, view *runtimepolicy.View, sele
 }
 
 func (n *Engine) check(ctx context.Context, view *runtimepolicy.View, selectedOrg string, execution *rpcexecution.CallExecution, wallets WalletSnapshot, signed bool, capture *creationCapture) policycore.Decision {
-	if ctx.Err() != nil || n == nil || view == nil || execution == nil || execution.Signed() != signed || execution.Tree() == nil || view.RequireLive() != nil {
+	if ctx.Err() != nil || n == nil || view == nil || n.currentView != nil && n.currentView != view || execution == nil || execution.Signed() != signed || execution.Tree() == nil || view.RequireLive() != nil {
 		return invalid()
 	}
 	metadata := view.Metadata()

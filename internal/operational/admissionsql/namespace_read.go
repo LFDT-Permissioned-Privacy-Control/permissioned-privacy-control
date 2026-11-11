@@ -98,7 +98,13 @@ func (r *NamespaceReader) ResolvePass(ctx context.Context, input h.TrustedRootPa
 
 // This callback is private pure computation only. No node, file, mutable
 // provider or caller callback runs while the read transaction is open.
-func (r *NamespaceReader) namespaceSnapshot(ctx context.Context, scope *h.RootScope, resolve func(context.Context, h.Snapshot) error) error {
+type namespaceSelection interface {
+	Network() h.Digest
+	Era() h.ModelEra
+	Addresses() []h.Address
+}
+
+func (r *NamespaceReader) namespaceSnapshot(ctx context.Context, scope namespaceSelection, resolve func(context.Context, h.Snapshot) error) error {
 	if r == nil || r.pool == nil || ctx == nil || scope == nil || !r.limits.Valid() || scope.Network() != r.network || scope.Era() != r.era {
 		return h.ErrUnavailable
 	}

@@ -19,6 +19,7 @@ type lifecyclePlan struct {
 	benefitCode   rpcexecution.CodeInfo
 	benefitNS     string
 	benefitShared bool
+	storageCode   rpcexecution.CodeInfo
 }
 
 func (n *Engine) temporalShared(address common.Address, code rpcexecution.CodeInfo) (bool, bool) {
@@ -32,11 +33,11 @@ func (n *Engine) temporalShared(address common.Address, code rpcexecution.CodeIn
 	return code.HasCode() && !code.Precompile(), true
 }
 
-func (n *Engine) temporalOwner(address common.Address, code rpcexecution.CodeInfo) string {
+func (n *Engine) temporalOwner(address common.Address, code rpcexecution.CodeInfo, anchor rpcexecution.Anchor) string {
 	if !code.HasCode() || code.Precompile() || code.Delegated() {
 		return ""
 	}
-	return n.registeredOwner(address)
+	return n.runtimeOwnerFor(address, code, anchor)
 }
 
 // checkLifecycle caches at most6 opaque indexed queries per original record:
@@ -70,7 +71,7 @@ func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, r
 		if associations[address] {
 			return true
 		}
-		cost, known := n.associationWork[address]
+		cost, known := n.associationCost(address)
 		if !known || cost == 0 {
 			return false
 		}
@@ -105,6 +106,9 @@ func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, r
 			if !known {
 				return invalid()
 			}
+			if _, err := n.validateRuntimeBasis(r.To.Value, code, e.Anchor()); err != nil {
+				return invalid()
+			}
 			ns, known := namespace(code)
 			if !known {
 				return invalid()
@@ -125,6 +129,11 @@ func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, r
 		code, codeKnown := e.FrameCode(i)
 		if !codeKnown {
 			return invalid()
+		}
+		if r.NominalCodeAddress.Known {
+			if _, err := n.validateRuntimeBasis(r.NominalCodeAddress.Value, code, e.Anchor()); err != nil {
+				return invalid()
+			}
 		}
 		f := policycore.Frame{CallerAddress: r.CallerAddress.Value, Depth: uint64(r.Depth), Value: r.Value, Calldata: r.Input}
 		if r.NominalCodeAddress.Known {
@@ -152,7 +161,10 @@ func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, r
 				return invalid()
 			}
 		}
-		f.CallerOrg = n.temporalOwner(r.CallerAddress.Value, caller)
+		if _, err := n.validateRuntimeBasis(r.CallerAddress.Value, caller, e.Anchor()); err != nil {
+			return invalid()
+		}
+		f.CallerOrg = n.temporalOwner(r.CallerAddress.Value, caller, e.Anchor())
 		if isCreation {
 			if (r.Kind != executionfacts.Create && r.Kind != executionfacts.Create2) || creation.Creator != r.From || creation.Address != r.StorageAddress {
 				return invalid()
@@ -194,6 +206,10 @@ func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, r
 			if !known {
 				return invalid()
 			}
+			if _, err := n.validateRuntimeBasis(f.StorageAddress, storage, e.Anchor()); err != nil {
+				return invalid()
+			}
+			entry.storageCode = storage
 			f.StorageRuntimeHasCode = storage.HasCode() && !storage.Precompile()
 			f.StorageDeploymentNamespace, known = namespace(storage)
 			if !known {
@@ -203,7 +219,7 @@ func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, r
 			if !known {
 				return invalid()
 			}
-			if f.CodeKind == policycore.CodeEOA && f.CodeOrg != "" && f.CodeDeploymentNamespace == "" {
+			if f.CodeKind == policycore.CodeEOA && n.runtimeOwner(f.CodeAddress) != "" && f.CodeDeploymentNamespace == "" {
 				return invalid() // Registered empty remains distinct from an EOA.
 			}
 			epoch, created := code.CreationRecordIndex()
@@ -247,6 +263,9 @@ func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, r
 					if !known {
 						return invalid()
 					}
+					if _, err := n.validateRuntimeBasis(target, implementation, e.Anchor()); err != nil {
+						return invalid()
+					}
 					if implementation.HasCode() && !implementation.Precompile() {
 						f.UpgradeTargetOrg = n.registeredOwner(target)
 						if f.UpgradeTargetOrg == "" {
@@ -280,7 +299,7 @@ func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, r
 		_, member := view.Org(owner)
 		allowed := member
 		if member && n.runtime.IntraOrgGrantTracing() {
-			actual, actualMember, associated, registered := view.ContractAssociation(address)
+			actual, actualMember, associated, registered := n.contractAssociation(view, address)
 			allowed = registered && actual == owner && actualMember && associated
 		}
 		access[address] = allowed
@@ -318,7 +337,7 @@ func (n *Engine) checkLifecycle(ctx context.Context, view *runtimepolicy.View, r
 		}
 		qualifiedStorage := ""
 		if f.StorageRuntimeHasCode {
-			qualifiedStorage = f.StorageOrg
+			qualifiedStorage = n.runtimeOwnerFor(f.StorageAddress, entry.storageCode, e.Anchor())
 		}
 		setFrameMasks(&f, org.masks, qualifiedStorage, entry.org)
 		decision := org.view.NativeProgram().Evaluate(policycore.Context{Org: entry.org, Groups: org.groups, GroupSourceClaims: org.source, LinkedAddresses: wallets.addresses, Signer: signer}, []policycore.Frame{f})
