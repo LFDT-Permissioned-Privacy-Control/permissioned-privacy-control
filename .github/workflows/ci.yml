@@ -15,7 +15,7 @@ env:
   # govulncheck checks for; keep this in lockstep with the go line in go.mod
   # and mcp/go.mod.
   GO_VERSION: '1.26.11'
-  NODE_VERSION: '24.22.1'
+  NODE_VERSION: '24.22.3'
   # Minimum coverage threshold (percentage).
   # Set to 44 because explorer/store.go (954 lines of SQL queries against the
   # block-explorer indexer DB) cannot be unit-tested in CI — the indexer DB is
