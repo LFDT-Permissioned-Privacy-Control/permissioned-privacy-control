@@ -86,7 +86,7 @@ func New(c Config) (*Factory, error) {
 			return nil, ErrInvalid
 		}
 		sm := c.Shares.Metadata()
-		if sm.Binding != c.ShareExpected || sm.Mode != "reader" || !sm.Identity.valid() {
+		if sm.Binding != c.ShareExpected || sm.Mode != "reader" || !sm.Identity.Valid() {
 			return nil, ErrInvalid
 		}
 		shareIdentity = sm.Identity
@@ -247,7 +247,7 @@ func (c *Current) WithShares(ctx context.Context, hashes []common.Hash) (*Curren
 	if remaining <= 0 || len(hashes) > MaxShareHashes || 256+64*len(hashes) > remaining {
 		return nil, ErrTooBroad
 	}
-	q, err := NormalizeShareQuery(ShareQuery{Hashes: hashes, fence: c.fence, maxBytes: remaining})
+	q, err := PrepareShareQuery(hashes, c.fence, remaining)
 	if err != nil {
 		return nil, err
 	}

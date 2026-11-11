@@ -33,7 +33,7 @@ func TestHistoricalNamespaceDependencyBoundary(t *testing.T) {
 		}
 	}
 	allowed := map[string]bool{}
-	for _, name := range []string{"historynamespace", "networkidentity", "strictjson", "operational/admissionsql", "admission", "creationfacts", "creationcapture", "creationobserver", "rpcexecution", "transactioninput", "executionfacts", "nativeadmission", "policycore", "policybundle", "runtimepolicy", "identity", "disclosurepolicy", "disclosuredata", "compliancepolicy", "compliance", "pricefeedpolicy", "brokerpolicy"} {
+	for _, name := range []string{"historynamespace", "networkidentity", "strictjson", "operational/admissionsql", "admissionsharedata", "admission", "creationfacts", "creationcapture", "creationobserver", "rpcexecution", "transactioninput", "executionfacts", "nativeadmission", "policycore", "policybundle", "runtimepolicy", "identity", "disclosurepolicy", "disclosuredata", "compliancepolicy", "compliance", "pricefeedpolicy", "brokerpolicy"} {
 		allowed["privacy-proxy/internal/"+name] = true
 	}
 	for dep := range transitiveDeps(t, root, "privacy-proxy/cmd/ops-v2-namespace") {

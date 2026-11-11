@@ -166,7 +166,7 @@ verify-audit-buffer:
 # Keep private V2 implementation types outside legacy handler/schema discovery.
 # Private auth dependencies also declare json types that collide in swag's type cache;
 # legacy handlers and their referenced public models remain in the discovery roots.
-SWAG_EXCLUDES = ./site,./frontend,./e2e,./mcp,./contracts,./scripts,./monitoring,./demos,./docs,./internal/nativeadmission,./internal/rpcengine,./internal/rpcexecution,./internal/identitybroker,./internal/brokerpolicy,./internal/brokertest,./internal/identityhttp,./internal/operational/identitysql
+SWAG_EXCLUDES = ./site,./frontend,./e2e,./mcp,./contracts,./scripts,./monitoring,./demos,./docs,./internal/nativeadmission,./internal/rpcengine,./internal/rpcexecution,./internal/identitybroker,./internal/brokerpolicy,./internal/brokertest,./internal/identityhttp,./internal/operational/identitysql,./internal/historyfacts,./internal/admissionsharedata
 .PHONY: api-spec
 api-spec:
 	go tool swag init --v3.1 -q -g internal/server/openapi_general_info.go -d ./ \
