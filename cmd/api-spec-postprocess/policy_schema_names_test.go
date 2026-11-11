@@ -156,3 +156,37 @@ func TestPolicySchemaNamesYAMLPreserveMeaningAndFormatting(t *testing.T) {
 		t.Fatal("YAML accepted a conflicting alias")
 	}
 }
+
+func TestPrivacyLeafSchemaNamesKeepExistingSDKReferences(t *testing.T) {
+	doc := policySchemaFixture()
+	schemas, _ := dig[map[string]any](doc, "components", "schemas")
+	param := map[string]any{"type": "object", "properties": map[string]any{"index": map[string]any{"type": "integer"}}}
+	schemas["privacy-proxy_internal_readprivacyabi.ParamRule"] = param
+	// Swag emits both the old function-parameter alias and the relocated
+	// event-parameter declaration. Identical definitions must collapse once.
+	schemas["privacy-proxy_internal_rbac.ParamRule"] = copyDocument(t, param)
+	schemas["privacy-proxy_internal_readprivacyabi.EventRule"] = map[string]any{
+		"type": "object", "properties": map[string]any{"param_rules": map[string]any{
+			"type": "array", "items": map[string]any{"$ref": schemaRefPrefix + "privacy-proxy_internal_readprivacyabi.ParamRule"},
+		}},
+	}
+	doc["privacy-response"] = map[string]any{"$ref": schemaRefPrefix + "privacy-proxy_internal_explorerdata.VisibilityReason"}
+	if err := normalizePolicySchemaNames(doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["privacy-response"].(map[string]any)["$ref"] != schemaRefPrefix+"privacy-proxy_internal_explorer.VisibilityReason" {
+		t.Fatal("existing SDK visibility reference renamed")
+	}
+	event, err := dig[map[string]any](schemas, "privacy-proxy_internal_rbac.EventRule", "properties", "param_rules", "items")
+	if err != nil || event["$ref"] != schemaRefPrefix+"privacy-proxy_internal_rbac.ParamRule" {
+		t.Fatal("nested SDK parameter reference renamed", err)
+	}
+	if !reflect.DeepEqual(schemas["privacy-proxy_internal_rbac.ParamRule"], param) {
+		t.Fatal("parameter schema shape changed")
+	}
+	for _, name := range []string{"privacy-proxy_internal_explorerdata.VisibilityReason", "privacy-proxy_internal_readprivacyabi.EventRule", "privacy-proxy_internal_readprivacyabi.ParamRule"} {
+		if _, exists := schemas[name]; exists {
+			t.Fatal("relocated implementation type leaked to SDK", name)
+		}
+	}
+}

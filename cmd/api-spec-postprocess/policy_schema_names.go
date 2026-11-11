@@ -22,12 +22,17 @@ var policySchemaNames = map[string]string{
 	"privacy-proxy_internal_policycore.FrameRule":               "privacy-proxy_internal_policydsl.FrameRule",
 	"privacy-proxy_internal_policycore.RecordPartyMatch":        "privacy-proxy_internal_policydsl.RecordPartyMatch",
 	"privacy-proxy_internal_policybackend_evm.CompilerSettings": "privacy-proxy_internal_policydsl.CompilerSettings",
+	// Data/ABI leaves retain the established Explorer/RBAC transport names.
+	"privacy-proxy_internal_explorerdata.VisibilityReason": "privacy-proxy_internal_explorer.VisibilityReason",
+	"privacy-proxy_internal_readprivacyabi.EventRule":      "privacy-proxy_internal_rbac.EventRule",
+	"privacy-proxy_internal_readprivacyabi.ParamRule":      "privacy-proxy_internal_rbac.ParamRule",
 }
 
 const schemaRefPrefix = "#/components/schemas/"
 
 func movedPolicySchema(name string) bool {
-	return strings.HasPrefix(name, "privacy-proxy_internal_policycore.") || strings.HasPrefix(name, "privacy-proxy_internal_policybackend_evm.")
+	return strings.HasPrefix(name, "privacy-proxy_internal_policycore.") || strings.HasPrefix(name, "privacy-proxy_internal_policybackend_evm.") ||
+		strings.HasPrefix(name, "privacy-proxy_internal_explorerdata.") || strings.HasPrefix(name, "privacy-proxy_internal_readprivacyabi.")
 }
 
 func normalizedPolicyRef(ref string) (string, error) {
