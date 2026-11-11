@@ -55,14 +55,16 @@ type SourcePlan struct {
 	Version      uint8
 	BundleDigest Digest
 	NetworkKey   Digest
-	Profile      string // literal ops.disclosure.data-sources/v1
+	Profile      string // closed legacy Version1 or explicitly retained Version2 profile
 	PlanDigest   Digest
 	Resources    []disclosurepolicy.Resource // sorted, unique, exact actually supported set
 }
 
 // Immutable references name qualified owned source cuts, never URLs or authority tokens.
 // Activity ref ID names an immutable SEALED audit chain head, excluding buffered/unlogged operations.
-// History ref ID names an immutable coverage/canonical cut incl R; it is not A2 birth proof.
+// Legacy History ref ID names an immutable coverage/canonical cut incl R.
+// Explicit retained Version2 History instead names a source basis, not an
+// immutable list of rows, a ROOT or an A2 birth proof.
 // Wallet ref ID is exact current snapshot digest; Finance ref ID is the exact retained scoped row sample.
 type SourceRef struct {
 	Kind SourceKind
@@ -279,10 +281,11 @@ type CursorBinding struct {
 }
 
 type CoverageDTO struct {
-	Status          string   `json:"status"` // literal COMPLETE_AT_CUT
-	Populations     []string `json:"populations"`
-	SourceCutDigest Digest   `json:"sourceCutDigest"`
-	PreparedAt      int64    `json:"preparedAt"`
+	Status            string   `json:"status"` // COMPLETE_AT_CUT or explicitly RETAINED_AT_READ
+	Populations       []string `json:"populations"`
+	SourceCutDigest   Digest   `json:"sourceCutDigest,omitempty"`
+	SourceBasisDigest Digest   `json:"sourceBasisDigest,omitempty"`
+	PreparedAt        int64    `json:"preparedAt"`
 }
 type AddressDTO struct {
 	AddressID      string   `json:"addressId"`

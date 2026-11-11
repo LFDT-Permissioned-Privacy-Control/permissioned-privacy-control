@@ -86,6 +86,16 @@ func validTime(v time.Time) bool {
 }
 
 func New(c Config) (*Reader, error) {
+	return newReader(c, false)
+}
+
+// NewRetained selects the separately qualified whole retained source plan.
+// Wallet facts and their meaning remain current operational associations.
+func NewRetained(c Config) (*Reader, error) {
+	return newReader(c, true)
+}
+
+func newReader(c Config, retained bool) (*Reader, error) {
 	if nilInterface(c.Store) || c.Clock == nil || !c.ExpectedState.Valid() {
 		return nil, d.ErrInvalid
 	}
@@ -94,7 +104,11 @@ func New(c Config) (*Reader, error) {
 		return nil, d.ErrInvalid
 	}
 	net, err := (d.NetworkBinding{Environment: c.Binding.Environment, ChainID: c.Binding.ChainID, GenesisHash: c.Binding.GenesisHash, DeploymentID: c.Binding.DeploymentID}).Key()
-	if err != nil || c.Plan.Version != 1 || c.Plan.Profile != "ops.disclosure.data-sources/v1" || c.Plan.NetworkKey != digest(net) || len(c.Plan.Resources) < 1 || len(c.Plan.Resources) > 6 {
+	profileOK := c.Plan.Version == 1 && c.Plan.Profile == "ops.disclosure.data-sources/v1"
+	if retained {
+		profileOK = d.ValidRetainedPlan(c.Plan)
+	}
+	if err != nil || !profileOK || c.Plan.NetworkKey != digest(net) || len(c.Plan.Resources) < 1 || len(c.Plan.Resources) > 6 {
 		return nil, d.ErrInvalid
 	}
 	if _, ok := parseDigest(c.Plan.BundleDigest); !ok {

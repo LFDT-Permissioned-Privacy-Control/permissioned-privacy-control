@@ -24,8 +24,19 @@ type DataConfig struct {
 	RenderKeys d.Keys
 	CursorKeys d.Keys
 }
+
+// RetainedDataConfig selects the separately validated live retained assembly.
+// It cannot enter the legacy immutable Sources.Open/cursor path.
+type RetainedDataConfig struct {
+	Network    d.NetworkBinding
+	Sources    d.RetainedSources
+	RenderKeys d.Keys
+	CursorKeys d.Keys
+}
+
 type dataState struct {
 	sources    d.Sources
+	retained   d.RetainedSources
 	plan       d.SourcePlan
 	network    d.Digest
 	render     d.Keys
@@ -58,11 +69,22 @@ func nilInterface(v any) bool {
 	return false
 }
 func NewWithData(config Config, dc DataConfig) (*Service, error) {
+	return newWithData(config, dc, nil)
+}
+
+func NewWithRetainedData(config Config, dc RetainedDataConfig) (*Service, error) {
+	if nilInterface(dc.Sources) {
+		return nil, ErrInvalid
+	}
+	return newWithData(config, DataConfig{Network: dc.Network, RenderKeys: dc.RenderKeys, CursorKeys: dc.CursorKeys}, dc.Sources)
+}
+
+func newWithData(config Config, dc DataConfig, retained d.RetainedSources) (*Service, error) {
 	s, e := New(config)
 	if e != nil {
 		return nil, e
 	}
-	if nilInterface(dc.Sources) {
+	if retained == nil && nilInterface(dc.Sources) {
 		return nil, ErrInvalid
 	}
 	metadata := config.Snapshot.Metadata()
@@ -74,8 +96,19 @@ func NewWithData(config Config, dc DataConfig) (*Service, error) {
 		return nil, ErrInvalid
 	}
 	netID := d.Digest("sha256:" + hex.EncodeToString(network[:]))
-	plan := dc.Sources.Plan()
-	if plan.Version != 1 || plan.Profile != "ops.disclosure.data-sources/v1" || plan.BundleDigest != d.Digest(metadata.ManifestDigest) || plan.NetworkKey != netID || !ValidDigest(string(plan.PlanDigest)) || plan.Resources == nil || len(plan.Resources) > 6 {
+	var plan d.SourcePlan
+	if retained == nil {
+		plan = dc.Sources.Plan()
+		if plan.Version != 1 || plan.Profile != "ops.disclosure.data-sources/v1" {
+			return nil, ErrInvalid
+		}
+	} else {
+		plan = retained.Plan()
+		if !d.ValidRetainedPlan(plan) {
+			return nil, ErrInvalid
+		}
+	}
+	if plan.BundleDigest != d.Digest(metadata.ManifestDigest) || plan.NetworkKey != netID || !ValidDigest(string(plan.PlanDigest)) || plan.Resources == nil || len(plan.Resources) > 6 {
 		return nil, ErrInvalid
 	}
 	for i, r := range plan.Resources {
@@ -144,7 +177,7 @@ func NewWithData(config Config, dc DataConfig) (*Service, error) {
 		return nil, ErrInvalid
 	}
 	s.epoch = string(strong)
-	s.data = &dataState{dc.Sources, plan, netID, render, cursors, generation, make(chan struct{}, 8)}
+	s.data = &dataState{sources: dc.Sources, retained: retained, plan: plan, network: netID, render: render, cursors: cursors, generation: generation, slots: make(chan struct{}, 8)}
 	return s, nil
 }
 func (s *Service) DataEnabled() bool { return s != nil && s.data != nil }
@@ -201,7 +234,11 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	if !s.DataEnabled() {
 		return nil, d.ErrUnsupported
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	fence, e := newDataReadFence(ctx)
+	if e != nil {
+		return nil, e
+	}
+	ctx, cancel := context.WithDeadline(ctx, fence.deadline)
 	defer cancel()
 	v, e := s.view(token)
 	if e != nil {
@@ -218,6 +255,17 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	if e != nil {
 		return nil, e
 	}
+	expires := v.ExpiresAt()
+	if until.Before(expires) {
+		expires = until
+	}
+	remaining := expires.Sub(s.clock())
+	if remaining <= 0 {
+		return nil, ErrUnauthorized
+	}
+	fence.clip(remaining)
+	ctx, clipCancel := context.WithDeadline(ctx, fence.deadline)
+	defer clipCancel()
 	if q.Resource == p.Transactions && q.View == d.Detail && (c.Scope.Level != p.Full || q.Level != nil && *q.Level != p.Full) {
 		return nil, ErrNotFound
 	}
@@ -229,22 +277,57 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	scope := d.ReadScope{Namespace: d.Digest(s.epoch), CaseID: c.ID, CaseVersion: c.Version, RecipientActorID: v.ActorID(), DataOrganizationID: c.DataOrg, BundleDigest: d.Digest(s.snapshot.Metadata().ManifestDigest), RuleDigest: d.Digest(rule.Digest()), EffectiveUntil: until, Query: query}
 	binding := d.CursorBinding{Namespace: scope.Namespace, CaseID: c.ID, CaseVersion: c.Version, RecipientActorID: v.ActorID(), BundleDigest: scope.BundleDigest, RuleDigest: scope.RuleDigest, QueryDigest: query.Digest(), RenderGeneration: s.data.generation, SourcePlanDigest: s.data.plan.PlanDigest}
 	var continuation *d.Continuation
+	var retainedContinuation *d.RetainedContinuation
+	var originalBasis *d.RetainedBasis
+	var selectedBasis d.RetainedBasis
 	var after *d.Position
 	var refs []d.SourceRef
 	if q.Cursor != nil {
-		got, err := s.data.cursors.Open(*q.Cursor, binding, s.clock())
-		if err != nil {
-			return nil, dataError(err)
+		if s.data.retained == nil {
+			got, err := s.data.cursors.Open(*q.Cursor, binding, s.clock())
+			if err != nil {
+				return nil, dataError(err)
+			}
+			continuation = &got
+			refs = got.References()
+			pos := got.Position()
+			after = &pos
+		} else {
+			got, err := s.data.cursors.OpenRetained(*q.Cursor, s.data.plan, binding, query.Resource(), s.clock())
+			if err != nil {
+				return nil, dataError(err)
+			}
+			retainedContinuation = &got
+			refs = got.References()
+			pos, basis := got.Position(), got.Basis()
+			after, originalBasis = &pos, &basis
 		}
-		continuation = &got
-		refs = got.References()
-		pos := got.Position()
-		after = &pos
 		if e := d.PositionForQuery(query, after); e != nil {
 			return nil, dataError(e)
 		}
 	}
-	snap, e := s.data.sources.Open(ctx, scope, refs)
+	var snap d.Snapshot
+	if s.data.retained == nil {
+		snap, e = s.data.sources.Open(ctx, scope, refs)
+	} else {
+		var owned d.RetainedSnapshot
+		owned, e = s.data.retained.OpenRetained(ctx, scope, refs, originalBasis, d.ClonePosition(after))
+		if e != nil && !nilInterface(owned) {
+			owned.Close()
+		}
+		if e == nil && !nilInterface(owned) {
+			selectedBasis = owned.Basis().Clone()
+			if d.BasisForResource(query.Resource(), selectedBasis) != nil || selectedBasis.Valid() && selectedBasis.NetworkKey != s.data.network {
+				owned.Close()
+				return nil, ErrUnavailable
+			}
+			if originalBasis != nil && !selectedBasis.Equal(*originalBasis) {
+				owned.Close()
+				return nil, ErrConflict
+			}
+			snap = owned
+		}
+	}
 	if e != nil {
 		return nil, sourceError(e)
 	}
@@ -253,7 +336,12 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	}
 	defer snap.Close()
 	descriptors := snap.Descriptors()
-	actualRefs, e := d.SourceReferences(descriptors)
+	var actualRefs []d.SourceRef
+	if s.data.retained == nil {
+		actualRefs, e = d.SourceReferences(descriptors)
+	} else {
+		actualRefs, e = d.SourceReferencesRetained(s.data.plan, descriptors)
+	}
 	if e != nil {
 		return nil, ErrUnavailable
 	}
@@ -262,15 +350,25 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 			return nil, ErrUnavailable
 		}
 	}
-	if continuation != nil && !slices.Equal(refs, actualRefs) {
+	if (continuation != nil || retainedContinuation != nil) && !slices.Equal(refs, actualRefs) {
 		return nil, ErrConflict
 	}
-	set, e := d.SourceSetDigest(descriptors, query.Resource(), query.View())
+	var set d.Digest
+	if s.data.retained == nil {
+		set, e = d.SourceSetDigest(descriptors, query.Resource(), query.View())
+	} else {
+		set, e = d.SourceSetDigestRetained(s.data.plan, descriptors, query.Resource(), query.View())
+	}
 	if e != nil {
 		return nil, dataError(e)
 	}
 	if continuation != nil {
 		if e := continuation.VerifySourceSet(set); e != nil {
+			return nil, dataError(e)
+		}
+	}
+	if retainedContinuation != nil {
+		if e := retainedContinuation.VerifySourceSet(set); e != nil {
 			return nil, dataError(e)
 		}
 	}
@@ -285,7 +383,12 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	if e != nil {
 		return nil, dataError(e)
 	}
-	if e := d.ValidateFacts(scope, descriptors, facts, after); e != nil {
+	if s.data.retained == nil {
+		e = d.ValidateFacts(scope, descriptors, facts, after)
+	} else {
+		e = d.ValidateFactsRetained(s.data.plan, scope, descriptors, facts, after)
+	}
+	if e != nil {
 		return nil, dataError(e)
 	}
 	if _, e := s.protected(v, c); e != nil {
@@ -297,7 +400,12 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	}
 	prepared := s.clock().UTC().Truncate(time.Microsecond)
 	rc := d.RenderContext{PreparedAt: prepared, Namespace: scope.Namespace, CaseID: c.ID, DataOrganizationID: c.DataOrg, RecipientActorID: v.ActorID(), Keys: s.data.render, Query: query, EffectiveUntil: until}
-	result, e := d.Render(scope, descriptors, facts, rc, readID.String())
+	var result d.Result
+	if s.data.retained == nil {
+		result, e = d.Render(scope, descriptors, facts, rc, readID.String())
+	} else {
+		result, e = d.RenderRetained(s.data.plan, scope, descriptors, facts, rc, readID.String())
+	}
 	if e != nil {
 		return nil, sourceError(e)
 	}
@@ -315,7 +423,12 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 		if !expires.After(s.clock()) {
 			return nil, ErrUnauthorized
 		}
-		raw, e := s.data.cursors.Seal(binding, set, actualRefs, *facts.Next, expires)
+		var raw string
+		if s.data.retained == nil {
+			raw, e = s.data.cursors.Seal(binding, set, actualRefs, *facts.Next, expires)
+		} else {
+			raw, e = s.data.cursors.SealRetained(s.data.plan, binding, query.Resource(), selectedBasis, set, actualRefs, *facts.Next, expires)
+		}
 		if e != nil {
 			return nil, dataError(e)
 		}
@@ -331,7 +444,13 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	if len(raw)+1 > MaxResponseBytes {
 		return nil, d.ErrTooBroad
 	}
-	response := &Response{body: append(raw, '\n'), status: 200, download: query.View() == d.Report, gate: func() error { _, err := s.protected(v, c); return err }}
+	response := &Response{body: append(raw, '\n'), status: 200, download: query.View() == d.Report, gate: func() error {
+		if err := fence.check(); err != nil {
+			return err
+		}
+		_, err := s.protected(v, c)
+		return err
+	}}
 	if e := snap.CheckCurrent(ctx); e != nil {
 		return nil, sourceError(e)
 	}
@@ -358,6 +477,9 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	}
 	if receipt.AttemptID != event.AttemptID {
 		return nil, ErrUnavailable
+	}
+	if e := response.gate(); e != nil {
+		return nil, e
 	}
 	return response, nil
 }

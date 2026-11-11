@@ -61,13 +61,28 @@ func financeDigest(v d.Digest) (a.Digest, bool) {
 	return x, err == nil
 }
 func NewFinanceReader(c FinanceReaderConfig) (*FinanceReader, error) {
+	return newFinanceReader(c, false)
+}
+
+// NewRetainedFinanceReader accepts only the separate retained assembly plan.
+// The source still reports retained admission decisions, capped at 100 events;
+// it does not turn them into a complete execution or compliance ledger.
+func NewRetainedFinanceReader(c FinanceReaderConfig) (*FinanceReader, error) {
+	return newFinanceReader(c, true)
+}
+
+func newFinanceReader(c FinanceReaderConfig, retained bool) (*FinanceReader, error) {
 	network, err := c.Network.Key()
 	if err != nil || c.Store == nil || c.Store.pool == nil || c.Store.mode != "reader" || c.Store.schemaVersion < 1 || c.Store.schemaVersion > 3 || c.Clock == nil || !c.ExpectedState.Valid() || c.ExpectedState.Coverage == (a.Digest{}) {
 		return nil, d.ErrInvalid
 	}
 	plan, ok := financeDigest(c.Plan.PlanDigest)
 	_, bundleOK := financeDigest(c.Plan.BundleDigest)
-	if !ok || !bundleOK || c.Plan.Version != 1 || c.Plan.Profile != "ops.disclosure.data-sources/v1" || c.Plan.NetworkKey != d.Digest(network.String()) || len(c.Plan.Resources) < 1 || len(c.Plan.Resources) > 6 || !slices.Contains(c.Plan.Resources, p.ComplianceReport) || !financeTime(c.Clock().UTC().Truncate(time.Microsecond)) {
+	profileOK := c.Plan.Version == 1 && c.Plan.Profile == "ops.disclosure.data-sources/v1"
+	if retained {
+		profileOK = d.ValidRetainedPlan(c.Plan)
+	}
+	if !ok || !bundleOK || !profileOK || c.Plan.NetworkKey != d.Digest(network.String()) || len(c.Plan.Resources) < 1 || len(c.Plan.Resources) > 6 || !slices.Contains(c.Plan.Resources, p.ComplianceReport) || !financeTime(c.Clock().UTC().Truncate(time.Microsecond)) {
 		return nil, d.ErrInvalid
 	}
 	for i, r := range c.Plan.Resources {
