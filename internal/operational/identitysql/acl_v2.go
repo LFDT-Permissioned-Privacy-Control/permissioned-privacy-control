@@ -106,7 +106,7 @@ func checkV2Privileges(ctx context.Context, q querier, role, mode string) error 
  OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='ops_identity_v2' AND has_function_privilege(r.rolname,p.oid,'EXECUTE'))
  OR EXISTS(SELECT 1 FROM pg_database d WHERE d.datname=current_database() AND pg_has_role(r.oid,d.datdba,'MEMBER'))
  OR EXISTS(SELECT 1 FROM pg_namespace n WHERE n.nspname='ops_identity_v2' AND pg_has_role(r.oid,n.nspowner,'MEMBER'))
- OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN('ops_identity_v2','pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%' AND c.relkind IN('r','p','v','m','f') AND(has_table_privilege(r.rolname,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES') OR has_any_column_privilege(r.rolname,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')))
+ OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN('ops_identity_v2','pg_catalog','information_schema') AND n.nspname<>'pg_toast' AND left(n.nspname,14)<>'pg_toast_temp_' AND left(n.nspname,8)<>'pg_temp_' AND c.relkind IN('r','p','v','m','f') AND(has_table_privilege(r.rolname,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES') OR has_any_column_privilege(r.rolname,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')))
  FROM pg_roles r WHERE r.rolname=$1`, role).Scan(&unsafe)
 	if err != nil || unsafe {
 		return b.ErrUnavailable

@@ -319,7 +319,7 @@ func (s *Store) checkPrivileges(ctx context.Context) error {
  OR has_schema_privilege(current_user,'ops_admission_v2','CREATE')
  OR EXISTS(SELECT 1 FROM pg_database d WHERE d.datname=current_database() AND pg_has_role(current_user,d.datdba,'MEMBER'))
  OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='ops_admission_v2' AND pg_has_role(current_user,c.relowner,'MEMBER'))
- OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN('ops_admission_v2','pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%' AND c.relkind IN('r','p','v','m') AND(has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER') OR has_any_column_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE')))
+ OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN('ops_admission_v2','pg_catalog','information_schema') AND n.nspname<>'pg_toast' AND left(n.nspname,14)<>'pg_toast_temp_' AND left(n.nspname,8)<>'pg_temp_' AND c.relkind IN('r','p','v','m') AND(has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER') OR has_any_column_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE')))
  FROM pg_roles r WHERE r.rolname=current_user`).Scan(&unsafe); err != nil || unsafe {
 		return a.ErrUnavailable
 	}

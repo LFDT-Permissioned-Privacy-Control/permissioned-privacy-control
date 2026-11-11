@@ -111,12 +111,12 @@ func checkNamespacePrivileges(ctx context.Context, q querier) error {
  OR has_schema_privilege(current_user,'ops_admission_v2','CREATE') OR has_schema_privilege(current_user,$2,'CREATE')
  OR NOT has_schema_privilege(current_user,'ops_admission_v2','USAGE') OR NOT has_schema_privilege(current_user,$2,'USAGE')
  OR EXISTS(SELECT 1 FROM pg_database d WHERE d.datname=current_database() AND pg_has_role(current_user,d.datdba,'MEMBER'))
- OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%' AND(
+ OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN('pg_catalog','information_schema') AND n.nspname<>'pg_toast' AND left(n.nspname,14)<>'pg_toast_temp_' AND left(n.nspname,8)<>'pg_temp_' AND(
   pg_has_role(current_user,c.relowner,'MEMBER') OR
   (c.relkind IN('r','p','v','m','f') AND(has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(current_user,c.oid,'INSERT,UPDATE,REFERENCES') OR
    (NOT(n.nspname||'.'||c.relname=ANY($1::text[])) AND(has_table_privilege(current_user,c.oid,'SELECT') OR has_any_column_privilege(current_user,c.oid,'SELECT'))))) OR
   (c.relkind='S' AND has_sequence_privilege(current_user,c.oid,'SELECT,USAGE,UPDATE'))))
- OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname NOT IN('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_temp%' AND has_function_privilege(current_user,p.oid,'EXECUTE'))
+ OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname NOT IN('pg_catalog','information_schema') AND left(n.nspname,8)<>'pg_temp_' AND has_function_privilege(current_user,p.oid,'EXECUTE'))
  OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl,acldefault('r',c.relowner)))g WHERE n.nspname=$2 AND g.grantee<>c.relowner AND g.grantee<>r.oid)
  OR EXISTS(SELECT 1 FROM pg_namespace n CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl,acldefault('n',n.nspowner)))g WHERE n.nspname=$2 AND g.grantee<>n.nspowner AND g.grantee<>r.oid)
  OR EXISTS(SELECT 1 FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN LATERAL aclexplode(a.attacl)g WHERE n.nspname=$2 AND a.attnum>0 AND g.grantee<>c.relowner AND g.grantee<>r.oid)
@@ -154,7 +154,7 @@ func MigrateNamespace(ctx context.Context, dsn, readerRole string, acknowledgeDr
 		}
 		var otherAccess, ownAccess bool
 		if tx.QueryRow(ctx, `SELECT
- EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN('ops_history_namespace_v1','pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%' AND c.relkind IN('r','p','v','m','f') AND(has_table_privilege($1,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege($1,c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))),
+ EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN('ops_history_namespace_v1','pg_catalog','information_schema') AND n.nspname<>'pg_toast' AND left(n.nspname,14)<>'pg_toast_temp_' AND left(n.nspname,8)<>'pg_temp_' AND c.relkind IN('r','p','v','m','f') AND(has_table_privilege($1,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege($1,c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))),
  EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='ops_history_namespace_v1' AND c.relkind='r' AND has_table_privilege($1,c.oid,'SELECT'))`, readerRole).Scan(&otherAccess, &ownAccess) != nil || otherAccess && !ownAccess {
 			return h.ErrUnavailable
 		}
@@ -162,7 +162,7 @@ func MigrateNamespace(ctx context.Context, dsn, readerRole string, acknowledgeDr
 			// A fresh namespace reader is a dedicated blank role, not an upgrade
 			// of the existing app/observer/facts role whose old client must stay valid.
 			var privileged bool
-			if tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%' AND c.relkind IN('r','p','v','m','f') AND(has_table_privilege($1,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege($1,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')))`, readerRole).Scan(&privileged) != nil || privileged {
+			if tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN('pg_catalog','information_schema') AND n.nspname<>'pg_toast' AND left(n.nspname,14)<>'pg_toast_temp_' AND left(n.nspname,8)<>'pg_temp_' AND c.relkind IN('r','p','v','m','f') AND(has_table_privilege($1,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege($1,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')))`, readerRole).Scan(&privileged) != nil || privileged {
 				return h.ErrUnavailable
 			}
 			if _, err := tx.Exec(ctx, namespaceSchemaSQL); err != nil {
