@@ -68,6 +68,7 @@ type observedOperation struct {
 	trace    *rpcengine.TraceOperationResult
 	metadata *rpcengine.MetadataOperationResult
 	state    *rpcengine.StateOperationResult
+	history  *rpcengine.HistoryOperationResult
 }
 
 func (o observedOperation) valid() bool {
@@ -84,6 +85,9 @@ func (o observedOperation) valid() bool {
 	if o.state != nil {
 		n++
 	}
+	if o.history != nil {
+		n++
+	}
 	return n == 1
 }
 func (o observedOperation) notification(s *Service) (bool, error) {
@@ -92,6 +96,9 @@ func (o observedOperation) notification(s *Service) (bool, error) {
 	}
 	if o.trace != nil {
 		return o.trace.IsNotificationFor(s.engine)
+	}
+	if o.history != nil {
+		return o.history.IsNotificationFor(s.history)
 	}
 	if o.metadata != nil {
 		return o.metadata.IsNotificationFor(s.metadata)
@@ -124,6 +131,18 @@ func (o observedOperation) completion(s *Service, remote string) (activitylog.Co
 			return invalid, err
 		}
 		return completion(m, remote)
+	}
+	if o.history != nil {
+		m, err := o.history.MetadataFor(s.history)
+		if err != nil {
+			return invalid, err
+		}
+		c, err := completion(rpcengine.OperationMetadata{Class: m.Class, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
+		if err != nil || !activitylog.ValidMethod(m.Method) {
+			return c, ErrInvalid
+		}
+		c.Method = m.Method
+		return c, nil
 	}
 	if o.state != nil {
 		m, err := o.state.MetadataFor(s.state)
@@ -158,6 +177,9 @@ func (o observedOperation) preflight(s *Service) error {
 	if o.native != nil {
 		return o.native.PreflightFor(s.engine)
 	}
+	if o.history != nil {
+		return o.history.PreflightFor(s.history)
+	}
 	if o.state != nil {
 		return o.state.PreflightFor(s.state)
 	}
@@ -173,6 +195,9 @@ func (o observedOperation) marshal(s *Service) ([]byte, error) {
 	if o.native != nil {
 		return o.native.MarshalResponseFor(s.engine)
 	}
+	if o.history != nil {
+		return o.history.MarshalResponseFor(s.history)
+	}
 	if o.state != nil {
 		return o.state.MarshalResponseFor(s.state)
 	}
@@ -187,6 +212,9 @@ func (o observedOperation) recordingFailure(s *Service) ([]byte, error) {
 	}
 	if o.native != nil {
 		return o.native.MarshalRecordingFailureFor(s.engine)
+	}
+	if o.history != nil {
+		return o.history.MarshalRecordingFailureFor(s.history)
 	}
 	if o.state != nil {
 		return o.state.MarshalRecordingFailureFor(s.state)
@@ -208,6 +236,9 @@ func (o observedOperation) deliver(ctx context.Context, s *Service) error {
 	}
 	if s.recorder.Healthy() != nil {
 		return ErrInvalid
+	}
+	if o.history != nil {
+		return o.history.RequireDeliverable(ctx, s.history)
 	}
 	if o.state != nil {
 		return o.state.RequireDeliverable(ctx, s.state)

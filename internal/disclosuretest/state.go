@@ -24,6 +24,7 @@ type StateFixture struct {
 	ReadProfile     string
 	Execution       map[string]*policycore.Policy
 	Runtime         *policybundle.RuntimeCreationObservedSource
+	HistoryConsumer bool
 }
 
 func DefaultStateFixture(t testing.TB) StateFixture {
@@ -52,6 +53,9 @@ func StateSnapshot(t testing.TB, f StateFixture) *policybundle.CatalogSnapshot {
 		identitySource = *f.IdentityCatalog
 	}
 	options, description, err := policyprofiles.Options(policybundle.RuntimeCreationObservedProfileID)
+	if f.HistoryConsumer {
+		options, description, err = policyprofiles.HistoryOptions(policybundle.RuntimeCreationObservedProfileID)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
