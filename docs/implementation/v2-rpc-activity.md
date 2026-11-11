@@ -61,6 +61,23 @@ withhold both successful output and revert `error.data`. They do not refresh or
 rebuild identity. This boundary does not promise a token stays live throughout a
 slow socket write; the socket has its own deadline.
 
+On `RuntimeCreationObserved`, native calls bind every configured call source to
+the full network already selected for wallet and financial state. Acquisition
+checks the actual chain ID and the complete, hash-recomputed genesis header on
+the selected credential before tracing. After local append, the original
+selected client checks both again before the final original View/context gate.
+Only that small source handle is retained across append. A changed chain ID or
+genesis withholds success and revert data while preserving the selected audit
+outcome. The direct call library API applies its final check before returning
+protected data. Earlier unbound profiles retain their existing source contract.
+
+Each genesis result is bounded at sixteen KiB. Acquisition adds one genesis
+probe next to its existing chain-ID check; delivery adds a chain-ID and genesis
+probe under the original operation fence and the client's lower timeout.
+These samples assume one logically consistent trusted endpoint. They do not
+attest the configured environment/deployment or provide consensus verification
+or an atomic source-to-socket guarantee.
+
 The recorded HTTP status means the **selected application response before
 recording**, rather than eventual wire delivery. JSON-RPC errors normally select
 HTTP 200 and retain their numeric error code; their outcome is still failure or

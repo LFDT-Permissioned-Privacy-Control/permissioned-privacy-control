@@ -20,6 +20,7 @@ import (
 	"privacy-proxy/internal/guardbridge"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/nativeadmission"
+	"privacy-proxy/internal/networkidentity"
 	"privacy-proxy/internal/nodeapproval"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/policycore"
@@ -268,9 +269,24 @@ func newRaw(snapshot *policybundle.CatalogSnapshot, options RawOptions, expected
 			return bad()
 		}
 	}
-	e, err := newEngine(snapshot, options.CallClients, options.Wallets, options.Clock, expectedProfile)
+	callClients := options.CallClients
+	expectedNetwork := networkidentity.Binding{Environment: network.Environment, ChainID: network.ChainID, GenesisHash: network.GenesisHash, DeploymentID: network.DeploymentID}
+	if creationObservedSource {
+		callClients = make(map[string]*rpcexecution.Client, len(options.CallClients))
+		for org, original := range options.CallClients {
+			bound, err := original.WithNetwork(expectedNetwork)
+			if err != nil {
+				return bad()
+			}
+			callClients[org] = bound
+		}
+	}
+	e, err := newEngine(snapshot, callClients, options.Wallets, options.Clock, expectedProfile)
 	if err != nil {
 		return nil, err
+	}
+	if creationObservedSource {
+		e.network = expectedNetwork
 	}
 	e.raw = &rawEngine{readProfile: runtime.ReadProfile(), sendEnabled: len(refs) > 0, wallets: options.Wallets, admission: options.Admission, captureGate: options.CaptureGate, bindings: map[string]map[string]rawBinding{}}
 	// Source bindings and aggregate budgets are checked before producer startup.

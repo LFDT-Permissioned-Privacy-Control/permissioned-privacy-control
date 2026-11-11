@@ -297,6 +297,8 @@ type node struct {
 	anchors                     []string
 	mutate                      func(map[string]any)
 	onTrace                     func()
+	onChain                     func()
+	chainID                     string
 	onNonce                     func()
 	onSend                      func(string) string
 	code                        string
@@ -337,6 +339,12 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch req.Method {
 	case "eth_chainId":
 		result = "0x1"
+		if n.chainID != "" {
+			result = n.chainID
+		}
+		if n.onChain != nil {
+			n.onChain()
+		}
 	case "eth_getBlockByNumber", "eth_getBlockByHash", "eth_getHeaderByNumber":
 		result = map[string]any{"hash": nodeHash, "number": "0x1", "timestamp": "0xa"}
 		if n.anchorHeader != nil {

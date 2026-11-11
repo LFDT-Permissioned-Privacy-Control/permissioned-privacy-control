@@ -10,6 +10,7 @@ import (
 	"privacy-proxy/internal/admission"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/policycore"
+	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/runtimepolicy"
 )
 
@@ -72,6 +73,7 @@ type OperationResult struct {
 	metadata   OperationMetadata
 	phase      uint8
 	signedHash string
+	callSource *rpcexecution.Client
 }
 
 const (
@@ -158,6 +160,12 @@ func (r *OperationResult) PreflightFor(e *Engine) error {
 	if r.view == nil && (r.response.Result != nil || r.response.Error == nil || r.response.Error.Data != nil) {
 		return errOperation
 	}
+	if r.callSource != nil {
+		network, bound := r.callSource.BoundNetwork()
+		if !bound || network != e.network || r.metadata.Method != EthCall || r.view == nil {
+			return errOperation
+		}
+	}
 	return preflightResponse(r.response)
 }
 func (r *OperationResult) MarshalResponseFor(e *Engine) ([]byte, error) {
@@ -167,7 +175,15 @@ func (r *OperationResult) MarshalResponseFor(e *Engine) ([]byte, error) {
 	return marshalObserved(r.response)
 }
 func (r *OperationResult) RequireDeliverable(ctx context.Context, e *Engine) error {
-	if !r.owned(e) || ctx.Err() != nil || e.raw == nil || e.raw.closed.Load() {
+	if !r.owned(e) || ctx == nil || ctx.Err() != nil || e.raw == nil || e.raw.closed.Load() || r.PreflightFor(e) != nil {
+		return errOperation
+	}
+	if r.callSource != nil && r.callSource.RequireBoundNetwork(ctx) != nil {
+		return errOperation
+	}
+	// This must remain after every potentially blocking source probe. Future
+	// SQL/source rechecks also belong before the final full network sample.
+	if ctx.Err() != nil || e.raw.closed.Load() {
 		return errOperation
 	}
 	if r.view != nil {

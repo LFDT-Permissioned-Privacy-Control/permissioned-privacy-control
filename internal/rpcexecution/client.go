@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"privacy-proxy/internal/executionfacts"
+	"privacy-proxy/internal/networkidentity"
 	"privacy-proxy/internal/policycore"
 )
 
@@ -45,6 +46,8 @@ type Client struct {
 	credentialRef string
 	selected      bool
 	ids           *atomic.Uint64
+	network       networkidentity.Binding
+	networkBound  bool
 }
 
 func NewClient(transport Transport, binding NodeBinding, limits Limits) (*Client, error) {
@@ -249,6 +252,14 @@ func (c *Client) acquireScopedProfile(ctx context.Context, call Call, block Bloc
 	chain, ok := quantity(chainText, 256)
 	if !ok || chain.String() != c.binding.ChainID || (call.chainID != nil && call.chainID.Cmp(chain) != 0) {
 		return nil, failure(InvalidEvidence)
+	}
+	if c.networkBound {
+		if chain.String() != c.network.ChainID {
+			return nil, failure(InvalidEvidence)
+		}
+		if err := c.requireGenesis(ctx); err != nil {
+			return nil, err
+		}
 	}
 	headerMethod := "eth_getBlockByNumber"
 	if block.hash {
