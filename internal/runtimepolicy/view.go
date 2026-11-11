@@ -18,6 +18,7 @@ type View struct {
 func (v *View) ActorID() string                       { return v.principal.ActorID() }
 func (v *View) Kind() identity.Kind                   { return v.principal.Kind() }
 func (v *View) ExpiresAt() time.Time                  { return v.principal.ExpiresAt() }
+func (v *View) SourceProfile() (id, digest string)    { return v.principal.SourceProfile() }
 func (v *View) Metadata() policybundle.BundleMetadata { return v.factory.snapshot.Metadata() }
 func (v *View) Org(orgID string) (*OrgView, bool)     { org, ok := v.orgs[orgID]; return org, ok }
 

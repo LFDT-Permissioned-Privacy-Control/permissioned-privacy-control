@@ -53,6 +53,7 @@ import (
 	_ "privacy-proxy/internal/operational/disclosuresql"
 	_ "privacy-proxy/internal/operational/identitysql"
 	_ "privacy-proxy/internal/operational/rpcactivity"
+	_ "privacy-proxy/internal/operational/ssohttp"
 	_ "privacy-proxy/internal/operational/ssosql"
 	_ "privacy-proxy/internal/operational/walletsql"
 	_ "privacy-proxy/internal/policybundle"
@@ -794,6 +795,37 @@ func TestSSOStorageBoundaries(t *testing.T) {
 	for dep := range transitiveDeps(t, root, "privacy-proxy/internal/rpcengine") {
 		if strings.HasPrefix(dep, "privacy-proxy/internal/operational/ssosql") {
 			t.Fatal("Core acquired SSO SQL", dep)
+		}
+	}
+}
+
+func TestSSORuntimeOwnedBoundary(t *testing.T) {
+	root := moduleRoot(t)
+	const pkg = "privacy-proxy/internal/operational/ssohttp"
+	allowed := map[string]bool{}
+	for _, name := range []string{"strictjson", "identity", "brokerpolicy", "netguard", "identitybroker/azure", "identitybroker/privado", "compliance", "compliancepolicy", "creationfacts", "disclosurepolicy", "policycore", "pricefeedpolicy", "policybundle", "identitybroker", "identityhttp", "ssotransaction", "operational/ssosql", "runtimepolicy", "ssopolicy", "operational/ssohttp"} {
+		allowed["privacy-proxy/internal/"+name] = true
+	}
+	for dep := range transitiveDeps(t, root, pkg) {
+		if strings.HasPrefix(dep, "privacy-proxy/") && !allowed[dep] {
+			t.Error("SSO runtime acquired unapproved infrastructure", dep)
+		}
+		for _, prefix := range []string{"github.com/redis/", "github.com/ethereum/go-ethereum/core/vm", "github.com/ethereum/go-ethereum/core/state", "github.com/ethereum/go-ethereum/triedb"} {
+			if strings.HasPrefix(dep, prefix) {
+				t.Error("SSO runtime acquired legacy persistence/VM", dep)
+			}
+		}
+	}
+	for dep := range transitiveDeps(t, root, "privacy-proxy/internal/rpcengine") {
+		if dep == pkg || dep == "privacy-proxy/internal/operational/ssosql" {
+			t.Error("Core acquired operational SSO", dep)
+		}
+	}
+	for _, owner := range []string{"identitybroker", "identityhttp"} {
+		for dep := range transitiveDeps(t, root, "privacy-proxy/internal/"+owner) {
+			if strings.HasPrefix(dep, "github.com/jackc/pgx") || strings.HasPrefix(dep, "privacy-proxy/internal/operational/") {
+				t.Error(owner, "acquired operational SQL", dep)
+			}
 		}
 	}
 }

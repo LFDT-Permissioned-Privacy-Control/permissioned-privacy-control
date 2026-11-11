@@ -64,6 +64,16 @@ func (s *Store) Metadata() Metadata {
 	}
 	return s.metadata
 }
+
+// AppMetadata checks only this concrete pointer's local app-role/lifetime
+// binding. Every operation still independently checks live SQL readiness,
+// catalog, ACL and recovery scope; this method is not a database health check.
+func (s *Store) AppMetadata() (Metadata, error) {
+	if !s.valid("app") {
+		return Metadata{}, ErrRole
+	}
+	return s.metadata, nil
+}
 func (s *Store) Close() {
 	if s != nil && s.pool != nil && s.closed.CompareAndSwap(false, true) {
 		s.pool.Close()

@@ -28,6 +28,8 @@ type keyring struct {
 	active string
 	mac    map[string][]byte
 	aes    map[string]cipher.AEAD
+	// Private equality checks at startup; no raw AES value or getter is retained.
+	fingerprints map[string][32]byte
 }
 
 func newKeyrings(source brokerpolicy.Source, renewal, encryption []SecretBinding, signing ed25519.PrivateKey) (*keyring, *keyring, error) {
@@ -59,7 +61,7 @@ func newCommonKeyrings(source brokerpolicy.CommonSettings, renewal, encryption [
 			}
 		}
 	}
-	macRing, aesRing := &keyring{mac: macKeys}, &keyring{aes: map[string]cipher.AEAD{}}
+	macRing, aesRing := &keyring{mac: macKeys}, &keyring{aes: map[string]cipher.AEAD{}, fingerprints: map[string][32]byte{}}
 	for _, ref := range source.RenewalKeys {
 		if ref.Active {
 			macRing.active = ref.ID
@@ -78,6 +80,7 @@ func newCommonKeyrings(source brokerpolicy.CommonSettings, renewal, encryption [
 			return nil, nil, ErrInvalid
 		}
 		aesRing.aes[ref.ID] = aead
+		aesRing.fingerprints[ref.ID] = sha256.Sum256(aesKeys[ref.ID])
 	}
 	return macRing, aesRing, nil
 }
