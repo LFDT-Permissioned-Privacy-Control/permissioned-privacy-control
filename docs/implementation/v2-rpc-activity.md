@@ -2,7 +2,8 @@
 
 `internal/operational/rpcactivity` wraps the native RPC engine and the durable
 activity recorder. It supports `eth_call`, `eth_sendRawTransaction` and the
-optional twelve-operation [metadata engine](v2-node-metadata.md) on the
+optional twelve-operation [metadata engine](v2-node-metadata.md) and five-operation
+[state engine](v2-node-state.md) on the
 `RuntimeCreationObserved` profile. It is a library: it does not mount a production
 listener or replace the other authentication and operational HTTP handlers.
 Existing direct engine constructors, methods and HTTP adapters keep their
@@ -19,11 +20,11 @@ two fixed invalid labels, and have a healthy, qualified source. A handler accept
 organization inference. Per-request membership and permission still come only
 from the original accepted runtime View.
 
-`Config.Metadata` can be used by itself without constructing native admission,
-wallet or Guard resources. Supplying both engines requires the very same
+`Config.Metadata` and `Config.State` can be used by themselves without constructing
+native admission, wallet or Guard resources. Supplying multiple engines requires the very same
 snapshot pointer as well as matching network, profile, manifest and organization
 metadata. An equal manifest string cannot disguise different method maps.
-Both engines and every mounted alias share one recorder and one HTTP limit.
+All engines and every mounted alias share one recorder and one HTTP limit.
 The native-only constructor path retains its existing behavior.
 
 ## Operation and delivery
@@ -96,7 +97,11 @@ projecting output. Empty IP stays absent, and lower disclosure levels redact IP.
 
 Request limits stay at the engine's existing one MiB call and two MiB raw limits.
 Metadata applies its stricter one MiB envelope limit after the shared outer body
-read, and drops request metadata before typed acquisition.
+read, and drops request metadata before typed acquisition. State applies the
+same envelope limit only after family dispatch; enabling state does not reduce
+the native raw-transaction two MiB body limit. A3-backed state delivery rechecks
+its original SQL facts and numeric node ancestor before the final same-View
+check, under the original operation fence.
 A canonical escaped JSON ID can occupy almost six or twelve MiB respectively.
 The sealed response has a checked aggregate preflight and a sixteen MiB final
 wire ceiling, including newline. Only the known result/error branches are

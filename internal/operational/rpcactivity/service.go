@@ -19,17 +19,21 @@ import (
 	"privacy-proxy/internal/networkidentity"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/rpcengine"
+	"privacy-proxy/internal/rpcmethoddata"
 )
 
 type Config struct {
 	Engine   *rpcengine.Engine
 	Metadata *rpcengine.MetadataEngine
+	State    *rpcengine.StateEngine
 	Recorder *activitylog.Recorder
 	Network  networkidentity.Binding
 }
 type Service struct {
 	engine        *rpcengine.Engine
 	metadata      *rpcengine.MetadataEngine
+	state         *rpcengine.StateEngine
+	stateMethods  map[string]bool
 	recorder      *activitylog.Recorder
 	organizations []string
 	slots         chan struct{}
@@ -185,12 +189,20 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 	}
 	var result observedOperation
 	decoded := json.Unmarshal(raw, &route) == nil
-	if s.metadata != nil && (s.engine == nil || !decoded || route.Method != "eth_call" && route.Method != "eth_sendRawTransaction") {
+	stateMethod := route.Method
+	if canonical, known := rpcmethoddata.CanonicalBuiltin(stateMethod); known {
+		stateMethod = canonical
+	}
+	if decoded && s.state != nil && s.stateMethods[stateMethod] {
+		result.state = s.state.QueryObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, raw)
+	} else if s.metadata != nil && (s.engine == nil || !decoded || route.Method != "eth_call" && route.Method != "eth_sendRawTransaction") {
 		result.metadata = s.metadata.QueryObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, raw)
-	} else if decoded && route.Method == "eth_sendRawTransaction" {
+	} else if s.engine != nil && decoded && route.Method == "eth_sendRawTransaction" {
 		result.native = s.engine.SubmitRawObserved(ctx, assertion, org, raw)
-	} else {
+	} else if s.engine != nil {
 		result.native = s.engine.CallObserved(ctx, assertion, org, raw)
+	} else {
+		result.state = s.state.QueryObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, raw)
 	}
 	raw = nil
 	assertion = ""

@@ -38,6 +38,7 @@ type metadataNode struct {
 	result      map[string]any
 	chain       string
 	genesis     *types.Header
+	headers     map[string]*types.Header // Explicit finite state-consumer ancestor fixtures.
 	server      *httptest.Server
 }
 
@@ -60,15 +61,24 @@ func newMetadataNode(t *testing.T) *metadataNode {
 		n.credentials = append(n.credentials, r.Header.Get("Idempotency-Key"))
 		result, ok := n.result[c.Method]
 		chain, genesis := n.chain, n.genesis
+		var selectedHeader *types.Header
+		if len(c.Params) == 1 {
+			var selector string
+			_ = json.Unmarshal(c.Params[0], &selector)
+			selectedHeader = n.headers[selector]
+		}
 		n.mu.Unlock()
 		switch c.Method {
 		case "eth_chainId":
 			result = chain
 		case "eth_getHeaderByNumber":
-			if len(c.Params) != 1 || string(c.Params[0]) != `"0x0"` {
+			if len(c.Params) != 1 || string(c.Params[0]) != `"0x0"` && selectedHeader == nil {
 				t.Error("metadata genesis selector changed")
 			}
 			result = genesis
+			if selectedHeader != nil {
+				result = selectedHeader
+			}
 		default:
 			if !ok {
 				t.Error("metadata leaked generic method", c.Method)

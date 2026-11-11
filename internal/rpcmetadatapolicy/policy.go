@@ -158,51 +158,16 @@ func Bind(d *Definition, manifest Digest, methodCatalogVersion string, methods [
 	if d == nil || d.digest == (Digest{}) || manifest == (Digest{}) || manifest != d.manifest || !validText(methodCatalogVersion, 128) || len(methods) == 0 {
 		return nil, ErrInvalid
 	}
-	owned := make([]Method, len(methods))
-	index := make(map[string]int, len(methods))
-	for i, m := range methods {
-		if !methodName.MatchString(m.Name) || !methodName.MatchString(m.Canonical) {
-			return nil, ErrInvalid
-		}
-		if _, duplicate := index[m.Name]; duplicate {
-			return nil, ErrInvalid
-		}
-		index[m.Name] = i
-		m.RequiredClaims = append([]string{}, m.RequiredClaims...)
-		sort.Strings(m.RequiredClaims)
-		for j, claim := range m.RequiredClaims {
-			if claim != "admin" && claim != "deploy" && claim != "upgrade" || j > 0 && m.RequiredClaims[j-1] == claim {
-				return nil, ErrInvalid
-			}
-		}
-		owned[i] = m
+	owned, methodDigest, err := BindMethods(methodCatalogVersion, methods)
+	if err != nil {
+		return nil, err
 	}
-	for _, m := range owned {
-		i, known := index[m.Canonical]
-		if !known || owned[i].Canonical != m.Canonical {
-			return nil, ErrInvalid
-		}
-	}
-	sort.Slice(owned, func(i, j int) bool { return owned[i].Name < owned[j].Name })
-	h := sha256.New()
-	_, _ = h.Write([]byte("ops-rpc-metadata-method-set/v1\x00{\"version\":"))
-	version, _ := json.Marshal(methodCatalogVersion)
-	_, _ = h.Write(version)
-	_, _ = h.Write([]byte(",\"methods\":["))
 	metadata := []Method{}
-	for i, m := range owned {
-		if i != 0 {
-			_, _ = h.Write([]byte{','})
-		}
-		encoded, _ := json.Marshal(m)
-		_, _ = h.Write(encoded)
-		if metadataNames[m.Canonical] {
-			metadata = append(metadata, m)
+	for _, method := range owned {
+		if metadataNames[method.Canonical] {
+			metadata = append(metadata, method)
 		}
 	}
-	_, _ = h.Write([]byte("]}"))
-	var methodDigest Digest
-	copy(methodDigest[:], h.Sum(nil))
 	effective := sha256.New()
 	_, _ = effective.Write([]byte("ops-rpc-metadata-permission/v1\x00"))
 	_, _ = effective.Write(manifest[:])
@@ -211,6 +176,57 @@ func Bind(d *Definition, manifest Digest, methodCatalogVersion string, methods [
 	var digest Digest
 	copy(digest[:], effective.Sum(nil))
 	return &Policy{digest, methodDigest, d, metadata}, nil
+}
+
+// BindMethods binds the entire actual method catalog without granting any
+// method or anonymous access. It preserves the original metadata digest domain
+// so all previously accepted permission bytes remain stable.
+func BindMethods(methodCatalogVersion string, methods []Method) ([]Method, Digest, error) {
+	if !validText(methodCatalogVersion, 128) || len(methods) == 0 {
+		return nil, Digest{}, ErrInvalid
+	}
+	owned := make([]Method, len(methods))
+	index := make(map[string]int, len(methods))
+	for i, m := range methods {
+		if !methodName.MatchString(m.Name) || !methodName.MatchString(m.Canonical) {
+			return nil, Digest{}, ErrInvalid
+		}
+		if _, duplicate := index[m.Name]; duplicate {
+			return nil, Digest{}, ErrInvalid
+		}
+		index[m.Name] = i
+		m.RequiredClaims = append([]string{}, m.RequiredClaims...)
+		sort.Strings(m.RequiredClaims)
+		for j, claim := range m.RequiredClaims {
+			if claim != "admin" && claim != "deploy" && claim != "upgrade" || j > 0 && m.RequiredClaims[j-1] == claim {
+				return nil, Digest{}, ErrInvalid
+			}
+		}
+		owned[i] = m
+	}
+	for _, m := range owned {
+		i, known := index[m.Canonical]
+		if !known || owned[i].Canonical != m.Canonical {
+			return nil, Digest{}, ErrInvalid
+		}
+	}
+	sort.Slice(owned, func(i, j int) bool { return owned[i].Name < owned[j].Name })
+	h := sha256.New()
+	_, _ = h.Write([]byte("ops-rpc-metadata-method-set/v1\x00{\"version\":"))
+	version, _ := json.Marshal(methodCatalogVersion)
+	_, _ = h.Write(version)
+	_, _ = h.Write([]byte(",\"methods\":["))
+	for i, m := range owned {
+		if i != 0 {
+			_, _ = h.Write([]byte{','})
+		}
+		encoded, _ := json.Marshal(m)
+		_, _ = h.Write(encoded)
+	}
+	_, _ = h.Write([]byte("]}"))
+	var methodDigest Digest
+	copy(methodDigest[:], h.Sum(nil))
+	return owned, methodDigest, nil
 }
 
 func (p *Policy) Digest() Digest {
