@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OPS demo wallet</title><link rel="stylesheet" href="/picker.css"><script type="module" src="/picker.js"></script></head>
+<body><main><p class="label">ISOLATED DEMO · PUBLIC TEST IDENTITIES</p><h1>Choose a demo identity</h1>
+<p>Start a Privado login in OPS, select the matching demo profile, and copy its request URI here. This wallet generates a real proof. Confirm the verified identity in the original OPS tab.</p>
+<p class="warning">These identities use public test keys. This service belongs only in the local demo; it cannot authenticate real people.</p>
+<form id="proof"><label for="persona">Demo identity</label><select id="persona" name="persona"><option value="admin">Admin</option><option value="deployer">Deployer</option><option value="reader" selected>Reader</option><option value="outsider">Outsider · no organization permissions</option></select>
+<label for="request">OPS request URI</label><input id="request" name="request" type="url" maxlength="400" autocomplete="off" required placeholder="https://localhost:8443/api/v2/auth/privado/requests/…">
+<button id="submit" type="submit">Generate and submit proof</button></form>
+<p id="status" role="status" aria-live="polite">Ready. Proof generation can take several seconds.</p>
+<details><summary>What this demo checks</summary><p>The wallet creates actual AuthV2 and role proofs using pinned SDK and circuit files. OPS verifies them against this demo issuer’s identity-state service, records its own session, and asks you to confirm. This wallet never issues an OPS token or browser session.</p><p>The application’s Reth node, indexer and creation observer run separately. The local identity-state service is an explicit test fixture; it does not represent a hosted Privado issuer or Azure tenant.</p></details>
+</main></body></html>

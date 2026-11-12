@@ -1,0 +1,4 @@
+:root { color-scheme: light; font: 16px/1.5 system-ui,sans-serif; color: #182c3e; background: #edf3f6; }
+body { margin: 0; padding: 40px 20px; } main { max-width: 680px; margin: auto; padding: 36px; background: white; border-radius: 12px; box-shadow: 0 3px 20px #1232; }
+h1 { margin: 8px 0; line-height: 1.2; }.label { color: #486578; font-size: 12px; font-weight: 700; letter-spacing: .08em; }.warning { border-left: 4px solid #b97b09; padding: 10px 16px; background: #fff8df; }
+label { display: block; font-weight: 650; margin: 22px 0 6px; } select,input,button { box-sizing: border-box; width: 100%; font: inherit; border: 1px solid #9aafbe; border-radius: 6px; padding: 11px; }button { cursor: pointer; margin-top: 20px; background: #174d6e; color: white; border: 0; }button:disabled { opacity: .6; cursor: wait; }#status { padding: 12px; background: #eaf3fa; }details { margin-top: 28px; }summary { cursor: pointer; }
