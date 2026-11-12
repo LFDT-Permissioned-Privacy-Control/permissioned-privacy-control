@@ -190,7 +190,7 @@ func (s *Service) buildPrivadoAccess(proof *privado.VerifiedProof, originalNotAf
 		return nil, ErrUnauthorized
 	}
 	m := proof.Metadata()
-	_, digest, ok := s.privadoProfile(m.ProfileID)
+	profile, digest, ok := s.privadoProfile(m.ProfileID)
 	if !ok || digest != m.ProfileDigest {
 		return nil, ErrUnauthorized
 	}
@@ -212,6 +212,11 @@ func (s *Service) buildPrivadoAccess(proof *privado.VerifiedProof, originalNotAf
 	}
 	notAfter := min(m.NotAfter, originalNotAfter)
 	claims := identity.AccessClaims{Issuer: s.issuer.Issuer, Audience: s.issuer.Audience, Subject: actor, ID: jti, IssuedAt: now.Unix(), NotBefore: now.Unix(), Expires: expires, PrincipalKind: identity.Human, SourceProfile: m.ProfileID, SourceProfileDigest: m.ProfileDigest, IdentityAuthority: "privado", SourceSubject: m.HolderDID, SourceVerifiedAt: m.SourceVerifiedAt, ClaimsAsOf: m.ClaimsAsOf, SourceNotAfter: &notAfter, Facts: proof.Facts()}
+	// Auth-only proves a holder identity, without a credential expiry claim.
+	// Its access lifetime is still clipped by every proof/flow bound above.
+	if profile.Kind == identity.PrivadoIdentity {
+		claims.SourceNotAfter = nil
+	}
 	access, e := s.signAccessClaims(claims, now)
 	if e != nil {
 		return nil, e
