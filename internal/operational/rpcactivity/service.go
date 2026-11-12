@@ -37,6 +37,7 @@ type Service struct {
 	stateMethods   map[string]bool
 	traceMethods   map[string]bool
 	minedMethods   map[string]bool
+	utilityMethods map[string]bool
 	history        *rpcengine.HistoryEngine
 	historyMethods map[string]bool
 	recorder       *activitylog.Recorder
@@ -84,6 +85,19 @@ func newNativeService(c Config) (*Service, error) {
 			minedNames[name] = true
 		}
 	}
+	utility := c.Engine.UtilityOperationBinding()
+	utilityNames := map[string]bool{}
+	if len(utility.Methods) > 0 {
+		if utility.Profile != binding.Profile || utility.ManifestDigest != binding.ManifestDigest || utility.NetworkKey != binding.NetworkKey || utility.ChainID != binding.ChainID || utility.Environment != binding.Environment || !slices.Equal(utility.OrganizationIDs, binding.OrganizationIDs) {
+			return nil, ErrInvalid
+		}
+		for _, name := range utility.Methods {
+			if !activitylog.ValidMethod(name) {
+				return nil, ErrInvalid
+			}
+			utilityNames[name] = true
+		}
+	}
 	methods := c.Recorder.Methods()
 	for _, label := range labels {
 		if !slices.Contains(methods, label) {
@@ -100,7 +114,12 @@ func newNativeService(c Config) (*Service, error) {
 			return nil, ErrInvalid
 		}
 	}
-	return &Service{engine: c.Engine, minedMethods: minedNames, traceMethods: traceNames, recorder: c.Recorder, organizations: slices.Clone(binding.OrganizationIDs), slots: make(chan struct{}, n.InFlight)}, nil
+	for name := range utilityNames {
+		if !slices.Contains(methods, name) {
+			return nil, ErrInvalid
+		}
+	}
+	return &Service{engine: c.Engine, utilityMethods: utilityNames, minedMethods: minedNames, traceMethods: traceNames, recorder: c.Recorder, organizations: slices.Clone(binding.OrganizationIDs), slots: make(chan struct{}, n.InFlight)}, nil
 }
 func (s *Service) Handler(selectedOrg string) (http.Handler, error) {
 	if s == nil || selectedOrg != "" && !slices.Contains(s.organizations, selectedOrg) {
@@ -234,7 +253,9 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 	if canonical, known := rpcmethoddata.CanonicalBuiltin(stateMethod); known {
 		stateMethod = canonical
 	}
-	if decoded && s.engine != nil && s.minedMethods[stateMethod] {
+	if decoded && s.engine != nil && s.utilityMethods[stateMethod] {
+		result.trace = s.engine.UtilityObserved(ctx, assertion, org, raw)
+	} else if decoded && s.engine != nil && s.minedMethods[stateMethod] {
 		result.mined = s.engine.TraceTransactionObserved(ctx, assertion, org, raw)
 	} else if decoded && s.engine != nil && s.traceMethods[stateMethod] {
 		result.trace = s.engine.TraceCallObserved(ctx, assertion, org, raw)

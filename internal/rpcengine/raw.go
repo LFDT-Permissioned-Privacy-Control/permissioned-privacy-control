@@ -25,6 +25,7 @@ import (
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/policycore"
 	"privacy-proxy/internal/rpcexecution"
+	"privacy-proxy/internal/runtimepolicy"
 	"privacy-proxy/internal/transactioninput"
 	"privacy-proxy/internal/walletadapter"
 	"privacy-proxy/internal/walletops"
@@ -72,6 +73,7 @@ type RawOptions struct {
 	Clock                identity.Clock
 	Associations         creationfacts.CurrentAddressReader
 	AssociationBinding   creationfacts.AddressReadBinding
+	Utilities            *ExecutionUtilityOptions
 	CurrentAddressLimits NativeAddressLimits
 }
 
@@ -91,13 +93,23 @@ type rawEngine struct {
 }
 
 func neededRawRefs(snapshot *policybundle.CatalogSnapshot) map[string][]string {
+	return neededRawRefsNode(snapshot, false)
+}
+func neededRawRefsNode(snapshot *policybundle.CatalogSnapshot, node bool) map[string][]string {
 	out := map[string][]string{}
 	for _, org := range snapshot.Organizations() {
 		catalog, _ := snapshot.NativeCatalog(org.ID)
 		seen := map[string]bool{}
 		for group := range catalog.Groups {
 			g, _ := snapshot.Group(org.ID, group)
-			if !slices.Contains(g.AllowedMethods, "eth_sendTransaction") {
+			allowed := slices.Contains(g.AllowedMethods, "eth_sendTransaction")
+			if node {
+				for _, name := range g.AllowedMethods {
+					decl, ok := snapshot.Method(name)
+					allowed = allowed || ok && decl.Canonical == "eth_sendTransaction"
+				}
+			}
+			if !allowed {
 				continue
 			}
 			ref := ""
@@ -219,7 +231,7 @@ func newRawConfigured(snapshot *policybundle.CatalogSnapshot, options RawOptions
 	if err != nil || walletMeta.Namespace != namespace || walletMeta.ExpectedState != options.WalletState {
 		return bad()
 	}
-	refs := neededRawRefs(snapshot)
+	refs := neededRawRefsNode(snapshot, options.Utilities != nil && options.Utilities.NodeSigning)
 	if len(refs) != len(options.RawNodes) {
 		return bad()
 	}
@@ -332,6 +344,12 @@ func newRawConfigured(snapshot *policybundle.CatalogSnapshot, options RawOptions
 			return bad()
 		}
 	}
+	if options.Utilities != nil {
+		if err := e.initExecutionUtilities(*options.Utilities); err != nil {
+			e.Close()
+			return bad()
+		}
+	}
 	// Source bindings and aggregate budgets are checked before producer startup.
 	for org, needed := range refs {
 		n := options.RawNodes[org]
@@ -407,7 +425,21 @@ func (e *Engine) SubmitRaw(ctx context.Context, assertion, explicitOrg string, r
 }
 
 func (e *Engine) submitRaw(ctx context.Context, assertion, explicitOrg string, raw []byte, observation *OperationResult) Response {
-	ctx, cancel, operationErr := e.startNative(ctx, observation)
+	return e.submitRawAuthorized(ctx, assertion, explicitOrg, raw, observation, nil)
+}
+
+type rawAuthorization struct {
+	view   *runtimepolicy.View
+	wallet nativeadmission.WalletSnapshot
+	method string
+}
+
+func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg string, raw []byte, observation *OperationResult, authorized *rawAuthorization) Response {
+	cancel := func() {}
+	var operationErr error
+	if authorized == nil {
+		ctx, cancel, operationErr = e.startNative(ctx, observation)
+	}
 	if operationErr != nil {
 		return responseError(nil, -32002, "unavailable")
 	}
@@ -435,7 +467,16 @@ func (e *Engine) submitRaw(ctx context.Context, assertion, explicitOrg string, r
 	if ctx.Err() != nil || e.raw.closed.Load() {
 		return responseError(req.id, -32002, "unavailable")
 	}
-	view, err := e.factory.Build(assertion)
+	var view *runtimepolicy.View
+	var err error
+	if authorized != nil {
+		view = authorized.view
+		if view == nil || view.RequireLive() != nil || observation == nil || observation.fence == nil || !observation.fence.live() {
+			return denied(req.id)
+		}
+	} else {
+		view, err = e.factory.Build(assertion)
+	}
 	if err != nil {
 		return observation.failure(UnauthenticatedCompletion, denied(req.id))
 	}
@@ -475,10 +516,18 @@ func (e *Engine) submitRaw(ctx context.Context, assertion, explicitOrg string, r
 	}
 	observation.selectOrg(orgID)
 	org, _ := view.Org(orgID)
-	if !methodAuthorized(e.snapshot, org, "eth_sendTransaction") {
+	name := "eth_sendTransaction"
+	if authorized != nil {
+		name = authorized.method
+	}
+	allowed := methodAuthorized(e.snapshot, org, name)
+	if authorized != nil {
+		allowed = e.utilityAllowed(org, name)
+	}
+	if !allowed {
 		return observation.failure(DeniedCompletion, denied(req.id))
 	}
-	ref, err := org.SelectCredentialRef("eth_sendTransaction")
+	ref, err := org.SelectCredentialRef(name)
 	if err != nil {
 		return observation.failure(DeniedCompletion, denied(req.id))
 	}
@@ -492,6 +541,9 @@ func (e *Engine) submitRaw(ctx context.Context, assertion, explicitOrg string, r
 	wallet, err := e.raw.wallets.Load(ctx, view.ActorID())
 	if err != nil || wallet.ActorID() != view.ActorID() {
 		return responseError(req.id, -32002, "unavailable")
+	}
+	if authorized != nil && (authorized.wallet.ActorID() != view.ActorID() || wallet.Version() != authorized.wallet.Version() || !wallet.Contains(tx.Signer())) {
+		return observation.failure(DeniedCompletion, denied(req.id))
 	}
 	if len(entries) > 0 && (!wallet.Contains(tx.Signer()) || len(tx.Input()) == 0) {
 		return observation.failure(DeniedCompletion, denied(req.id))

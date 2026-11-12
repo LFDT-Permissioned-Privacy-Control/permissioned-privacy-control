@@ -181,7 +181,7 @@ func (e *MinedExecution) RequireEvaluationCurrent(ctx context.Context, observer 
 	if err := minedCanonical(ctx, p.source, p.header); err != nil {
 		return err
 	}
-	if observer != (creationfacts.Header{}) && observer != p.header {
+	if observer != (creationfacts.Header{}) && !minedHeaderMatches(p.header, observer) {
 		return minedCanonical(ctx, p.source, observer)
 	}
 	return ctx.Err()

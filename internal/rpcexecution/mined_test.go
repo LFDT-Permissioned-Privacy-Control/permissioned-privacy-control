@@ -413,3 +413,28 @@ func TestMinedActualTLSReplayContextAndExplicitZeroPosition(t *testing.T) {
 		})
 	}
 }
+
+func TestMinedPartialObserverCanonicalMetadata(t *testing.T) {
+	f := newMinedFixture(t, 2, false, false)
+	p, err := f.client.AcquireMinedEnvelope(t.Context(), f.tx.Hash(), DefaultMinedTraceLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := p.AcquireTrace(t.Context(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := creationfacts.Header{Number: f.header.Number.Uint64(), Hash: f.header.Hash()}
+	if e.RequireEvaluationCurrent(t.Context(), partial) != nil {
+		t.Fatal("owned observer number/hash wrongly required absent parent/time")
+	}
+	cp, _ := e.DeliveryCheckpoint()
+	if cp.RequireCurrent(t.Context(), partial) != nil {
+		t.Fatal("same partial observer delivery point failed")
+	}
+	wrong := partial
+	wrong.Hash = common.Hash{9}
+	if cp.RequireCurrent(t.Context(), wrong) == nil {
+		t.Fatal("foreign observer point accepted")
+	}
+}

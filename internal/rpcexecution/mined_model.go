@@ -207,7 +207,7 @@ func (p *MinedTraceCheckpoint) RequireCurrent(ctx context.Context, observer crea
 	if err := minedCanonical(ctx, p.source, p.header); err != nil {
 		return err
 	}
-	if observer != (creationfacts.Header{}) && observer != p.header {
+	if observer != (creationfacts.Header{}) && !minedHeaderMatches(p.header, observer) {
 		if err := minedCanonical(ctx, p.source, observer); err != nil {
 			return err
 		}

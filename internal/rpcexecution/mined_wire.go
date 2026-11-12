@@ -131,7 +131,7 @@ func minedCanonical(ctx context.Context, c *Client, h creationfacts.Header) erro
 		return err
 	}
 	actual, err := decodeQualifiedHeader(raw)
-	if err != nil || actual != h {
+	if err != nil || !minedHeaderMatches(actual, h) {
 		return failure(InvalidEvidence)
 	}
 	return ctx.Err()
@@ -191,4 +191,10 @@ func decodeMinedBlock(raw []byte, pos includedPosition, wanted common.Hash, l Hi
 		return nil, zero, 0, failure(InvalidEvidence)
 	}
 	return &full, h, count, nil
+}
+
+// Observer readers own number/hash provenance; optional parent/time fields must
+// match when present. The actual node header is still fully hash-recomputed.
+func minedHeaderMatches(actual, expected creationfacts.Header) bool {
+	return actual.Number == expected.Number && actual.Hash == expected.Hash && (expected.Parent == (common.Hash{}) || actual.Parent == expected.Parent) && (expected.Timestamp == 0 || actual.Timestamp == expected.Timestamp)
 }
