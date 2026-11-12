@@ -74,7 +74,7 @@ func NewExplorer(c ExplorerConfig) (*ExplorerEngine, error) {
 		Version    string
 		Manifest   policybundle.Digest
 		Operations []activitymethoddata.Operation
-	}{"ops-explorer-current-read/v1", c.Snapshot.Metadata().ManifestDigest, activitymethoddata.Operations()})
+	}{"ops-explorer-current-read/v2", c.Snapshot.Metadata().ManifestDigest, activitymethoddata.Operations()})
 	d := sha256.Sum256(raw)
 	return &ExplorerEngine{config: c, metadata: metadata, cursor: sealed, policy: policybundle.Digest("sha256:" + hex.EncodeToString(d[:]))}, nil
 }

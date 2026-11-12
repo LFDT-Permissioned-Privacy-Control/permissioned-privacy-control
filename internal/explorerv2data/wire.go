@@ -13,6 +13,7 @@ type OpaqueRowID = string
 type AddressMetadata = map[string]string
 
 const Population = "LIVE_RETAINED_INDEXED_ROWS_CURRENT_RIGHTS"
+const ObservedVisiblePage = "OBSERVED_VISIBLE_PAGE"
 
 type Page[T any] struct {
 	Items []T      `json:"items"`
@@ -25,6 +26,7 @@ type PageInfo struct {
 	ScanLimited bool      `json:"scanLimited"`
 	Total       *Quantity `json:"total,omitempty"`
 	Population  string    `json:"population"`
+	Coverage    string    `json:"coverage,omitempty"`
 }
 
 type Block struct {
@@ -169,16 +171,21 @@ type AddressStats struct {
 }
 
 type ChainStats struct {
-	TotalBlocks       *Quantity `json:"totalBlocks,omitempty"`
-	TotalTransactions *Quantity `json:"totalTransactions,omitempty"`
-	TotalAddresses    *Quantity `json:"totalAddresses,omitempty"`
-	TotalTokens       *Quantity `json:"totalTokens,omitempty"`
-	AvgBlockTime      *Decimal  `json:"avgBlockTime,omitempty"`
-	PrivacyEnabled    bool      `json:"privacyEnabled"`
+	TotalBlocks                  *Quantity `json:"totalBlocks,omitempty"`
+	TotalTransactions            *Quantity `json:"totalTransactions,omitempty"`
+	TotalAddresses               *Quantity `json:"totalAddresses,omitempty"`
+	TotalTokens                  *Quantity `json:"totalTokens,omitempty"`
+	AvgBlockTime                 *Decimal  `json:"avgBlockTime,omitempty"`
+	PrivacyEnabled               bool      `json:"privacyEnabled"`
+	ObservedTransactions         Quantity  `json:"observedTransactions"`
+	ObservedBlocks               Quantity  `json:"observedBlocks"`
+	ObservedParticipantAddresses Quantity  `json:"observedParticipantAddresses"`
+	Page                         PageInfo  `json:"page"`
 }
 
 type TxHistoryPoint struct {
 	Timestamp Quantity `json:"timestamp"`
+	Count     Quantity `json:"count"`
 }
 
 type Contract struct {

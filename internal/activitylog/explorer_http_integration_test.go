@@ -52,8 +52,10 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	txs := []*types.Transaction{coin, f.HistoryTransaction(t, 2, 1, target)}
-	node := f.NewHistoryNode(t, txs, [][]*types.Log{{}, {}})
+	listed := f.HistoryTransaction(t, 2, 1, target)
+	hidden := f.HistoryTransaction(t, 3, 2, common.HexToAddress("0x987654"))
+	txs := []*types.Transaction{coin, hidden, listed}
+	node := f.NewHistoryNode(t, txs, [][]*types.Log{{}, {}, {}})
 	network := node.Network()
 	var instant atomic.Int64
 	instant.Store(f.Now)
@@ -95,7 +97,7 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 	}
 	key, _ := nb.Key()
 	recipients, digest, _ := a.NormalizeRecipients([]string{f.Actor(f.Subject)})
-	scope := a.Scope{Network: key, Hash: txs[1].Hash(), Actor: f.Actor(f.AdminSubject), Organization: f.Org, State: state}
+	scope := a.Scope{Network: key, Hash: listed.Hash(), Actor: f.Actor(f.AdminSubject), Organization: f.Org, State: state}
 	share := a.Share{Network: key, Hash: scope.Hash, Actor: scope.Actor, Organization: scope.Organization, Recipients: recipients, RecipientDigest: digest, DeclaredAt: clock(), Witness: a.Witness{AnchorHash: node.Hash(), AnchorNumber: 1, AnchorTimestamp: uint64(f.Now), ManifestDigest: a.Digest{2}, WalletVersion: a.Digest{3}, WalletEvidenceAt: clock()}}
 	receipt, err := app.WithRawTransaction(ctx, scope, func(tx a.RawTx) (a.CommitKind, error) { return a.CommitAllow, tx.PutShare(share) })
 	if err != nil || !receipt.Committed {
@@ -146,7 +148,7 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	index, indexOwner, binding := actualExplorerIndex(t, d.owner, d.ownerDSN, network)
-	if _, err = indexOwner.Exec(ctx, `UPDATE blocks SET hash=$1 WHERE number=1`, strings.ToLower(node.Hash().Hex())); err != nil {
+	if _, err = indexOwner.Exec(ctx, `UPDATE blocks SET hash=$1,gas_used=$2,transaction_count=$3 WHERE number=1`, strings.ToLower(node.Hash().Hex()), 21000*len(txs), len(txs)); err != nil {
 		t.Fatal(err)
 	}
 	for i, tx := range txs {
@@ -154,7 +156,7 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = indexOwner.Exec(ctx, `INSERT INTO transactions(hash,block_number,tx_index,from_address,to_address,value,gas_used,gas_price,status,input_data,nonce)VALUES($1,1,$2,$3,$4,$5,21000,1,1,$6,$7)`, strings.ToLower(tx.Hash().Hex()), i, strings.ToLower(sender.Hex()), strings.ToLower(target.Hex()), tx.Value().String(), "0x"+common.Bytes2Hex(tx.Data()), int64(tx.Nonce()))
+		_, err = indexOwner.Exec(ctx, `INSERT INTO transactions(hash,block_number,tx_index,from_address,to_address,value,gas_used,gas_price,status,input_data,nonce)VALUES($1,1,$2,$3,$4,$5,21000,1,1,$6,$7)`, strings.ToLower(tx.Hash().Hex()), i, strings.ToLower(sender.Hex()), strings.ToLower(tx.To().Hex()), tx.Value().String(), "0x"+common.Bytes2Hex(tx.Data()), int64(tx.Nonce()))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -233,7 +235,7 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 			ScanLimited bool
 		}
 	}
-	if json.Unmarshal(first.body, &page) != nil || len(page.Items) != 1 || page.Items[0].Hash != strings.ToLower(txs[1].Hash().Hex()) || page.Items[0].Value == nil || *page.Items[0].Value != "7" || page.Page.Next == "" {
+	if json.Unmarshal(first.body, &page) != nil || len(page.Items) != 1 || page.Items[0].Hash != strings.ToLower(listed.Hash().Hex()) || page.Items[0].Value == nil || *page.Items[0].Value != "7" || page.Page.Next == "" {
 		t.Fatal("lossless genuine listed row and continuation", string(first.body))
 	}
 	next := <-get("/api/v2/explorer/transactions?limit=1&cursor=" + url.QueryEscape(page.Page.Next))
@@ -241,9 +243,67 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 		t.Fatal("actual current wallet row next", next.status, string(next.body))
 	}
 	filtered := <-get("/api/v2/explorer/transactions?category=coin_transfer&limit=10")
-	if filtered.status != 200 || !bytes.Contains(filtered.body, []byte(strings.ToLower(coin.Hash().Hex()))) || bytes.Contains(filtered.body, []byte(strings.ToLower(txs[1].Hash().Hex()))) {
+	if filtered.status != 200 || !bytes.Contains(filtered.body, []byte(strings.ToLower(coin.Hash().Hex()))) || bytes.Contains(filtered.body, []byte(strings.ToLower(listed.Hash().Hex()))) {
 		t.Fatal("actual native coin filter omitted wallet row or included contract call", filtered.status, string(filtered.body))
 	}
+	// These are aggregates of the emitted page, never the raw cohort. The hidden
+	// transaction is between the two visible transactions in descending order.
+	var stats struct {
+		ObservedTransactions, ObservedBlocks, ObservedParticipantAddresses string
+		Page                                                               struct {
+			Next     string
+			HasMore  *bool
+			Coverage string
+		}
+	}
+	firstStats := <-get("/api/v2/explorer/stats?limit=1")
+	if firstStats.status != 200 || json.Unmarshal(firstStats.body, &stats) != nil || stats.ObservedTransactions != "1" || stats.ObservedBlocks != "1" || stats.Page.Coverage != "OBSERVED_VISIBLE_PAGE" || stats.Page.Next == "" || bytes.Contains(firstStats.body, []byte("totalTransactions")) {
+		t.Fatal("checked observed page stats", firstStats.status, string(firstStats.body))
+	}
+	statsCursor := stats.Page.Next
+	nextStats := <-get("/api/v2/explorer/stats?limit=1&cursor=" + url.QueryEscape(statsCursor))
+	stats = struct {
+		ObservedTransactions, ObservedBlocks, ObservedParticipantAddresses string
+		Page                                                               struct {
+			Next     string
+			HasMore  *bool
+			Coverage string
+		}
+	}{}
+	if nextStats.status != 200 || json.Unmarshal(nextStats.body, &stats) != nil || stats.ObservedTransactions != "1" || stats.Page.Next != "" || stats.Page.HasMore == nil || *stats.Page.HasMore {
+		t.Fatal("stats continuation skipped or counted hidden/lookahead row", nextStats.status, string(nextStats.body))
+	}
+	var chart struct {
+		Items []struct{ Timestamp, Count string }
+		Page  struct {
+			Next     string
+			Coverage string
+		}
+	}
+	chartPage := <-get("/api/v2/explorer/stats/tx-history?interval=hour&limit=1")
+	if chartPage.status != 200 || json.Unmarshal(chartPage.body, &chart) != nil || len(chart.Items) != 1 || chart.Items[0].Count != "1" || chart.Items[0].Timestamp != new(big.Int).SetInt64(f.Now-f.Now%3600).String() || chart.Page.Coverage != "OBSERVED_VISIBLE_PAGE" || chart.Page.Next == "" {
+		t.Fatal("checked bucket without lookahead", chartPage.status, string(chartPage.body))
+	}
+	chartNext := <-get("/api/v2/explorer/stats/tx-history?interval=hour&limit=1&cursor=" + url.QueryEscape(chart.Page.Next))
+	chart.Items = nil
+	if chartNext.status != 200 || json.Unmarshal(chartNext.body, &chart) != nil || len(chart.Items) != 1 || chart.Items[0].Count != "1" {
+		t.Fatal("bucket continues on next visible page", chartNext.status, string(chartNext.body))
+	}
+	wholeChart := <-get("/api/v2/explorer/stats/tx-history?interval=day&limit=10")
+	if wholeChart.status != 200 || json.Unmarshal(wholeChart.body, &chart) != nil || len(chart.Items) != 1 || chart.Items[0].Count != "2" {
+		t.Fatal("hidden row contributed to chart", wholeChart.status, string(wholeChart.body))
+	}
+	originalToken := tok
+	tok = f.Token(t, snapshot, f.AdminSubject, "Local")
+	emptyStats := <-get("/api/v2/explorer/stats?limit=10")
+	if emptyStats.status != 200 || json.Unmarshal(emptyStats.body, &stats) != nil || stats.ObservedTransactions != "0" || stats.ObservedBlocks != "0" || stats.ObservedParticipantAddresses != "0" {
+		t.Fatal("all-hidden cohort did not remain empty", emptyStats.status, string(emptyStats.body))
+	}
+	emptyChart := <-get("/api/v2/explorer/stats/tx-history?interval=day&limit=10")
+	if emptyChart.status != 200 || json.Unmarshal(emptyChart.body, &chart) != nil || len(chart.Items) != 0 {
+		t.Fatal("all-hidden chart exposed buckets", emptyChart.status, string(emptyChart.body))
+	}
+	tok = originalToken
 	// The same cursor is bound to the original JWT and the captured upper.
 	node.Reorg(true)
 	changed := <-get("/api/v2/explorer/transactions?limit=1&cursor=" + url.QueryEscape(page.Page.Next))

@@ -131,11 +131,11 @@ func parseExplorerRequest(path, rawQuery string) (explorerRequest, error) {
 		return r, errExplorerRequest
 	}
 	allowed := map[string]bool{}
-	if r.collection {
+	if r.collection || label == "explorer.stats" {
 		allowed["limit"] = true
 		allowed["cursor"] = true
 	}
-	if r.query.Family == explorerquery.Transactions {
+	if r.query.Family == explorerquery.Transactions && label != "explorer.stats" && label != "explorer.tx_history" {
 		allowed["category"] = true
 	}
 	if r.query.Family == explorerquery.Logs {

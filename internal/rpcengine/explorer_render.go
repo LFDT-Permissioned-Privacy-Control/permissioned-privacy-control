@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math/big"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -872,29 +873,7 @@ func (x *explorerRender) render(data explorerquery.Data, count int) ([]byte, err
 		}
 	}
 	request := x.result.request
-	if request.operation.Label == "explorer.stats" {
-		return json.Marshal(wire.ChainStats{PrivacyEnabled: true})
-	}
-	if request.operation.Label == "explorer.tx_history" {
-		points := []wire.TxHistoryPoint{}
-		seen := map[string]bool{}
-		for _, item := range items {
-			tx, ok := item.(wire.Transaction)
-			if !ok || tx.BlockTimestamp == nil {
-				continue
-			}
-			s := string(*tx.BlockTimestamp)
-			if !seen[s] {
-				points = append(points, wire.TxHistoryPoint{Timestamp: *tx.BlockTimestamp})
-				seen[s] = true
-			}
-		}
-		items = make([]any, len(points))
-		for i, p := range points {
-			items[i] = p
-		}
-	}
-	if !request.collection {
+	if !request.collection && request.operation.Label != "explorer.stats" {
 		if len(items) == 0 {
 			return []byte("null"), nil
 		}
@@ -920,5 +899,82 @@ func (x *explorerRender) render(data explorerquery.Data, count int) ([]byte, err
 		}
 		page.Next = &next
 	}
+	if request.operation.Label == "explorer.stats" || request.operation.Label == "explorer.tx_history" {
+		page.Coverage = wire.ObservedVisiblePage
+		if request.operation.Label == "explorer.stats" {
+			stats, err := observedExplorerStats(items, page)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(stats)
+		}
+		points, err := observedExplorerHistory(items, request.interval)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(wire.Page[wire.TxHistoryPoint]{Items: points, Page: page})
+	}
 	return json.Marshal(wire.Page[any]{Items: items, Page: page})
+}
+
+// Aggregates describe only the emitted visible transaction page, after its
+// lookahead was removed. They do not certify an index or all-history total.
+func observedExplorerStats(items []any, page wire.PageInfo) (wire.ChainStats, error) {
+	blocks, addresses := map[wire.Quantity]bool{}, map[string]bool{}
+	for _, item := range items {
+		tx, ok := item.(wire.Transaction)
+		if !ok || tx.BlockNumber == nil {
+			return wire.ChainStats{}, errExplorer
+		}
+		blocks[*tx.BlockNumber] = true
+		for _, address := range []*string{&tx.From, tx.To} {
+			if address != nil && *address != "0x"+strings.Repeat("0", 40) && explorerquery.ValidAddress(*address) {
+				addresses[*address] = true
+			}
+		}
+	}
+	return wire.ChainStats{PrivacyEnabled: true, ObservedTransactions: decimal(uint64(len(items))), ObservedBlocks: decimal(uint64(len(blocks))), ObservedParticipantAddresses: decimal(uint64(len(addresses))), Page: page}, nil
+}
+
+func observedExplorerHistory(items []any, interval string) ([]wire.TxHistoryPoint, error) {
+	span := uint64(86400)
+	switch interval {
+	case "hour":
+		span = 3600
+	case "day":
+	case "week":
+		span = 604800
+	default:
+		return nil, errExplorer
+	}
+	counts := map[uint64]uint64{}
+	for _, item := range items {
+		tx, ok := item.(wire.Transaction)
+		if !ok || tx.BlockTimestamp == nil {
+			return nil, errExplorer
+		}
+		stamp, err := strconv.ParseUint(string(*tx.BlockTimestamp), 10, 64)
+		if err != nil {
+			return nil, errExplorer
+		}
+		offset := stamp % span
+		if interval == "week" {
+			offset = (offset + 3*86400) % span
+		}
+		start := uint64(0)
+		if stamp >= offset {
+			start = stamp - offset
+		}
+		counts[start]++
+	}
+	starts := make([]uint64, 0, len(counts))
+	for stamp := range counts {
+		starts = append(starts, stamp)
+	}
+	sort.Slice(starts, func(i, j int) bool { return starts[i] < starts[j] })
+	points := make([]wire.TxHistoryPoint, 0, len(starts))
+	for _, stamp := range starts {
+		points = append(points, wire.TxHistoryPoint{Timestamp: decimal(stamp), Count: decimal(counts[stamp])})
+	}
+	return points, nil
 }
