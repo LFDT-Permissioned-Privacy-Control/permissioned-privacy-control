@@ -2,7 +2,8 @@
 
 A privacy-preserving JSON-RPC proxy for Ethereum nodes with ZK-proof authentication and hierarchical RBAC.
 
-**Native V2:** use [the operational server guide](docs/implementation/v2-operational-server.md)
+**Native V2:** run `make demo-v2` and follow [the local walkthrough](docs/implementation/v2-local-demo.md).
+For deployment, use [the operational server guide](docs/implementation/v2-operational-server.md)
 and `make build-v2` or `Dockerfile.v2`. Approved files define the in-memory Go
 policy; named operational stores retain wallet, admission, audit and session
 state. The native delivery excludes the optional EVM policy backend.

@@ -1,0 +1,98 @@
+name: Native V2
+
+on:
+  pull_request: {}
+  push:
+    branches: [main, master, release/2.0]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.26.9'
+  NODE_VERSION: '24.22.1'
+  GOMAXPROCS: '2'
+  OPS_TEST_BROWSER_CHANNEL: chromium
+
+jobs:
+  native-controls:
+    name: Native commands, identity and browser controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Select credential-free local Docker access
+        run: node scripts/v2-demo/docker-env.mjs --github-env
+      - name: Install locked browser and test-wallet dependencies
+        run: |
+          npm ci --prefix frontend
+          npm ci --prefix e2e/playwright
+          npm ci --prefix tools/v2-test-wallet --ignore-scripts
+          ./e2e/playwright/node_modules/.bin/playwright install --with-deps chromium
+          docker pull postgres:16-alpine
+      - name: Provision and verify pinned public circuits
+        run: node scripts/v2-test-prerequisites.mjs
+      - name: Test required-case enforcement and demo authentication boundary
+        run: node --test scripts/test-v2-runner.test.mjs tools/v2-demo-wallet/*.test.mjs
+      - name: Test native commands and architecture
+        run: node scripts/test-v2.mjs core
+      - name: Build native delivery
+        run: make build-v2
+      - name: Test native browser units
+        working-directory: frontend
+        run: npx --no-install vitest run --config vitest.v2.config.ts
+      - name: Test real role proofs and fresh renewal
+        run: node scripts/test-v2.mjs identity
+      - name: Test built central login and browser session isolation
+        run: node scripts/test-v2.mjs browser
+      - name: Upload finite control results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-v2-controls
+          path: .tmp/v2-test-results/
+          if-no-files-found: error
+          retention-days: 7
+
+  native-walkthrough:
+    name: Native chain and Explorer walkthrough
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      OPS_V2_DEMO_PROJECT: ops-v2-ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Select credential-free local Docker access
+        run: node scripts/v2-demo/docker-env.mjs --github-env
+      - name: Fetch exact Explorer and indexer sources
+        run: node scripts/v2-ci-dependencies.mjs
+      - name: Install the locked walkthrough browser
+        run: |
+          npm ci --prefix e2e/playwright
+          ./e2e/playwright/node_modules/.bin/playwright install --with-deps chromium
+      - name: Run actual chain and Explorer acceptance
+        run: make demo-v2-check
+      - name: Stop only this walkthrough
+        if: always()
+        run: make demo-v2-down
