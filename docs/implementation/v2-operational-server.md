@@ -66,7 +66,7 @@ it returns 503 without dependency details. It checks live SQL roles, schemas,
 recovery bindings and reported observer readiness, the audit recorder, node
 network identity/sync status, Guard producer readiness and any mandatory price
 observations. Monitoring should use this endpoint before returning an instance
-to traffic. All node credentials are checked against chain ID and genesis.
+to traffic. All configured data-plane node credentials are checked against chain ID and genesis.
 Sync status is additionally checked on the default/protected nodes and on
 credential bindings used by history, mined traces, submission or explicit sync
 queries. A call/state-only key does not need a new sync permission for health.

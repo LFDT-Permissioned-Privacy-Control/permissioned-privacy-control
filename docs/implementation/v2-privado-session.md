@@ -114,6 +114,12 @@ original source age, proof cutoff, flow expiry and family expiry. A replaced
 GIST/nonrevocation state or unavailable current state denies issuance. Existing
 Core clock tolerance and Guard v1 approval lifetimes/modes are unchanged.
 
+Authentication-only profiles issue the identity claim shape without a
+`source_not_after` credential-expiry claim; credential-based role profiles
+retain it. Both still apply the proof, original flow, family and five-minute
+expiration bounds before issuing an access token. Authentication alone does
+not synthesize role facts or group membership.
+
 ## Operational persistence and failure boundaries
 
 Schema2 keeps one provider-tagged family table with disjoint Azure and Privado
