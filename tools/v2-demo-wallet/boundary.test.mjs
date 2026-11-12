@@ -57,6 +57,27 @@ test('upstream redirect is not followed and never invokes prover or callback', a
   assert.deepEqual(await status.json(), { status: 'failed' })
   assert.equal(fetched, 1); assert.equal(x.proofs(), 0)
 })
+test('completed job retention never blocks another sign-in or displaces active work', async t => {
+  let finish
+  const x = await fixture(t, async () => new Promise(resolve => { finish = () => resolve(new Response('', { status: 302 })) }))
+  const start = () => x.request('/prove', { persona: 'reader', requestUri })
+  const first = await start()
+  assert.equal(first.status, 202)
+  const oldest = (await first.json()).id
+  assert.equal((await start()).status, 409)
+  assert.deepEqual(await (await x.request('/jobs/' + oldest)).json(), { status: 'working' })
+  finish(); await new Promise(resolve => setImmediate(resolve))
+  let newest
+  for (let i = 0; i < 8; i++) {
+    const next = await start()
+    assert.equal(next.status, 202)
+    newest = (await next.json()).id
+    finish(); await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal((await x.request('/jobs/' + oldest)).status, 404)
+  assert.deepEqual(await (await x.request('/jobs/' + newest)).json(), { status: 'failed' })
+  assert.equal(x.proofs(), 0)
+})
 test('RPC adapter cannot select another target or mutate chain state', async t => {
   let fetched = 0
   const x = await fixture(t, async () => { fetched++; throw Error('unexpected network') })

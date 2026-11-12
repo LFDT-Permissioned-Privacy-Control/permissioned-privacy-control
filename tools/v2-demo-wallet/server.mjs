@@ -99,7 +99,13 @@ export function handler(config, wallet, metadata, fetcher = fetch) {
         assert.ok(personas.includes(value.persona))
         const location = requestLocation(value.requestUri, config.opsOrigin)
         cleanup()
-        if (!wallet.healthy() || busy || jobs.size >= 8) return json(response, 409, { error: 'wallet_busy' })
+        if (!wallet.healthy() || busy) return json(response, 409, { error: 'wallet_busy' })
+        // Retain only the eight most recent results. Completed jobs must not
+        // prevent another sign-in, and an active prover is never displaced.
+        if (jobs.size >= 8) {
+          for (const [key, job] of jobs) if (job.status !== 'working') { jobs.delete(key); break }
+        }
+        if (jobs.size >= 8) return json(response, 409, { error: 'wallet_busy' })
         const id = randomUUID(), job = { status: 'working', expires: Date.now() + 5 * 60_000 }
         jobs.set(id, job); busy = true
         // The browser request owns no long-lived secret or session. One owned
