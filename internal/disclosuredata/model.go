@@ -232,7 +232,8 @@ type AddressPosition struct{ Address [20]byte } // one grouped row per address
 // Exactly ONE branch, matching normalized resource/view. Aggregates are complete-or-error.
 // addresses/resolve INPUT may contain COMPLETE<=4096 qualified candidates; OUTPUT is one/404.
 // Full tx detail INPUT one qualifiedtx; renderer compares locator ONLY against its actually
-// in-scope target From/To participants using same bounded Wallets. No adapter render keys.
+// in-scope target From/To participants using same bounded Wallets. Retained list
+// sources resolve an optional address locator with the same configured render keys.
 // Paged Read must prove page+lookahead or source exhaustion; no budget-exhausted false end.
 // Page keys strictly ASCENDING+unique and>authenticatedAfter; do not sort malformed source.
 type Facts struct {
