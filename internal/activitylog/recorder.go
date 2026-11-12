@@ -242,6 +242,17 @@ func (r *Recorder) Healthy() error {
 	defer r.mu.Unlock()
 	return r.healthyLocked(time.Now())
 }
+
+// CheckHealth performs a fresh disk-space check for startup diagnostics. Request
+// admission uses Healthy, which also rejects a stale background health sample.
+// A new sample cannot clear sticky faults, stale appends or closing state.
+func (r *Recorder) CheckHealth() error {
+	if r == nil {
+		return ErrUnavailable
+	}
+	r.sampleSpace()
+	return r.Healthy()
+}
 func (r *Recorder) Reserve() (*Slot, error) {
 	if r == nil {
 		return nil, ErrUnavailable

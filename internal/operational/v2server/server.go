@@ -318,7 +318,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	if !s.dataReady {
 		return errors.New("Core delivery consumers are not configured")
 	}
-	if ctx == nil || s.data == nil || s.data.recorder == nil || s.data.recorder.Healthy() != nil {
+	if ctx == nil || s.data == nil || s.data.recorder == nil || s.data.recorder.CheckHealth() != nil {
 		return ErrInvalid
 	}
 	// The sealer and feed outlive the HTTP drain. Request cancellation is not a

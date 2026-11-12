@@ -122,6 +122,35 @@ func completion() Completion {
 	return Completion{Method: "eth_call", HTTPStatus: 200, Outcome: Success}
 }
 
+func TestStartupCheckRefreshesDiskHealthWithoutWeakeningRequestFence(t *testing.T) {
+	c, store := recorderFixture(t)
+	r, err := New(t.Context(), c, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close(t.Context())
+	age := func() {
+		r.mu.Lock()
+		r.spaceAt = time.Now().Add(-2 * time.Second)
+		r.mu.Unlock()
+	}
+	age()
+	if r.Healthy() == nil {
+		t.Fatal("request admission accepted a stale startup sample")
+	}
+	if err := r.CheckHealth(); err != nil {
+		t.Fatal("fresh startup disk health", err)
+	}
+	age()
+	if r.Healthy() == nil {
+		t.Fatal("startup check weakened the per-request sample expiry")
+	}
+	r.fail(ErrQuarantined, true)
+	if err := r.CheckHealth(); !errors.Is(err, ErrQuarantined) {
+		t.Fatal("fresh disk check cleared a sticky audit fault", err)
+	}
+}
+
 func TestRecorderUncancellableAppendRetainsSlotAndCloseOwnership(t *testing.T) {
 	c, store := recorderFixture(t)
 	c.Limits.InFlight = 1

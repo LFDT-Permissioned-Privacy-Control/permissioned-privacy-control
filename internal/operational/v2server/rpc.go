@@ -8,6 +8,9 @@ import (
 func (s *Server) mountRPC(p *dataPlane) error {
 	// One wrapper owns the N-slot, durable Append and output lifetime for all
 	// operation families. Never mount Engine.Handler or an unfiltered node proxy.
+	if p.recorder.CheckHealth() != nil {
+		return ErrInvalid
+	}
 	service, e := rpcactivity.New(rpcactivity.Config{Engine: p.native, Metadata: p.metadata, State: p.state, History: p.history, Explorer: p.explorer, Recorder: p.recorder, Network: p.network})
 	if e != nil {
 		return e
