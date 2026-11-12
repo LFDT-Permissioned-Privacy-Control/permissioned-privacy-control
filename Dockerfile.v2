@@ -1,0 +1,36 @@
+# Native V2 delivery: no legacy server, Solidity compiler or EVM policy backend
+# is copied into the runtime. SQL operational adapters remain linked explicitly.
+FROM node:24.22.1-alpine AS web
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --ignore-scripts && npm rebuild esbuild
+COPY frontend/ ./
+RUN npm run build:v2
+
+FROM golang:1.26.9-trixie AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+ARG GIT_COMMIT=none
+ARG BUILD_TIME=unknown
+RUN mkdir /out && CGO_ENABLED=0 go build -tags production,prover_disabled \
+    -ldflags "-X privacy-proxy/internal/version.Version=${VERSION} -X privacy-proxy/internal/version.Commit=${GIT_COMMIT} -X privacy-proxy/internal/version.BuildTime=${BUILD_TIME}" \
+    -o /out/ ./cmd/ops-v2 ./cmd/ops-v2-serve \
+    ./cmd/ops-v2-identity-migrate ./cmd/ops-v2-wallet-migrate \
+    ./cmd/ops-v2-admission-migrate ./cmd/ops-v2-disclosure-migrate \
+    ./cmd/ops-v2-namespace ./cmd/ops-v2-sso-migrate \
+    ./cmd/ops-activity-admin ./cmd/ops-creation-observer
+
+FROM debian:trixie-slim AS runtime
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 1000 -m appuser \
+    && mkdir -p /var/lib/ops/activity && chown appuser:appuser /var/lib/ops/activity
+COPY --from=builder /out/ /usr/local/bin/
+COPY --from=web /app/frontend/dist-v2/ /app/web/
+WORKDIR /app
+USER appuser
+EXPOSE 8443
+ENTRYPOINT ["ops-v2-serve"]

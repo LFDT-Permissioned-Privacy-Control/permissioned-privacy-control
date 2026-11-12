@@ -33,6 +33,23 @@ export VERSION GIT_COMMIT BUILD_TIME
 build: ensure-hooks
 	go build -tags mockauth -ldflags "$(LDFLAGS)" -o bin/privacy-proxy ./cmd/server
 
+# Native V2 is selected explicitly. The legacy build/prod targets remain V1.
+# prover_disabled removes the unused native C proof generator, while the real
+# Go Groth16 proof verifier remains part of the Privado login path.
+V2_COMMANDS := ops-v2 ops-v2-serve ops-v2-identity-migrate ops-v2-wallet-migrate \
+	ops-v2-admission-migrate ops-v2-disclosure-migrate ops-v2-namespace \
+	ops-v2-sso-migrate ops-activity-admin ops-creation-observer
+.PHONY: build-v2 build-v2-binaries build-v2-web
+build-v2: build-v2-web build-v2-binaries
+
+build-v2-binaries:
+	mkdir -p bin/v2
+	CGO_ENABLED=0 go build -tags production,prover_disabled -ldflags "$(LDFLAGS)" \
+		-o bin/v2/ $(addprefix ./cmd/,$(V2_COMMANDS))
+
+build-v2-web:
+	npm --prefix frontend run build:v2
+
 # Build production Docker image (no mock auth, no dev shortcuts).
 # Build identity is passed in as build-args because the build context
 # usually excludes .git, so `git describe` can't run inside the container.
