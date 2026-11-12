@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -127,6 +128,7 @@ type functionalNode struct {
 	genesis, head *types.Header
 	tx            *types.Transaction
 	signer        *ecdsa.PrivateKey
+	advanceHead   func(bool)
 }
 
 // This is a TLS protocol fixture, not a live-node qualification claim. Its
@@ -163,6 +165,8 @@ func ownedFunctionalNode(t *testing.T) *functionalNode {
 	empty := fixtureObject(t, genesis)
 	empty["transactions"], empty["uncles"], empty["withdrawals"] = []any{}, []any{}, []any{}
 	receipt := map[string]any{"transactionHash": tx.Hash().Hex(), "blockHash": hed.Hash().Hex(), "blockNumber": "0x1", "transactionIndex": "0x0", "from": from.Hex(), "to": to.Hex(), "type": "0x0", "contractAddress": nil, "status": "0x1", "gasUsed": "0x5208", "cumulativeGasUsed": "0x5208", "effectiveGasPrice": "0x3", "logsBloom": "0x" + strings.Repeat("00", 256), "logs": []any{}}
+	latest := hed
+	var latestMu sync.RWMutex
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var q struct {
 			JSONRPC string            `json:"jsonrpc"`
@@ -186,7 +190,11 @@ func ownedFunctionalNode(t *testing.T) *functionalNode {
 			_ = json.Unmarshal(q.Params[0], &selector)
 			if selector == "0x0" {
 				result = genesis
-			} else if selector == "0x1" || selector == "latest" {
+			} else if selector == "latest" {
+				latestMu.RLock()
+				result = latest
+				latestMu.RUnlock()
+			} else if selector == "0x1" {
 				result = hed
 			} else {
 				t.Error("unknown header number", selector)
@@ -220,10 +228,25 @@ func ownedFunctionalNode(t *testing.T) *functionalNode {
 	network := networkidentity.Binding{Environment: "test", ChainID: "1", GenesisHash: genesis.Hash().Hex(), DeploymentID: "retained-functional"}
 	net, _ := network.Key()
 	source := c.Source{Network: c.Network{Key: c.Digest(net), Environment: network.Environment, ChainID: network.ChainID, Genesis: genesis.Hash(), Deployment: network.DeploymentID}, Organization: f.Org, URL: server.URL, CredentialRef: "retained", CredentialHeader: "Idempotency-Key", Profile: rpcexecution.IncludedProfileID, PragueStart: 0, PragueEnd: uint64(f.Now + 1000)}
-	return &functionalNode{NodeConfig{Source: source, Credential: rpcexecution.Credential{Header: "Idempotency-Key", Value: "retained-functional"}, Transport: server.Client().Transport}, network, genesis, hed, tx, key}
+	return &functionalNode{NodeConfig{Source: source, Credential: rpcexecution.Credential{Header: "Idempotency-Key", Value: "retained-functional"}, Transport: server.Client().Transport}, network, genesis, hed, tx, key, func(advance bool) {
+		latestMu.Lock()
+		defer latestMu.Unlock()
+		latest = hed
+		if advance {
+			latest = types.CopyHeader(hed)
+			latest.Number = big.NewInt(2)
+			latest.ParentHash = hed.Hash()
+			latest.Time++
+		}
+	}}
 }
 
-func actualFunctionalConfig(t *testing.T, node *functionalNode) Config {
+type functionalControl struct {
+	wallet           *f.WalletFixture
+	admission, index *pgx.Conn
+}
+
+func actualFunctionalConfig(t *testing.T, node *functionalNode, controls ...func(functionalControl)) Config {
 	t.Helper()
 	ctx := t.Context()
 	db := ownedFunctionalDB(t)
@@ -369,5 +392,8 @@ func actualFunctionalConfig(t *testing.T, node *functionalNode) Config {
 		t.Fatal(err)
 	}
 	t.Cleanup(activity.Close)
+	for _, receive := range controls {
+		receive(functionalControl{wallet, admissionOwner, indexOwner})
+	}
 	return Config{Snapshot: snapshot, Network: node.network, Index: index, ExpectedIndex: index.Metadata(), Namespace: namespace, Nodes: map[string]NodeConfig{f.Org: node.config}, Wallet: disclosurewallet.Config{Store: walletReader, Binding: wallet.Binding, ExpectedState: wallet.State, Clock: clock}, Finance: admissionsql.FinanceReaderConfig{Store: finance, Network: binding, ExpectedState: a.ExpectedState{Generation: generation, Coverage: admissionsql.EmptyCoverage()}, Clock: clock}, Activity: activity, Clock: clock, RenderKeys: d.Keys{Active: d.Key{ID: "render", Bytes: []byte(strings.Repeat("!", 32))}}}
 }
