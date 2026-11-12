@@ -269,7 +269,12 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	if q.Resource == p.Transactions && q.View == d.Detail && (c.Scope.Level != p.Full || q.Level != nil && *q.Level != p.Full) {
 		return nil, ErrNotFound
 	}
-	query, e := d.Normalize(q, c.Scope)
+	var query d.NormalizedQuery
+	if s.data.retained == nil {
+		query, e = d.Normalize(q, c.Scope)
+	} else {
+		query, e = d.NormalizeRetained(q, c.Scope)
+	}
 	if e != nil {
 		return nil, dataError(e)
 	}

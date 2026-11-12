@@ -122,12 +122,23 @@ func validLocator(s string) bool {
 	return e == nil && len(b) == 16 && base64.RawURLEncoding.EncodeToString(b) == parts[2]
 }
 func Normalize(q Query, original p.Scope) (NormalizedQuery, error) {
+	return normalize(q, original, false)
+}
+
+// NormalizeRetained also accepts an opaque address selector for a transaction
+// list. The operational source resolves it only within actual current targets.
+func NormalizeRetained(q Query, original p.Scope) (NormalizedQuery, error) {
+	return normalize(q, original, true)
+}
+
+func normalize(q Query, original p.Scope, retained bool) (NormalizedQuery, error) {
 	var n NormalizedQuery
 	s, e := p.NormalizeScope(original, p.DefaultLimits())
 	if e != nil || q.Version != 1 || !combination(q.Resource, q.View) || !slices.Contains(s.Resources, q.Resource) {
 		return n, ErrInvalid
 	}
-	if q.View != List && (q.Limit != nil || q.Cursor != nil) || q.View != Resolve && q.View != Detail && q.AddressID != nil || !(q.Resource == p.Transactions && q.View == Detail) && q.TransactionHash != nil {
+	addressList := retained && q.Resource == p.Transactions && q.View == List && q.AddressID != nil
+	if q.View != List && (q.Limit != nil || q.Cursor != nil) || q.View != Resolve && q.View != Detail && !addressList && q.AddressID != nil || !(q.Resource == p.Transactions && q.View == Detail) && q.TransactionHash != nil {
 		return n, ErrInvalid
 	}
 	n.resource = q.Resource
@@ -190,7 +201,7 @@ func Normalize(q Query, original p.Scope) (NormalizedQuery, error) {
 			return n, ErrInvalid
 		}
 	}
-	if q.View == Resolve || q.View == Detail {
+	if q.View == Resolve || q.View == Detail || addressList {
 		if q.AddressID == nil || !validLocator(*q.AddressID) {
 			return n, ErrInvalid
 		}

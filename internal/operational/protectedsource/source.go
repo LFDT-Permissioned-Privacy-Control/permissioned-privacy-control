@@ -197,6 +197,15 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 	if err != nil {
 		return err
 	}
+	var selectedAddress *[20]byte
+	if read.scope.Query.Resource() == p.Transactions && read.scope.Query.View() == d.List && read.scope.Query.AddressID() != "" {
+		address, err := d.ResolveAddressLocator(d.RenderContext{PreparedAt: s.now(), Namespace: read.scope.Namespace, CaseID: read.scope.CaseID, DataOrganizationID: read.scope.DataOrganizationID, RecipientActorID: read.scope.RecipientActorID, Keys: s.render, Query: read.scope.Query, EffectiveUntil: read.scope.EffectiveUntil}, read.scope.Query.AddressID(), targets)
+		if err != nil {
+			return err
+		}
+		selectedAddress = &address
+		targets = [][20]byte{address}
+	}
 	qscope := read.scope.Query.Scope()
 	index, err := s.index.BeginProtected(ctx, x.ProtectedSelection{Expected: s.indexMetadata, Targets: targets, FromTime: uint64(qscope.DataTime.Start), ThroughTime: uint64(qscope.DataTime.End), FromNumber: s.namespaceMetadata.Era.EntryNumber, ThroughNumber: upper.Number})
 	if err != nil {
@@ -224,7 +233,7 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 	descriptor := d.SourceDescriptor{Version: 2, Kind: d.HistorySource, Reference: ref, NetworkKey: s.plan.NetworkKey, Epoch: epoch, Generation: namespace.rangePass.Generation(), PlanDigest: s.plan.PlanDigest, FormatDigest: digestParts("ops.disclosure.retained-history-format/v1"), CoverageDigest: d.Digest(namespace.rangePass.AuthorityDigest().String()), AsOf: s.now(), Population: d.RetainedHistoryPopulation}
 	read.descriptors = append(read.descriptors, descriptor)
 	if read.scope.Query.Resource() == p.Transactions {
-		query := x.ProtectedTransactionQuery{Limit: read.scope.Query.Limit()}
+		query := x.ProtectedTransactionQuery{Limit: read.scope.Query.Limit(), Address: selectedAddress}
 		if read.after != nil {
 			position := read.after.Transaction
 			number, _ := strconv.ParseUint(string(position.BlockNumber), 10, 63)
@@ -241,6 +250,17 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 			copy(value[:], hash)
 			query.Hash = &value
 		}
+		witnessRows := []x.ProtectedRow{}
+		if selectedAddress != nil {
+			witnesses, err := index.ReadWitnesses(ctx, predicate)
+			if err != nil {
+				return indexError(err)
+			}
+			if len(witnesses) != 1 || witnesses[0].Address != *selectedAddress {
+				return d.ErrNotFound
+			}
+			witnessRows = append(witnessRows, witnesses[0].Row)
+		}
 		rows, end, err := index.ReadTransactions(ctx, predicate, query)
 		if err != nil {
 			return indexError(err)
@@ -248,16 +268,23 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 		if full && len(rows) == 0 {
 			return d.ErrNotFound
 		}
-		qualified, err := node.qualify(ctx, rows, full)
+		allRows := append(witnessRows, rows...)
+		qualified, err := node.qualify(ctx, allRows, full)
 		if err != nil {
 			return err
 		}
 		if err = namespace.qualify(ctx, qualified, read.scope.DataOrganizationID); err != nil {
 			return err
 		}
+		if selectedAddress != nil {
+			witness := qualified[0].fact
+			if witness.From != *selectedAddress && (witness.To == nil || *witness.To != *selectedAddress) {
+				return d.ErrUnavailable
+			}
+		}
 		read.facts.Transactions = []d.TransactionFact{}
 		read.facts.End = end
-		for _, root := range qualified {
+		for _, root := range qualified[len(witnessRows):] {
 			fact, err := transactionFact(read.scope, ref, actors, root.fact)
 			if err != nil {
 				return err

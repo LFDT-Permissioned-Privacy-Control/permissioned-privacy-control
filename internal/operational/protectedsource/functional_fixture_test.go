@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	a "privacy-proxy/internal/admission"
 	c "privacy-proxy/internal/creationfacts"
+	d "privacy-proxy/internal/disclosuredata"
 	p "privacy-proxy/internal/disclosurepolicy"
 	f "privacy-proxy/internal/disclosuretest"
 	"privacy-proxy/internal/disclosurewallet"
@@ -368,5 +369,5 @@ func actualFunctionalConfig(t *testing.T, node *functionalNode) Config {
 		t.Fatal(err)
 	}
 	t.Cleanup(activity.Close)
-	return Config{Snapshot: snapshot, Network: node.network, Index: index, ExpectedIndex: index.Metadata(), Namespace: namespace, Nodes: map[string]NodeConfig{f.Org: node.config}, Wallet: disclosurewallet.Config{Store: walletReader, Binding: wallet.Binding, ExpectedState: wallet.State, Clock: clock}, Finance: admissionsql.FinanceReaderConfig{Store: finance, Network: binding, ExpectedState: a.ExpectedState{Generation: generation, Coverage: admissionsql.EmptyCoverage()}, Clock: clock}, Activity: activity, Clock: clock}
+	return Config{Snapshot: snapshot, Network: node.network, Index: index, ExpectedIndex: index.Metadata(), Namespace: namespace, Nodes: map[string]NodeConfig{f.Org: node.config}, Wallet: disclosurewallet.Config{Store: walletReader, Binding: wallet.Binding, ExpectedState: wallet.State, Clock: clock}, Finance: admissionsql.FinanceReaderConfig{Store: finance, Network: binding, ExpectedState: a.ExpectedState{Generation: generation, Coverage: admissionsql.EmptyCoverage()}, Clock: clock}, Activity: activity, Clock: clock, RenderKeys: d.Keys{Active: d.Key{ID: "render", Bytes: []byte(strings.Repeat("!", 32))}}}
 }

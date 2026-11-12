@@ -3,6 +3,8 @@ package protectedsource
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,6 +103,44 @@ func TestActualRetainedSourcesComposeAllResources(t *testing.T) {
 		}
 		if _, err = d.RenderRetained(plan, scope, read.Descriptors(), facts, d.RenderContext{PreparedAt: config.Clock(), Namespace: scope.Namespace, CaseID: caseID, DataOrganizationID: f.Org, RecipientActorID: scope.RecipientActorID, Keys: keys, Query: normalized, EffectiveUntil: scope.EffectiveUntil}, uuid.NewString()); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("opaque address list", func(t *testing.T) {
+		query := d.Query{Version: 1, Resource: p.Transactions, View: d.List, AddressID: &locator}
+		if _, err := d.Normalize(query, base); err == nil {
+			t.Fatal("legacy query contract widened")
+		}
+		normalized, err := d.NormalizeRetained(query, base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scope := d.ReadScope{Namespace: namespace, CaseID: caseID, CaseVersion: 1, RecipientActorID: f.Actor(f.AdminSubject), DataOrganizationID: f.Org, BundleDigest: plan.BundleDigest, RuleDigest: digestParts("functional-rule"), EffectiveUntil: time.Unix(f.Now+300, 0).UTC(), Query: normalized}
+		read, err := source.OpenRetained(t.Context(), scope, nil, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer read.Close()
+		facts, err := read.Read(t.Context(), scope, nil)
+		if err != nil || len(facts.Transactions) != 1 {
+			t.Fatal("opaque target list", facts, err)
+		}
+		if err = read.CheckCurrent(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		foreign := scope
+		foreign.RecipientActorID = f.Actor(f.Subject)
+		if _, err = source.OpenRetained(t.Context(), foreign, nil, nil, nil); !errors.Is(err, d.ErrNotFound) {
+			t.Fatal("locator crossed recipient", err)
+		}
+		invalid := "da1.render." + strings.Repeat("A", 22)
+		query.AddressID = &invalid
+		foreign = scope
+		foreign.Query, err = d.NormalizeRetained(query, base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = source.OpenRetained(t.Context(), foreign, nil, nil, nil); !errors.Is(err, d.ErrNotFound) {
+			t.Fatal("unknown locator broadened to all targets", err)
 		}
 	})
 }
