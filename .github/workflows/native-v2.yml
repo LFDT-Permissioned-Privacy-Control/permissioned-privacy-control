@@ -46,7 +46,7 @@ jobs:
       - name: Provision and verify pinned public circuits
         run: node scripts/v2-test-prerequisites.mjs
       - name: Test required-case enforcement and demo authentication boundary
-        run: node --test scripts/test-v2-runner.test.mjs tools/v2-demo-wallet/*.test.mjs
+        run: node --test scripts/test-v2-runner.test.mjs scripts/v2-demo/ownership.test.mjs tools/v2-demo-wallet/*.test.mjs
       - name: Test native commands and architecture
         run: node scripts/test-v2.mjs core
       - name: Build native delivery
