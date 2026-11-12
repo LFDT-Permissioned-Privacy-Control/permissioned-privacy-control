@@ -64,12 +64,17 @@ outcome semantics apply.
 ## Delivery and bounds
 
 Default simulation/search limits are 32 probes, 256 physical source requests and
-128 MiB of response envelopes. Node-owned default reads and signing use a fixed
-bounded number of calls; the subsequent signed-raw/Guard pipeline retains its
-existing separate source limits. All stages share the original operation deadline. Existing per-trace,
-code, rule-work, current-facts and response limits also apply. No retries run in
-the source adapter. Only a projected response and small source checkpoint survive
-into recording. The real Recorder append, original wallet/current-facts checks,
+128 MiB of response envelopes, shared by acquisition, probes and delivery checks.
+This counter excludes node-owned defaults, signing and the subsequent raw/Guard
+stage. Defaults add at most four requests: chain ID, genesis, optional nonce and
+optional gas price. Signing adds at most three: chain ID, genesis and one
+sign-only request. Chain ID, nonce and fee responses have 1 KiB limits, genesis
+headers have a 16 KiB limit, and the signed response has a 2 MiB limit. The signed-raw/Guard stage retains its existing finite
+trace, code, batch, delivery-target and retention limits. Every stage uses the
+same original operation deadline of at most 20 seconds; starting another stage
+cannot renew it. Existing rule-work, current-facts and response limits also
+apply. No retries run in the source adapter. Only a projected response and small
+source checkpoint survive into recording. The real Recorder append, original wallet/current-facts checks,
 same-node network/header samples and final original identity/deadline checks gate
 protected output. Node-owned sends retain the existing durable signed-raw effect
 and delivery rules.

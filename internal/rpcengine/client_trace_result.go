@@ -146,6 +146,11 @@ func (r *TraceOperationResult) RequireDeliverable(ctx context.Context, e *Engine
 		defer cancel()
 		ctx = bounded
 	}
+	// Fixed errors carry no projection. Retain the original lifetime without
+	// requiring the data source that a denied operation never acquired.
+	if r.code != 0 {
+		return ctx.Err()
+	}
 	if r.walletVersion != "" {
 		if r.view == nil || e.wallets == nil {
 			return errOperation

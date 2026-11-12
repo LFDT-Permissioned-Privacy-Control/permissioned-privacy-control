@@ -26,7 +26,7 @@ func TestUtilityActualGuardTypedDefaultsAndFiniteBudgets(t *testing.T) {
 	if _, err := d.owner.Exec(t.Context(), `CREATE ROLE raw_observer LOGIN PASSWORD 'raw-test-only';CREATE ROLE raw_facts LOGIN PASSWORD 'raw-test-only'`); err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"legacy-defaults", "type1-preflight", "type2-defaults", "guard-legacy", "guard-type2", "guard-type1-rejected-before-sign", "changed-nonce", "changed-fee", "probe-limit", "request-limit", "byte-limit", "alias", "foreign-org", "no-storage-method"} {
+	for _, scenario := range []string{"legacy-defaults", "type1-preflight", "type2-defaults", "guard-legacy", "guard-type2", "guard-type1-rejected-before-sign", "changed-nonce", "changed-fee", "probe-limit", "request-limit", "byte-limit", "alias", "foreign-org", "no-storage-method", "original-parent-bound", "original-parent-bound-denied", "slot-admin"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := utilityFixture()
 			u := &utilityActivityNode{t: t}
@@ -69,6 +69,17 @@ func TestUtilityActualGuardTypedDefaultsAndFiniteBudgets(t *testing.T) {
 				m.Aliases = map[string]string{method: "eth_estimateGas"}
 				f.methodCatalog = &m
 				f.groups[0].AllowedMethods = append(f.groups[0].AllowedMethods, method)
+			case "original-parent-bound":
+				method = "eth_createAccessList"
+			case "original-parent-bound-denied":
+				method = "eth_estimateGas"
+				u.denyIntermediate = true
+				want = false
+			case "slot-admin":
+				method = "eth_createAccessList"
+				f.groups = append(f.groups, policybundle.Group{ID: second, Slug: "slot-admin", Name: "Slot admin", Claims: []string{"admin"}, AllowedMethods: []string{"eth_getCode"}})
+				f.roles = append(f.roles, second)
+				f.contracts[0].ReadGrants = append(f.contracts[0].ReadGrants, policybundle.ReadGrant{ID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab", GroupID: second, EventRules: policybundle.EventRules{Mode: "none", Rules: []policybundle.EventRule{}}})
 			case "no-storage-method":
 				method = "eth_createAccessList"
 				f.groups[0].AllowedMethods = []string{method, "eth_sendTransaction"}
@@ -79,16 +90,19 @@ func TestUtilityActualGuardTypedDefaultsAndFiniteBudgets(t *testing.T) {
 			if scenario == "guard-type1-rejected-before-sign" {
 				want = false
 			}
+			var stopGuard func()
 			engine, tok, financial, _ := mountedRawEngine(t, f, n, d, false, creationMountOptions{configure: func(o *rpcengine.RawOptions) {
 				o.Utilities = &rpcengine.ExecutionUtilityOptions{NodeSigning: true, Limits: limits}
-			}})
+			}, guardStop: func(stop func()) { stopGuard = stop }})
 			defer engine.Close()
 			org := orgA
 			if scenario == "foreign-org" {
 				org = orgB
 			}
 			body := `{"id":1,"method":"` + method + `","params":[{"from":"` + signedValue(t, 9).Signer().Hex() + `","to":"` + addressA + `","input":"0x0102",` + fields + `}]}`
-			result := engine.UtilityObserved(t.Context(), tok, org, []byte(body))
+			origin, stopOrigin := context.WithCancel(t.Context())
+			defer stopOrigin()
+			result := engine.UtilityObserved(origin, tok, org, []byte(body))
 			raw, err := result.MarshalResponseFor(engine)
 			if err != nil {
 				t.Fatal(err)
@@ -164,6 +178,36 @@ func TestUtilityActualGuardTypedDefaultsAndFiniteBudgets(t *testing.T) {
 					if len(entry.StorageKeys) != 0 {
 						t.Fatal("storage method omitted but slot disclosed")
 					}
+				}
+			}
+			if scenario == "slot-admin" {
+				var list struct {
+					AccessList []types.AccessTuple `json:"accessList"`
+				}
+				if json.Unmarshal(wire.Result, &list) != nil || len(list.AccessList) != 1 || len(list.AccessList[0].StorageKeys) != 1 || list.AccessList[0].StorageKeys[0] != (common.Hash{42}) {
+					t.Fatal("actual slot admin did not receive its permitted storage key", string(raw))
+				}
+			}
+			if scenario == "original-parent-bound" || scenario == "original-parent-bound-denied" {
+				if err := result.RequireDeliverable(t.Context(), engine); err != nil {
+					t.Fatal("live original context", err)
+				}
+				stopOrigin()
+				if err := result.RequireDeliverable(t.Context(), engine); err == nil {
+					t.Fatal("fresh delivery caller replaced cancelled original context")
+				}
+			}
+			if scenario == "guard-legacy" {
+				if engine.CheckOperationalReadiness(t.Context()) != nil || stopGuard == nil {
+					t.Fatal("ready Guard lane rejected by readiness")
+				}
+				stopGuard()
+				until := time.Now().Add(6 * time.Second)
+				for engine.CheckOperationalReadiness(t.Context()) == nil {
+					if time.Now().After(until) {
+						t.Fatal("stopped Guard producer remained ready")
+					}
+					time.Sleep(20 * time.Millisecond)
 				}
 			}
 			_ = financial

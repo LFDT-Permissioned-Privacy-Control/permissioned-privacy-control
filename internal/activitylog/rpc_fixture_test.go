@@ -579,6 +579,7 @@ type creationMountOptions struct {
 	walletService func(*walletops.Service)
 	configure     func(*rpcengine.RawOptions)
 	constructor   func(*policybundle.CatalogSnapshot, rpcengine.RawOptions) (*rpcengine.Engine, error)
+	guardStop     func(func())
 }
 
 func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg bool, creationOptions ...creationMountOptions) (*rpcengine.Engine, string, *admission.Service, *policybundle.CatalogSnapshot) {
@@ -758,6 +759,9 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 		producer := &faultProducer{batches: make(chan []byte, 16)}
 
 		server := grpc.NewServer()
+		if len(creationOptions) > 0 && creationOptions[0].guardStop != nil {
+			creationOptions[0].guardStop(server.Stop)
+		}
 		approvalpb.RegisterApprovalDeliveryServer(server, producer)
 		go server.Serve(listener)
 		t.Cleanup(server.Stop)

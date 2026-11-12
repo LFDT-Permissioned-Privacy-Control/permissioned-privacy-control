@@ -60,7 +60,7 @@ func (m *utilityActivityNode) respond(n *node, w http.ResponseWriter, id json.Ra
 		}
 		root := map[string]any{"type": "CALL", "from": call["from"], "to": call["to"], "input": call["input"], "value": call["value"], "gas": "0x" + strconv.FormatUint(gas, 16), "gasUsed": "0x" + strconv.FormatUint(used, 16), "output": "0xfeed"}
 		if m.denyIntermediate && gas > 50000 && gas < 80000 {
-			root["calls"] = []any{map[string]any{"type": "CALL", "from": addressA, "to": addressB, "input": "0x", "value": "0x0", "gas": "0x1000", "gasUsed": "0x1", "output": "0xprivate"}}
+			root["calls"] = []any{map[string]any{"type": "CALL", "from": addressA, "to": addressB, "input": "0x", "value": "0x0", "gas": "0x1000", "gasUsed": "0x1", "output": "0xdead"}}
 		}
 		if gas < 50000 {
 			root["error"] = "out of gas"
@@ -156,6 +156,7 @@ func TestUtilityActualCheckedEstimateAccessListAndSignedRawPipeline(t *testing.T
 				wireMethod = "eth_sendTransaction"
 			}
 			body := `{"jsonrpc":"2.0","id":1.2500e+03,"method":"` + wireMethod + `","params":[{"from":"` + signedValue(t, 9).Signer().Hex() + `","to":"` + addressA + `","input":"0x0102","value":"0x0","gas":"0x186a0"}]}`
+			before := metadataRows(t, x)
 			raw := bodyResult(t, requestAsync(t, front.Client(), front.URL, tok, body, context.Background()))
 			var response struct {
 				Result json.RawMessage
@@ -165,8 +166,11 @@ func TestUtilityActualCheckedEstimateAccessListAndSignedRawPipeline(t *testing.T
 				t.Fatal(string(raw))
 			}
 			if method == "gas-dependent-denial" {
-				if response.Error == nil || len(u.traceGas) < 2 {
+				if response.Error == nil || response.Error.Code != -32001 || len(u.traceGas) < 2 {
 					t.Fatal("intermediate unapproved probe allowed", string(raw), u.traceGas)
+				}
+				if sealed := metadataSealedOne(t, x, before); sealed.Outcome != "denied" || sealed.Method != wireMethod {
+					t.Fatal("policy denial was not durably recorded", sealed.Outcome, sealed.Method)
 				}
 				return
 			}
