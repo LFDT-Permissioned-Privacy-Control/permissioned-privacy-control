@@ -29,6 +29,22 @@ func fieldsOf(row explorerquery.Record) (explorerFields, error) {
 	}
 	return f, nil
 }
+
+// The existing indexer writes bare lowercase bytes; typed node evidence uses
+// 0x-prefixed lowercase bytes. These two exact encodings have the same value.
+// A missing/NULL/non-string field is never treated as valid empty bytes.
+func indexedHexMatches(raw json.RawMessage, canonical string) bool {
+	var indexed *string
+	if json.Unmarshal(raw, &indexed) != nil || indexed == nil || !strings.HasPrefix(canonical, "0x") || len(canonical)%2 != 0 {
+		return false
+	}
+	for _, c := range canonical[2:] {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return *indexed == canonical || *indexed == canonical[2:]
+}
 func (f explorerFields) text(k string) string { var s string; _ = json.Unmarshal(f[k], &s); return s }
 func (f explorerFields) nullable(k string) *string {
 	s := f.text(k)
@@ -312,7 +328,7 @@ func (x *explorerRender) shadowTransaction(hash string) (explorerdata.Transactio
 				return ""
 			}
 			return *to
-		}() || string(*value) != v.Value().String() || !strings.EqualFold(f.text("input_data"), out.InputData) {
+		}() || string(*value) != v.Value().String() || !indexedHexMatches(f["input_data"], out.InputData) {
 			return out, errExplorer
 		}
 	}
@@ -640,7 +656,7 @@ func (x *explorerRender) logWire(row explorerquery.Record) (any, bool, error) {
 		return nil, false, nil
 	}
 	bn, e := f.integer("block_number")
-	if e != nil || bn != m.row.BlockNumber || f.text("address") != m.row.Address || f.text("data") != m.row.Data || f.boolean("removed") != m.row.Removed {
+	if e != nil || bn != m.row.BlockNumber || f.text("address") != m.row.Address || !indexedHexMatches(f["data"], m.row.Data) || f.boolean("removed") != m.row.Removed {
 		return nil, false, errExplorer
 	}
 	for i, k := range []string{"topic0", "topic1", "topic2", "topic3"} {

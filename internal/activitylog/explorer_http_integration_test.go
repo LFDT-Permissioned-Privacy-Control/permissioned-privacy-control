@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"io"
@@ -55,7 +56,10 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 	listed := f.HistoryTransaction(t, 2, 1, target)
 	hidden := f.HistoryTransaction(t, 3, 2, common.HexToAddress("0x987654"))
 	txs := []*types.Transaction{coin, hidden, listed}
-	node := f.NewHistoryNode(t, txs, [][]*types.Log{{}, {}, {}})
+	ownerAddress := crypto.PubkeyToAddress(f.HistoryKey(1).PublicKey)
+	transfer := &types.Log{Address: target, Topics: []common.Hash{crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)")), common.BytesToHash(ownerAddress.Bytes()), common.BytesToHash(target.Bytes())}, Data: common.LeftPadBytes([]byte{0xab}, 32)}
+	ping := &types.Log{Address: target, Topics: []common.Hash{crypto.Keccak256Hash([]byte("Ping()"))}, Data: []byte{}}
+	node := f.NewHistoryNode(t, txs, [][]*types.Log{{transfer, ping}, {}, {}})
 	network := node.Network()
 	var instant atomic.Int64
 	instant.Store(f.Now)
@@ -63,6 +67,8 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 	src := f.DefaultStateFixture(t)
 	src.HistoryConsumer = true
 	contract := f.ReadContract(target.Hex())
+	contract.ABI = json.RawMessage(`[{"anonymous":false,"type":"event","name":"Transfer","inputs":[{"name":"from","type":"address","indexed":true},{"name":"to","type":"address","indexed":true},{"name":"value","type":"uint256","indexed":false}]},{"anonymous":false,"type":"event","name":"Ping","inputs":[]}]`)
+	contract.ReadGrants[0].EventRules = policybundle.EventRules{Mode: "all", Rules: []policybundle.EventRule{}}
 	src.Contracts[f.Org] = []policybundle.Contract{contract}
 	snapshot := f.StateSnapshot(t, src)
 	tok := f.Token(t, snapshot, f.Subject, "Auditor")
@@ -156,9 +162,19 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = indexOwner.Exec(ctx, `INSERT INTO transactions(hash,block_number,tx_index,from_address,to_address,value,gas_used,gas_price,status,input_data,nonce)VALUES($1,1,$2,$3,$4,$5,21000,1,1,$6,$7)`, strings.ToLower(tx.Hash().Hex()), i, strings.ToLower(sender.Hex()), strings.ToLower(tx.To().Hex()), tx.Value().String(), "0x"+common.Bytes2Hex(tx.Data()), int64(tx.Nonce()))
+		_, err = indexOwner.Exec(ctx, `INSERT INTO transactions(hash,block_number,tx_index,from_address,to_address,value,gas_used,gas_price,status,input_data,nonce)VALUES($1,1,$2,$3,$4,$5,21000,1,1,$6,$7)`, strings.ToLower(tx.Hash().Hex()), i, strings.ToLower(sender.Hex()), strings.ToLower(tx.To().Hex()), tx.Value().String(), common.Bytes2Hex(tx.Data()), int64(tx.Nonce()))
 		if err != nil {
 			t.Fatal(err)
+		}
+	}
+	for i, event := range []*types.Log{transfer, ping} {
+		topics := make([]any, 4)
+		for j, topic := range event.Topics {
+			topics[j] = strings.ToLower(topic.Hex())
+		}
+		_, err = indexOwner.Exec(ctx, `INSERT INTO logs(tx_hash,log_index,address,topic0,topic1,topic2,topic3,data,block_number,timestamp,removed) VALUES($1,$2,$3,$4,$5,$6,$7,$8,1,$9,false)`, strings.ToLower(coin.Hash().Hex()), i, strings.ToLower(target.Hex()), topics[0], topics[1], topics[2], topics[3], common.Bytes2Hex(event.Data), f.Now)
+		if err != nil {
+			t.Fatal("writer-shaped event row", err)
 		}
 	}
 	explorer, err := rpcengine.NewExplorer(rpcengine.ExplorerConfig{Snapshot: snapshot, History: history, State: stateEngine, Metadata: metadata, Index: index, IndexExpected: binding, CursorKey: bytes.Repeat([]byte{13}, 32), PseudonymKey: bytes.Repeat([]byte{14}, 32)})
@@ -245,6 +261,79 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 	filtered := <-get("/api/v2/explorer/transactions?category=coin_transfer&limit=10")
 	if filtered.status != 200 || !bytes.Contains(filtered.body, []byte(strings.ToLower(coin.Hash().Hex()))) || bytes.Contains(filtered.body, []byte(strings.ToLower(listed.Hash().Hex()))) {
 		t.Fatal("actual native coin filter omitted wallet row or included contract call", filtered.status, string(filtered.body))
+	}
+	coinPath := "/api/v2/explorer/transactions/" + strings.ToLower(coin.Hash().Hex())
+	listedPath := "/api/v2/explorer/transactions/" + strings.ToLower(listed.Hash().Hex())
+	logPath := coinPath + "/logs?limit=10"
+	emptyInput := <-get(coinPath)
+	nonemptyInput := <-get(listedPath)
+	bareLogs := <-get(logPath)
+	var events struct {
+		Items []struct {
+			LogIndex uint32
+			Data     string
+		}
+	}
+	if emptyInput.status != 200 || !bytes.Contains(emptyInput.body, []byte(`"inputData":"0x"`)) || nonemptyInput.status != 200 || !bytes.Contains(nonemptyInput.body, []byte(`"inputData":"0x01020304"`)) {
+		t.Fatal("actual writer-shaped empty/nonempty transaction bytes", emptyInput.status, string(emptyInput.body), nonemptyInput.status, string(nonemptyInput.body))
+	}
+	if bareLogs.status != 200 || json.Unmarshal(bareLogs.body, &events) != nil || len(events.Items) != 2 {
+		t.Fatal("actual writer-shaped matched event route", bareLogs.status, string(bareLogs.body))
+	}
+	for _, event := range events.Items {
+		want := "0x" + common.Bytes2Hex(transfer.Data)
+		if event.LogIndex == 1 {
+			want = "0x"
+		}
+		if event.Data != want {
+			t.Fatal("canonical qualified event value", event.LogIndex, event.Data, want)
+		}
+	}
+	if _, err = indexOwner.Exec(ctx, `UPDATE transactions SET input_data='0x'||input_data; UPDATE logs SET data='0x'||data`); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		path     string
+		original result
+	}{{coinPath, emptyInput}, {listedPath, nonemptyInput}, {logPath, bareLogs}} {
+		got := <-get(test.path)
+		if got.status != 200 || !bytes.Equal(got.body, test.original.body) {
+			t.Fatal("equivalent node-prefix rows changed actual route value", test.path, got.status, string(got.body))
+		}
+	}
+	if _, err = indexOwner.Exec(ctx, `UPDATE transactions SET input_data=substring(input_data from 3); UPDATE logs SET data=substring(data from 3)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		hash    string
+		value   any
+		restore string
+	}{{strings.ToLower(coin.Hash().Hex()), "01", ""}, {strings.ToLower(listed.Hash().Hex()), "01020305", "01020304"}, {strings.ToLower(coin.Hash().Hex()), nil, ""}} {
+		if _, err = indexOwner.Exec(ctx, `UPDATE transactions SET input_data=$1 WHERE hash=$2`, test.value, test.hash); err != nil {
+			t.Fatal(err)
+		}
+		got := <-get("/api/v2/explorer/transactions/" + test.hash)
+		if got.status == 200 {
+			t.Fatal("mismatched/null indexed input accepted as actual node bytes", string(got.body))
+		}
+		if _, err = indexOwner.Exec(ctx, `UPDATE transactions SET input_data=$1 WHERE hash=$2`, test.restore, test.hash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, test := range []struct {
+		index          int
+		wrong, restore string
+	}{{0, common.Bytes2Hex(common.LeftPadBytes([]byte{0xac}, 32)), common.Bytes2Hex(transfer.Data)}, {1, "00", ""}} {
+		if _, err = indexOwner.Exec(ctx, `UPDATE logs SET data=$1 WHERE tx_hash=$2 AND log_index=$3`, test.wrong, strings.ToLower(coin.Hash().Hex()), test.index); err != nil {
+			t.Fatal(err)
+		}
+		got := <-get(logPath)
+		if got.status == 200 {
+			t.Fatal("mismatched empty/nonempty indexed log accepted as actual receipt bytes", string(got.body))
+		}
+		if _, err = indexOwner.Exec(ctx, `UPDATE logs SET data=$1 WHERE tx_hash=$2 AND log_index=$3`, test.restore, strings.ToLower(coin.Hash().Hex()), test.index); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// These are aggregates of the emitted page, never the raw cohort. The hidden
 	// transaction is between the two visible transactions in descending order.
