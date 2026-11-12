@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -47,7 +48,11 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := common.HexToAddress("0x123456")
-	txs := []*types.Transaction{f.HistoryTransaction(t, 1, 0, target), f.HistoryTransaction(t, 2, 1, target)}
+	coin, err := types.SignTx(types.NewTransaction(0, target, big.NewInt(7), 100000, big.NewInt(1), nil), types.LatestSignerForChainID(big.NewInt(1)), f.HistoryKey(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	txs := []*types.Transaction{coin, f.HistoryTransaction(t, 2, 1, target)}
 	node := f.NewHistoryNode(t, txs, [][]*types.Log{{}, {}})
 	network := node.Network()
 	var instant atomic.Int64
@@ -234,6 +239,10 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 	next := <-get("/api/v2/explorer/transactions?limit=1&cursor=" + url.QueryEscape(page.Page.Next))
 	if next.status != 200 || !bytes.Contains(next.body, []byte(strings.ToLower(txs[0].Hash().Hex()))) {
 		t.Fatal("actual current wallet row next", next.status, string(next.body))
+	}
+	filtered := <-get("/api/v2/explorer/transactions?category=coin_transfer&limit=10")
+	if filtered.status != 200 || !bytes.Contains(filtered.body, []byte(strings.ToLower(coin.Hash().Hex()))) || bytes.Contains(filtered.body, []byte(strings.ToLower(txs[1].Hash().Hex()))) {
+		t.Fatal("actual native coin filter omitted wallet row or included contract call", filtered.status, string(filtered.body))
 	}
 	// The same cursor is bound to the original JWT and the captured upper.
 	node.Reorg(true)
