@@ -23,3 +23,18 @@ func TestOfflineRecoveryCLIRejectsUnboundedOrMisplacedTimeout(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanupRequiresExactStateAndValidRetentionBeforeOpeningStore(t *testing.T) {
+	t.Setenv("TEST_ADMISSION_RETENTION_DSN", "postgres://public-test-only@127.0.0.1:1/none?sslmode=disable")
+	args := []string{"cleanup", "--dsn-env", "TEST_ADMISSION_RETENTION_DSN", "--environment", "test", "--chain-id", "1", "--genesis-hash", "0x" + strings.Repeat("1", 64), "--deployment-id", "cleanup", "--generation", "11111111-1111-4111-8111-111111111111", "--coverage-digest", "sha256:" + strings.Repeat("1", 64)}
+	for _, test := range []struct {
+		setting string
+		args    []string
+	}{{"1001", args}, {"1000", args[:len(args)-2]}} {
+		t.Setenv("RETENTION_COMPLIANCE_CLEANUP_BATCH", test.setting)
+		var out, stderr bytes.Buffer
+		if code := run(test.args, &out, &stderr); code != 2 || out.Len() != 0 || !strings.Contains(stderr.String(), "exact network/generation/coverage") || strings.Contains(stderr.String(), "postgres://") {
+			t.Fatal("invalid cleanup must fail before database work", code)
+		}
+	}
+}

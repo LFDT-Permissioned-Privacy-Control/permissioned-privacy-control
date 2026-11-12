@@ -1,5 +1,6 @@
 // Command ops-v2-wallet-migrate is an explicit offline wallet-schema and
-// recovery tool. Runtime startup imports neither its credentials nor its DDL.
+// recovery and retention tool. Runtime startup imports neither its credentials
+// nor its DDL.
 package main
 
 import (
@@ -9,6 +10,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"time"
 
 	"privacy-proxy/internal/operational/walletsql"
 	w "privacy-proxy/internal/walletops"
@@ -23,7 +25,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	command := args[0]
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	env := fs.String("dsn-env", "", "explicit environment variable containing offline DSN")
+	env := fs.String("dsn-env", "", "explicit environment variable containing the selected owner or retention DSN")
 	app := fs.String("app-role", "", "pre-existing application role")
 	reader := fs.String("reader-role", "", "pre-existing reader role")
 	retention := fs.String("retention-role", "", "pre-existing retention role")
@@ -39,7 +41,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	digest := fs.String("sha256", "", "expected exact batch digest")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
-			fmt.Fprintln(stdout, "ops-v2-wallet-migrate migrate|bootstrap-empty|begin-recovery|import-revocations|finalize --dsn-env NAME [explicit roles/binding/generation/batch/coverage options]")
+			fmt.Fprintln(stdout, "ops-v2-wallet-migrate migrate|bootstrap-empty|begin-recovery|import-revocations|finalize|cleanup --dsn-env NAME [explicit roles/binding/generation/batch/coverage options]; cleanup uses retention credentials and RETENTION_WALLET_CHALLENGES_* settings")
 			return 0
 		}
 		fmt.Fprintln(stderr, "invalid wallet migration arguments")
@@ -59,6 +61,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 	var output any
 	switch command {
+	case "cleanup":
+		settings, e := walletsql.RetentionFromEnv(os.Getenv)
+		if e != nil {
+			fmt.Fprintln(stderr, "invalid wallet retention settings")
+			return 2
+		}
+		var store *walletsql.Store
+		store, err = walletsql.OpenRetention(ctx, dsn)
+		if err == nil {
+			defer store.Close()
+			var deleted int64
+			deleted, err = store.CleanupOnce(ctx, time.Now().UTC(), settings.Batch)
+			output = map[string]any{"deletedChallenges": deleted}
+		}
 	case "migrate":
 		err = walletsql.Migrate(ctx, dsn, *app, *reader, *retention)
 		output = map[string]any{"schemaVersion": 1, "sourceChecksum": walletsql.SchemaChecksum()}

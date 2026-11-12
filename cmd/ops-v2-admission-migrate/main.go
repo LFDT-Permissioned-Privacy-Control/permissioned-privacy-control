@@ -1,5 +1,6 @@
 // Command ops-v2-admission-migrate performs explicit offline schema/recovery
-// operations. The HTTP runtime imports no migrator credentials or DDL path.
+// and retention operations. The HTTP runtime imports no migrator credentials
+// or DDL path.
 package main
 
 import (
@@ -25,7 +26,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	command := args[0]
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	dsnEnv := fs.String("dsn-env", "", "explicit environment variable containing offline owner DSN")
+	dsnEnv := fs.String("dsn-env", "", "explicit environment variable containing the selected owner or retention DSN")
 	app := fs.String("app-role", "", "pre-existing application role")
 	reader := fs.String("reader-role", "", "pre-existing reader role")
 	retention := fs.String("retention-role", "", "pre-existing retention role")
@@ -39,7 +40,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	recoveryTimeout := fs.Duration("recovery-timeout", 10*time.Minute, "finalize only: finite offline scan budget, at most 30m")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
-			fmt.Fprintln(stdout, "ops-v2-admission-migrate migrate|migrate-creation-intents|bootstrap-empty|begin-recovery|finalize --dsn-env NAME [explicit roles/binding/generation/coverage options; finalize --recovery-timeout 10m, maximum 30m]")
+			fmt.Fprintln(stdout, "ops-v2-admission-migrate migrate|migrate-creation-intents|bootstrap-empty|begin-recovery|finalize|cleanup --dsn-env NAME [explicit roles/binding/generation/coverage options; finalize --recovery-timeout 10m, maximum 30m]; cleanup uses retention credentials and RETENTION_COMPLIANCE_*/RETENTION_TRAVEL_RECORDS settings")
 			return 0
 		}
 		fmt.Fprintln(stderr, "invalid admission migration arguments")
@@ -69,6 +70,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var err error
 	var out any
 	switch command {
+	case "cleanup":
+		settings, e := admissionsql.RetentionFromEnv(os.Getenv)
+		network, bindingErr := binding.Key()
+		digest, digestErr := a.ParseDigest(*coverage)
+		expected := a.ExpectedState{Generation: *generation, Coverage: digest}
+		if e != nil || bindingErr != nil || digestErr != nil || !expected.Valid() {
+			fmt.Fprintln(stderr, "cleanup requires valid retention settings and exact network/generation/coverage binding")
+			return 2
+		}
+		var store *admissionsql.Store
+		store, err = admissionsql.OpenRetention(ctx, dsn)
+		if err == nil {
+			defer store.Close()
+			var deleted int64
+			deleted, err = store.CleanupOnce(ctx, network, expected, time.Now().UTC(), settings)
+			out = map[string]any{"deletedRows": deleted}
+		}
 	case "migrate":
 		err = admissionsql.Migrate(ctx, dsn, *app, *reader, *retention)
 		if err == nil {

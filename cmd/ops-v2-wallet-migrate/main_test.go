@@ -22,3 +22,12 @@ func TestArgumentsAndSecretsStayOffline(t *testing.T) {
 		t.Fatal("help failed")
 	}
 }
+
+func TestCleanupRejectsInvalidRetentionBeforeOpeningStore(t *testing.T) {
+	t.Setenv("TEST_WALLET_RETENTION_DSN", "postgres://public-test-only@127.0.0.1:1/none?sslmode=disable")
+	t.Setenv("RETENTION_WALLET_CHALLENGES_CLEANUP_BATCH", "1001")
+	var out, stderr bytes.Buffer
+	if code := run([]string{"cleanup", "--dsn-env", "TEST_WALLET_RETENTION_DSN"}, &out, &stderr); code != 2 || out.Len() != 0 || !strings.Contains(stderr.String(), "retention settings") || strings.Contains(stderr.String(), "postgres://") {
+		t.Fatal("invalid cleanup settings must fail before database work", code)
+	}
+}
