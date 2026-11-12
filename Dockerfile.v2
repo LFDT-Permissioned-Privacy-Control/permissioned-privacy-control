@@ -7,15 +7,19 @@ RUN npm ci --ignore-scripts && npm rebuild esbuild
 COPY frontend/ ./
 RUN npm run build:v2
 
-FROM golang:1.26.9-trixie AS builder
+FROM golang:1.26.9-trixie AS go-deps
 WORKDIR /app
+ENV GOMAXPROCS=2 CGO_ENABLED=0 GOTOOLCHAIN=local
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+FROM go-deps AS builder
 COPY . .
 ARG VERSION=dev
 ARG GIT_COMMIT=none
 ARG BUILD_TIME=unknown
-RUN mkdir /out && CGO_ENABLED=0 go build -tags production,prover_disabled \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    mkdir /out && go build -p=1 -tags production,prover_disabled \
     -ldflags "-X privacy-proxy/internal/version.Version=${VERSION} -X privacy-proxy/internal/version.Commit=${GIT_COMMIT} -X privacy-proxy/internal/version.BuildTime=${BUILD_TIME}" \
     -o /out/ ./cmd/ops-v2 ./cmd/ops-v2-serve \
     ./cmd/ops-v2-identity-migrate ./cmd/ops-v2-wallet-migrate \
