@@ -71,8 +71,12 @@ up() {
   start_prepared
 }
 start_prepared() {
+  # Reload selected files and process-local CA pools together. State stays in
+  # the owned volumes; a repeated up deliberately restarts serving processes.
+  compose stop -t 30 ops explorer-api explorer-web
   compose run --rm --no-deps --user 0 --entrypoint sh bootstrap -ec 'mkdir -p /circuits; cp -R /host-circuits/. /circuits/; chown -R 1000:1000 /circuits; find /circuits -type f -exec chmod 644 {} \;'
-  compose up -d --wait --wait-timeout 90 postgres demo-wallet
+  compose up -d --wait --wait-timeout 90 postgres
+  compose up -d --force-recreate --wait --wait-timeout 90 demo-wallet
   compose up -d reth
   compose run --rm --no-deps --entrypoint node bootstrap scripts/v2-demo/wait-rpc.mjs
   compose run --rm --no-deps bootstrap configure --root /demo --prepare-databases
@@ -86,7 +90,8 @@ start_prepared() {
     compose run --rm --no-deps explorer-admin 'exec sso-v2-admin --source /demo/explorer/source.json --sha256 "$(cat /demo/explorer/source.sha256)" --action initialize'
   fi
   compose run --rm --no-deps bootstrap explorer-state --root /demo
-  compose up -d observer ops explorer-api explorer-web
+  compose up -d observer
+  compose up -d --force-recreate ops explorer-api explorer-web
   compose run --rm --no-deps bootstrap wait --root /demo
   copy_public
   compose run --rm --no-deps --entrypoint cat bootstrap /demo/urls.txt
@@ -97,6 +102,12 @@ case "${1:-up}" in
   build-indexer) compose build indexer;;
   build-ops) compose build ops;;
   resume) [ "$OWNED_COUNT" != 0 ]; start_prepared;;
+  repair-tls)
+    [ "$OWNED_COUNT" != 0 ] || { echo 'Run demo up first.' >&2; exit 1; }
+    compose stop -t 30 ops explorer-api explorer-web demo-wallet
+    compose run --rm --no-deps bootstrap repair-tls --root /demo
+    export_serving
+    start_prepared;;
   up) up;;
   check)
     up
@@ -117,5 +128,5 @@ case "${1:-up}" in
     export_serving
     compose up -d --force-recreate ops
     compose run --rm --no-deps bootstrap wait --root /demo;;
-  *) echo 'Usage: v2-demo.sh up|check|status|down|reset|logs|revision [on|off]' >&2; exit 2;;
+  *) echo 'Usage: v2-demo.sh up|check|status|down|reset|logs|repair-tls|revision [on|off]' >&2; exit 2;;
 esac

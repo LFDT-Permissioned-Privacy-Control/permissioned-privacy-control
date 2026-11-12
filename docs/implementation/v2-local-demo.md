@@ -40,6 +40,8 @@ actual built UI. Set `OPS_TEST_BROWSER_CHANNEL=chrome` to use an installed Chrom
 Source revisions must be available at their locked remote; no branch fallback or
 silent test skip is used. Logs and selected public URLs live under
 `.tmp/v2-demo/<project>/`. `OPS_V2_DEMO_PROJECT` can select another isolated demo.
+Running `up` again reapplies the selected files and restarts serving processes;
+it keeps the existing volumes and identities.
 
 ## Try the roles
 
@@ -55,6 +57,10 @@ The generated certificate belongs only to this local demo. Accept the local
 certificate warning for the printed URLs when browsing manually. The launcher
 does not install a system-wide CA. Container clients trust only the selected CA
 in their own process configuration; its private key stays offline.
+The launcher uses browser-compatible P-256 TLS certificates. For missing,
+mismatched or older demo TLS material, `scripts/v2-demo.sh repair-tls` repairs
+only TLS files and restarts their consumers; identity keys and stored data stay
+intact. Valid existing P-256 material is retained.
 
 `make demo-v2-check` links the public demo wallets through actual ownership
 challenge/sign/verify requests, deploys `DemoRecord` through OPS and submits a
