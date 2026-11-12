@@ -151,7 +151,7 @@ func TestMinedTraceActualWalletSQLRecorderAndProfileRules(t *testing.T) {
 	if _, err := d.owner.Exec(t.Context(), `CREATE ROLE raw_observer LOGIN PASSWORD 'raw-test-only';CREATE ROLE raw_facts LOGIN PASSWORD 'raw-test-only'`); err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"standard-positive", "guard-mode-positive", "strict-participant-no-policy", "strict-outsider", "standard-outsider", "listed-positive", "listed-no-nested-grant", "no-nested-grant", "wrong-function", "foreign-nested", "root-revert", "notification", "raw-id"} {
+	for _, scenario := range []string{"standard-positive", "guard-mode-positive", "strict-participant-no-policy", "strict-outsider", "standard-outsider", "listed-positive", "listed-no-nested-grant", "no-nested-grant", "wrong-function", "foreign-nested", "root-revert", "notification", "raw-id", "public-floor-outsider"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := minedActivityFixture()
 			if scenario == "guard-mode-positive" {
@@ -173,6 +173,14 @@ func TestMinedTraceActualWalletSQLRecorderAndProfileRules(t *testing.T) {
 				f.linkSigner = false
 			}
 			switch scenario {
+			case "public-floor-outsider":
+				f.capability(policybundle.CapabilitySharedCode)
+				f.linkSigner = false
+				f.contracts = f.contracts[1:]
+				f.creationAttribution.Factories = []policybundle.FactoryAttribution{}
+				f.bindings = []policycore.Binding{}
+				f.runtime.SharedInfrastructure = []policybundle.SharedInfrastructure{{Address: addressA}}
+				want = false
 			case "strict-outsider", "standard-outsider":
 				want = false
 			case "listed-no-nested-grant", "no-nested-grant":

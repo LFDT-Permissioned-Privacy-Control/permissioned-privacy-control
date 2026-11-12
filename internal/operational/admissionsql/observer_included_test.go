@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -45,6 +46,7 @@ type observedNode struct {
 	children               []common.Address
 	code                   string
 	traceCount             int
+	index                  uint32
 }
 
 func (n *observedNode) serve(w http.ResponseWriter, r *http.Request) {
@@ -82,12 +84,17 @@ func (n *observedNode) serve(w http.ResponseWriter, r *http.Request) {
 		v["from"] = n.signer.Hex()
 		v["blockHash"] = n.header.Hash().Hex()
 		v["blockNumber"] = "0x1"
-		v["transactionIndex"] = "0x0"
+		v["transactionIndex"] = "0x" + strconv.FormatUint(uint64(n.index), 16)
 		result = v
 	case "eth_getTransactionReceipt":
 		result = map[string]any{"transactionHash": n.tx.Hash().Hex(), "from": n.signer.Hex(), "to": n.creator.Hex(), "blockHash": n.header.Hash().Hex(), "blockNumber": "0x1", "transactionIndex": "0x0", "status": "0x1", "contractAddress": nil, "type": "0x2", "gasUsed": "0x20", "cumulativeGasUsed": "0x20", "effectiveGasPrice": "0x1", "logsBloom": "0x" + strings.Repeat("00", 256), "logs": []any{}}
+		result.(map[string]any)["transactionIndex"] = "0x" + strconv.FormatUint(uint64(n.index), 16)
+		result.(map[string]any)["cumulativeGasUsed"] = "0x" + strconv.FormatUint(32*(uint64(n.index)+1), 16)
 	case "eth_getBlockByHash", "eth_getBlockByNumber":
 		header["transactions"] = []any{n.tx.Hash().Hex()}
+		if n.index == 1 {
+			header["transactions"] = []any{common.Hash{99}.Hex(), n.tx.Hash().Hex()}
+		}
 		header["uncles"] = []any{}
 		header["withdrawals"] = []any{}
 		result = header
@@ -110,7 +117,7 @@ func (n *observedNode) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": q.ID, "result": result})
 }
-func newObservedWork(t *testing.T, d *observerDatabase) (*observedNode, a.Scope, a.CreationIntent, f.ObserverSnapshot, *rpcexecution.IncludedClient) {
+func newObservedWork(t *testing.T, d *observerDatabase, configure ...func(*observedNode)) (*observedNode, a.Scope, a.CreationIntent, f.ObserverSnapshot, *rpcexecution.IncludedClient) {
 	t.Helper()
 	binding, scope := creationScope(t, d.db)
 	key, _ := crypto.HexToECDSA(strings.Repeat("11", 32))
@@ -122,6 +129,9 @@ func newObservedWork(t *testing.T, d *observerDatabase) (*observedNode, a.Scope,
 	genesis := &types.Header{Number: big.NewInt(0), Difficulty: big.NewInt(0), Time: 1700000000, GasLimit: 30000000, BaseFee: big.NewInt(1)}
 	header := &types.Header{Number: big.NewInt(1), ParentHash: genesis.Hash(), Difficulty: big.NewInt(0), Time: genesis.Time + 1, GasLimit: 30000000, BaseFee: big.NewInt(1)}
 	node := &observedNode{genesis: genesis, header: header, tx: tx, signer: crypto.PubkeyToAddress(key.PublicKey), creator: creator, child: common.HexToAddress("0x2222222222222222222222222222222222222222"), code: "0x6000"}
+	for _, apply := range configure {
+		apply(node)
+	}
 	server := httptest.NewServer(http.HandlerFunc(node.serve))
 	t.Cleanup(server.Close)
 	binding.GenesisHash = genesis.Hash().Hex()
