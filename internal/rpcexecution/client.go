@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 
@@ -115,19 +116,21 @@ func (c *Client) AcquisitionLimits() Limits {
 }
 
 type CallExecution struct {
-	origin      *Client
-	signed      bool
-	signer      common.Address
-	txHash      common.Hash
-	hashMode    uint8
-	recordCount int
-	call        Call
-	anchor      Anchor
-	tree        *executionfacts.Tree
-	codes       map[common.Address]CodeInfo
-	raw         []byte
-	clientTrace []byte // Original owned unsigned callTracer child; never prestate.
-	timeline    *codeTimeline
+	origin         *Client
+	signed         bool
+	signer         common.Address
+	txHash         common.Hash
+	hashMode       uint8
+	recordCount    int
+	call           Call
+	anchor         Anchor
+	tree           *executionfacts.Tree
+	codes          map[common.Address]CodeInfo
+	raw            []byte
+	clientTrace    []byte // Original owned unsigned callTracer child; never prestate.
+	timeline       *codeTimeline
+	access         types.AccessList
+	accessCaptured bool
 }
 
 func (e *CallExecution) Call() Call                             { return e.call }
@@ -252,6 +255,10 @@ func (c *Client) acquireProfile(ctx context.Context, call Call, block BlockSelec
 }
 
 func (c *Client) acquireScopedProfile(ctx context.Context, call Call, block BlockSelector, overrides map[string]any, lifecycle bool, scope RootCreationScopeCheck) (*CallExecution, error) {
+	return c.acquireScopedProfileOptions(ctx, call, block, overrides, lifecycle, scope, false)
+}
+
+func (c *Client) acquireScopedProfileOptions(ctx context.Context, call Call, block BlockSelector, overrides map[string]any, lifecycle bool, scope RootCreationScopeCheck, access bool) (*CallExecution, error) {
 	if call.chainID != nil && call.chainID.String() != c.binding.ChainID {
 		return nil, failure(InvalidCall)
 	}
@@ -344,7 +351,7 @@ func (c *Client) acquireScopedProfile(ctx context.Context, call Call, block Bloc
 			return nil, failure(NodeFailure)
 		}
 	}
-	config := map[string]any{"tracer": "muxTracer", "tracerConfig": map[string]any{"callTracer": map[string]any{"onlyTopCall": false, "withLog": true}, "prestateTracer": map[string]any{"diffMode": false, "disableCode": false, "disableStorage": true, "includeEmpty": true}}}
+	config := map[string]any{"tracer": "muxTracer", "tracerConfig": map[string]any{"callTracer": map[string]any{"onlyTopCall": false, "withLog": true}, "prestateTracer": map[string]any{"diffMode": false, "disableCode": false, "disableStorage": !access, "includeEmpty": true}}}
 	if overrides != nil {
 		config["stateOverrides"] = overrides
 	}
@@ -379,7 +386,7 @@ func (c *Client) acquireScopedProfile(ctx context.Context, call Call, block Bloc
 	if err != nil {
 		return nil, failure(InvalidEvidence)
 	}
-	codes, total, err := decodePrestate(parts["prestateTracer"], c.limits)
+	codes, total, err := decodePrestateProfile(parts["prestateTracer"], c.limits, access)
 	if err != nil {
 		return nil, err
 	}
@@ -396,6 +403,10 @@ func (c *Client) acquireScopedProfile(ctx context.Context, call Call, block Bloc
 	}
 	if err == nil && !call.signedInput && c.binding.Profile == SimulationCallProfileID {
 		result.clientTrace = parts["callTracer"]
+	}
+	if err == nil && access {
+		result.access, err = accessFromPrestate(parts["prestateTracer"])
+		result.accessCaptured = err == nil
 	}
 	return result, err
 }

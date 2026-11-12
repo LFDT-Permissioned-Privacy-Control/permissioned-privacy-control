@@ -309,6 +309,7 @@ type node struct {
 	captureMined                bool
 	captureUnavailable          bool
 	mined                       *minedActivityNode
+	utility                     *utilityActivityNode
 	genesisHeader, anchorHeader *types.Header
 }
 
@@ -332,6 +333,9 @@ func (n *node) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.methods = append(n.methods, req.Method)
+	if n.utility != nil && n.utility.respond(n, w, req.ID, req.Method, req.Params) {
+		return
+	}
 	if n.mined != nil && n.mined.respond(n, w, req.ID, req.Method, req.Params) {
 		return
 	}

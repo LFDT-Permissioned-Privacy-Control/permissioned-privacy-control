@@ -35,6 +35,7 @@ type WalletResolver interface {
 	Load(context.Context, string) (nativeadmission.WalletSnapshot, error)
 }
 type Engine struct {
+	utilities    *executionUtilityEngine
 	snapshot     *policybundle.CatalogSnapshot
 	factory      *runtimepolicy.Factory
 	native       *nativeadmission.Engine
