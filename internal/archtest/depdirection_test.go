@@ -196,7 +196,7 @@ func TestNativeCallRuntimeDependencyBoundary(t *testing.T) {
 			allowed["privacy-proxy/internal/rpcexecution"] = true
 		}
 		if pkg == "privacy-proxy/internal/rpcengine" {
-			for _, name := range []string{"networkidentity", "nativeadmission", "admission", "walletadapter", "walletops", "walletproof", "guardbridge", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate", "creationcapture", "rpcenvelope", "rpcmetadatapolicy", "rpcmethoddata", "rpcstatepolicy", "rpchistorypolicy", "historyfacts", "readprivacy", "readprivacyabi", "explorerdata", "admissionsharedata"} {
+			for _, name := range []string{"networkidentity", "nativeadmission", "admission", "walletadapter", "walletops", "walletproof", "guardbridge", "nodeapproval", "nodeapproval/approvalpb", "tracer", "nodehttp", "loggate", "creationcapture", "rpcenvelope", "rpcmetadatapolicy", "rpcmethoddata", "rpcstatepolicy", "rpchistorypolicy", "historyfacts", "readprivacy", "readprivacyabi", "explorerdata", "admissionsharedata", "explorerprivacy", "explorerquery", "explorerv2data", "activitymethoddata"} {
 				allowed["privacy-proxy/internal/"+name] = true
 			}
 		}

@@ -307,6 +307,7 @@ type TransactionDTO struct {
 	To               *string `json:"to"`                        // required null for creation
 	TransactionHash  *string `json:"transactionHash,omitempty"` // Full only
 	Value            *Amount `json:"value,omitempty"`           // Full only
+	AddressID        *string `json:"addressId,omitempty"`       // Full only; case-bound in-scope target participant for detail
 }
 type TransactionDetailDTO struct {
 	TransactionDTO

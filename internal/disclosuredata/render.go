@@ -186,6 +186,11 @@ func txDTO(c RenderContext, fc factContext, t TransactionFact) TransactionDTO {
 	if c.Query.scope.Level == p.Full {
 		out.TransactionHash = ptr(hashString(t.Hash))
 		out.Value = ptr(t.Value)
+		if len(fc.targets[t.From]) > 0 {
+			out.AddressID = ptr(locator(c.Keys.Active, c, t.From))
+		} else if t.To != nil && len(fc.targets[*t.To]) > 0 {
+			out.AddressID = ptr(locator(c.Keys.Active, c, *t.To))
+		}
 	}
 	return out
 }
@@ -256,6 +261,14 @@ func emissionBudget(f Facts, fc factContext, c RenderContext) error {
 	for range f.Transactions {
 		if e := b.AddBytes(512); e != nil {
 			return e
+		}
+		if c.Query.scope.Level == p.Full {
+			if e := b.AddBytes(128); e != nil {
+				return e
+			}
+			if e := b.AddItems(1); e != nil {
+				return e
+			}
 		}
 	}
 	sanctions := f.Sanctions

@@ -26,7 +26,7 @@ func TestProjectionNeverLeaksFullFieldsAtLowerLevels(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			for _, word := range []string{`"transactionHash"`, `"value"`, addressString(testAddress(1)), addressString(testAddress(3))} {
+			for _, word := range []string{`"transactionHash"`, `"value"`, `"addressId"`, addressString(testAddress(1)), addressString(testAddress(3))} {
 				if bytes.Contains(raw, []byte(word)) != (level == p.Full) {
 					t.Fatal("field projection", word, string(raw))
 				}

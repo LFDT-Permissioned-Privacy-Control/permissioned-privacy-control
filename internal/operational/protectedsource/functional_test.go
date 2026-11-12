@@ -26,14 +26,18 @@ func TestActualRetainedSourcesComposeAllResources(t *testing.T) {
 	namespace := digestParts("functional-case-namespace")
 	base := p.Scope{TargetActors: []string{f.Actor(f.Subject)}, Resources: plan.Resources, Addresses: p.Addresses{Mode: "all-target-addresses", Values: []string{}}, DataTime: p.Interval{Start: f.Now - 10, End: f.Now + 10}, Level: p.Full}
 	keys := d.Keys{Active: d.Key{ID: "render", Bytes: bytes.Repeat([]byte{33}, 32)}}
-	var locator string
+	var locator, transactionLocator string
 	for _, resource := range []p.Resource{p.AddressHistory, p.Transactions, p.ActivityLogs, p.ActivitySummary, p.SanctionsReport, p.ComplianceReport} {
 		t.Run(string(resource), func(t *testing.T) {
 			view := d.Report
 			if resource == p.AddressHistory || resource == p.Transactions || resource == p.ActivityLogs {
 				view = d.List
 			}
-			normalized, err := d.Normalize(d.Query{Version: 1, Resource: resource, View: view}, base)
+			selectedScope := base
+			if resource == p.Transactions {
+				selectedScope.Resources = []p.Resource{p.Transactions}
+			}
+			normalized, err := d.Normalize(d.Query{Version: 1, Resource: resource, View: view}, selectedScope)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -80,11 +84,26 @@ func TestActualRetainedSourcesComposeAllResources(t *testing.T) {
 				}
 				locator = result.Result.Items[0].AddressID
 			}
+			if resource == p.Transactions {
+				var result struct {
+					Result struct {
+						Items []struct {
+							AddressID string `json:"addressId"`
+						} `json:"items"`
+					} `json:"result"`
+				}
+				if err = json.Unmarshal(raw, &result); err != nil || len(result.Result.Items) != 1 || result.Result.Items[0].AddressID == "" {
+					t.Fatal("Full transaction row lacks its case-bound detail locator", string(raw), err)
+				}
+				transactionLocator = result.Result.Items[0].AddressID
+			}
 		})
 	}
 	t.Run("full transaction detail", func(t *testing.T) {
 		hash := node.tx.Hash().Hex()
-		normalized, err := d.Normalize(d.Query{Version: 1, Resource: p.Transactions, View: d.Detail, AddressID: &locator, TransactionHash: &hash}, base)
+		txOnly := base
+		txOnly.Resources = []p.Resource{p.Transactions}
+		normalized, err := d.Normalize(d.Query{Version: 1, Resource: p.Transactions, View: d.Detail, AddressID: &transactionLocator, TransactionHash: &hash}, txOnly)
 		if err != nil {
 			t.Fatal(err)
 		}
