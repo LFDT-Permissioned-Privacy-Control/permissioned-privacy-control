@@ -27,6 +27,7 @@ type Config struct {
 	Metadata *rpcengine.MetadataEngine
 	State    *rpcengine.StateEngine
 	History  *rpcengine.HistoryEngine
+	Explorer *rpcengine.ExplorerEngine
 	Recorder *activitylog.Recorder
 	Network  networkidentity.Binding
 }
@@ -39,6 +40,7 @@ type Service struct {
 	minedMethods   map[string]bool
 	utilityMethods map[string]bool
 	history        *rpcengine.HistoryEngine
+	explorer       *rpcengine.ExplorerEngine
 	historyMethods map[string]bool
 	recorder       *activitylog.Recorder
 	organizations  []string

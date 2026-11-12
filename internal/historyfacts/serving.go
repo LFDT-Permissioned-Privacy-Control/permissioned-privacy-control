@@ -34,3 +34,12 @@ func (c *Current) EmitterMetadataCharge(address common.Address) int {
 	}
 	return c.view.ReadMetadataCharge(address)
 }
+
+// OperationFence returns the existing opaque caller fence by value. Consumers
+// can borrow its original deadline/cancellation without a temporary child.
+func (c *Current) OperationFence() Fence {
+	if c == nil {
+		return Fence{}
+	}
+	return c.fence
+}
