@@ -26,6 +26,8 @@ type utilityActivityNode struct {
 	signs            int
 	wrongSigner      bool
 	denyIntermediate bool
+	signedCalls      []map[string]any
+	changeSigned     func(map[string]any)
 }
 
 func (m *utilityActivityNode) respond(n *node, w http.ResponseWriter, id json.RawMessage, method string, params []json.RawMessage) bool {
@@ -74,6 +76,10 @@ func (m *utilityActivityNode) respond(n *node, w http.ResponseWriter, id json.Ra
 		m.signs++
 		var c map[string]any
 		_ = json.Unmarshal(params[0], &c)
+		m.signedCalls = append(m.signedCalls, c)
+		if m.changeSigned != nil {
+			m.changeSigned(c)
+		}
 		parse := func(name string) *big.Int {
 			s, _ := c[name].(string)
 			if s == "" {
@@ -88,7 +94,17 @@ func (m *utilityActivityNode) respond(n *node, w http.ResponseWriter, id json.Ra
 		if m.wrongSigner {
 			key, _ = crypto.HexToECDSA(strings.Repeat("0", 63) + "2")
 		}
-		tx, err := types.SignTx(types.NewTransaction(parse("nonce").Uint64(), to, parse("value"), parse("gas").Uint64(), parse("gasPrice"), data), types.LatestSignerForChainID(big.NewInt(1)), key)
+		var access types.AccessList
+		encodedAccess, _ := json.Marshal(c["accessList"])
+		_ = json.Unmarshal(encodedAccess, &access)
+		unsigned := types.NewTransaction(parse("nonce").Uint64(), to, parse("value"), parse("gas").Uint64(), parse("gasPrice"), data)
+		if c["type"] == "0x1" {
+			unsigned = types.NewTx(&types.AccessListTx{ChainID: big.NewInt(1), Nonce: parse("nonce").Uint64(), To: &to, Value: parse("value"), Gas: parse("gas").Uint64(), GasPrice: parse("gasPrice"), Data: data, AccessList: access})
+		}
+		if c["type"] == "0x2" {
+			unsigned = types.NewTx(&types.DynamicFeeTx{ChainID: big.NewInt(1), Nonce: parse("nonce").Uint64(), To: &to, Value: parse("value"), Gas: parse("gas").Uint64(), GasFeeCap: parse("maxFeePerGas"), GasTipCap: parse("maxPriorityFeePerGas"), Data: data, AccessList: access})
+		}
+		tx, err := types.SignTx(unsigned, types.LatestSignerForChainID(big.NewInt(1)), key)
 		if err != nil {
 			m.t.Fatal(err)
 		}

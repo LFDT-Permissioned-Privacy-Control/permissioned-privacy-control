@@ -121,6 +121,14 @@ func (r *TraceOperationResult) MarshalRecordingFailureFor(e *Engine) ([]byte, er
 	if r == nil || r.owner != e || e == nil {
 		return nil, errOperation
 	}
+	if r.rawResult != nil {
+		if r.PreflightFor(e) != nil {
+			return nil, errOperation
+		}
+		// A node-owned send has already crossed the raw lane's effect boundary.
+		// Preserve its original unknown-outcome hash after recording failure.
+		return r.rawResult.MarshalRecordingFailureFor(e)
+	}
 	return marshalTraceFixedError(r.id, -32002), nil
 }
 func (r *TraceOperationResult) RequireDeliverable(ctx context.Context, e *Engine) error {
