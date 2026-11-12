@@ -16,7 +16,7 @@ import (
 func main() { os.Exit(run(os.Args[1:])) }
 func run(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "expected init, configure or revision")
+		fmt.Fprintln(os.Stderr, "expected init, repair-tls, configure or revision")
 		return 2
 	}
 	command := args[0]
@@ -34,7 +34,7 @@ func run(args []string) int {
 	if fs.NArg() != 0 {
 		return 2
 	}
-	allowed := map[string]map[string]bool{"init": {"root": true}, "configure": {"root": true, "wallet-output": true, "prepare-databases": true}, "revision": {"root": true, "wallet-output": true, "reader-grant": true}, "explorer-state": {"root": true}, "status": {"root": true}, "wait": {"root": true}, "check": {"root": true, "transaction": true, "receipt-block": true, "contract": true}}
+	allowed := map[string]map[string]bool{"init": {"root": true}, "repair-tls": {"root": true}, "configure": {"root": true, "wallet-output": true, "prepare-databases": true}, "revision": {"root": true, "wallet-output": true, "reader-grant": true}, "explorer-state": {"root": true}, "status": {"root": true}, "wait": {"root": true}, "check": {"root": true, "transaction": true, "receipt-block": true, "contract": true}}
 	bad := allowed[command] == nil
 	fs.Visit(func(f *flag.Flag) {
 		if !allowed[command][f.Name] {
@@ -50,6 +50,8 @@ func run(args []string) int {
 	switch command {
 	case "init":
 		e = v2demo.Init(*root)
+	case "repair-tls":
+		e = v2demo.RepairTLS(*root)
 	case "configure":
 		if *databases {
 			e = v2demo.PrepareDatabases(ctx, *root)

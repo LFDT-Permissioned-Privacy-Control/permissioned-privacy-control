@@ -3,8 +3,10 @@
 package v2demo
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -141,6 +143,9 @@ func Init(root string) error {
 	}
 	if old, e := readState(root); e == nil {
 		if old.Version == 1 {
+			if e := ensureTLS(old); e != nil {
+				return e
+			}
 			return old.writeTail()
 		}
 		return ErrInvalid
@@ -217,26 +222,26 @@ func mustKey(index int) *ecdsa.PrivateKey {
 	return k
 }
 func writeTLS(s State) error {
-	caPublic, caKey, e := ed25519.GenerateKey(rand.Reader)
+	caKey, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if e != nil {
 		return e
 	}
-	leafPublic, leafKey, e := ed25519.GenerateKey(rand.Reader)
+	leafKey, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if e != nil {
 		return e
 	}
 	now := time.Now()
 	ca := &x509.Certificate{SerialNumber: big.NewInt(now.UnixNano()), Subject: pkix.Name{CommonName: "Isolated V2 demo CA"}, NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(1, 0, 0), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
-	caDER, e := x509.CreateCertificate(rand.Reader, ca, ca, caPublic, caKey)
+	caDER, e := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
 	if e != nil {
 		return e
 	}
 	leaf := &x509.Certificate{SerialNumber: big.NewInt(now.UnixNano() + 1), Subject: pkix.Name{CommonName: "Isolated V2 demo localhost"}, NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(1, 0, 0), BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, DNSNames: []string{"localhost"}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}}
-	leafDER, e := x509.CreateCertificate(rand.Reader, leaf, ca, leafPublic, caKey)
+	leafDER, e := x509.CreateCertificate(rand.Reader, leaf, ca, &leafKey.PublicKey, caKey)
 	if e != nil {
 		return e
 	}
-	for name, key := range map[string]ed25519.PrivateKey{"private/ca.key": caKey, "tls.key": leafKey} {
+	for name, key := range map[string]*ecdsa.PrivateKey{"private/ca.key": caKey, "tls.key": leafKey} {
 		der, e := x509.MarshalPKCS8PrivateKey(key)
 		if e != nil {
 			return e
@@ -250,6 +255,70 @@ func writeTLS(s State) error {
 	}
 	_, e = writeBytes(s.file("tls.crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}))
 	return e
+}
+
+// RepairTLS replaces only incompatible demo TLS material. Normal restarts retain
+// a valid P-256 CA and leaf byte-for-byte; identity signing keys and state never
+// participate in this repair. Each file is atomically replaced, and validation
+// of the entire set makes an interrupted multi-file repair safe to retry.
+func RepairTLS(root string) error {
+	root, e := canonicalRoot(root)
+	if e != nil {
+		return e
+	}
+	s, e := readState(root)
+	if e != nil {
+		return e
+	}
+	return ensureTLS(s)
+}
+
+func ensureTLS(s State) error {
+	if compatibleTLS(s) {
+		return nil
+	}
+	return writeTLS(s)
+}
+
+func compatibleTLS(s State) bool {
+	readPEM := func(name, kind string) []byte {
+		raw, e := os.ReadFile(s.file(name))
+		if e != nil {
+			return nil
+		}
+		block, rest := pem.Decode(raw)
+		if block == nil || block.Type != kind || len(bytes.TrimSpace(rest)) != 0 {
+			return nil
+		}
+		return block.Bytes
+	}
+	ca, e := x509.ParseCertificate(readPEM("ca.crt", "CERTIFICATE"))
+	if e != nil || !ca.IsCA || ca.SignatureAlgorithm != x509.ECDSAWithSHA256 || ca.CheckSignatureFrom(ca) != nil {
+		return false
+	}
+	leaf, e := x509.ParseCertificate(readPEM("tls.crt", "CERTIFICATE"))
+	if e != nil || leaf.IsCA || leaf.SignatureAlgorithm != x509.ECDSAWithSHA256 || leaf.CheckSignatureFrom(ca) != nil {
+		return false
+	}
+	for _, item := range []struct {
+		name string
+		cert *x509.Certificate
+	}{{"private/ca.key", ca}, {"tls.key", leaf}} {
+		value, e := x509.ParsePKCS8PrivateKey(readPEM(item.name, "PRIVATE KEY"))
+		if e != nil {
+			return false
+		}
+		key, ok := value.(*ecdsa.PrivateKey)
+		if !ok || key.Curve != elliptic.P256() || !key.PublicKey.Equal(item.cert.PublicKey) {
+			return false
+		}
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	if _, e = leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "localhost"}); e != nil {
+		return false
+	}
+	return leaf.VerifyHostname("127.0.0.1") == nil
 }
 
 func (s State) writeEnv(file string, values map[string]string) error {
