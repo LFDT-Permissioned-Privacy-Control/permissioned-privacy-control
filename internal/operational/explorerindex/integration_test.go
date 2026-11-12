@@ -18,6 +18,9 @@ import (
 //go:embed testdata/existing-indexer.sql
 var existingIndexerSQL string
 
+//go:embed testdata/indexer-009-up.sql
+var currentCounterSQL string
+
 type pgFixture struct {
 	owner   *pgx.Conn
 	dsn     string
@@ -28,7 +31,8 @@ func testBinding(reference [32]byte) explorerquery.Binding {
 	return explorerquery.Binding{Network: networkidentity.Binding{Environment: "test", ChainID: "1", GenesisHash: "0x" + strings.Repeat("0", 63) + "1", DeploymentID: "index-reader-test"}, SourceReference: reference, SchemaDigest: SchemaDigest(), ConfiguredEpoch: uuid.NewString()}
 }
 
-func indexFixture(t *testing.T) *pgFixture {
+func indexFixture(t *testing.T) *pgFixture { return indexFixtureVersion(t, true) }
+func indexFixtureVersion(t *testing.T, current bool) *pgFixture {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 40*time.Second)
 	defer cancel()
@@ -72,6 +76,9 @@ func indexFixture(t *testing.T) *pgFixture {
 		_ = f.owner.Close(cleanup)
 	})
 	f.exec(t, existingIndexerSQL)
+	if current {
+		f.exec(t, currentCounterSQL)
+	}
 	f.exec(t, "CREATE ROLE index_reader LOGIN NOINHERIT PASSWORD 'index-public-test-only'")
 	f.exec(t, "REVOKE CREATE ON SCHEMA public FROM PUBLIC")
 	f.exec(t, "GRANT USAGE ON SCHEMA public TO index_reader")

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "purpose": "existing-indexer-fixed-reads/v1",
   "schema": "public",
   "tables": [
@@ -1099,5 +1099,18 @@
         }
       ]
     }
-  ]
+  ],
+  "counter_shapes": {
+    "columns": [
+      "address_stats.internal_tx_count",
+      "address_stats.token_transfer_count",
+      "address_stats.tx_count",
+      "tokens.holder_count",
+      "tokens.transfer_count"
+    ],
+    "type_oids": [
+      20,
+      23
+    ]
+  }
 }

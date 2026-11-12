@@ -18,6 +18,11 @@
 // rows, restore history or completeness. Purpose consumers must qualify those
 // facts and their current authority independently.
 //
+// The supported catalogs have either INT or, following indexer migration009,
+// BIGINT for all five address_stats and tokens counters listed in the descriptor.
+// Mixed counter widths, other counter types and unrelated schema changes are
+// rejected. Counters retain their lossless decimal-string projections.
+//
 // Each snapshot locks the fixed relations through a zero-row read, checks the
 // effective role and exact supported catalog, and completes a read-only
 // repeatable-read transaction before returning usable data. Unknown completion

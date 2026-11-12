@@ -29,11 +29,16 @@ type tableDefinition struct {
 	Columns []columnDefinition `json:"columns"`
 	Keys    []keyDefinition    `json:"keys"`
 }
+type counterShapes struct {
+	Columns  []string `json:"columns"`
+	TypeOIDs []uint32 `json:"type_oids"`
+}
 type schemaDefinition struct {
-	Version int               `json:"version"`
-	Purpose string            `json:"purpose"`
-	Schema  string            `json:"schema"`
-	Tables  []tableDefinition `json:"tables"`
+	CounterShapes counterShapes     `json:"counter_shapes"`
+	Version       int               `json:"version"`
+	Purpose       string            `json:"purpose"`
+	Schema        string            `json:"schema"`
+	Tables        []tableDefinition `json:"tables"`
 }
 
 // SchemaDigest binds the compiled fixed-query purpose; it is not a database
@@ -49,9 +54,14 @@ func SchemaDigest() [32]byte {
 
 var compiledDefinition = sync.OnceValues(func() (*schemaDefinition, error) {
 	var s schemaDefinition
-	if json.Unmarshal(schemaBytes, &s) != nil || s.Version != 1 || s.Purpose != "existing-indexer-fixed-reads/v1" || s.Schema != "public" || len(s.Tables) != 11 {
+	if json.Unmarshal(schemaBytes, &s) != nil || s.Version != 2 || s.Purpose != "existing-indexer-fixed-reads/v1" || s.Schema != "public" || len(s.Tables) != 11 {
 		return nil, ErrInvalid
 	}
+	expectedCounters := []string{"address_stats.internal_tx_count", "address_stats.token_transfer_count", "address_stats.tx_count", "tokens.holder_count", "tokens.transfer_count"}
+	if !slices.Equal(s.CounterShapes.Columns, expectedCounters) || !slices.Equal(s.CounterShapes.TypeOIDs, []uint32{20, 23}) {
+		return nil, ErrInvalid
+	}
+	counters := 0
 	for i, t := range s.Tables {
 		if !sqlName(t.Name) || i > 0 && s.Tables[i-1].Name >= t.Name || len(t.Columns) == 0 || len(t.Columns) > 256 || len(t.Keys) == 0 || len(t.Keys) > 3 {
 			return nil, ErrInvalid
@@ -59,6 +69,14 @@ var compiledDefinition = sync.OnceValues(func() (*schemaDefinition, error) {
 		for j, c := range t.Columns {
 			if !sqlName(c.Name) || j > 0 && t.Columns[j-1].Name >= c.Name || c.TypeOID == 0 {
 				return nil, ErrInvalid
+			}
+		}
+		for _, column := range t.Columns {
+			if slices.Contains(s.CounterShapes.Columns, t.Name+"."+column.Name) {
+				if column.TypeOID != 23 {
+					return nil, ErrInvalid
+				}
+				counters++
 			}
 		}
 		for _, k := range t.Keys {
@@ -71,6 +89,9 @@ var compiledDefinition = sync.OnceValues(func() (*schemaDefinition, error) {
 				}
 			}
 		}
+	}
+	if counters != 5 {
+		return nil, ErrInvalid
 	}
 	return &s, nil
 })
@@ -121,6 +142,10 @@ func validateSchema(raw []byte, maximum int) error {
 	if d.Decode(&extra) != io.EOF {
 		return ErrUnavailable
 	}
+	// Producer009 widens precisely these five counters in one migration.
+	// Admit only both complete known shapes, never arbitrary numeric casts or
+	// an interrupted/mixed-width catalog. All remaining structure stays exact.
+	var counterOID uint32
 	for i, t := range actual {
 		want := definition.Tables[i]
 		if t.Name != want.Name || t.Kind != "r" || t.Persistence != "p" || t.RowSecurity || t.ForceRowSecurity || t.Inheritance || t.Rules || t.UserTriggers || len(t.Columns) != len(want.Columns) || len(t.Keys) != len(want.Keys) {
@@ -128,7 +153,15 @@ func validateSchema(raw []byte, maximum int) error {
 		}
 		for j, c := range t.Columns {
 			w := want.Columns[j]
-			if c.Name != w.Name || c.TypeSchema != "pg_catalog" || c.TypeOID != w.TypeOID || c.TypeMod != w.TypeMod || c.NotNull != w.NotNull || c.Generated != "" || c.Identity != "" || c.Select != w.Select {
+			typeMatches := c.TypeOID == w.TypeOID
+			if slices.Contains(definition.CounterShapes.Columns, t.Name+"."+w.Name) {
+				typeMatches = slices.Contains(definition.CounterShapes.TypeOIDs, c.TypeOID)
+				if counterOID != 0 && counterOID != c.TypeOID {
+					return ErrUnavailable
+				}
+				counterOID = c.TypeOID
+			}
+			if c.Name != w.Name || c.TypeSchema != "pg_catalog" || !typeMatches || c.TypeMod != w.TypeMod || c.NotNull != w.NotNull || c.Generated != "" || c.Identity != "" || c.Select != w.Select {
 				return ErrUnavailable
 			}
 		}
