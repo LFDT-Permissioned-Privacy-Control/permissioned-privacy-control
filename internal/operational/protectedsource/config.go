@@ -34,6 +34,7 @@ type Config struct {
 	Finance       admissionsql.FinanceReaderConfig
 	Activity      *activitysql.Reader
 	Clock         identity.Clock
+	RenderKeys    d.Keys
 }
 
 // Sources borrows already restricted operational readers. It owns no database
@@ -51,6 +52,7 @@ type Sources struct {
 	sanctions         *disclosuresanctions.Projector
 	sanctionsDigest   d.Digest
 	clock             identity.Clock
+	render            d.Keys
 }
 
 func nilValue(v any) bool {
@@ -131,9 +133,17 @@ func New(ctx context.Context, c Config) (*Sources, error) {
 	if [32]byte(activity.NetworkKey) != network {
 		return nil, d.ErrInvalid
 	}
+	render, err := d.CopyKeys(c.RenderKeys)
+	if err != nil {
+		return nil, err
+	}
+	renderGeneration, err := d.RenderGeneration(render)
+	if err != nil {
+		return nil, err
+	}
 	// This is a selected assembly digest, not a database restoration marker.
 	plan := d.SourcePlan{Version: 2, Profile: d.RetainedSourceProfile, BundleDigest: d.Digest(meta.ManifestDigest), NetworkKey: digestArray(network), Resources: []p.Resource{p.ActivityLogs, p.ActivitySummary, p.AddressHistory, p.ComplianceReport, p.SanctionsReport, p.Transactions}}
-	plan.PlanDigest = digestParts("ops.disclosure.retained-assembly/v1", plan.BundleDigest, plan.NetworkKey, c.ExpectedIndex.Binding, namespace.Era, namespace.State.Generation, selected, c.Wallet.Binding, c.Wallet.ExpectedState, c.Finance.Network, c.Finance.ExpectedState, activity, m.ClassifierDigest(), m.RequestPredicateDigest(), compliance.Digest())
+	plan.PlanDigest = digestParts("ops.disclosure.retained-assembly/v1", plan.BundleDigest, plan.NetworkKey, c.ExpectedIndex.Binding, namespace.Era, namespace.State.Generation, selected, c.Wallet.Binding, c.Wallet.ExpectedState, c.Finance.Network, c.Finance.ExpectedState, activity, m.ClassifierDigest(), m.RequestPredicateDigest(), renderGeneration, compliance.Digest())
 	c.Wallet.Plan = plan
 	c.Finance.Plan = plan
 	c.Wallet.Clock = c.Clock
@@ -157,7 +167,7 @@ func New(ctx context.Context, c Config) (*Sources, error) {
 	if now := c.Clock().UTC(); now.IsZero() || now.Unix() < 0 || now.Unix() > p.MaxUnixSeconds {
 		return nil, d.ErrInvalid
 	}
-	return &Sources{plan: plan, index: c.Index, indexMetadata: c.ExpectedIndex, namespace: c.Namespace, namespaceMetadata: namespace, nodes: nodes, wallet: wallet, finance: finance, activity: part, sanctions: sanctions, sanctionsDigest: d.Digest(compliance.Digest()), clock: c.Clock}, nil
+	return &Sources{plan: plan, index: c.Index, indexMetadata: c.ExpectedIndex, namespace: c.Namespace, namespaceMetadata: namespace, nodes: nodes, wallet: wallet, finance: finance, activity: part, sanctions: sanctions, sanctionsDigest: d.Digest(compliance.Digest()), clock: c.Clock, render: render}, nil
 }
 func (s *Sources) Plan() d.SourcePlan {
 	if s == nil {
