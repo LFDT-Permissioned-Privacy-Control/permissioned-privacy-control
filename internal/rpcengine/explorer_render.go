@@ -397,14 +397,8 @@ func (x *explorerRender) transaction(row explorerquery.Record) (any, bool, error
 		return nil, false, errExplorer
 	}
 	result.CreatedAt = f.nullable("created_at")
-	cats := []string{}
-	if shadow.IsContractCreation() {
-		cats = append(cats, "contract_creation")
-	} else if len(v.Input()) > 0 {
-		cats = append(cats, "contract_call")
-	} else {
-		cats = append(cats, "native_transfer")
-	}
+	status, hasStatus := r.Receipt.Status()
+	cats := explorerTransactionCategories(shadow.IsContractCreation(), v.Value(), v.Input(), hasStatus && status == 1)
 	if !x.result.current.Profile().Strict() {
 		count := uint64(0)
 		for _, tr := range x.contextTransfers {
@@ -435,6 +429,23 @@ func (x *explorerRender) transaction(row explorerquery.Record) (any, bool, error
 	}
 	return result, true, nil
 }
+
+// Keep the existing indexer's category meanings, deriving them from the
+// qualified signed envelope and receipt rather than mutable category bits.
+func explorerTransactionCategories(creation bool, value *big.Int, input []byte, successful bool) []string {
+	categories := []string{}
+	if value != nil && value.Sign() > 0 && len(input) == 0 {
+		categories = append(categories, "coin_transfer")
+	}
+	if creation && successful {
+		categories = append(categories, "contract_creation")
+	}
+	if !creation && len(input) >= 4 {
+		categories = append(categories, "contract_call")
+	}
+	return categories
+}
+
 func (x *explorerRender) transfer(row explorerquery.Record) (explorerdata.TokenTransfer, bool, error) {
 	f, e := fieldsOf(row)
 	if e != nil {

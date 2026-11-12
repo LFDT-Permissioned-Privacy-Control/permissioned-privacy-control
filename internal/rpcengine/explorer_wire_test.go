@@ -2,6 +2,8 @@ package rpcengine
 
 import (
 	"encoding/json"
+	"math/big"
+	"slices"
 	"strings"
 	"testing"
 
@@ -30,5 +32,28 @@ func TestExplorerRoutesAndLosslessMaskedValue(t *testing.T) {
 		if err != nil || !strings.Contains(string(out), tc.expected) {
 			t.Fatal("masked/zero/lossless distinction", string(out), err)
 		}
+	}
+}
+
+func TestExplorerCategoriesMatchExistingIndexerMeanings(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		creation, success bool
+		value             int64
+		input             []byte
+		want              []string
+	}{
+		{"native-value", false, true, 7, nil, []string{"coin_transfer"}},
+		{"zero-value", false, true, 0, nil, []string{}},
+		{"short-calldata", false, true, 7, []byte{1}, []string{}},
+		{"selector", false, true, 0, []byte{1, 2, 3, 4}, []string{"contract_call"}},
+		{"creation", true, true, 0, []byte{1}, []string{"contract_creation"}},
+		{"failed-creation", true, false, 0, []byte{1}, []string{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := explorerTransactionCategories(test.creation, big.NewInt(test.value), test.input, test.success); !slices.Equal(got, test.want) {
+				t.Fatalf("got %v want %v", got, test.want)
+			}
+		})
 	}
 }
