@@ -1,11 +1,11 @@
 # OPS V2 DSL and Reth: agent handoff
 
-Updated 25 September 2026. This is the starting point for continuing the PoC on
-`feat/ops-dsl-reth`, originally at
-`/Users/blade/work/software/privacy-proxy/.tmp/worktrees/ops-dsl-reth`.
-The latest functional fix is `8d835dd4`; later documentation commits describe it.
-The original branch is preserved on origin. For the main-reconciled migration
-sequence and database compatibility, use the [stack runbook](ops-reth-stack.md).
+This historical report records the optional EVM/Reth experiment as of
+25 September 2026, including fix `8d835dd4`. Its SQL governance and Solidity
+execution design are separate from the native Go V2 delivery described in the
+[operational server guide](v2-operational-server.md). For the experimental
+migration sequence and database compatibility, use the
+[stack runbook](ops-reth-stack.md).
 
 ## Scope and reading order
 
@@ -37,7 +37,7 @@ handoff and the September 25 report for the continuation's final status.
 ## Why execution authorization moved into Reth
 
 An OPS-side pre-flight trace can describe a different state or call tree from
-the transaction that is eventually executed. This branch authenticates and
+the transaction that is eventually executed. The experimental implementation authenticates and
 admits the request at OPS, then enforces the DSL during actual node execution.
 The node checks actual application frames, including nested calls and creation,
 against live execution state and a coherent pinned policy/facts snapshot. A

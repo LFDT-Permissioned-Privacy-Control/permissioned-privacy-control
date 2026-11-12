@@ -2,10 +2,14 @@
 
 A privacy-preserving JSON-RPC proxy for Ethereum nodes with ZK-proof authentication and hierarchical RBAC.
 
-**Continuing the OPS V2 DSL/Reth PoC?** Start with the
-[agent handoff](docs/implementation/ops-v2-agent-handoff.md) for the accepted
-architecture, specifications, code map, test evidence and remaining limits.
-Use its guarded-Reth runbook for this branch's acceptance checks.
+**Native V2:** use [the operational server guide](docs/implementation/v2-operational-server.md)
+and `make build-v2` or `Dockerfile.v2`. Approved files define the in-memory Go
+policy; named operational stores retain wallet, admission, audit and session
+state. The native delivery excludes the optional EVM policy backend.
+
+The [DSL/Reth experiment handoff](docs/implementation/ops-v2-agent-handoff.md)
+records that separate backend's design and evidence. The quickstart and general
+development targets below select the legacy stack.
 
 ## Quick Start
 

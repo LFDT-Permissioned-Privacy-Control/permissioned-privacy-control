@@ -22,6 +22,14 @@ The original `disclosurecase.New` and `disclosurehttp.New` remain metadata-only.
 The metadata-only HTTP constructor rejects a data-enabled service, so it cannot
 bypass that service's admission and deadline checks.
 
+The [operational server](v2-operational-server.md) instead assembles
+`NewWithRetainedData` with concrete `operational/protectedsource` readers.
+History-backed resources use `RETAINED_AT_READ` and `sourceBasisDigest`;
+sealed activity retains `COMPLETE_AT_CUT` with `sourceCutDigest`. Retained
+cursors preserve the original upper block and source basis, while each page
+qualifies its own bounded retained data. These contracts describe retained
+populations rather than an immutable export of all historical activity.
+
 ## Authorization and cases
 
 Git-approved standing rules define permission. A case records concrete targets,
@@ -50,6 +58,11 @@ accept a limit of 1–100 and an authenticated cursor. Transaction detail requir
 Full access before hash/locator value checks or source lookup. Address resolution
 always projects the current authorized level; its opaque ID is not permission to
 obtain the raw address.
+
+Full transaction rows include a case-bound `addressId` for an actual in-scope
+target participant. A transaction-only case can use it for detail without
+permission to browse the separate `addresses` resource. Lower detail levels
+omit this transaction locator.
 
 Recognized resource/view pairs are:
 
@@ -81,17 +94,21 @@ as authoritative data.
 
 ## Sources, cuts and bounded work
 
-Source descriptors bind exact network, epoch, generation, format, coverage and
-immutable cut references. Activity, history and financial records must reference
-the correct source kind. Wallet facts define current associations and `Mine`, not
+Original immutable-cut source descriptors bind exact network, epoch, generation,
+format, coverage and cut references. Retained history instead binds its
+separately versioned source plan and original upper-block basis. Activity,
+history and financial records must reference the correct source kind. Wallet
+facts define current associations and `Mine`, not
 historical authorship or data-organization ownership. The one wallet snapshot
 contains at most 4,096 total tuples across query targets and, when needed, the
 viewer. The viewer cannot add an address to the target scope.
 
 Activity lists and summaries cover qualified audit records already sealed in
-SQL at the captured chain head. Their coverage population is
-`SEALED_RPC_COMPLETIONS_AS_OF_CHAIN_HEAD`. `COMPLETE_AT_CUT` means complete
-within that retained, qualified dataset. It excludes requests still in the local
+SQL at the captured chain head. The original immutable source uses
+`SEALED_RPC_COMPLETIONS_AS_OF_CHAIN_HEAD`. The operational retained assembly uses
+`SEALED_REQUEST_COMPLETIONS_AS_OF_CHAIN_HEAD` for recognized RPC and Explorer
+completions, excluding other HTTP operations. `COMPLETE_AT_CUT` means complete
+within the selected retained, qualified dataset. It excludes requests still in the local
 buffer and requests that were never recorded or were lost before sealing. Zero
 matching records does not prove that no matching request ran. Consumers must
 label these results as sealed audit records rather than all executed requests.
@@ -105,8 +122,11 @@ unchanged facts later does not invalidate pagination or refresh an old proof.
 Owned sources check current freshness, recovery and fault state separately.
 Cursors bind the case, recipient, original rule/bundle, semantic query, source
 plan/cuts, wallet facts and actual render-key generation. The service authenticates
-the cursor before source work and passes its detached after-position explicitly;
-sources receive no cursor or render keys.
+the cursor before source work and passes its detached after-position explicitly.
+Immutable-cut sources receive no cursor or render keys. The retained source
+receives the same configured render keys as the case service solely to resolve
+an optional case-bound address locator for a transaction list; it does not
+receive or authenticate the client's encrypted cursor.
 
 Rows must be strictly ordered, unique and after the authenticated position.
 A page must establish a full page plus lookahead or actual source exhaustion.
