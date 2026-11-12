@@ -16,6 +16,7 @@ import (
 	"privacy-proxy/internal/operational/admissionsql"
 	"privacy-proxy/internal/operational/disclosuresql"
 	"privacy-proxy/internal/operational/protectedsource"
+	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/walletops"
 )
 
@@ -112,6 +113,7 @@ func (s *Server) mountProtected(ctx context.Context, p *dataPlane, wb walletops.
 		return e
 	}
 	s.close = append(s.close, namespace.Close)
+	s.readyChecks = append(s.readyChecks, namespace.CheckReady)
 	nodes := map[string]protectedsource.NodeConfig{}
 	for _, n := range c.Nodes {
 		if _, exists := nodes[n.OrganizationID]; exists {
@@ -123,6 +125,11 @@ func (s *Server) mountProtected(ctx context.Context, p *dataPlane, wb walletops.
 		}
 		source := creationfacts.Source{Network: p.reference.Network, Organization: n.OrganizationID, URL: n.Endpoint.URL, CredentialRef: ref, CredentialHeader: cr.Header, Profile: "reth-prague-included-creations/v1", PragueStart: n.Endpoint.PragueStart, PragueEnd: n.Endpoint.PragueEnd}
 		nodes[n.OrganizationID] = protectedsource.NodeConfig{Source: source, Credential: cr, Transport: p.transport}
+		readyClient, e := rpcexecution.NewMetadataClient(p.transport, rpcexecution.MetadataSource{Network: p.network, URL: n.Endpoint.URL, CredentialRef: ref, CredentialHeader: cr.Header, AllowUnauthenticated: ref == ""}, cr, rpcexecution.DefaultMetadataLimits())
+		if e != nil {
+			return e
+		}
+		s.addReadyNode(readyClient, cr, true)
 	}
 	render, e := dataKeys(c.RenderKeys)
 	if e != nil {
@@ -141,6 +148,7 @@ func (s *Server) mountProtected(ctx context.Context, p *dataPlane, wb walletops.
 		return e
 	}
 	s.close = append(s.close, store.Close)
+	s.readyChecks = append(s.readyChecks, store.CheckReady)
 	admin, e := adminKeys(c.AdminCursorKeys)
 	if e != nil {
 		return e

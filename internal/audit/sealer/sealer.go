@@ -285,7 +285,10 @@ func (s *Sealer) Run(ctx context.Context) {
 	t := time.NewTicker(s.cfg.Interval)
 	defer t.Stop()
 	for {
-		if _, err := s.Tick(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if _, err := s.Tick(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("audit sealer tick failed (will retry next tick)", "error", err)
 		}
 		select {

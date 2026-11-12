@@ -112,6 +112,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 		return nil, e
 	}
 	s.close = append(s.close, writer.Close)
+	s.readyChecks = append(s.readyChecks, func(ctx context.Context) error { return writer.CheckReady(ctx, key, p.admissionState) })
 	dsn, e = secret(c.Admission.ReaderDSNEnv)
 	if e != nil {
 		return nil, e
@@ -121,6 +122,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 		return nil, e
 	}
 	s.close = append(s.close, p.admissionReader.Close)
+	s.readyChecks = append(s.readyChecks, func(ctx context.Context) error { return p.admissionReader.CheckReady(ctx, key, p.admissionState) })
 	p.shareBinding = historyfacts.ShareBinding{Network: p.network, State: p.admissionState, SchemaProfile: historyfacts.ShareSchemaProfile}
 	p.shares, e = admissionsql.NewShareReader(p.admissionReader, p.shareBinding)
 	if e != nil {
@@ -135,6 +137,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 		return nil, e
 	}
 	s.close = append(s.close, p.namespaceFacts.Close)
+	s.readyChecks = append(s.readyChecks, func(ctx context.Context) error { return p.namespaceFacts.CheckReady(ctx, key, p.admissionState) })
 	sourceSet, e := digest(c.Admission.AddressSourceSetDigest)
 	if e != nil {
 		return nil, e
@@ -149,6 +152,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 		return nil, e
 	}
 	dsn, e = secret(c.WalletReaderDSNEnv)
+	s.readyChecks = append(s.readyChecks, p.address.CheckReady)
 	if e != nil {
 		return nil, e
 	}
@@ -161,6 +165,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 	if e != nil {
 		return nil, e
 	}
+	s.readyChecks = append(s.readyChecks, func(ctx context.Context) error { return p.walletReader.CheckReady(ctx, ns, ws) })
 	wallets, e := walletadapter.New(p.walletReader, ns, ws, time.Now)
 	if e != nil {
 		return nil, e
@@ -238,6 +243,16 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 				return nil, ErrInvalid
 			}
 			readSource := rpcexecution.MetadataSource{Network: p.network, URL: n.URL, CredentialRef: ref, CredentialHeader: cr.Header, AllowUnauthenticated: n.AllowUnauthenticated}
+			readyClient, e := rpcexecution.NewMetadataClient(transport, readSource, cr, rpcexecution.DefaultMetadataLimits())
+			if e != nil {
+				return nil, e
+			}
+			requireSync := false
+			for _, name := range g.AllowedMethods {
+				method := methods[name]
+				requireSync = requireSync || historyFamily(method) || method == "debug_traceTransaction" || method == "eth_sendTransaction" || method == "eth_sendRawTransaction" || method == "eth_syncing"
+			}
+			s.addReadyNode(readyClient, cr, requireSync)
 			source := creationfacts.Source{Network: network, Organization: org.ID, URL: n.URL, CredentialRef: ref, CredentialHeader: cr.Header, Profile: "reth-prague-included-creations/v1", PragueStart: n.PragueStart, PragueEnd: n.PragueEnd}
 			for _, name := range g.AllowedMethods {
 				canonical := methods[name]
@@ -347,6 +362,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 	if e != nil {
 		return nil, e
 	}
+	s.readyChecks = append(s.readyChecks, p.native.CheckOperationalReadiness, financial.CheckQuoteReadiness)
 	s.close = append(s.close, p.native.Close)
 	raw, e := readPinned(c.MetadataPolicy, 64<<10)
 	if e != nil {
@@ -377,6 +393,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 	if e != nil {
 		return nil, e
 	}
+	s.addReadyNode(md, credential, true)
 	sd, e := rpcexecution.NewStateClient(transport, defaultSource, credential, rpcexecution.DefaultStateLimits())
 	if e != nil {
 		return nil, e
@@ -423,6 +440,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 	if e != nil {
 		return nil, e
 	}
+	s.readyChecks = append(s.readyChecks, p.index.CheckReady)
 
 	scope := activitysql.Scope{NetworkKey: key, SourceID: c.Activity.SourceID, ExpectedGeneration: c.Activity.Generation}
 	dsn, e = secret(c.Activity.WriterDSNEnv)
@@ -434,6 +452,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 		return nil, e
 	}
 	s.close = append(s.close, activityWriter.Close)
+	s.readyChecks = append(s.readyChecks, activityWriter.CheckReady)
 	dsn, e = secret(c.Activity.ReaderDSNEnv)
 	if e != nil {
 		return nil, e
@@ -443,6 +462,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 		return nil, e
 	}
 	s.close = append(s.close, p.activityReader.Close)
+	s.readyChecks = append(s.readyChecks, p.activityReader.CheckReady)
 	configDigest, e := digest(c.Activity.ConfigurationDigest)
 	if e != nil {
 		return nil, e

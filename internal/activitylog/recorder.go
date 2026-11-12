@@ -382,6 +382,12 @@ func (r *Recorder) Close(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	r.closing = true
+	// Stop the background sealer before it can mistake normal closing for a
+	// retryable store failure. Existing request appends retain their ownership;
+	// the lifecycle worker still waits for them before closing the buffer.
+	if r.runCancel != nil {
+		r.runCancel()
+	}
 	r.signal()
 	r.mu.Unlock()
 	// Exactly one lifecycle worker also owns a potentially uncancellable

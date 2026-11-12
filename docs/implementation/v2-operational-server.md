@@ -60,6 +60,24 @@ Each request derives its groups from verified claims and the selected Git rules.
 Membership evidence is bounded to five minutes; renewal cannot reset the age
 of stale provider evidence.
 
+`GET /health/live` reports process liveness. `GET /health/ready` returns 204
+only when the configured operational dependencies pass their checks; otherwise
+it returns 503 without dependency details. It checks live SQL roles, schemas,
+recovery bindings and reported observer readiness, the audit recorder, node
+network identity/sync status, Guard producer readiness and any mandatory price
+observations. Monitoring should use this endpoint before returning an instance
+to traffic. All node credentials are checked against chain ID and genesis.
+Sync status is additionally checked on the default/protected nodes and on
+credential bindings used by history, mined traces, submission or explicit sync
+queries. A call/state-only key does not need a new sync permission for health.
+
+One probe runs at a time, with at most four checked dependencies in parallel
+and a three-second probe deadline. A completed sample is reused for at most one
+second; shutdown or a local recorder fault invalidates success immediately.
+This is a sampled dependency check, not an atomic fleet-wide guarantee or an
+external identity-provider availability check. Requests still validate their
+exact node anchor, observer progress, permissions and data freshness.
+
 ## Operational storage and workers
 
 Initialize stores using their offline administration commands and distinct

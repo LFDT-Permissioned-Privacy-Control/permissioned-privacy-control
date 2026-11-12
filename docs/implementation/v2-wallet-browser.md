@@ -39,6 +39,11 @@ The BFF checks the original capture immediately before forwarding and before
 private output. No lock spans the network: an already forwarded original-Actor
 operation can commit while its response is withheld after a session change.
 
+The two host controllers stay separate because central token warm-up and
+Explorer app-session capture have different ownership rules. Their exact wallet
+row and challenge decoders follow the same checked protocol. A shared SDK or
+cross-repository source dependency is not required for these four operations.
+
 `wallethttp.Handler.RegisterLinks` registers the exact four required routes:
 
 | Method | Route |

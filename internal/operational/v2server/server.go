@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	b "privacy-proxy/internal/identitybroker"
@@ -40,10 +41,15 @@ type Server struct {
 	once        sync.Once
 	data        *dataPlane
 	dataReady   bool // set only by the actual shared RPC/Explorer/protected assembly
+	closed      atomic.Bool
+	readyChecks []func(context.Context) error
+	ready       *readiness
+	readyNodes  map[[32]byte]bool
 }
 
 func (s *Server) Close() {
 	if s != nil {
+		s.closed.Store(true)
 		s.once.Do(func() {
 			for i := len(s.close) - 1; i >= 0; i-- {
 				s.close[i]()
@@ -138,6 +144,7 @@ func Open(parent context.Context, c Config) (*Server, error) {
 		return fail("proof store")
 	}
 	s.close = append(s.close, proof.Close)
+	s.readyChecks = append(s.readyChecks, app.CheckReady, proof.CheckReady)
 	azureSecrets := map[string]string{}
 	for _, profile := range source.AzureProfiles {
 		if profile.ClientSecret != nil {
@@ -212,6 +219,11 @@ func Open(parent context.Context, c Config) (*Server, error) {
 		return fail("wallet store")
 	}
 	s.close = append(s.close, walletStore.Close)
+	walletNS, e := walletBinding.Namespace()
+	if e != nil {
+		return fail("wallet namespace")
+	}
+	s.readyChecks = append(s.readyChecks, func(ctx context.Context) error { return walletStore.CheckReady(ctx, walletNS, walletState) })
 	wallet, e := walletops.New(walletops.Config{Snapshot: core, Clock: time.Now, Binding: walletBinding, State: walletState, Store: walletStore})
 	if e != nil {
 		return fail("wallet")
@@ -276,6 +288,7 @@ func Open(parent context.Context, c Config) (*Server, error) {
 		return fail("SSO store")
 	}
 	s.close = append(s.close, ssoStore.Close)
+	s.readyChecks = append(s.readyChecks, ssoStore.CheckReady)
 	sso, e := ssohttp.New(ssohttp.Config{CoreSnapshot: core, BrokerSnapshot: brokerSnapshot, Broker: broker, Store: ssoStore, Clients: clients, RuntimeSourceJSON: runtimeBytes, ExpectedSourceSHA256: runtimeDigest, EncryptionBindings: []ssohttp.SecretBinding{{FromEnv: runtime.ContextKey.FromEnv, Value: contextKey}, {FromEnv: runtime.GrantKey.FromEnv, Value: grantKey}}, ClientSecretBindings: clientSecrets, Clock: time.Now, SecurityLog: slog.Default()})
 	if e != nil {
 		return fail("SSO HTTP")
@@ -292,6 +305,13 @@ func Open(parent context.Context, c Config) (*Server, error) {
 		return fail("protected data")
 	}
 	s.dataReady = true
+	s.ready = newReadiness(func() error {
+		if s.closed.Load() || !s.dataReady || s.data == nil {
+			return ErrInvalid
+		}
+		return s.data.recorder.Healthy()
+	}, s.readyChecks)
+	s.handler.HandleFunc("GET /health/ready", s.ready.handler)
 	s.handler.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNoContent)
@@ -331,7 +351,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 	}
 	go func() {
-		if e := s.data.recorder.Run(workers); e != nil {
+		if e := s.data.recorder.Run(workers); e != nil && !s.closed.Load() {
 			slog.Error("activity recorder stopped")
 		}
 	}()
