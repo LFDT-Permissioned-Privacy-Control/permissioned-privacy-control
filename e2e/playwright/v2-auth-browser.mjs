@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { chromium } from '@playwright/test'
+import { browserChannel } from './v2-browser-options.mjs'
 
 const [origin, seconds] = process.argv.slice(2)
 assert.match(origin ?? '', /^https:\/\/ops\.test:[0-9]+$/)
@@ -7,7 +8,7 @@ assert.match(seconds ?? '', /^[0-9]+$/)
 const now = Number(seconds) * 1000
 const markerKey = 'ops-v2.browser-context'
 const browser = await chromium.launch({
-  channel: 'chrome', // installed browser; no download or dependency mutation
+  channel: browserChannel, // Provisioned before the test; the test never installs a browser.
   headless: true,
   args: ['--host-resolver-rules=MAP ops.test 127.0.0.1', '--no-proxy-server'],
 })
@@ -47,7 +48,7 @@ const login = async (page, subject) => complete(page, await begin(page), subject
 const note = label => { cases++; process.stdout.write(`PASS ${label}\n`) }
 
 try {
-  process.stdout.write(`Owned Chrome ${browser.version()} / Playwright 1.58.0\n`)
+  process.stdout.write(`Owned browser ${browser.version()} / Playwright 1.58.0\n`)
   const a = await context.newPage(), b = await context.newPage()
   await load(a); await load(b)
   assert.equal(await a.evaluate(() => isSecureContext && !!navigator.locks), true)

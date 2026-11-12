@@ -8,8 +8,9 @@ import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { createInterface } from 'node:readline'
 import path from 'node:path'
+import { artifactHashes, circuitDirectory, walletModules } from '../../tools/v2-test-wallet/artifacts.mjs'
 
-const modules = process.env.OPS_PRIVADO_WALLET_MODULES ?? '/Users/blade/work/software/privacy-e2e-demo/privacy-proxy/tools/wallet-emulator-js/node_modules'
+const modules = walletModules
 const require = createRequire(path.join(modules, '../package.json'))
 assert.equal(JSON.parse(readFileSync(path.join(modules, '@0xpolygonid/js-sdk/package.json'), 'utf8')).version, '1.43.0')
 const sdk = require('@0xpolygonid/js-sdk'), core = require('@iden3/js-iden3-core')
@@ -38,10 +39,8 @@ const loader = async url => {
   return { contextUrl: null, documentUrl: url, document: structuredClone(documents.get(url)) }
 }
 const files = {
-  authV2: { dir: process.env.OPS_PRIVADO_AUTH_CIRCUITS ?? '/Users/blade/.privado-circuits/authV2',
-    hashes: ['70affbca1ad1947d76784ca90f6c4a8fd143119685c9917a2a6fefc15b9ed7c1', '6acb096a716f5f5b1e5505a7b7261c7eeb7f0a90597c5194fad7b14f91180ac1', '79cf543dd8300c0149454ddd200a0a1ac83eed1df4fb49bdceea4b5ebd2cec96'] },
-  credentialAtomicQuerySigV2: { dir: process.env.OPS_PRIVADO_SIG_CIRCUITS ?? '/private/tmp/ops-v2-privado-sigv2-20261107',
-    hashes: ['8d43d3ba84dbe2245302cd2d351f399e03e3c15a0543943b9ba31c3c42e57a73', 'a7dfd0a1e55d40992fe95ecc40b5201758cadde69f692ca3eea6ee059c07c1df', 'f90286b8bff8d00ca4ae3b81578108967257f2efa3c103777a7306e1a8b94597'] },
+  authV2: { dir: circuitDirectory('authV2'), hashes: artifactHashes.authV2 },
+  credentialAtomicQuerySigV2: { dir: circuitDirectory('credentialAtomicQuerySigV2'), hashes: artifactHashes.credentialAtomicQuerySigV2 },
 }
 const loaded = new Map()
 const circuits = {
@@ -141,15 +140,20 @@ const makeIdentity = async byte => wallet.createIdentity({ method: core.DidMetho
     type: sdk.CredentialStatusType.Iden3ReverseSparseMerkleTreeProof, id: 'https://fixture.invalid/rhs', nonce: 0, genesisPublishingDisabled: true } })
 
 try {
+  const demo = process.env.OPS_PRIVADO_WALLET_DEMO === '1'
   const a = await makeIdentity(0x42), b = await makeIdentity(0x44), issuer = await makeIdentity(0x43), verifier = await makeIdentity(0x45)
-  const holders = { a, b }, credentials = {}
+  const holders = demo ? Object.fromEntries(await Promise.all(['admin', 'deployer', 'reader', 'outsider']
+    .map(async (id, index) => [id, await makeIdentity(0x50 + index)]))) : { a, b }
+  const roles = demo ? { admin: 1, deployer: 2, reader: 3 } : { a: 7, b: 7 }
+  const credentials = {}
   for (const [name, holder] of Object.entries(holders)) {
+    if (!Object.hasOwn(roles, name)) continue // Outsider proves identity without a role grant.
     const credential = await wallet.issueCredential(issuer.did, { credentialSchema: schemaUrl, type: 'BankRole',
-      credentialSubject: { id: holder.did.string(), role: 7 }, expiration: 4102444800,
+      credentialSubject: { id: holder.did.string(), role: roles[name] }, expiration: 4102444800,
       revocationOpts: { type: sdk.CredentialStatusType.Iden3ReverseSparseMerkleTreeProof, id: 'https://fixture.invalid/rhs', nonce: 7 } }, { documentLoader: loader })
     await credentialWallet.save(credential); credentials[name] = credential
   }
-  for (const who of [a, b, issuer, verifier]) {
+  for (const who of [...Object.values(holders), issuer, verifier]) {
     const model = await wallet.getDIDTreeModel(who.did)
     known.set(core.DID.idFromDID(who.did).bigInt().toString(), model.state.bigInt())
   }
@@ -163,8 +167,10 @@ try {
   const packers = new sdk.PackageManager()
   packers.registerPackers([new sdk.DefaultZKPPacker(circuits, proofService), new sdk.PlainPacker()])
   const handler = new sdk.AuthHandler(packers, proofService)
-  output({ type: 'ready', testOnly: 'NEW PUBLIC fixture seeds42/44/43/45;not user material', sdkVersion: '1.43.0',
+  output({ type: 'ready', testOnly: 'NEW PUBLIC fixture seeds42/44/43/45;demo50-53;not user material', sdkVersion: '1.43.0',
     holderA: a.did.string(), holderB: b.did.string(), issuerDid: issuer.did.string(), verifierDid: verifier.did.string(),
+    ...(demo ? { personas: Object.entries(holders).map(([id, holder]) => ({ id, holderDid: holder.did.string(),
+      roleValue: roles[id] ?? null, profileId: `demo-${id}` })) } : {}),
     contextUrl, context: roleContext, network, chainId, stateContract, rpcUrl,
     states: [...known].map(([id, state]) => ({ id, state: state.toString() })) })
   const RealDate = globalThis.Date
@@ -176,6 +182,7 @@ try {
       const input = JSON.parse(line); id = input.id
       assert.ok(typeof id === 'string' && id.length <= 128)
       if (input.action === 'advance-gist') {
+        assert.ok(!demo, 'Mutable GIST controls are available only in the isolated test fixture')
         const who = [verifier, issuer, a, b][gistAdvances]
         assert.ok(who, 'fixture GIST advance bound')
         const previous = (await gist.root()).bigInt(), at = BigInt(Math.floor(RealDate.now() / 1000))
@@ -189,7 +196,7 @@ try {
         output({ id, root: root.toString(), previousRoot: previous.toString() })
         continue
       }
-      assert.ok(input.holder === 'a' || input.holder === 'b')
+      assert.ok(Object.hasOwn(holders, input.holder))
       assert.ok(Buffer.byteLength(JSON.stringify(input.request)) <= 65536)
       const request = input.request
       assert.ok(Number.isSafeInteger(request.created_time) && request.created_time > 0)
@@ -201,6 +208,7 @@ try {
       }
       const holder = holders[input.holder], prior = { ...generation }, scope = request.body.scope
       assert.ok(Array.isArray(scope) && scope.length <= 16 && scope.every((s, i) => s.id === i + 1 && s.circuitId === 'credentialAtomicQuerySigV2'))
+      assert.ok(credentials[input.holder] || scope.length === 0, 'This demo identity has no role credential')
       const hadCache = scope.length ? !!await proofCache.getProof(holder.did, credentials[input.holder].id, scope[0]) : false
       const bypass = input.cacheMode !== 'use'
       const response = await handler.handleAuthorizationRequest(holder.did, sdk.byteEncoder.encode(JSON.stringify(request)),

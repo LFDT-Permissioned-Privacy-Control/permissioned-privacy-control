@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { chromium } from '@playwright/test'
+import { browserChannel } from './v2-browser-options.mjs'
 
 const [origin, kind, instant] = process.argv.slice(2)
 assert.match(origin ?? '', /^https:\/\/ops\.test:[0-9]+$/)
 assert.ok(['azure', 'privado'].includes(kind))
 assert.ok(Number.isFinite(Date.parse(instant)))
-const browser = await chromium.launch({ channel: 'chrome', headless: true,
+const browser = await chromium.launch({ channel: browserChannel, headless: true,
   args: ['--host-resolver-rules=MAP ops.test 127.0.0.1,MAP wallet.test 127.0.0.1', '--no-proxy-server'] })
 const context = await browser.newContext({ ignoreHTTPSErrors: true }) // Owned TLS certificate only.
 let cases = 0

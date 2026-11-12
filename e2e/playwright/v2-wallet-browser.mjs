@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { chromium } from '@playwright/test'
+import { browserChannel } from './v2-browser-options.mjs'
 import { privateKeyToAccount } from '../../frontend/node_modules/viem/_esm/accounts/index.js'
 import { hexToString } from '../../frontend/node_modules/viem/_esm/utils/encoding/fromHex.js'
 
@@ -8,7 +9,7 @@ assert.match(ops ?? '', /^https:\/\/ops\.test:[0-9]+$/)
 assert.match(app ?? '', /^https:\/\/app\.test:[0-9]+$/)
 const accounts = ['17', '18', '19', '20'].map(byte => privateKeyToAccount('0x' + byte.repeat(32)))
 const addresses = accounts.map(account => account.address.toLowerCase())
-const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--host-resolver-rules=MAP ops.test 127.0.0.1,MAP app.test 127.0.0.1', '--no-proxy-server'] })
+const browser = await chromium.launch({ channel: browserChannel, headless: true, args: ['--host-resolver-rules=MAP ops.test 127.0.0.1,MAP app.test 127.0.0.1', '--no-proxy-server'] })
 const context = await browser.newContext({ ignoreHTTPSErrors: true }) // Owned fixture TLS only.
 let subject = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', held = null, waiting = null, stage = 'startup'
 let verifications = 0, cases = 0

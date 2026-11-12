@@ -46,6 +46,7 @@ frontend/node_modules/
 frontend/dist/
 frontend/dist-v2/
 frontend/build/
+tools/v2-test-wallet/node_modules/
 
 # Docs site (Next.js, ~750MB)
 site/

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { chromium } from '@playwright/test'
+import { browserChannel } from './v2-browser-options.mjs'
 
 // This driver uses the owned real Go/PG/provider harness, never a mock grant.
 const [origin, seconds] = process.argv.slice(2)
@@ -7,7 +8,7 @@ assert.match(origin ?? '', /^https:\/\/ops\.test:[0-9]+$/)
 assert.match(seconds ?? '', /^[0-9]+$/)
 const walletOrigin = origin.replace('ops.test', 'wallet.test')
 const markerKey = 'ops-v2.browser-context'
-const browser = await chromium.launch({ channel: 'chrome', headless: true,
+const browser = await chromium.launch({ channel: browserChannel, headless: true,
   args: ['--host-resolver-rules=MAP ops.test 127.0.0.1,MAP wallet.test 127.0.0.1', '--no-proxy-server'] })
 const context = await browser.newContext({ ignoreHTTPSErrors: true }) // Owned test certificate ONLY.
 let cases = 0
@@ -47,7 +48,7 @@ const confirm = async page => {
 const note = label => { cases++; process.stdout.write(`PASS ${label}\n`) }
 
 try {
-  process.stdout.write(`Owned Chrome ${browser.version()} / Playwright1.58.0\n`)
+  process.stdout.write(`Owned browser ${browser.version()} / Playwright1.58.0\n`)
   const a = await context.newPage(), b = await context.newPage(), wallet = await context.newPage()
   await load(a); await load(b); await wallet.goto(walletOrigin + '/__test/wallet')
   const fixture = await a.evaluate(async () => (await fetch('/__test/config')).json())

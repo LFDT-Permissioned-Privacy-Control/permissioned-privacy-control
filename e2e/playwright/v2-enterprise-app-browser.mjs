@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { chromium } from '@playwright/test'
+import { browserChannel } from './v2-browser-options.mjs'
 
 const [ops, app, kind, instant] = process.argv.slice(2)
 assert.match(ops ?? '', /^https:\/\/ops\.test:[0-9]+$/)
 assert.match(app ?? '', /^https:\/\/app\.test:[0-9]+$/)
 assert.ok(['azure', 'privado'].includes(kind))
-const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--host-resolver-rules=MAP ops.test 127.0.0.1,MAP app.test 127.0.0.1,MAP wallet.test 127.0.0.1', '--no-proxy-server'] })
+const browser = await chromium.launch({ channel: browserChannel, headless: true, args: ['--host-resolver-rules=MAP ops.test 127.0.0.1,MAP app.test 127.0.0.1,MAP wallet.test 127.0.0.1', '--no-proxy-server'] })
 const context = await browser.newContext({ ignoreHTTPSErrors: true }) // Owned fixture TLS only.
 const localOPS = ops.replace('ops.test', '127.0.0.1'), localAPP = app.replace('app.test', '127.0.0.1')
 const controls = { ops: { Origin: ops, Host: new URL(ops).host }, app: { Origin: app, Host: new URL(app).host } }

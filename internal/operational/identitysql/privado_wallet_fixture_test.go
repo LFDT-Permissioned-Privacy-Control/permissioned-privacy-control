@@ -64,6 +64,7 @@ func startWalletProcess(t *testing.T) *walletProcess {
 		node = "node"
 	}
 	w.cmd = exec.CommandContext(ctx, node, "--max-old-space-size=1024", filepath.Join(root, "e2e/playwright/v2-privado-wallet-fixture.mjs"))
+	w.cmd.Env = append(os.Environ(), "OPS_PRIVADO_WALLET_DEMO=0")
 	w.cmd.Dir = root
 	w.cmd.Stderr = &w.stderr
 	stdout, e := w.cmd.StdoutPipe()
