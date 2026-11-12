@@ -33,6 +33,7 @@ const (
 	Addresses    Family = "addresses"
 	Sync         Family = "sync"
 	Progress     Family = "progress"
+	Search       Family = "search"
 )
 
 type Anchor struct {
@@ -61,7 +62,7 @@ func ValidAddress(s string) bool { return addressPattern.MatchString(s) }
 func ValidHash(s string) bool    { return hashPattern.MatchString(s) }
 func Normalize(q Query) (Query, error) {
 	switch q.Family {
-	case Blocks, Transactions, Transfers, Internals, Logs, Tokens, Balances, Holders, Contracts, Addresses, Sync, Progress:
+	case Blocks, Transactions, Transfers, Internals, Logs, Tokens, Balances, Holders, Contracts, Addresses, Sync, Progress, Search:
 	default:
 		return Query{}, ErrInvalid
 	}

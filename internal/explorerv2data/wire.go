@@ -147,7 +147,7 @@ type TokenHolder struct {
 	Address    Address  `json:"address"`
 	Balance    Quantity `json:"balance"`
 	Percentage *Decimal `json:"percentage,omitempty"`
-	IsContract bool     `json:"isContract"`
+	IsContract *bool    `json:"isContract,omitempty"`
 }
 
 type Balance struct {
@@ -225,9 +225,11 @@ type Catchup struct {
 }
 
 type ChainID struct {
+	ChainID Quantity `json:"chainId"`
 }
 
 type LatestBlock struct {
+	Number Quantity `json:"number"`
 }
 
 type NativeBalance struct {
@@ -243,5 +245,6 @@ type Code struct {
 }
 
 type IsContract struct {
-	Address Address `json:"address"`
+	IsContract bool    `json:"isContract"`
+	Address    Address `json:"address"`
 }

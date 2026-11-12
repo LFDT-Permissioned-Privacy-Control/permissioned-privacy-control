@@ -25,46 +25,60 @@ const (
 	Explorer
 )
 
-var explorerLabels = [...]string{
-	"explorer.accounts",
-	"explorer.address_balance",
-	"explorer.address_balances",
-	"explorer.address_code",
-	"explorer.address_contract",
-	"explorer.address_internal",
-	"explorer.address_is_contract",
-	"explorer.address_logs",
-	"explorer.address_stats",
-	"explorer.address_transactions",
-	"explorer.address_transfers",
-	"explorer.block_hash",
-	"explorer.block_internal",
-	"explorer.block_number",
-	"explorer.block_transactions",
-	"explorer.blocks",
-	"explorer.catchup",
-	"explorer.chain_id",
-	"explorer.head",
-	"explorer.indexer_progress",
-	"explorer.invalid_request",
-	"explorer.invalid_transport",
-	"explorer.logs",
-	"explorer.search_suggestions",
-	"explorer.stats",
-	"explorer.sync_status",
-	"explorer.token",
-	"explorer.token_holders",
-	"explorer.token_transfers",
-	"explorer.tokens",
-	"explorer.transaction",
-	"explorer.transaction_internal",
-	"explorer.transaction_logs",
-	"explorer.transaction_transfers",
-	"explorer.transactions",
-	"explorer.transactions_page",
-	"explorer.transfers",
-	"explorer.tx_history",
+type Operation struct {
+	Method, Route, Label, Gate string
+	OrgAdminOnly               bool
 }
+
+var operations = [...]Operation{
+	{"GET", "/chain-id", "explorer.chain_id", "eth_chainId", false},
+	{"GET", "/stats", "explorer.stats", "eth_getTransactionByHash", false},
+	{"GET", "/stats/tx-history", "explorer.tx_history", "eth_getTransactionByHash", false},
+	{"GET", "/blocks", "explorer.blocks", "eth_getBlockByNumber", false},
+	{"GET", "/blocks/latest/number", "explorer.head", "eth_blockNumber", false},
+	{"GET", "/blocks/hash/:hash", "explorer.block_hash", "eth_getBlockByHash", false},
+	{"GET", "/blocks/:number", "explorer.block_number", "eth_getBlockByNumber", false},
+	{"GET", "/blocks/:number/transactions", "explorer.block_transactions", "eth_getTransactionByHash", false},
+	{"GET", "/blocks/:number/internal", "explorer.block_internal", "eth_getTransactionByHash", false},
+	{"GET", "/transactions/paginated", "explorer.transactions_page", "eth_getTransactionByHash", false},
+	{"GET", "/transactions", "explorer.transactions", "eth_getTransactionByHash", false},
+	{"GET", "/transactions/:hash", "explorer.transaction", "eth_getTransactionByHash", false},
+	{"GET", "/transactions/:hash/internal", "explorer.transaction_internal", "eth_getTransactionByHash", false},
+	{"GET", "/transactions/:hash/transfers", "explorer.transaction_transfers", "eth_getLogs", false},
+	{"GET", "/transactions/:hash/logs", "explorer.transaction_logs", "eth_getLogs", false},
+	{"GET", "/addresses/:address/stats", "explorer.address_stats", "eth_getTransactionByHash", false},
+	{"GET", "/addresses/:address/transactions", "explorer.address_transactions", "eth_getTransactionByHash", false},
+	{"GET", "/addresses/:address/balance", "explorer.address_balance", "eth_getBalance", false},
+	{"GET", "/addresses/:address/code", "explorer.address_code", "eth_getCode", false},
+	{"GET", "/addresses/:address/balances", "explorer.address_balances", "eth_getLogs", false},
+	{"GET", "/addresses/:address/transfers", "explorer.address_transfers", "eth_getLogs", false},
+	{"GET", "/addresses/:address/internal", "explorer.address_internal", "eth_getTransactionByHash", false},
+	{"GET", "/addresses/:address/logs", "explorer.address_logs", "eth_getLogs", false},
+	{"GET", "/addresses/:address/contract", "explorer.address_contract", "eth_getCode", false},
+	{"GET", "/addresses/:address/is-contract", "explorer.address_is_contract", "eth_getCode", false},
+	{"GET", "/logs", "explorer.logs", "eth_getLogs", false},
+	{"GET", "/tokens", "explorer.tokens", "eth_getLogs", false},
+	{"GET", "/tokens/:address", "explorer.token", "eth_getLogs", false},
+	{"GET", "/tokens/:address/holders", "explorer.token_holders", "eth_getLogs", false},
+	{"GET", "/tokens/:address/transfers", "explorer.token_transfers", "eth_getLogs", false},
+	{"GET", "/transfers", "explorer.transfers", "eth_getLogs", false},
+	{"GET", "/accounts", "explorer.accounts", "eth_getTransactionByHash", false},
+	{"GET", "/search/suggestions", "explorer.search_suggestions", "eth_getTransactionByHash", false},
+	{"GET", "/sync/status", "explorer.sync_status", "eth_syncing", true},
+	{"GET", "/sync/indexer-progress", "explorer.indexer_progress", "eth_syncing", true},
+	{"GET", "/sync/catchup", "explorer.catchup", "eth_syncing", true},
+}
+
+func Operations() []Operation { return append([]Operation{}, operations[:]...) }
+
+var explorerLabels = func() []string {
+	labels := []string{"explorer.invalid_request", "explorer.invalid_transport"}
+	for _, op := range operations {
+		labels = append(labels, op.Label)
+	}
+	sort.Strings(labels)
+	return labels
+}()
 
 // ValidMethod is the existing durable completion grammar, unchanged. It does
 // not classify a reserved label or authorize its registration as an RPC name.

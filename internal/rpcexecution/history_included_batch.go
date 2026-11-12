@@ -19,11 +19,20 @@ type IncludedHistoryBatch struct {
 	staged    *HistoryReadObservation // private header/typed-data staging only; never a valid public observation
 	requested []common.Hash
 	anchor    *HistoryHeader
+	anchors   []HistoryHeader
 	digest    common.Hash
 }
 
 func (c *HistoryReadClient) AcquireIncludedBatch(ctx context.Context, hashes []common.Hash, anchor *HistoryHeader, fence HistoryOperationFence, reserved int) (*IncludedHistoryBatch, error) {
-	if c == nil || len(hashes) > min(64, c.limits.MaxParents) {
+	return c.AcquireExplorerBatch(ctx, hashes, anchor, nil, fence, reserved)
+}
+
+// AcquireExplorerBatch also qualifies a bounded set of retained block headers.
+// Header anchors are expected identities, not trusted header contents; the same
+// selected node supplies and canonically rechecks every full typed header.
+func (c *HistoryReadClient) AcquireExplorerBatch(ctx context.Context, hashes []common.Hash, anchor *HistoryHeader, anchors []HistoryHeader, fence HistoryOperationFence, reserved int) (*IncludedHistoryBatch, error) {
+
+	if c == nil || len(hashes) > min(64, c.limits.MaxParents) || len(anchors) > min(64, c.limits.MaxHeaders-1) {
 		return nil, failure(EvidenceLimit)
 	}
 	if reserved < 0 || reserved > c.limits.MaxChargedBytes {
@@ -42,6 +51,12 @@ func (c *HistoryReadClient) AcquireIncludedBatch(ctx context.Context, hashes []c
 	// public observation validity check or be promoted to a canonical block.
 	o := &HistoryReadObservation{source: c.source, fence: fence, budget: budget, headers: map[common.Hash]*types.Header{}, canonical: map[uint64]common.Hash{}}
 	b := &IncludedHistoryBatch{owner: c, staged: o, requested: append([]common.Hash{}, hashes...)}
+	for _, a := range anchors {
+		if a.Hash == (common.Hash{}) || a.Number > 1<<63-1 {
+			return nil, failure(InvalidCall)
+		}
+		b.anchors = append(b.anchors, HistoryHeader{Number: a.Number, Hash: a.Hash})
+	}
 	if anchor != nil {
 		copy := *anchor
 		copy.BaseFeePerGas = historyBigCopy(anchor.BaseFeePerGas)
@@ -72,6 +87,9 @@ func (c *HistoryReadClient) AcquireIncludedBatch(ctx context.Context, hashes []c
 	numbers := map[uint64]bool{}
 	if anchor != nil {
 		numbers[anchor.Number] = true
+	}
+	for _, a := range b.anchors {
+		numbers[a.Number] = true
 	}
 	for i, value := range raw {
 		if historyNull(value) {
@@ -120,6 +138,12 @@ func (c *HistoryReadClient) AcquireIncludedBatch(ctx context.Context, hashes []c
 	if anchor != nil {
 		h := byNumber[anchor.Number]
 		if h == nil || h.Hash() != anchor.Hash {
+			return nil, failure(InvalidEvidence)
+		}
+	}
+	for _, a := range b.anchors {
+		h := byNumber[a.Number]
+		if h == nil || h.Hash() != a.Hash {
 			return nil, failure(InvalidEvidence)
 		}
 	}
@@ -202,11 +226,12 @@ func (b *IncludedHistoryBatch) computeDigest() (common.Hash, error) {
 		return common.Hash{}, err
 	}
 	raw, err := json.Marshal(struct {
-		Domain string
-		Hashes []common.Hash
-		Anchor *HistoryHeader
-		Data   common.Hash
-	}{"ops-explorer-included-batch/v1", b.requested, b.anchor, data})
+		Domain  string
+		Hashes  []common.Hash
+		Anchor  *HistoryHeader
+		Anchors []HistoryHeader
+		Data    common.Hash
+	}{"ops-explorer-included-batch/v1", b.requested, b.anchor, b.anchors, data})
 	if err != nil {
 		return common.Hash{}, err
 	}
@@ -273,4 +298,16 @@ func (b *IncludedHistoryBatch) RemainingWorkingBytes() int {
 	b.staged.budget.mu.Lock()
 	defer b.staged.budget.mu.Unlock()
 	return b.staged.budget.limits.MaxChargedBytes - b.staged.budget.charged
+}
+
+// Header returns a detached full typed header already acquired under this batch.
+func (b *IncludedHistoryBatch) Header(number uint64, hash common.Hash) (*types.Header, bool) {
+	if b == nil || b.digest == (common.Hash{}) || b.staged.canonical[number] != hash {
+		return nil, false
+	}
+	h, ok := b.staged.headers[hash]
+	if !ok {
+		return nil, false
+	}
+	return types.CopyHeader(h), true
 }

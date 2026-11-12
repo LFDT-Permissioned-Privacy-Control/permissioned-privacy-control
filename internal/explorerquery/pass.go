@@ -110,3 +110,11 @@ func (p *ReadPass) Data() Data {
 	d.Context = clone(d.Context)
 	return d
 }
+
+func (p *ReadPass) Upper() *Anchor {
+	if p == nil || p.data.Upper == nil {
+		return nil
+	}
+	copy := *p.data.Upper
+	return &copy
+}

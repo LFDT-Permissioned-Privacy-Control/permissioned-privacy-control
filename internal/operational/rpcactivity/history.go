@@ -10,7 +10,7 @@ import (
 
 // New composes concrete owned operations with one real Recorder and N-slot
 // lifetime. Approved history requirements cannot be served by a sibling alone.
-func New(c Config) (*Service, error) {
+func newHistoryService(c Config) (*Service, error) {
 	if c.History == nil {
 		if c.Engine != nil && c.Engine.RequiresHistoryConsumer() || c.Metadata != nil && c.Metadata.RequiresHistoryConsumer() || c.State != nil && c.State.RequiresHistoryConsumer() {
 			return nil, ErrInvalid

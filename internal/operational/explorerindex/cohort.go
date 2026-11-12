@@ -149,7 +149,11 @@ func (r *Reader) readCohort(s *snapshot, q explorerquery.Query) (explorerquery.D
 		copy := *data.Upper
 		q.Upper = &copy
 	}
-	data.Rows, err = r.cohortRows(s, q, nil)
+	if q.Family == explorerquery.Search {
+		data.Rows, err = r.searchRows(s, q)
+	} else {
+		data.Rows, err = r.cohortRows(s, q, nil)
+	}
 	if err != nil {
 		return data, q, err
 	}
@@ -193,6 +197,15 @@ func (r *Reader) readCohort(s *snapshot, q explorerquery.Query) (explorerquery.D
 			}
 			data.Context = append(data.Context, found...)
 		}
+	}
+	if q.Family == explorerquery.Sync {
+		contextQuery := q
+		contextQuery.Family = explorerquery.Progress
+		found, e := r.cohortRows(s, contextQuery, nil)
+		if e != nil {
+			return data, q, e
+		}
+		data.Context = append(data.Context, found...)
 	}
 	return data, q, nil
 }
@@ -459,4 +472,51 @@ func cohortRecord(f explorerquery.Family, raw []byte) (explorerquery.Record, err
 		return explorerquery.Record{}, ErrUnavailable
 	}
 	return explorerquery.Record{Family: f, Key: key, Position: pos, JSON: encoded}, nil
+}
+
+func (r *Reader) searchRows(s *snapshot, q explorerquery.Query) ([]explorerquery.Record, error) {
+	upper := int64(1<<63 - 1)
+	if q.Upper != nil {
+		upper = int64(q.Upper.Number)
+	}
+	afterKind, afterValue := "", ""
+	if q.After != nil {
+		afterKind = q.After.Subkey
+		afterValue = q.After.Hash
+	}
+	sql := `WITH candidates AS (
+ SELECT 'transaction'::text kind,hash::text value,hash::text tx_hash FROM public.transactions WHERE block_number<=$2 AND strpos(lower(hash),$1)>0
+ UNION ALL SELECT 'address',address,NULL FROM public.address_stats WHERE strpos(lower(address),$1)>0
+ UNION ALL SELECT 'token',address,NULL FROM public.tokens WHERE block_number<=$2 AND (strpos(lower(address),$1)>0 OR strpos(lower(symbol),$1)>0 OR strpos(lower(name),$1)>0)
+ UNION ALL SELECT 'contract',address,NULL FROM public.contracts WHERE block_number<=$2 AND strpos(lower(address),$1)>0
+ )SELECT kind,CASE WHEN octet_length(value)<=66 THEN value END,CASE WHEN octet_length(tx_hash)<=66 THEN tx_hash END FROM candidates WHERE ($3='' OR (kind COLLATE "C",value COLLATE "C")<($3,$4)) ORDER BY kind COLLATE "C" DESC,value COLLATE "C" DESC LIMIT $5`
+	rows, e := s.query(sql, strings.ToLower(q.Search), upper, afterKind, afterValue, q.RawLimit+1)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []explorerquery.Record{}
+	for rows.Next() {
+		var kind string
+		var value, hash *string
+		if e = rows.Scan(&kind, &value, &hash); e != nil || value == nil {
+			return nil, ErrUnavailable
+		}
+		if kind == "transaction" && !explorerquery.ValidHash(*value) || kind != "transaction" && !explorerquery.ValidAddress(*value) {
+			return nil, ErrUnavailable
+		}
+		obj := map[string]any{"kind": kind, "value": *value}
+		if hash != nil {
+			obj["tx_hash"] = *hash
+		}
+		raw, e := json.Marshal(obj)
+		if e != nil {
+			return nil, e
+		}
+		if e = s.b.retain(4 * len(raw)); e != nil {
+			return nil, e
+		}
+		out = append(out, explorerquery.Record{Family: explorerquery.Search, Key: kind + ":" + *value, Position: explorerquery.Position{Hash: *value, Subkey: kind}, JSON: raw})
+	}
+	return out, rows.Err()
 }
