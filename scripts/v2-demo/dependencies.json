@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "dependencies": {
+    "explorer": {
+      "repository": "https://github.com/gateway-fm/ops-explorer.git",
+      "commit": "0727e91a80555c5b1f7b8f8af7db4e671e294158",
+      "overrideEnvironment": "OPS_V2_DEMO_EXPLORER_SOURCE"
+    },
+    "indexer": {
+      "repository": "https://github.com/gateway-fm/ops-indexer.git",
+      "commit": "219515f184c61e85e57add79b01070063c7504d0",
+      "overrideEnvironment": "OPS_V2_DEMO_INDEXER_SOURCE"
+    }
+  }
+}

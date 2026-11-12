@@ -124,6 +124,26 @@ demo-reth-logs:
 demo-reth-status:
 	@./scripts/reth-demo.sh status
 
+# Production native V2, real Reth/indexer/observer and an explicit public demo
+# identity wallet. Ordinary down preserves state; reset is deliberately separate.
+.PHONY: demo-v2 demo-v2-check demo-v2-down demo-v2-reset demo-v2-status demo-v2-logs demo-v2-revoke-reader demo-v2-restore-reader
+demo-v2:
+	@./scripts/v2-demo.sh up
+demo-v2-check:
+	@./scripts/v2-demo.sh check
+demo-v2-down:
+	@./scripts/v2-demo.sh down
+demo-v2-reset:
+	@./scripts/v2-demo.sh reset
+demo-v2-status:
+	@./scripts/v2-demo.sh status
+demo-v2-logs:
+	@./scripts/v2-demo.sh logs
+demo-v2-revoke-reader:
+	@./scripts/v2-demo.sh revision off
+demo-v2-restore-reader:
+	@./scripts/v2-demo.sh revision on
+
 # Stop all services
 stop:
 	docker-compose down

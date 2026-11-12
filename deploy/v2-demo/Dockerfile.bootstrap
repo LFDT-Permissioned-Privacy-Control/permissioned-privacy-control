@@ -1,0 +1,28 @@
+# Offline demo initialization and explicitly public test wallet only. This image
+# is separate from the production OPS runtime and never supplies Core tokens.
+FROM golang:1.26.9-trixie AS builder
+WORKDIR /app
+ENV GOMAXPROCS=2 CGO_ENABLED=0 GOTOOLCHAIN=local
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY proto/ proto/
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    go build -p=1 -tags production,prover_disabled -o /out/ops-v2-demo-init ./cmd/ops-v2-demo-init
+
+FROM node:24.22.1-trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY tools/v2-test-wallet/package.json tools/v2-test-wallet/package-lock.json tools/v2-test-wallet/
+RUN npm ci --prefix tools/v2-test-wallet --ignore-scripts
+COPY tools/v2-test-wallet/*.mjs tools/v2-test-wallet/
+COPY tools/v2-demo-wallet/ tools/v2-demo-wallet/
+COPY e2e/playwright/v2-privado-wallet-fixture.mjs e2e/playwright/
+COPY scripts/v2-demo/ scripts/v2-demo/
+COPY deploy/v2-demo/export.sh deploy/v2-demo/explorer-gateway.mjs /opt/v2-demo/
+COPY --from=builder /out/ops-v2-demo-init /usr/local/bin/
+RUN mkdir -p /demo /circuits && chown node:node /demo /circuits
+USER node
+ENTRYPOINT ["ops-v2-demo-init"]

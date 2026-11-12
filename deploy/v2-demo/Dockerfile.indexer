@@ -1,0 +1,14 @@
+FROM golang:1.26.10-trixie AS builder
+WORKDIR /app
+ENV GOMAXPROCS=2 CGO_ENABLED=0 GOTOOLCHAIN=local
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    go build -p=1 -o /indexer ./cmd/indexer
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* && useradd -r -u 1000 -m appuser
+COPY --from=builder /indexer /usr/local/bin/
+USER appuser
+ENTRYPOINT ["indexer"]

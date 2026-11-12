@@ -1,0 +1,13 @@
+# The sibling checkout is the build context; no local state or node_modules.
+**
+!backend/
+!backend/**
+!frontend/
+!frontend/**
+**/*_test.go
+**/node_modules/
+**/.tmp/
+**/dist/
+**/dist-v2/
+**/.env
+**/.env.*

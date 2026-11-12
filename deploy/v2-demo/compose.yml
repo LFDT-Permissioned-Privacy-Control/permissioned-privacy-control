@@ -1,0 +1,164 @@
+# All listeners bind loopback. Docker host networking must be enabled on Docker
+# Desktop; Linux and OrbStack expose the same owned localhost origins directly.
+x-owned: &owned
+  labels:
+    com.gateway.ops-v2-demo.owner: ${OPS_V2_DEMO_ROOT:?checkout required}
+    com.gateway.ops-v2-demo.project: ${OPS_V2_DEMO_PROJECT:?project required}
+  network_mode: host
+  restart: "no"
+x-tools: &tools
+  <<: *owned
+  image: ${OPS_V2_DEMO_PROJECT}-tools:local
+  build:
+    context: ${OPS_V2_DEMO_ROOT}
+    dockerfile: deploy/v2-demo/Dockerfile.bootstrap
+
+services:
+  bootstrap:
+    <<: *tools
+    volumes:
+      - state:/demo
+      - wallet-config:/wallet-output:ro
+      - ops-config:/exports/ops
+      - explorer-config:/exports/explorer
+      - wallet-config:/exports/wallet
+      - observer-config:/exports/observer
+      - reth-config:/exports/reth
+      - ops-spool:/exports/ops-spool
+      - reth-data:/exports/reth-data
+      - circuits:/circuits
+      - ${OPS_V2_DEMO_ROOT}/.tmp/v2-circuits:/host-circuits:ro
+  postgres:
+    <<: *owned
+    image: postgres:16-alpine
+    env_file: ${OPS_V2_DEMO_CONTROL_DIR}/postgres.env
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1", "-p", "${OPS_V2_DEMO_POSTGRES_PORT:-5432}"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "${OPS_V2_DEMO_POSTGRES_PORT:-5432}", "-U", "postgres"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  reth:
+    <<: *owned
+    image: ${OPS_V2_DEMO_RETH_IMAGE:-ghcr.io/paradigmxyz/reth:v2.5.2@sha256:68e76b32ad9ac1a3de54984d6f15bbce2047a92a771ff4efbcd08ee8f9dbd4d1}
+    user: "1000:1000"
+    environment:
+      OPS_APPROVALS: "0"
+    command:
+      - node
+      - --dev
+      - --dev.block-time
+      - 1s
+      - --chain
+      - /demo/genesis.json
+      - --datadir
+      - /data
+      - --http
+      - --http.addr
+      - 127.0.0.1
+      - --http.port
+      - ${OPS_V2_DEMO_RETH_PORT:-8545}
+      - --http.api
+      - eth,debug,web3,net,txpool
+      - --authrpc.addr
+      - 127.0.0.1
+      - --authrpc.port
+      - ${OPS_V2_DEMO_ENGINE_PORT:-8551}
+      - --authrpc.jwtsecret
+      - /demo/engine.jwt
+      - --ipcdisable
+      - --disable-discovery
+      - --addr
+      - 127.0.0.1
+      - --port
+      - "0"
+      - --max-outbound-peers
+      - "0"
+      - --max-inbound-peers
+      - "0"
+      - --log.file.directory
+      - /data/logs
+    volumes: ["reth-config:/demo:ro", "reth-data:/data"]
+  demo-wallet:
+    <<: *tools
+    entrypoint: ["node", "tools/v2-demo-wallet/server.mjs", "--config", "/demo/wallet.json"]
+    environment:
+      NODE_EXTRA_CA_CERTS: /demo/ca.crt
+      OPS_PRIVADO_CIRCUITS_DIR: /circuits
+    volumes: ["wallet-config:/demo", "circuits:/circuits:ro"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "const c=JSON.parse(require('fs').readFileSync('/demo/wallet.json'));fetch(c.origin+'/health').then(async r=>{if(!r.ok||!(await r.json()).ready)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  indexer:
+    <<: *owned
+    image: ${OPS_V2_DEMO_PROJECT}-indexer:local
+    build:
+      context: ${OPS_V2_DEMO_INDEXER_SOURCE:-${OPS_V2_DEMO_ROOT}}
+      dockerfile: ${OPS_V2_DEMO_ROOT}/deploy/v2-demo/Dockerfile.indexer
+    env_file: ${OPS_V2_DEMO_CONTROL_DIR}/indexer.env
+  ops:
+    <<: *owned
+    image: ${OPS_V2_DEMO_PROJECT}-ops:local
+    build:
+      context: ${OPS_V2_DEMO_ROOT}
+      dockerfile: Dockerfile.v2
+    env_file: ${OPS_V2_DEMO_CONTROL_DIR}/ops.env
+    environment:
+      SSL_CERT_FILE: /demo/ca.crt
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ['exec ops-v2-serve --config /demo/ops/server.json --sha256 "$$(cat /demo/ops/server.sha256)"']
+    volumes: ["ops-config:/demo:ro", "ops-spool:/var/lib/ops/activity"]
+    stop_grace_period: 30s
+  observer:
+    <<: *owned
+    image: ${OPS_V2_DEMO_PROJECT}-ops:local
+    env_file: ${OPS_V2_DEMO_CONTROL_DIR}/observer.env
+    entrypoint: ["/bin/sh", "/demo/observer/run.sh"]
+    volumes: ["observer-config:/demo:ro"]
+    stop_grace_period: 30s
+  explorer-api:
+    <<: *owned
+    image: ${OPS_V2_DEMO_PROJECT}-explorer:local
+    build:
+      context: ${OPS_V2_DEMO_EXPLORER_SOURCE:-${OPS_V2_DEMO_ROOT}}
+      dockerfile: ${OPS_V2_DEMO_ROOT}/deploy/v2-demo/Dockerfile.explorer
+    env_file: ${OPS_V2_DEMO_CONTROL_DIR}/explorer.env
+    environment:
+      SSL_CERT_FILE: /demo/ca.crt
+      API_LISTEN_HOST: 127.0.0.1
+    volumes: ["explorer-config:/demo:ro"]
+  explorer-admin:
+    <<: *owned
+    image: ${OPS_V2_DEMO_PROJECT}-explorer:local
+    env_file: ${OPS_V2_DEMO_CONTROL_DIR}/explorer-admin.env
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ['exec sso-v2-admin --source /demo/explorer/source.json --sha256 "$$(cat /demo/explorer/source.sha256)" --action migrate']
+    volumes: ["explorer-config:/demo:ro"]
+  explorer-web:
+    <<: *owned
+    image: ${OPS_V2_DEMO_PROJECT}-explorer:local
+    entrypoint: ["node", "/opt/v2-demo/explorer-gateway.mjs"]
+    environment:
+      OPS_V2_DEMO_EXPLORER_PORT: ${OPS_V2_DEMO_EXPLORER_PORT:-8444}
+      OPS_V2_DEMO_EXPLORER_API_PORT: ${OPS_V2_DEMO_EXPLORER_API_PORT:-8081}
+    volumes:
+      - explorer-config:/demo:ro
+      - ${OPS_V2_DEMO_ROOT}/deploy/v2-demo/explorer-gateway.mjs:/opt/v2-demo/explorer-gateway.mjs:ro
+
+volumes:
+  state: &volume
+    labels:
+      com.gateway.ops-v2-demo.owner: ${OPS_V2_DEMO_ROOT}
+      com.gateway.ops-v2-demo.project: ${OPS_V2_DEMO_PROJECT}
+  wallet-config: *volume
+  ops-config: *volume
+  explorer-config: *volume
+  observer-config: *volume
+  reth-config: *volume
+  ops-spool: *volume
+  reth-data: *volume
+  postgres-data: *volume
+  circuits: *volume

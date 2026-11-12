@@ -1,0 +1,24 @@
+FROM golang:1.26.9-trixie AS builder
+WORKDIR /app
+ENV GOMAXPROCS=2 CGO_ENABLED=0 GOTOOLCHAIN=local
+COPY backend/go.mod backend/go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY backend/ ./
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    go build -p=1 -tags privacy -o /out/ ./cmd/api ./cmd/sso-v2-admin
+
+FROM node:24.22.1-alpine AS web
+WORKDIR /app
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --ignore-scripts && npm rebuild esbuild
+COPY frontend/ ./
+RUN node node_modules/typescript/bin/tsc -p tsconfig.app.json --noEmit \
+    && node node_modules/vite/bin/vite.js build --config vite.v2.config.ts
+
+FROM node:24.22.1-trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /out/ /usr/local/bin/
+COPY --from=web /app/dist-v2/ /app/web/
+USER node
+ENTRYPOINT ["api"]
