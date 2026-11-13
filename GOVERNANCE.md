@@ -1,7 +1,7 @@
 # Governance
 
 Open Privacy Suite is maintained by Gateway.fm and project maintainers designated by
-Gateway.fm.
+Gateway.fm. The current maintainers are listed in [MAINTAINERS.md](MAINTAINERS.md).
 
 ## Maintainer Responsibilities
 
