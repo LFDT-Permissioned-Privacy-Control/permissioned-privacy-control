@@ -2,6 +2,13 @@
 
 A privacy-preserving JSON-RPC proxy for Ethereum nodes with ZK-proof authentication and hierarchical RBAC.
 
+An [LF Decentralized Trust](https://www.lfdecentralizedtrust.org/) lab since October 2026. It was developed in the open at
+[gateway-fm/open-privacy-suite](https://github.com/gateway-fm/open-privacy-suite) from January to October 2026: 507
+merged pull requests, releases v0.5.0 to v0.13.0 and
+[eight contributors](https://github.com/gateway-fm/open-privacy-suite/graphs/contributors). That repository is now
+archived and keeps the full commit history and release notes; this one starts from a single import commit. Maintainers are listed in
+[MAINTAINERS.md](MAINTAINERS.md).
+
 ## Quick Start
 
 **Evaluating the product?** One command brings up a self-contained demo —
