@@ -182,6 +182,27 @@ the Besu dependency audit with its existing reviewed exceptions, Go approval rac
 coexistence scenarios were skipped because those additional plugin JARs were not installed.
 Linux compatibility CI remains required before publication.
 
+### Advisory follow-up, 22 October 2026
+
+Go 1.26.10, released on 21 October, fixes a standard-library advisory that Aikido tracks as
+AIKIDO-2026-934590 against both `go.mod` files. Aikido reads the version from the `go` line, which
+stayed at 1.26.0 while the `toolchain` line carried the patch release. The `go` line in both files
+now moves to **Go 1.26.10** and the redundant `toolchain` line is dropped. `GO_VERSION` in CI and
+the privacy-bypass workflow, and the backend builder image, move in lockstep. `govulncheck` v1.5.0
+on Go 1.26.10 reports no reachable or imported-package vulnerabilities.
+
+### Advisory follow-up, 16 November 2026
+
+Two advisories published after the follow-up above fail `govulncheck` again, and it reports both
+as reachable. [GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), an HTTP/1 server crash caused
+by a `MaxBytesReader` header race in `net/http`, is fixed in Go 1.26.11.
+[GO-2026-6865](https://pkg.go.dev/vuln/GO-2026-6865), a panic on two-block frames in
+`github.com/klauspost/compress`, is fixed in v1.20.2. The `go` line in both `go.mod` files,
+`GO_VERSION` in CI and the privacy-bypass workflow, and the backend builder image move to
+**Go 1.26.11**. `klauspost/compress` is an indirect dependency, selected at v1.20.1 through
+`prometheus/client_golang`; it moves to **v1.20.2**. `govulncheck` v1.5.0 on Go 1.26.11 reports no
+reachable or imported-package vulnerabilities in either module.
+
 ## Validation record
 
 The [Besu verifier follow-up](../../poc/approval-performance/BESU-VERIFIER-2026-09-29.md)
