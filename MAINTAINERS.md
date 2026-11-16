@@ -11,3 +11,4 @@ Report security issues as described in [SECURITY.md](SECURITY.md), not to indivi
 |------|--------|-------------|
 | Ivan Belyakov | [@IvanBelyakoff](https://github.com/IvanBelyakoff) | Gateway.fm |
 | Igor Mandrigin | [@mandrigin](https://github.com/mandrigin) | Gateway.fm |
+| Alain Nicolas | [@alainncls](https://github.com/alainncls) | Consensys |
