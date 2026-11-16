@@ -6,7 +6,8 @@ The shared V1 signed-approval contract is maintained in
 The accompanying manifest records every protocol input's SHA-256 hash.
 
 OPS vendors the protobuf and four test vectors for offline Go builds. They are imported inputs;
-change the canonical contract through an integration-repository PR, then update this pin and run:
+change the canonical contract through an integration-repository PR, then update this pin and the
+Reth build context in `docker-compose.reth-demo.yml` to the same commit, and run:
 
 ```sh
 python3 scripts/approval_contract.py --sync
@@ -25,7 +26,13 @@ protobuf or regenerated golden file cannot pass by being committed only in OPS. 
 export flags are for proposing changes in a disposable checkout; submit those outputs to the
 contract owner and update the reviewed pin before using them here.
 
-This pin covers the contract only. The native source, dependency checks and local demo builds
-remain in OPS during the migration. They will move to verified release bundles or digest-pinned
-images after the standalone repository publishes qualified artifacts. No placeholder artifact
-checksums or release tags are used. The separate OPS V2 policy runtime is not changed by this pin.
+The Besu plugin and Reth producer source, their native builds and tests, Java/Rust dependency
+audits, operator guide and alert rules live in the integration repository, whose CI also runs the
+real-node and OPS HTTP scenarios against a pinned `gateway-fm/open-privacy-suite` commit. OPS CI
+does not build or audit those dependency trees; OPS keeps the Go sender, its policy integration
+and this contract check.
+`make demo-reth` builds the Reth producer from the pinned commit, and `approval_contract.py`
+rejects a demo build context that names any other ref. Until the integration repository
+publishes a qualified release, the demo builds from source; it then moves to that release's
+checksum- or digest-pinned artifact. No placeholder artifact checksums or release tags are used.
+The separate OPS V2 policy runtime is not changed by this pin.

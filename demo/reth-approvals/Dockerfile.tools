@@ -13,5 +13,6 @@ WORKDIR /app
 COPY go.mod ./
 COPY poc/reth-signed-approvals/*.py poc/reth-signed-approvals/
 COPY poc/reth-signed-approvals/contracts/ poc/reth-signed-approvals/contracts/
-COPY node-approvals/docker/compile.js node-approvals/docker/compile.js
+# poc/reth-signed-approvals/docker_demo.py runs the compiler from this in-image path.
+COPY demo/reth-approvals/compile.js node-approvals/docker/compile.js
 ENTRYPOINT ["python3", "poc/reth-signed-approvals/docker_demo.py"]
