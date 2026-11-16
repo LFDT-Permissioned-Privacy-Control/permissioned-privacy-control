@@ -2,9 +2,11 @@
 
 ## Supported Versions
 
-This project is preparing an initial source-only open-source release. Until the
-first public release is tagged, security support applies to the current `main`
-branch and any release candidate branches explicitly announced by maintainers.
+Security support applies to the current `main` branch and to release candidate
+branches the maintainers announce. Releases v0.5.0 to v0.13.0 were published from
+[gateway-fm/open-privacy-suite](https://github.com/gateway-fm/open-privacy-suite),
+the archived repository the project was developed in before it moved here; fixes
+for them are made on `main`.
 
 ## Reporting a Vulnerability
 
