@@ -34,6 +34,24 @@ class ContractPinTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checksum"):
             contract.verify_bytes(b"changed", contract.digest(b"expected"), "manifest")
 
+    def test_reth_demo_builds_the_pinned_integration_commit(self):
+        commit = "a" * 40
+        url = f"https://github.com/{contract.REPOSITORY}.git"
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            demo = root / contract.DEMO
+            demo.write_text(f"tools:\n  build:\n    context: .\nreth:\n  build:\n    context: {url}#{commit}\n")
+            contract.check_demo(root, commit)
+            for text in ["context: .\n",
+                         f"context: {url}#{'b' * 40}\n",
+                         f"context: {url}\n",
+                         f"context: {url}#main\n",
+                         f"context: {url}#{commit}\ncontext: {url}#{'b' * 40}\n"]:
+                with self.subTest(text=text):
+                    demo.write_text(text)
+                    with self.assertRaisesRegex(ValueError, "must build the Reth demo"):
+                        contract.check_demo(root, commit)
+
 
 if __name__ == "__main__":
     unittest.main()

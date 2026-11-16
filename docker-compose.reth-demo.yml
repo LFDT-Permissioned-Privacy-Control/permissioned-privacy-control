@@ -1,11 +1,14 @@
 # Development-only signed approvals demo. Run through `make demo-reth`.
-# All application/node binaries are built in containers from this checkout.
+# OPS and the fixture tools are built in containers from this checkout. The Reth
+# producer is built from ops-node-integrations at the commit pinned in
+# integrations/approvals-contract.lock.json; scripts/approval_contract.py rejects
+# any other ref. Replace it with the digest-pinned release image once one exists.
 services:
   demo-init:
     image: ${RETH_DEMO_PROJECT:-ops-reth-demo}-tools:local
     build:
       context: .
-      dockerfile: node-approvals/docker/Dockerfile.tools
+      dockerfile: demo/reth-approvals/Dockerfile.tools
       target: dev
     command: ["init"]
     volumes:
@@ -42,7 +45,7 @@ services:
   reth:
     image: ${RETH_DEMO_PROJECT:-ops-reth-demo}-reth:local
     build:
-      context: .
+      context: https://github.com/gateway-fm/ops-node-integrations.git#f9e039cbfabe82c3f8cc668d71fa437cde4856a0
       dockerfile: node-approvals/docker/Dockerfile.reth
       target: dev
       args:

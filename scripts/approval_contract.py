@@ -10,6 +10,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 LOCK = Path("integrations/approvals-contract.lock.json")
 MANIFEST = Path("integrations/approvals-contract.manifest.json")
+DEMO = Path("docker-compose.reth-demo.yml")
 REPOSITORY = "gateway-fm/ops-node-integrations"
 INPUTS = {
     "proto/ops/approvals/v1/approvals.proto": "proto/ops/approvals/v1/approvals.proto",
@@ -44,6 +45,15 @@ def check_inputs(root, manifest):
         if not path.is_file():
             raise ValueError(f"missing vendored input: {destination}")
         verify_bytes(path.read_bytes(), manifest["files"][source], destination)
+
+
+def check_demo(root, commit):
+    """Require the Reth demo to build the integration at the reviewed contract commit."""
+    expected = f"https://github.com/{REPOSITORY}.git#{commit}"
+    contexts = re.findall(r"^\s*context:\s*(\S+)", safe_path(root, str(DEMO)).read_text(), re.MULTILINE)
+    integration = [context for context in contexts if REPOSITORY in context]
+    if not integration or any(context != expected for context in integration):
+        raise ValueError(f"{DEMO} must build the Reth demo from {expected}")
 
 
 def download(commit, name, expected):
@@ -86,6 +96,7 @@ def main():
         else:
             verify_bytes(safe_path(ROOT, str(MANIFEST)).read_bytes(), pin["manifest_sha256"], str(MANIFEST))
     check_inputs(ROOT, manifest)
+    check_demo(ROOT, pin["commit"])
     print(f"approval contract {pin['version']} at {pin['commit']} verified")
 
 
