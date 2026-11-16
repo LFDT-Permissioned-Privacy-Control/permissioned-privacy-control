@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 
@@ -183,37 +182,23 @@ func (p *PrivadoVerifier) CreateHumanityAuthRequest(verifierID, callbackURL, rea
 	return &reqMsg, nil
 }
 
-// VerificationResult contains the results of JWZ verification
-type VerificationResult struct {
-	// UserDID is the decentralized identifier of the user who generated the proof
-	UserDID string
-	// ProofData holds one entry per requested proof the response answered (see
-	// requestedProofData). Only the field each request queried is bound to its
-	// proof; the rest of the presentation is supplied by the wallet.
-	ProofData []map[string]any
-}
-
-// VerifyJWZ verifies a Privado ID JWZ token against an authorization request
-// Returns the user's DID (Decentralized Identifier) if verification succeeds
-// authRequest: The original authorization request that was sent to the user
-// verifierID: The expected verifier ID (should match authResponse.To)
+// VerifyJWZ verifies a Privado ID JWZ token against the authorization request
+// it answers and returns the sender's DID.
+//
+// Only the DID is returned. The verifier checks just the proofs the request
+// asks for, and even those prove only the queried field; the rest of the
+// response, including any credential data in it, is supplied by the wallet
+// and must not be trusted (RD-1291).
+//
+// authRequest: the authorization request that was sent to the user
+// verifierID: the expected verifier ID (must match authResponse.To)
 func (p *PrivadoVerifier) VerifyJWZ(ctx context.Context, jwzToken string, authRequest *protocol.AuthorizationRequestMessage, verifierID string) (string, error) {
-	result, err := p.VerifyJWZWithProofData(ctx, jwzToken, authRequest, verifierID)
-	if err != nil {
-		return "", err
-	}
-	return result.UserDID, nil
-}
-
-// VerifyJWZWithProofData verifies a Privado ID JWZ token and returns the user DID
-// together with the data of the proofs the request asked for.
-func (p *PrivadoVerifier) VerifyJWZWithProofData(ctx context.Context, jwzToken string, authRequest *protocol.AuthorizationRequestMessage, verifierID string) (*VerificationResult, error) {
 	if p.verifier == nil {
-		return nil, fmt.Errorf("verifier not initialized")
+		return "", fmt.Errorf("verifier not initialized")
 	}
 
 	if authRequest == nil {
-		return nil, fmt.Errorf("authorization request is required")
+		return "", fmt.Errorf("authorization request is required")
 	}
 
 	// Verify the JWZ token against the original authorization request
@@ -224,73 +209,19 @@ func (p *PrivadoVerifier) VerifyJWZWithProofData(ctx context.Context, jwzToken s
 		*authRequest,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("JWZ verification failed: %w", err)
+		return "", fmt.Errorf("JWZ verification failed: %w", err)
 	}
 
 	// Security check: Verify that the proof was generated for our verifier ID
 	// The authResponse.To field should match our verifier ID
 	// This prevents accepting proofs intended for other verifiers
 	if verifierID != "" && authResponse.To != verifierID {
-		return nil, fmt.Errorf("verifier ID mismatch: proof intended for %s, but expected %s", authResponse.To, verifierID)
+		return "", fmt.Errorf("verifier ID mismatch: proof intended for %s, but expected %s", authResponse.To, verifierID)
 	}
 
-	// Extract user DID from the verified response
 	// authResponse.From contains the DID of the user who generated the proof
-	userDID := authResponse.From
-	if userDID == "" {
-		return nil, fmt.Errorf("user DID not found in verified response")
+	if authResponse.From == "" {
+		return "", fmt.Errorf("user DID not found in verified response")
 	}
-
-	return &VerificationResult{
-		UserDID:   userDID,
-		ProofData: requestedProofData(authRequest.Body.Scope, authResponse.Body.Scope),
-	}, nil
-}
-
-// requestedProofData returns the data of the proofs the verifier checked. The
-// verifier pairs each requested scope entry with the first response carrying
-// its ID and ignores every other response entry, so those are never returned:
-// a wallet can add entries the request did not ask for, and nothing checks
-// them. Even in a checked entry only the queried field is proven.
-func requestedProofData(requests []protocol.ZeroKnowledgeProofRequest, responses []protocol.ZeroKnowledgeProofResponse) []map[string]any {
-	var proofData []map[string]any
-	for _, request := range requests {
-		var zkProof *protocol.ZeroKnowledgeProofResponse
-		for i := range responses {
-			if responses[i].ID == request.ID {
-				zkProof = &responses[i]
-				break
-			}
-		}
-		if zkProof == nil {
-			continue
-		}
-		data := make(map[string]any)
-
-		// Add proof ID for reference
-		data["id"] = zkProof.ID
-		data["circuitID"] = zkProof.CircuitID
-
-		// Extract verifiable presentation data if available
-		if len(zkProof.VerifiablePresentation) > 0 {
-			var vp map[string]any
-			if err := json.Unmarshal(zkProof.VerifiablePresentation, &vp); err == nil {
-				// Look for credentialSubject in the verifiable presentation
-				if credSubject, ok := vp["credentialSubject"].(map[string]any); ok {
-					data["credentialSubject"] = credSubject
-				}
-				// Also include the full VP for any other claims
-				data["verifiablePresentation"] = vp
-			}
-		}
-
-		// Extract public signals from the ZK proof which may contain credential data
-		if zkProof.PubSignals != nil {
-			data["pubSignals"] = zkProof.PubSignals
-		}
-
-		proofData = append(proofData, data)
-	}
-
-	return proofData
+	return authResponse.From, nil
 }

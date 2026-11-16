@@ -30,7 +30,7 @@ func TestHandleAuthVerify_BillionsBootstrap_MockBypass(t *testing.T) {
 
 	// Simulate a fully-configured Path B environment without breaking the
 	// existing mock-verifier setup. A real Billions credential check would
-	// run inside privadoVerifier.VerifyJWZWithProofData; we never get there
+	// run inside privadoVerifier.VerifyJWZ; we never get there
 	// for mock tokens.
 	srv.config.AllowMockLogin = true
 	srv.config.RequireProofOfHumanity = true

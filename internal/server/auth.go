@@ -520,9 +520,10 @@ func (s *Server) verifyAndIssueTokens(c *gin.Context, jwzToken string, authReque
 	}
 
 	if userDID == "" {
-		// Verify JWZ token against the original authorization request. Only the
-		// DID is used: credential data in the response grants nothing (RD-1291).
-		verificationResult, verifyErr := s.privadoVerifier.VerifyJWZWithProofData(c.Request.Context(), jwzToken, authRequest, s.config.VerifierID)
+		// Verify JWZ token against the original authorization request. The
+		// verifier returns only the DID: credential data in the wallet's
+		// response is unverified and grants nothing (RD-1291).
+		verifiedDID, verifyErr := s.privadoVerifier.VerifyJWZ(c.Request.Context(), jwzToken, authRequest, s.config.VerifierID)
 		if verifyErr != nil {
 			// RD-1241 owns the wire response so the auth and OAuth paths cannot
 			// drift on what they disclose; RD-1242 records the same outcome on
@@ -533,7 +534,7 @@ func (s *Server) verifyAndIssueTokens(c *gin.Context, jwzToken string, authReque
 			s.failAuthSession(sessionID, authFailReasonForVerification(class))
 			return nil, verifyErr
 		}
-		userDID = verificationResult.UserDID
+		userDID = verifiedDID
 	}
 
 	// Ensure user exists in RBAC system and get their KYC status. New users
