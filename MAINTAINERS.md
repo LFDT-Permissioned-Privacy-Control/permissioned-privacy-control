@@ -10,3 +10,4 @@ Report security issues as described in [SECURITY.md](SECURITY.md), not to indivi
 | Name | GitHub | Affiliation |
 |------|--------|-------------|
 | Ivan Belyakov | [@IvanBelyakoff](https://github.com/IvanBelyakoff) | Gateway.fm |
+| Igor Mandrigin | [@mandrigin](https://github.com/mandrigin) | Gateway.fm |
