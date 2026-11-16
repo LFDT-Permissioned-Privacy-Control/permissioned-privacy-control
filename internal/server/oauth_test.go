@@ -938,9 +938,6 @@ func TestOAuth_FullFlow(t *testing.T) {
 	router.POST("/oauth/token", srv.handleOAuthToken)
 	router.GET("/oauth/session/:id/status", srv.handleOAuthSessionStatus)
 
-	// Enable mock login for testing
-	srv.config.AllowMockLogin = true
-
 	// Step 1: Start OAuth flow with authorize request
 	state := "unique-state-value-12345"
 	redirectURI := "http://localhost:3000/callback"
@@ -967,9 +964,10 @@ func TestOAuth_FullFlow(t *testing.T) {
 	require.NotEmpty(t, oauthSessionID)
 	require.NotEmpty(t, authSessionID)
 
-	// Step 2: Simulate Privado authentication callback with mock token
+	// Step 2: Privado authentication callback; the test verifier accepts the
+	// token and returns its DID
 	callbackBody := map[string]interface{}{
-		"token": "mock.token.did:privado:test_user_123",
+		"token": "header.payload.proof",
 	}
 	callbackBodyBytes, _ := json.Marshal(callbackBody)
 
@@ -1020,7 +1018,7 @@ func TestOAuth_FullFlow(t *testing.T) {
 	// Validate the JWT
 	claims, err := srv.jwtService.ValidateAccessToken(tokenResp.AccessToken)
 	require.NoError(t, err)
-	assert.Equal(t, "did:privado:test_user_123", claims.Subject)
+	assert.Equal(t, "did:privado:test123", claims.Subject)
 }
 
 // TestOAuth_SessionStoreCapacity tests the session store capacity limits
@@ -1134,22 +1132,6 @@ func TestOAuth_SessionInfo(t *testing.T) {
 		assert.Equal(t, false, resp["allow_mock"])
 	})
 
-	t.Run("returns allow_mock true when enabled in dev", func(t *testing.T) {
-		srv.config.AllowMockLogin = true
-		defer func() { srv.config.AllowMockLogin = false }()
-
-		oauthSessionID := createSessionWithAuthReq(t)
-
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/oauth/session/"+oauthSessionID+"/info", nil)
-		router.ServeHTTP(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		var resp map[string]interface{}
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-		assert.Equal(t, true, resp["allow_mock"])
-	})
-
 	t.Run("returns 404 for nonexistent session", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/oauth/session/nonexistent-id/info", nil)
@@ -1241,55 +1223,6 @@ func TestOAuth_MockComplete(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 
-	t.Run("completes session successfully in dev mode", func(t *testing.T) {
-		srv.config.AllowMockLogin = true
-		defer func() { srv.config.AllowMockLogin = false }()
-		oauthSessionID := createPendingSession(t)
-
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/oauth/session/"+oauthSessionID+"/mock-complete", nil)
-		router.ServeHTTP(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		var resp map[string]interface{}
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-		assert.Equal(t, true, resp["ok"])
-		assert.Contains(t, resp["did"].(string), "did:privado:mock_")
-
-		// Session should now have a code set
-		session := srv.oauthSessionStore.GetSession(oauthSessionID)
-		require.NotNil(t, session)
-		assert.NotEmpty(t, session.Code)
-	})
-
-	t.Run("returns 409 when session already completed", func(t *testing.T) {
-		srv.config.AllowMockLogin = true
-		defer func() { srv.config.AllowMockLogin = false }()
-		oauthSessionID := createPendingSession(t)
-
-		// Complete first time
-		w1 := httptest.NewRecorder()
-		req1 := httptest.NewRequest(http.MethodPost, "/oauth/session/"+oauthSessionID+"/mock-complete", nil)
-		router.ServeHTTP(w1, req1)
-		require.Equal(t, http.StatusOK, w1.Code)
-
-		// Try to complete again
-		w2 := httptest.NewRecorder()
-		req2 := httptest.NewRequest(http.MethodPost, "/oauth/session/"+oauthSessionID+"/mock-complete", nil)
-		router.ServeHTTP(w2, req2)
-		assert.Equal(t, http.StatusConflict, w2.Code)
-	})
-
-	t.Run("returns 404 for nonexistent session", func(t *testing.T) {
-		srv.config.AllowMockLogin = true
-		defer func() { srv.config.AllowMockLogin = false }()
-
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/oauth/session/nonexistent/mock-complete", nil)
-		router.ServeHTTP(w, req)
-
-		assert.Equal(t, http.StatusNotFound, w.Code)
-	})
 }
 
 // TestOAuth_BrowserRedirect tests the browser-vs-JSON behavior of handleOAuthAuthorize
@@ -1393,12 +1326,9 @@ func TestOAuth_TokenExchange_ReturnsRefreshToken(t *testing.T) {
 
 	router := gin.New()
 	router.GET("/oauth/authorize", srv.handleOAuthAuthorize)
-	router.POST("/oauth/session/:id/mock-complete", srv.handleOAuthMockComplete)
+	router.POST("/oauth/callback", srv.handleOAuthCallback)
 	router.POST("/oauth/token", srv.handleOAuthToken)
 	router.POST("/api/v1/refresh", srv.handleRefresh)
-
-	// Enable mock login for testing
-	srv.config.AllowMockLogin = true
 
 	// Step 1: Start OAuth flow with authorize request
 	state := "refresh-test-state"
@@ -1421,14 +1351,19 @@ func TestOAuth_TokenExchange_ReturnsRefreshToken(t *testing.T) {
 	require.NoError(t, err)
 
 	oauthSessionID := authorizeResp["oauth_session_id"].(string)
+	authSessionID := authorizeResp["auth_session_id"].(string)
 	require.NotEmpty(t, oauthSessionID)
+	require.NotEmpty(t, authSessionID)
 
-	// Step 2: Complete the session via mock-complete
-	mockCompleteReq := httptest.NewRequest("POST", "/oauth/session/"+oauthSessionID+"/mock-complete", nil)
-	mockCompleteW := httptest.NewRecorder()
-	router.ServeHTTP(mockCompleteW, mockCompleteReq)
+	// Step 2: Complete the session through the Privado callback; the test
+	// verifier accepts the token and returns its DID
+	callbackReq := httptest.NewRequest("POST", "/oauth/callback?session="+authSessionID+"&oauth_session="+oauthSessionID,
+		strings.NewReader(`{"token":"header.payload.proof"}`))
+	callbackReq.Header.Set("Content-Type", "application/json")
+	callbackW := httptest.NewRecorder()
+	router.ServeHTTP(callbackW, callbackReq)
 
-	require.Equal(t, http.StatusOK, mockCompleteW.Code)
+	require.Equal(t, http.StatusOK, callbackW.Code)
 
 	// Step 3: Get the authorization code from the session status
 	session := srv.oauthSessionStore.GetSession(oauthSessionID)
@@ -1464,7 +1399,7 @@ func TestOAuth_TokenExchange_ReturnsRefreshToken(t *testing.T) {
 	// Validate the access token is a valid JWT
 	claims, err := srv.jwtService.ValidateAccessToken(tokenResp.AccessToken)
 	require.NoError(t, err)
-	assert.Contains(t, claims.Subject, "did:privado:mock_")
+	assert.Equal(t, "did:privado:test123", claims.Subject)
 
 	// Step 6: Use the refresh token to get new tokens via POST /api/v1/refresh
 	refreshReqBody, _ := json.Marshal(apimodels.RefreshRequest{

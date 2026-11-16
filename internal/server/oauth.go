@@ -258,7 +258,7 @@ func generateSecureCode() string {
 // @Failure      500 {object} apimodels.APIError "failed to complete session"
 // @Router       /oauth/session/{id}/mock-complete [post]
 func (s *Server) handleOAuthMockComplete(c *gin.Context) {
-	if s.config.IsProduction() || !s.config.AllowMockLogin {
+	if !s.mockLoginEnabled() {
 		c.JSON(http.StatusForbidden, gin.H{"error": "mock login not available"})
 		return
 	}
@@ -471,7 +471,7 @@ func (s *Server) handleOAuthSessionInfo(c *gin.Context) {
 		return
 	}
 
-	allowMock := s.config.AllowMockLogin && !s.config.IsProduction()
+	allowMock := s.mockLoginEnabled()
 	c.JSON(http.StatusOK, gin.H{
 		"auth_request": authSession.AuthRequest,
 		"allow_mock":   allowMock,
@@ -725,22 +725,14 @@ func (s *Server) handleOAuthCallback(c *gin.Context) {
 		return
 	}
 
-	// Verify the proof and get user DID
-	var userDID string
-	if s.config.AllowMockLogin && len(jwzToken) > 5 && jwzToken[:5] == "mock." {
-		// Extract DID from mock token
-		parts := strings.Split(jwzToken, ".")
-		if len(parts) >= 2 {
-			userDID = parts[len(parts)-1]
-			if !strings.HasPrefix(userDID, "did:") {
-				userDID = "did:privado:" + userDID
-			}
-		}
-		if userDID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid mock token format"})
-			return
-		}
-	} else {
+	// Verify the proof and get user DID. Mock tokens are accepted only by
+	// mockauth builds, as on the wallet path; a production build sends them
+	// to the verifier like any other token (RD-1444).
+	userDID, err := s.tryMockLogin(c, jwzToken)
+	if err != nil {
+		return // tryMockLogin has written the response
+	}
+	if userDID == "" {
 		userDID, err = s.privadoVerifier.VerifyJWZ(c.Request.Context(), jwzToken, authSession.AuthRequest, s.config.VerifierID)
 		if err != nil {
 			// Shared with the wallet-callback path. This used to be a second

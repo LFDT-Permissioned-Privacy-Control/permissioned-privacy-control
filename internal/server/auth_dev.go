@@ -13,7 +13,7 @@ import (
 // tryMockLogin handles mock JWZ tokens for testing.
 // This implementation is only included in non-production builds.
 func (s *Server) tryMockLogin(c *gin.Context, jwzToken string) (string, error) {
-	if !s.config.AllowMockLogin || len(jwzToken) <= 5 || jwzToken[:5] != "mock." {
+	if !s.mockLoginEnabled() || len(jwzToken) <= 5 || jwzToken[:5] != "mock." {
 		return "", nil // Not a mock token or not allowed
 	}
 
@@ -36,4 +36,10 @@ func (s *Server) tryMockLogin(c *gin.Context, jwzToken string) (string, error) {
 	}
 
 	return userDID, nil
+}
+
+// mockLoginEnabled reports whether this build and config accept mock logins.
+// Production builds compile the stub in auth_prod.go, which always says no.
+func (s *Server) mockLoginEnabled() bool {
+	return s.config.AllowMockLogin && !s.config.IsProduction()
 }
