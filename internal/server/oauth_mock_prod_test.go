@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/iden3/iden3comm/v2/protocol"
@@ -96,4 +97,37 @@ func TestOAuth_ProductionBuildRefusesMockLogin(t *testing.T) {
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 		assert.Equal(t, false, resp["allow_mock"])
 	})
+}
+
+// RD-1444: demo auto-auth completes a pending login with a new demo identity
+// after DEMO_AUTO_AUTH_DELAY. A production build never does, whatever the
+// config says; it used to whenever ENVIRONMENT was not "production".
+func TestDemoAutoAuth_ProductionBuildNeverCompletesLogins(t *testing.T) {
+	srv := setupTestServerForOAuth(t)
+	defer srv.db.Close()
+	defer srv.oauthSessionStore.Stop()
+	defer srv.sessionStore.Stop()
+
+	srv.config.Environment = "development"
+	srv.config.DemoAutoAuthDelay = 10 * time.Millisecond
+
+	assert.Zero(t, DemoAutoAuthDelay(srv.config), "a production build has no demo auto-auth")
+
+	authReq, err := srv.privadoVerifier.CreateAuthorizationRequest("did:privado:verifier:test", "http://localhost/cb", "test")
+	require.NoError(t, err)
+	walletSessionID := srv.sessionStore.CreateSession(authReq)
+	oauthAuthSessionID := srv.sessionStore.CreateSession(authReq)
+	oauthSessionID := srv.oauthSessionStore.CreateSession("client", "http://localhost/cb", "state", oauthAuthSessionID, "")
+
+	srv.scheduleDemoAutoAuth(walletSessionID)
+	srv.scheduleOAuthDemoAutoAuth(oauthSessionID, oauthAuthSessionID)
+
+	assert.Never(t, func() bool {
+		s := srv.sessionStore.GetSession(walletSessionID)
+		return s != nil && s.Completed
+	}, 300*time.Millisecond, 10*time.Millisecond, "the wallet login must not be completed")
+	assert.Never(t, func() bool {
+		s := srv.oauthSessionStore.GetSession(oauthSessionID)
+		return s != nil && s.Code != ""
+	}, 100*time.Millisecond, 10*time.Millisecond, "no authorization code may be minted")
 }

@@ -3,7 +3,11 @@
 package server
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
+
+	"privacy-proxy/internal/config"
 )
 
 // tryMockLogin handles mock JWZ tokens.
@@ -16,4 +20,12 @@ func (s *Server) tryMockLogin(c *gin.Context, jwzToken string) (string, error) {
 // builds never do, whatever ALLOW_MOCK_LOGIN and ENVIRONMENT say (RD-1444).
 func (s *Server) mockLoginEnabled() bool {
 	return false
+}
+
+// DemoAutoAuthDelay returns how long demo mode waits before completing a
+// pending login with a new demo identity; 0 means never. Production builds
+// have no demo mode, whatever DEMO_AUTO_AUTH_DELAY and ENVIRONMENT say
+// (RD-1444).
+func DemoAutoAuthDelay(*config.Config) time.Duration {
+	return 0
 }

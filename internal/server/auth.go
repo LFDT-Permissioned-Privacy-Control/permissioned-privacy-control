@@ -305,8 +305,8 @@ func (s *Server) handleAuthRequest(c *gin.Context) {
 // scheduleDemoAutoAuth schedules automatic session completion for demo mode.
 // Spawns a goroutine that completes the session with a mock DID after the configured delay.
 func (s *Server) scheduleDemoAutoAuth(sessionID string) {
-	delay := s.config.DemoAutoAuthDelay
-	if delay <= 0 || s.config.IsProduction() {
+	delay := DemoAutoAuthDelay(s.config)
+	if delay <= 0 {
 		return
 	}
 

@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"privacy-proxy/internal/config"
 )
 
 // tryMockLogin handles mock JWZ tokens for testing.
@@ -42,4 +45,14 @@ func (s *Server) tryMockLogin(c *gin.Context, jwzToken string) (string, error) {
 // Production builds compile the stub in auth_prod.go, which always says no.
 func (s *Server) mockLoginEnabled() bool {
 	return s.config.AllowMockLogin && !s.config.IsProduction()
+}
+
+// DemoAutoAuthDelay returns how long demo mode waits before completing a
+// pending login with a new demo identity; 0 means never. Production builds
+// compile the stub in auth_prod.go, which always returns 0.
+func DemoAutoAuthDelay(cfg *config.Config) time.Duration {
+	if cfg.IsProduction() {
+		return 0
+	}
+	return cfg.DemoAutoAuthDelay
 }

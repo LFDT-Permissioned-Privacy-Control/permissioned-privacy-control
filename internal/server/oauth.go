@@ -1055,8 +1055,8 @@ func (s *Server) isValidRedirectURI(uri string) bool {
 
 // scheduleOAuthDemoAutoAuth schedules automatic OAuth session completion for demo mode
 func (s *Server) scheduleOAuthDemoAutoAuth(oauthSessionID, authSessionID string) {
-	delay := s.config.DemoAutoAuthDelay
-	if delay <= 0 || s.config.IsProduction() {
+	delay := DemoAutoAuthDelay(s.config)
+	if delay <= 0 {
 		return
 	}
 

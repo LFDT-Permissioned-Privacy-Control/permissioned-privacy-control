@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/iden3/iden3comm/v2/protocol"
@@ -106,5 +107,42 @@ func TestOAuth_MockauthBuildMockLogin(t *testing.T) {
 
 	t.Run("mock-complete returns 404 for an unknown session", func(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, mockComplete("nonexistent").Code)
+	})
+}
+
+// A mockauth build keeps demo auto-auth outside production: a pending login
+// is completed with a new demo identity after the delay.
+func TestDemoAutoAuth_MockauthBuildCompletesLogins(t *testing.T) {
+	srv := setupTestServerForOAuth(t)
+	defer srv.db.Close()
+	defer srv.oauthSessionStore.Stop()
+	defer srv.sessionStore.Stop()
+
+	srv.config.Environment = "development"
+	srv.config.DemoAutoAuthDelay = 10 * time.Millisecond
+	require.Equal(t, 10*time.Millisecond, DemoAutoAuthDelay(srv.config))
+
+	authReq, err := srv.privadoVerifier.CreateAuthorizationRequest("did:privado:verifier:test", "http://localhost/cb", "test")
+	require.NoError(t, err)
+	walletSessionID := srv.sessionStore.CreateSession(authReq)
+	oauthAuthSessionID := srv.sessionStore.CreateSession(authReq)
+	oauthSessionID := srv.oauthSessionStore.CreateSession("client", "http://localhost/cb", "state", oauthAuthSessionID, "")
+
+	srv.scheduleDemoAutoAuth(walletSessionID)
+	srv.scheduleOAuthDemoAutoAuth(oauthSessionID, oauthAuthSessionID)
+
+	assert.Eventually(t, func() bool {
+		s := srv.sessionStore.GetSession(walletSessionID)
+		return s != nil && s.Completed
+	}, 5*time.Second, 10*time.Millisecond, "the wallet login is completed")
+	assert.Eventually(t, func() bool {
+		s := srv.oauthSessionStore.GetSession(oauthSessionID)
+		return s != nil && s.Code != "" && strings.HasPrefix(s.UserDID, "did:privado:demo_")
+	}, 5*time.Second, 10*time.Millisecond, "the OAuth session gets a code for a demo identity")
+
+	t.Run("not in production", func(t *testing.T) {
+		srv.config.Environment = "production"
+		defer func() { srv.config.Environment = "development" }()
+		assert.Zero(t, DemoAutoAuthDelay(srv.config))
 	})
 }
