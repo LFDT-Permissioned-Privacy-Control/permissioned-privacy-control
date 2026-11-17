@@ -46,7 +46,11 @@ jobs:
       - name: Provision and verify pinned public circuits
         run: node scripts/v2-test-prerequisites.mjs
       - name: Test required-case enforcement and demo authentication boundary
-        run: node --test scripts/test-v2-runner.test.mjs scripts/v2-demo/ownership.test.mjs tools/v2-demo-wallet/*.test.mjs
+        run: |
+          node --test scripts/test-v2-runner.test.mjs scripts/v2-demo/ownership.test.mjs scripts/v2-demo/export-config.test.mjs tools/v2-demo-wallet/*.test.mjs
+          CGO_ENABLED=0 go test -p 1 -tags production,prover_disabled ./internal/operational/v2demo ./cmd/ops-v2-demo-init
+      - name: Check canonical disclosure expiry after a real SQL roundtrip
+        run: CGO_ENABLED=0 go test -p 1 -tags production,prover_disabled ./internal/disclosurepolicy ./internal/operational/disclosuresql -run '^(TestProtectedUntilCanonicalUTC|TestCaseTimestampRoundTripUTC)$' -count=1 -timeout=90s
       - name: Test native commands and architecture
         run: node scripts/test-v2.mjs core
       - name: Build native delivery

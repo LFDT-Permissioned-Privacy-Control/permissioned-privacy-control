@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
+import { createInterface } from 'node:readline/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { demoAccount } from '../../tools/v2-demo-wallet/accounts.mjs';
@@ -12,7 +13,11 @@ import { signChallenge } from '../../tools/v2-demo-wallet/sign-message.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const directory = path.resolve(process.argv[2] ?? '');
 assert.ok(directory.startsWith(path.join(root, '.tmp/v2-demo') + path.sep));
-const resultsFile = path.join(directory, 'check-results.json');
+const mode = process.argv[3] ?? 'walkthrough';
+assert.ok(['walkthrough', 'reader-admin', 'reader-reader', 'disclosure'].includes(mode), 'Unknown demo check mode');
+const interactive = process.env.OPS_DEMO_INTERACTIVE === '1';
+assert.ok(!interactive || process.stdin.isTTY, 'Run the visible walkthrough in an interactive terminal');
+const resultsFile = path.join(directory, mode === 'walkthrough' ? 'check-results.json' : 'mapping-results.json');
 await rm(resultsFile, { force: true });
 const runtime = JSON.parse(await readFile(path.join(directory, 'runtime.json'), 'utf8'));
 assert.equal(runtime.testOnly, true); assert.equal(runtime.chainId, '31337');
@@ -29,7 +34,7 @@ const { Interface, keccak256, zeroPadValue } = walletRequire('ethers');
 const abi = new Interface(contract.abi);
 let stage = 'browser-start', count = 0;
 const passed = label => { count++; console.log('PASS ' + label); };
-const browser = await chromium.launch({ channel: process.env.OPS_TEST_BROWSER_CHANNEL ?? 'chrome', headless: true, args: ['--no-proxy-server'] });
+const browser = await chromium.launch({ channel: process.env.OPS_TEST_BROWSER_CHANNEL ?? 'chrome', headless: !interactive, slowMo: interactive ? 150 : 0, args: ['--no-proxy-server'] });
 const contexts = [], users = new Map();
 let readerRevoked = false;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -129,7 +134,93 @@ function demoCommand(args, label) {
   const result = spawnSync(path.join(root, 'scripts/v2-demo.sh'), args, { env: process.env, encoding: 'utf8', timeout: 120_000, maxBuffer: 1 << 20 });
   assert.equal(result.status, 0, label);
 }
+async function checkDisclosure(admin, deployer, reader, hash) {
+  stage = 'disclosure-open-form';
+  await admin.page.goto(runtime.explorerOrigin + '/disclosures');
+  await admin.page.getByText('Open a disclosure case', { exact: true }).click();
+  await admin.page.getByLabel('Approved rule ID', { exact: true }).fill('demo-auditor');
+  await admin.page.getByLabel('Client actor IDs', { exact: true }).fill(deployer.access.actorId);
+  const reference = 'DEMO-' + Date.now();
+  await admin.page.getByLabel('Case reference', { exact: true }).fill(reference);
+  await admin.page.getByLabel('Purpose', { exact: true }).fill('Inspect the demo contract transaction');
+  await admin.page.getByLabel('Legal basis', { exact: true }).fill('Isolated local demo; not a legal compliance assertion');
+  const localDate = seconds => { const d = new Date(seconds * 1000); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
+  const now = Math.floor(Date.now() / 1000);
+  await admin.page.getByLabel('From (local time)', { exact: true }).fill(localDate(now - 3600));
+  await admin.page.getByLabel('Through (local time)', { exact: true }).fill(localDate(now + 120));
+  for (const label of ['Addresses', 'Activity', 'Activity summary', 'Sanctions', 'Compliance']) await admin.page.getByLabel(label, { exact: true }).uncheck();
+  await admin.page.getByLabel('Detail level').selectOption('full');
+  stage = 'disclosure-create-case';
+  await admin.page.getByRole('button', { name: 'Open case', exact: true }).click();
+  await admin.page.getByRole('heading', { name: reference, exact: true }).waitFor();
+  const caseUrl = admin.page.url();
+  stage = 'disclosure-read-transactions';
+  const readResponse = admin.page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/disclosure/cases/' + new URL(caseUrl).pathname.split('/').at(-1) + '/read'));
+  await admin.page.getByRole('button', { name: 'Transactions', exact: true }).click();
+  const read = await readResponse;
+  const protectedData = await read.json();
+  console.log('Disclosure transaction read: HTTP ' + read.status() + ', rows=' + (protectedData.result?.items?.length ?? 'unavailable'));
+  assert.equal(read.status(), 200);
+  assert.ok(protectedData.result.items.some(row => row.transactionHash === hash), 'Disclosure did not include the sample transaction');
+  await admin.page.locator('a[href$="/transactions/' + hash + '"]').first().waitFor({ timeout: 30_000 });
+  assert.equal(await admin.page.getByRole('alert').count(), 0);
+  stage = 'disclosure-reader-denied';
+  const caseId = new URL(caseUrl).pathname.split('/').at(-1);
+  const deniedCase = reader.page.waitForResponse(r => r.request().method() === 'GET' && new URL(r.url()).pathname.endsWith('/disclosure/cases/' + caseId));
+  await reader.page.goto(caseUrl);
+  assert.equal((await deniedCase).status(), 404, 'Another recipient case must be unavailable, with a valid reader session');
+  await reader.page.getByRole('alert').waitFor();
+  assert.equal(await reader.page.locator('a[href$="/transactions/' + hash + '"]').count(), 0);
+  assert.equal((await bff(reader, '/transactions/' + hash)).status, 200);
+  passed('admin opens a standing-rule disclosure and reads its transaction without customer approval; reader cannot use the case');
+  return caseUrl;
+}
 try {
+  await (async () => {
+  if (mode === 'disclosure') {
+    for (const persona of ['admin', 'deployer', 'reader']) await login(persona);
+    const previous = JSON.parse(await readFile(path.join(directory, 'check-state.json'), 'utf8'));
+    const caseUrl = await checkDisclosure(users.get('admin'), users.get('deployer'), users.get('reader'), previous.lastTransaction);
+    await writeFile(resultsFile, JSON.stringify({ passed: true, cases: count, disclosureUrl: caseUrl }, null, 2) + '\n', { mode: 0o600 });
+    return;
+  }
+  if (mode !== 'walkthrough') {
+    const reader = await login('reader');
+    stage = 'mapping-current-admin-flag';
+    const self = await json(await reader.context.request.get(runtime.opsOrigin + '/api/v2/self', { headers: { Authorization: 'Bearer ' + reader.access.accessToken } }));
+    const isAdmin = mode === 'reader-admin';
+    assert.equal(self.organizations.find(org => org.id === runtime.organizationId)?.isOrgAdmin, isAdmin);
+    const previous = JSON.parse(await readFile(path.join(directory, 'check-state.json'), 'utf8'));
+    assert.match(previous.lastTransaction ?? '', /^0x[0-9a-f]{64}$/);
+    stage = 'mapping-retains-address-privacy';
+    const logs = await rpc(reader, 'eth_getLogs', [{ address: runtime.targetContract, fromBlock: '0x' + previous.lastBlock.toString(16), toBlock: '0x' + previous.lastBlock.toString(16) }]);
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].topics[1].toLowerCase(), '0x' + '0'.repeat(64));
+    const view = await bff(reader, '/transactions/' + previous.lastTransaction);
+    assert.equal(view.status, 200);
+    if (isAdmin) assert.equal(view.value.hash, previous.lastTransaction);
+    else assert.equal(view.value, null);
+    passed('unchanged Reader credential maps to ' + (isAdmin ? 'organization Admin' : 'Reader') + '; address privacy remains enforced');
+    const signer = demoAccount('reader');
+    const nonce = Number(BigInt(await nodeRPC(reader, 'eth_getTransactionCount', [signer.address, 'pending'])));
+    const signed = await signer.signTransaction({ type: 2, chainId: 31337, nonce, gasLimit: 200_000, maxFeePerGas: 2_000_000_000, maxPriorityFeePerGas: 1_000_000_000, to: runtime.targetContract, data: abi.encodeFunctionData('set', [demoAccount('admin').address.toLowerCase(), 171]) });
+    if (isAdmin) {
+      stage = 'mapping-admin-signed-call';
+      const hash = keccak256(signed);
+      assert.equal(await rpc(reader, 'eth_sendRawTransaction', [signed]), hash);
+      const receipt = await boundedWait(() => nodeRPC(reader, 'eth_getTransactionReceipt', [hash]), 60, 'mapped Admin signed call');
+      assert.equal(receipt.status, '0x1');
+      passed('mapped Admin can submit an allowed signed contract call through OPS');
+    } else {
+      stage = 'mapping-reader-write-denied';
+      assert.equal((await rpc(reader, 'eth_sendRawTransaction', [signed], true)).denied, true);
+      assert.equal(Number(BigInt(await nodeRPC(reader, 'eth_getTransactionCount', [signer.address, 'pending']))), nonce);
+      passed('restored Reader cannot submit the signed call; chain nonce unchanged');
+    }
+    await writeFile(resultsFile, JSON.stringify({ passed: true, cases: count, expectedGroup: isAdmin ? 'Admin' : 'Reader', transaction: previous.lastTransaction }, null, 2) + '\n', { mode: 0o600 });
+    console.log('Transaction: ' + runtime.explorerOrigin + '/transactions/' + previous.lastTransaction);
+    return;
+  }
   for (const persona of ['admin', 'deployer', 'reader', 'outsider']) await login(persona);
   await link('admin'); await link('deployer'); await link('reader');
   const deployer = users.get('deployer'), admin = users.get('admin'), reader = users.get('reader');
@@ -183,6 +274,13 @@ try {
   assert.equal((await rpc(deployer, 'eth_getTransactionByHash', [hash])).hash, hash);
   const denied = await rpc(users.get('outsider'), 'eth_getLogs', [filter], true); assert.equal(denied.denied, true);
   passed('admin full event subject, reader masked subject + hidden transaction, deployer own transaction, outsider denied');
+  stage = 'reader-write-denied';
+  const readerSigner = demoAccount('reader');
+  const readerNonce = await nodeRPC(reader, 'eth_getTransactionCount', [readerSigner.address, 'pending']);
+  const forbiddenCall = await readerSigner.signTransaction({ type: 2, chainId: 31337, nonce: Number(BigInt(readerNonce)), gasLimit: 200_000, maxFeePerGas: 2_000_000_000, maxPriorityFeePerGas: 1_000_000_000, to: runtime.targetContract, data: abi.encodeFunctionData('set', [subject, 999]) });
+  assert.equal((await rpc(reader, 'eth_sendRawTransaction', [forbiddenCall], true)).denied, true);
+  assert.equal(await nodeRPC(reader, 'eth_getTransactionCount', [readerSigner.address, 'pending']), readerNonce);
+  passed('reader signed write denied before broadcast; its chain nonce is unchanged');
   stage = 'actual-explorer-reads';
   const d = await bff(deployer, '/transactions/' + hash); assert.equal(d.status, 200); assert.equal(d.value.hash, hash);
   const r = await bff(reader, '/transactions/' + hash); assert.equal(r.status, 200); assert.equal(r.value, null);
@@ -194,6 +292,23 @@ try {
   await reader.page.getByText('This record is unavailable.', { exact: true }).waitFor();
   assert.equal(await reader.page.getByRole('link', { name: hash, exact: true }).count(), 0);
   passed('actual production Explorer BFF and built UI retain the same restricted views');
+  stage = 'explicit-transaction-sharing';
+  const shareNonce = Number(BigInt(await nodeRPC(deployer, 'eth_getTransactionCount', [signer.address, 'pending'])));
+  const sharedSigned = await signer.signTransaction({ type: 2, chainId: 31337, nonce: shareNonce, gasLimit: 200_000, maxFeePerGas: 2_000_000_000, maxPriorityFeePerGas: 1_000_000_000, to: runtime.targetContract, data: abi.encodeFunctionData('set', [subject, 171]) });
+  const sharedHash = keccak256(sharedSigned);
+  assert.equal(await rpc(deployer, 'eth_sendRawTransaction', [sharedSigned, { visibleTo: [reader.access.actorId] }]), sharedHash);
+  const sharedReceipt = await boundedWait(() => nodeRPC(deployer, 'eth_getTransactionReceipt', [sharedHash]), 60, 'shared call receipt');
+  assert.equal(sharedReceipt.status, '0x1');
+  demoCommand(['barrier', sharedHash, String(Number(BigInt(sharedReceipt.blockNumber))), runtime.targetContract], 'Shared transaction source barrier failed');
+  assert.equal((await rpc(reader, 'eth_getTransactionByHash', [sharedHash])).hash, sharedHash);
+  const sharedLogs = await rpc(reader, 'eth_getLogs', [{ address: runtime.targetContract, fromBlock: sharedReceipt.blockNumber, toBlock: sharedReceipt.blockNumber }]);
+  assert.equal(sharedLogs.length, 1); assert.equal(sharedLogs[0].topics[1].toLowerCase(), zeroPadValue(subject, 32));
+  const sharedView = await bff(reader, '/transactions/' + sharedHash);
+  assert.equal(sharedView.status, 200); assert.equal(sharedView.value.hash, sharedHash);
+  assert.equal(await rpc(reader, 'eth_getTransactionByHash', [hash]), null);
+  assert.equal((await bff(users.get('outsider'), '/transactions/' + sharedHash)).status, 403);
+  passed('explicit visibleTo sharing reveals only the new transaction to Reader; old private transaction and outsider remain restricted');
+  const caseUrl = await checkDisclosure(admin, deployer, reader, hash);
   stage = 'immutable-config-revision-restart';
   readerRevoked = true;
   demoCommand(['revision', 'off'], 'Reader revoke/restart failed');
@@ -203,11 +318,27 @@ try {
   readerRevoked = false;
   assert.equal((await rpc(reader, 'eth_getLogs', [filter]))[0].topics[1], '0x' + '0'.repeat(64));
   passed('new immutable config + drained OPS restart revokes and restores the reader event grant without replacing identities or SQL policy settings');
-  await writeFile(resultsFile, JSON.stringify({ passed: true, cases: count, transaction: hash, receiptBlock: previous.lastBlock, contract: runtime.targetContract, applicationNode: 'real-reth', identityState: 'public-controlled-Privado-fixture', receiptEnvelope: 'V1 retained sender/recipient visibility for event-entitled readers' }, null, 2) + '\n', { mode: 0o600 });
+  await reader.page.goto(runtime.explorerOrigin + '/transactions/' + sharedHash);
+  await reader.page.getByRole('link', { name: sharedHash, exact: true }).first().waitFor();
+  await writeFile(resultsFile, JSON.stringify({ passed: true, cases: count, transaction: hash, receiptBlock: previous.lastBlock, contract: runtime.targetContract, transactionUrl: runtime.explorerOrigin + '/transactions/' + hash, sharedTransaction: sharedHash, sharedTransactionUrl: runtime.explorerOrigin + '/transactions/' + sharedHash, contractUrl: runtime.explorerOrigin + '/addresses/' + runtime.targetContract + '/contract', disclosureUrl: caseUrl, deployerActorId: deployer.access.actorId, applicationNode: 'real-reth', identityState: 'public-controlled-Privado-fixture', receiptEnvelope: 'V1 retained sender/recipient visibility for event-entitled readers' }, null, 2) + '\n', { mode: 0o600 });
   console.log(`PASS ${count} native V2 real-chain walkthrough cases`);
+  console.log('Transaction: ' + runtime.explorerOrigin + '/transactions/' + hash);
+  console.log('Shared with Reader: ' + runtime.explorerOrigin + '/transactions/' + sharedHash);
+  console.log('Contract: ' + runtime.targetContract);
+  console.log('Disclosure case: ' + caseUrl);
+  console.log('Original private transaction: Deployer sees its transaction; Admin sees the event subject; Reader sees a masked subject and unavailable transaction; Outsider is denied.');
+  console.log('Shared transaction: Reader sees this transaction and its opted-in event payload; its group and write rights are unchanged.');
+  })();
+  if (interactive) {
+    for (const [persona, user] of users) await user.page.evaluate(persona => { document.title = 'OPS demo · ' + persona; }, persona);
+    const terminal = createInterface({ input: process.stdin, output: process.stdout });
+    try { await terminal.question('The demo browser windows remain open. Press Enter here to close them. '); }
+    finally { terminal.close(); }
+  }
 } catch (error) {
   // Never print request headers, token bodies, cookies, DSNs or SDK internals.
-  console.error('FAIL native V2 walkthrough stage=' + stage + ' category=' + (error?.name ?? 'Error'));
+  const location = /check\.mjs:(\d+):(\d+)/.exec(error?.stack ?? '');
+  console.error('FAIL native V2 walkthrough stage=' + stage + ' category=' + (error?.name ?? 'Error') + (location ? ' line=' + location[1] : ''));
   process.exitCode = 1;
 } finally {
   if (readerRevoked) {

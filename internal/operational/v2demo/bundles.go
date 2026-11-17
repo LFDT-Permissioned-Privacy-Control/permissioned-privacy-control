@@ -76,6 +76,21 @@ func walletMetadata(s State) (WalletMetadata, []byte, error) {
 	return m, context, nil
 }
 func identitySource(s State, m WalletMetadata) (identity.SourceCatalog, error) {
+	base, e := baseIdentitySource(s, m)
+	if e != nil {
+		return base, e
+	}
+	raw, e := readPublicFile(s.file("identity-override.json"))
+	if os.IsNotExist(e) {
+		return base, nil
+	}
+	if e != nil {
+		return identity.SourceCatalog{}, e
+	}
+	return checkedIdentity(base, raw)
+}
+
+func baseIdentitySource(s State, m WalletMetadata) (identity.SourceCatalog, error) {
 	raw, e := base64.RawURLEncoding.DecodeString(s.Secrets["DEMO_ACCESS_PRIVATE"])
 	if e != nil || len(raw) != 64 {
 		return identity.SourceCatalog{}, ErrInvalid

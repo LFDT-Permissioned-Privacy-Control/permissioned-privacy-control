@@ -28,6 +28,7 @@ func run(args []string) int {
 	block := fs.String("receipt-block", "", "actual decimal receipt block")
 	contract := fs.String("contract", "", "actual demo application address")
 	grant := fs.String("reader-grant", "", "revision only: on or off")
+	identityFile := fs.String("identity-file", "", "native public identity source; demo mappings only")
 	if e := fs.Parse(args[1:]); e != nil {
 		return 2
 	}
@@ -35,6 +36,9 @@ func run(args []string) int {
 		return 2
 	}
 	allowed := map[string]map[string]bool{"init": {"root": true}, "repair-tls": {"root": true}, "configure": {"root": true, "wallet-output": true, "prepare-databases": true}, "revision": {"root": true, "wallet-output": true, "reader-grant": true}, "explorer-state": {"root": true}, "status": {"root": true}, "wait": {"root": true}, "check": {"root": true, "transaction": true, "receipt-block": true, "contract": true}}
+	allowed["export"] = map[string]bool{"root": true}
+	allowed["check-identity"] = map[string]bool{"root": true, "wallet-output": true, "identity-file": true}
+	allowed["apply-identity"] = allowed["check-identity"]
 	bad := allowed[command] == nil
 	fs.Visit(func(f *flag.Flag) {
 		if !allowed[command][f.Name] {
@@ -48,6 +52,19 @@ func run(args []string) int {
 	defer cancel()
 	var e error
 	switch command {
+	case "export":
+		files, err := v2demo.ExportSources(*root)
+		if err != nil {
+			e = err
+		} else if json.NewEncoder(os.Stdout).Encode(files) != nil {
+			return 1
+		} else {
+			return 0
+		}
+	case "check-identity":
+		e = v2demo.CheckIdentity(ctx, *root, *wallet, *identityFile)
+	case "apply-identity":
+		e = v2demo.ApplyIdentity(ctx, *root, *wallet, *identityFile)
 	case "init":
 		e = v2demo.Init(*root)
 	case "repair-tls":

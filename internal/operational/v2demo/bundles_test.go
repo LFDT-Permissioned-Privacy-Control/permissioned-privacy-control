@@ -12,10 +12,12 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/operational/ssohttp"
 	vs "privacy-proxy/internal/operational/v2server"
 	"privacy-proxy/internal/ssopolicy"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -147,5 +149,107 @@ func TestInitPersistsIdentityAuthorityAndNativeRevision(t *testing.T) {
 	nextIDs, _ := changed.Identity()
 	if selection.ManifestDigest == newSelection.ManifestDigest || bs.ManifestDigest != newBS.ManifestDigest || sameBroker.Metadata().ManifestDigest != broker.Metadata().ManifestDigest || ids.Digest() != nextIDs.Digest() {
 		t.Fatal("permission revision changed identity/broker or failed to change rules")
+	}
+
+	s.ReaderGrant, s.Configured = true, true
+	if e = save(s); e != nil {
+		t.Fatal(e)
+	}
+	if _, _, _, _, e = bundles(context.Background(), s); e != nil {
+		t.Fatal(e)
+	}
+	public, e := ExportSources(root)
+	if e != nil || len(public.Files) != 15 {
+		t.Fatal("public export omitted a source", e)
+	}
+	encoded, _ := json.Marshal(public)
+	for _, secret := range s.Secrets {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatal("export exposed private state")
+		}
+	}
+	if public.Files["broker/role-context.json"] != string(contextBytes) {
+		t.Fatal("export changed hash-pinned context bytes")
+	}
+	proposed, e := identity.Decode([]byte(public.Files["core/identity.json"]), identity.DefaultLimits())
+	if e != nil {
+		t.Fatal(e)
+	}
+	for i := range proposed.Mappings {
+		if proposed.Mappings[i].ProfileID == "demo-reader" {
+			proposed.Mappings[i].GroupIDs = []string{Admin}
+		}
+	}
+	input := s.file("proposed-identity.json")
+	if _, e = writeJSON(input, proposed); e != nil {
+		t.Fatal(e)
+	}
+	selectedBefore, _ := os.ReadFile(cfg.SSO.Runtime.Path)
+	stateBefore, _ := os.ReadFile(s.file("private/state.json"))
+	explorerBefore, _ := os.ReadFile(s.file("explorer/source.json"))
+	if e = CheckIdentity(context.Background(), root, "", input); e != nil {
+		t.Fatal("complete candidate prepare/load", e)
+	}
+	selectedAfter, _ := os.ReadFile(cfg.SSO.Runtime.Path)
+	stateAfter, _ := os.ReadFile(s.file("private/state.json"))
+	if !bytes.Equal(selectedBefore, selectedAfter) || !bytes.Equal(stateBefore, stateAfter) {
+		t.Fatal("candidate check changed selected runtime/private state")
+	}
+	if _, e = os.Stat(s.file("identity-override.json")); !os.IsNotExist(e) {
+		t.Fatal("check activated the proposal")
+	}
+	base, _ := baseIdentitySource(s, m)
+	for _, row := range []struct {
+		name string
+		edit func(*identity.SourceCatalog)
+	}{
+		{"issuer", func(x *identity.SourceCatalog) { x.Issuers[0].Issuer = "https://other.test" }},
+		{"proof", func(x *identity.SourceCatalog) {
+			x.Profiles[0].IdentityStateContract = "0x2222222222222222222222222222222222222222"
+		}},
+		{"foreign-org", func(x *identity.SourceCatalog) { x.Mappings[0].OrganizationID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }},
+		{"unknown-group", func(x *identity.SourceCatalog) {
+			x.Mappings[0].GroupIDs = []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			var changed identity.SourceCatalog
+			raw, _ := json.Marshal(base)
+			_ = json.Unmarshal(raw, &changed)
+			row.edit(&changed)
+			raw, _ = json.Marshal(changed)
+			if _, e := checkedIdentity(base, raw); e == nil {
+				t.Fatal("unsafe edit accepted")
+			}
+		})
+	}
+	link := s.file("linked-identity.json")
+	if e = os.Symlink(input, link); e != nil {
+		t.Fatal(e)
+	}
+	if e = CheckIdentity(context.Background(), root, "", link); e == nil {
+		t.Fatal("symlink input accepted")
+	}
+	raw, _ := os.ReadFile(input)
+	if _, e = writeBytes(s.file("identity-override.json"), raw); e != nil {
+		t.Fatal(e)
+	}
+	promoted, promotedBroker, promotedSelection, promotedBS, e := bundles(context.Background(), s)
+	if e != nil {
+		t.Fatal("persisted mapping selection", e)
+	}
+	promotedIDs, _ := promoted.Identity()
+	promotedBrokerIDs, _ := promotedBroker.Identity()
+	pd, _ := ids.ProfileDigest("demo-reader")
+	newPD, _ := promotedIDs.ProfileDigest("demo-reader")
+	if promotedIDs.Digest() != promotedBrokerIDs.Digest() || promotedIDs.Digest() == ids.Digest() || pd != newPD || promotedSelection.ManifestDigest == selection.ManifestDigest || promotedBS.ManifestDigest == bs.ManifestDigest {
+		t.Fatal("mapping changed proof requirements or failed to rebind both bundles")
+	}
+	if e = runtimeFiles(context.Background(), s, promoted, promotedBroker, &cfg); e != nil {
+		t.Fatal(e)
+	}
+	explorerAfter, _ := os.ReadFile(s.file("explorer/source.json"))
+	if !bytes.Equal(explorerBefore, explorerAfter) {
+		t.Fatal("mapping edit invalidated unchanged Explorer source binding")
 	}
 }

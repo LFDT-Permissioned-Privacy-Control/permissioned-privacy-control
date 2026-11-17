@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Native V2 local stack. Only this checkout's labelled project is selected.
-set -euo pipefail
+set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 command -v docker >/dev/null || { echo 'Docker is required.' >&2; exit 1; }
@@ -23,8 +23,31 @@ for file in ports postgres ops observer indexer explorer explorer-admin; do
   chmod 600 "$OPS_V2_DEMO_CONTROL_DIR/$file.env"
 done
 COMPOSE=(docker compose --env-file "$OPS_V2_DEMO_CONTROL_DIR/ports.env" -p "$OPS_V2_DEMO_PROJECT" -f "$ROOT/deploy/v2-demo/compose.yml")
-compose() { "${COMPOSE[@]}" "$@"; }
+compose() {
+  case "$1" in
+    run) shift; "${COMPOSE[@]}" run --pull never "$@";;
+    up) shift; "${COMPOSE[@]}" up --pull never --no-build "$@";;
+    *) "${COMPOSE[@]}" "$@";;
+  esac
+}
 OWNED_COUNT="$(node "$ROOT/scripts/v2-demo/ownership.mjs")"
+require_prepared() {
+  [ "$OWNED_COUNT" != 0 ] || { echo 'This checkout has no prepared demo. Run make demo-v2 with space for the initial build.' >&2; exit 1; }
+  node "$ROOT/scripts/v2-demo/prepared.mjs" "${1:-runtime}"
+}
+check_prepared() {
+  export OPS_TEST_BROWSER_CHANNEL="${OPS_TEST_BROWSER_CHANNEL:-chrome}"
+  require_prepared browser
+  node "$ROOT/scripts/v2-demo/check.mjs" "$OPS_V2_DEMO_CONTROL_DIR" "${1:-walkthrough}"
+}
+identity_input() {
+  IDENTITY_INPUT="$(node -e 'const fs=require("fs"),p=require("path");const f=p.resolve(process.argv[1]||"");const s=fs.lstatSync(f);if(!s.isFile()||s.size>1048576||/[\r\n,:]/.test(f))process.exit(2);console.log(f)' "${1:?Supply IDENTITY_FILE with the native identity.json}")"
+}
+stop_failed_apply() {
+  trap - ERR INT TERM
+  compose stop -t 30 ops explorer-api explorer-web >/dev/null 2>&1 || true
+  echo 'Config apply did not complete; affected consumers were asked to stop. The selected source is retained. Correct it or resume to retry; operational data was not reset.' >&2
+}
 dependencies() {
   node "$ROOT/scripts/v2-demo/dependencies.mjs" "$OPS_V2_DEMO_CONTROL_DIR/dependencies.json"
   OPS_V2_DEMO_EXPLORER_SOURCE="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1])).dependencies.explorer.directory)' "$OPS_V2_DEMO_CONTROL_DIR/dependencies.json")"
@@ -59,6 +82,8 @@ up() {
   dependencies
   npm ci --prefix tools/v2-test-wallet --ignore-scripts
   node scripts/v2-test-prerequisites.mjs
+  # Initial setup may download images; prepared commands never do.
+  compose pull postgres reth
   # Go builds are intentionally sequential, including sibling repositories.
   compose build bootstrap
   compose run --rm --no-deps bootstrap init --root /demo
@@ -101,7 +126,35 @@ case "${1:-up}" in
   build-runtime) compose build ops; compose build explorer-api; compose build indexer;;
   build-indexer) compose build indexer;;
   build-ops) compose build ops;;
-  resume) [ "$OWNED_COUNT" != 0 ]; start_prepared;;
+  resume) require_prepared; start_prepared;;
+  check-prepared) check_prepared;;
+  info) node "$ROOT/scripts/v2-demo/info.mjs";;
+  check-mapping)
+    case "${2:-}" in admin|reader) check_prepared "reader-${2}";; *) echo 'Expected admin or reader.' >&2; exit 2;; esac;;
+  walkthrough)
+    export OPS_DEMO_INTERACTIVE=1 OPS_TEST_BROWSER_CHANNEL="${OPS_TEST_BROWSER_CHANNEL:-chrome}"
+    [ -t 0 ] || { echo 'Run make demo-v2-walkthrough in an interactive terminal.' >&2; exit 2; }
+    require_prepared browser
+    start_prepared
+    node "$ROOT/scripts/v2-demo/check.mjs" "$OPS_V2_DEMO_CONTROL_DIR" walkthrough;;
+  export-config) require_prepared; node "$ROOT/scripts/v2-demo/export-config.mjs" "${2:?Supply CONFIG_DIR with a new directory}";;
+  check-config|apply-config)
+    require_prepared
+    identity_input "${2:-}"
+    compose run --rm --no-deps -v "$IDENTITY_INPUT:/input/identity.json:ro" bootstrap check-identity --root /demo --wallet-output /wallet-output/wallet-state --identity-file /input/identity.json
+    if [ "$1" = apply-config ]; then
+      compose stop -t 30 ops explorer-api explorer-web
+      trap 'stop_failed_apply; exit 1' ERR
+      trap 'stop_failed_apply; exit 130' INT
+      trap 'stop_failed_apply; exit 143' TERM
+      compose run --rm --no-deps -v "$IDENTITY_INPUT:/input/identity.json:ro" bootstrap apply-identity --root /demo --wallet-output /wallet-output/wallet-state --identity-file /input/identity.json
+      copy_runtime
+      export_serving
+      compose up -d --force-recreate ops explorer-api explorer-web
+      compose run --rm --no-deps bootstrap wait --root /demo
+      trap - ERR INT TERM
+      echo 'Mappings applied. Start a fresh login in OPS and Explorer; existing renewal families may require reauthentication.'
+    fi;;
   repair-tls)
     [ "$OWNED_COUNT" != 0 ] || { echo 'Run demo up first.' >&2; exit 1; }
     compose stop -t 30 ops explorer-api explorer-web demo-wallet
@@ -128,5 +181,5 @@ case "${1:-up}" in
     export_serving
     compose up -d --force-recreate ops
     compose run --rm --no-deps bootstrap wait --root /demo;;
-  *) echo 'Usage: v2-demo.sh up|check|status|down|reset|logs|repair-tls|revision [on|off]' >&2; exit 2;;
+  *) echo 'Usage: v2-demo.sh up|resume|check|check-prepared|walkthrough|export-config DIR|check-config FILE|apply-config FILE|check-mapping admin|reader|status|down|reset|logs|repair-tls|revision on|off' >&2; exit 2;;
 esac
