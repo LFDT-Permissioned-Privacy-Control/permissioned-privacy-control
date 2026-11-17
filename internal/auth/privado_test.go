@@ -84,59 +84,16 @@ func TestPrivadoVerifier_VerifyJWZ_InvalidToken(t *testing.T) {
 	assert.Contains(t, err.Error(), "verification failed")
 }
 
-func TestPrivadoVerifier_VerifyJWZWithProofData_InvalidToken(t *testing.T) {
-	verifier, err := NewPrivadoVerifier("https://rpc-mainnet.privado.id", "https://ipfs-proxy-cache.privado.id", "0x3C9acB2205Aa72A05F6D77d708b5Cf85FCa3a896")
-	require.NoError(t, err)
-
-	// Create a minimal authorization request for testing
-	authRequest := &protocol.AuthorizationRequestMessage{
-		ID:   "test-request-id",
-		Type: "https://iden3-communication.io/authorization/1.0/request",
-		Body: protocol.AuthorizationRequestMessageBody{
-			CallbackURL: "http://localhost:8080/auth/callback",
-			Reason:      "Test verification",
-		},
-	}
-
-	// Try to verify an invalid JWZ token with the new method
-	ctx := context.Background()
-	result, err := verifier.VerifyJWZWithProofData(ctx, "invalid.jwz.token", authRequest, "did:privado:verifier:test")
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "verification failed")
-}
-
-func TestPrivadoVerifier_VerifyJWZWithProofData_NilAuthRequest(t *testing.T) {
+func TestPrivadoVerifier_VerifyJWZ_NilAuthRequest(t *testing.T) {
 	verifier, err := NewPrivadoVerifier("https://rpc-mainnet.privado.id", "https://ipfs-proxy-cache.privado.id", "0x3C9acB2205Aa72A05F6D77d708b5Cf85FCa3a896")
 	require.NoError(t, err)
 
 	// Try to verify without auth request
 	ctx := context.Background()
-	result, err := verifier.VerifyJWZWithProofData(ctx, "some.token", nil, "did:privado:verifier:test")
+	did, err := verifier.VerifyJWZ(ctx, "some.token", nil, "did:privado:verifier:test")
 	assert.Error(t, err)
-	assert.Nil(t, result)
+	assert.Empty(t, did)
 	assert.Contains(t, err.Error(), "authorization request is required")
-}
-
-func TestVerificationResult_Structure(t *testing.T) {
-	// Test that VerificationResult struct has expected fields
-	result := &VerificationResult{
-		UserDID: "did:privado:test123",
-		ProofData: []map[string]any{
-			{
-				"id":        uint32(1),
-				"circuitID": "credentialAtomicQueryMTPV2",
-				"credentialSubject": map[string]any{
-					"rbac_groups": []string{"org:admin"},
-				},
-			},
-		},
-	}
-
-	assert.Equal(t, "did:privado:test123", result.UserDID)
-	assert.Len(t, result.ProofData, 1)
-	assert.Equal(t, uint32(1), result.ProofData[0]["id"])
-	assert.Equal(t, "credentialAtomicQueryMTPV2", result.ProofData[0]["circuitID"])
 }
 
 func TestPrivadoVerifier_NewPrivadoVerifier_EmptyStateContractFallsBackToMainnet(t *testing.T) {

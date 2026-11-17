@@ -116,8 +116,8 @@ func TestHandleAuthCallback_UnsupportedNetwork(t *testing.T) {
 
 	const secretRPC = "https://internal-rpc.example.invalid/v1/super-secret-key"
 	mockVerifier := srv.privadoVerifier.(*mockPrivadoVerifier)
-	mockVerifier.verifyWithProofDataFunc = func(ctx context.Context, jwzToken string, ar *protocol.AuthorizationRequestMessage, verifierID string) (*privadoauth.VerificationResult, error) {
-		return nil, fmt.Errorf("Post %q: dial tcp: %w", secretRPC, fmt.Errorf("billions:main resolver not found"))
+	mockVerifier.verifyFunc = func(ctx context.Context, jwzToken string, ar *protocol.AuthorizationRequestMessage, verifierID string) (string, error) {
+		return "", fmt.Errorf("Post %q: dial tcp: %w", secretRPC, fmt.Errorf("billions:main resolver not found"))
 	}
 
 	jsonBody, _ := json.Marshal(map[string]any{"token": "some.jwz.token"})
@@ -163,8 +163,8 @@ func TestHandleAuthCallback_GenericFailureStaysOpaque(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w1.Body.Bytes(), &authReqResp))
 
 	mockVerifier := srv.privadoVerifier.(*mockPrivadoVerifier)
-	mockVerifier.verifyWithProofDataFunc = func(ctx context.Context, jwzToken string, ar *protocol.AuthorizationRequestMessage, verifierID string) (*privadoauth.VerificationResult, error) {
-		return nil, fmt.Errorf("invalid proof: gist root mismatch for issuer did:iden3:privado:main:xyz")
+	mockVerifier.verifyFunc = func(ctx context.Context, jwzToken string, ar *protocol.AuthorizationRequestMessage, verifierID string) (string, error) {
+		return "", fmt.Errorf("invalid proof: gist root mismatch for issuer did:iden3:privado:main:xyz")
 	}
 
 	jsonBody, _ := json.Marshal(map[string]any{"token": "some.jwz.token"})

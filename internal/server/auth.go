@@ -504,7 +504,6 @@ func (s *Server) failAuthSession(sessionID, reason string) {
 func (s *Server) verifyAndIssueTokens(c *gin.Context, jwzToken string, authRequest *protocol.AuthorizationRequestMessage, sessionID string) (*apimodels.AuthResponse, error) {
 	var userDID string
 	var err error
-	var zkClaims *auth.ZKRoleClaims
 
 	// Support mock tokens for testing - only in non-production builds
 	isMockLogin := false
@@ -521,9 +520,10 @@ func (s *Server) verifyAndIssueTokens(c *gin.Context, jwzToken string, authReque
 	}
 
 	if userDID == "" {
-		// Verify JWZ token against the original authorization request
-		// Use VerifyJWZWithProofData to get both the DID and any ZK credential data
-		verificationResult, verifyErr := s.privadoVerifier.VerifyJWZWithProofData(c.Request.Context(), jwzToken, authRequest, s.config.VerifierID)
+		// Verify JWZ token against the original authorization request. The
+		// verifier returns only the DID: credential data in the wallet's
+		// response is unverified and grants nothing (RD-1291).
+		verifiedDID, verifyErr := s.privadoVerifier.VerifyJWZ(c.Request.Context(), jwzToken, authRequest, s.config.VerifierID)
 		if verifyErr != nil {
 			// RD-1241 owns the wire response so the auth and OAuth paths cannot
 			// drift on what they disclose; RD-1242 records the same outcome on
@@ -534,23 +534,7 @@ func (s *Server) verifyAndIssueTokens(c *gin.Context, jwzToken string, authReque
 			s.failAuthSession(sessionID, authFailReasonForVerification(class))
 			return nil, verifyErr
 		}
-		userDID = verificationResult.UserDID
-
-		// Extract ZK role claims from the proof data if available
-		if s.zkRoleExtractor != nil && len(verificationResult.ProofData) > 0 {
-			// Process each proof's credential data
-			for _, proofData := range verificationResult.ProofData {
-				claims, extractErr := s.zkRoleExtractor.ExtractRoleClaims(proofData)
-				if extractErr != nil {
-					slog.Warn("failed to extract ZK role claims", "error", extractErr)
-					continue
-				}
-				if claims != nil && (len(claims.Groups) > 0 || len(claims.Claims) > 0) {
-					zkClaims = claims
-					break // Use the first proof that has role claims
-				}
-			}
-		}
+		userDID = verifiedDID
 	}
 
 	// Ensure user exists in RBAC system and get their KYC status. New users
@@ -595,14 +579,6 @@ func (s *Server) verifyAndIssueTokens(c *gin.Context, jwzToken string, authReque
 	// Auto-grant admin claim to mock-login users (dev builds only, no-op in prod)
 	if isMockLogin && user != nil {
 		s.ensureMockUserIsAdmin(c.Request.Context(), user.ID, userDID)
-	}
-
-	// Process ZK role claims if available and user exists
-	// This synchronizes RBAC memberships based on ZK-attested credentials
-	if s.zkRoleExtractor != nil && user != nil && zkClaims != nil {
-		if err := s.zkRoleExtractor.ProcessZKMemberships(c.Request.Context(), user.ID, zkClaims); err != nil {
-			slog.Warn("failed to process ZK memberships", "user", userDID, "error", err)
-		}
 	}
 
 	// Issue access token (short-lived)

@@ -111,7 +111,6 @@ type Server struct {
 	config               *config.Config
 	ensResolver          *ens.Resolver
 	jsonrpcProcessor     *JSONRPCProcessor
-	zkRoleExtractor      *auth.ZKRoleExtractor
 	runtimeTracer        *tracer.RuntimeTracer
 	azureAuthenticator   *auth.AzureADAuthenticator
 	azureStateStore      AzureStateManager
@@ -348,7 +347,6 @@ type PrivadoVerifier interface {
 	CreateAuthorizationRequest(verifierID, callbackURL, reason string) (*protocol.AuthorizationRequestMessage, error)
 	CreateHumanityAuthRequest(verifierID, callbackURL, reason, issuerDID string, hc auth.HumanityRequestConfig) (*protocol.AuthorizationRequestMessage, error)
 	VerifyJWZ(ctx context.Context, jwzToken string, authRequest *protocol.AuthorizationRequestMessage, verifierID string) (string, error)
-	VerifyJWZWithProofData(ctx context.Context, jwzToken string, authRequest *protocol.AuthorizationRequestMessage, verifierID string) (*auth.VerificationResult, error)
 	// RegisteredNetworks lists the iden3 "blockchain:network" resolver keys
 	// this verifier accepts. Drives /auth/providers so the login UI advertises
 	// only networks the deployment can actually verify (RD-1241).
@@ -630,9 +628,6 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 		}
 	}
 
-	// Initialize ZK role extractor for extracting role claims from Privado proofs
-	zkRoleExtractor := auth.NewZKRoleExtractor(database)
-
 	// Initialize disclosure service
 	// RD-1147: the disclosure store reads the access_logs audit trail
 	// (GetActivityLogs / GetActivitySummary) from the audit DB while all other
@@ -677,7 +672,6 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 		disclosureService:  disclosureService,
 		config:             cfg,
 		ensResolver:        ensResolver,
-		zkRoleExtractor:    zkRoleExtractor,
 		runtimeTracer:      runtimeTracer,
 		azureAuthenticator: azureAuthenticator,
 		azureStateStore:    azureStateStore,

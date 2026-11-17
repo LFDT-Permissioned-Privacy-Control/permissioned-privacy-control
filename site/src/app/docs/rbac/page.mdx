@@ -27,7 +27,7 @@ policy information and must be treated as a cross-tenant trust boundary.
 
 - **Multi-tenant** -- multiple independent organizations with isolated permission sets
 - **Flat groups, UNION across memberships** -- each user can belong to multiple groups; effective permissions are the UNION of every membership's grants. The legacy parent/child group hierarchy was removed when groups became flat; the resolver no longer walks `parent_id` even though the column persists on the schema for compatibility.
-- **Dual membership** -- users can be assigned via admin API or ZK-attested credentials
+- **Membership** -- users join groups through the admin API (or Azure AD tenant mapping); new users also join the default group. Credential data in a Privado wallet's login response never adds a membership (see [Memberships added at login by earlier versions](#memberships-added-at-login-by-earlier-versions))
 - **Contract ownership** -- track deployed contracts and define owner capabilities
 - **Caching** -- in-memory and database-level caching for high-performance access checks
 - **Immediate propagation** -- permission changes (group access, memberships, contract grants) take effect immediately, no restart or cache wait required
@@ -370,6 +370,32 @@ A user can belong to multiple groups. Across memberships:
 1. Compute permissions for each membership directly from the group's `GroupAccess` and `ContractGrant` rows (no traversal — see `resolver.go:computeGroupPermissions`, comment `// (flat — no hierarchy walk)`).
 2. Apply **UNION** across all memberships — methods, claims, and contract grants are all combined. A user gets the **most permissive** combined view of every group they belong to.
 3. Rate limiting is **not** aggregated per membership — the proxy forwards the caller's resolved group RPC API key (or the global fallback) upstream, and request-rate quotas are enforced by the upstream RPC proxy against that key.
+
+### Memberships added at login by earlier versions
+
+Earlier versions added a Privado user to every group named in the credential data of their login response, and that data was not verified, so any user could join any group, an org-admin group included. Upgrading stops new ones but keeps existing ones: they are still effective.
+
+Such a membership in an org-admin group gave the account every claim on every contract in the organization, full visibility of the organization's data, and the org admin API. One in a read-only admin group gave full visibility.
+
+These memberships show as **ZK Attested** on the user's page in the admin UI. To list them all:
+
+```sql
+SELECT m.id, u.external_id, o.slug AS org, g.slug AS "group",
+       g.is_org_admin, g.is_org_readonly_admin, m.created_at,
+       EXISTS (SELECT 1 FROM rbac_audit_log a
+               WHERE a.resource_type = 'membership' AND a.action = 'assign'
+                 AND a.resource_id = m.id) AS admin_granted
+FROM user_memberships m
+JOIN users u ON u.id = m.user_id
+JOIN groups g ON g.id = m.group_id
+JOIN organizations o ON o.id = g.org_id
+WHERE m.source = 'zk_attested'
+ORDER BY g.is_org_admin DESC, g.is_org_readonly_admin DESC, m.created_at;
+```
+
+- Do not delete them all. A login also relabelled a membership the user already had in a group the credential named. When an admin added that membership through the admin API, the RBAC audit log recorded it and `admin_granted` is true. But `admin_granted` is also false for default-group memberships and for ones added before that logging existed, so false alone does not prove a login added it.
+- Remove each one you did not grant, starting with org-admin and read-only admin groups.
+- For every account that held an org-admin membership this way, review its admin actions in the RBAC audit log, its requests in the access logs (while retention still keeps them), and the on-chain activity of its linked addresses.
 
 ### Time-boxed memberships (access windows)
 

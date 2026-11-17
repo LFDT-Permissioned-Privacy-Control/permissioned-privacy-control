@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 
@@ -183,36 +182,23 @@ func (p *PrivadoVerifier) CreateHumanityAuthRequest(verifierID, callbackURL, rea
 	return &reqMsg, nil
 }
 
-// VerificationResult contains the results of JWZ verification
-type VerificationResult struct {
-	// UserDID is the decentralized identifier of the user who generated the proof
-	UserDID string
-	// ProofData contains the credential subject data from verified ZK proofs
-	// Each entry in the slice corresponds to a ZeroKnowledgeProofResponse from the scope
-	ProofData []map[string]any
-}
-
-// VerifyJWZ verifies a Privado ID JWZ token against an authorization request
-// Returns the user's DID (Decentralized Identifier) if verification succeeds
-// authRequest: The original authorization request that was sent to the user
-// verifierID: The expected verifier ID (should match authResponse.To)
+// VerifyJWZ verifies a Privado ID JWZ token against the authorization request
+// it answers and returns the sender's DID.
+//
+// Only the DID is returned. The verifier checks just the proofs the request
+// asks for, and even those prove only the queried field; the rest of the
+// response, including any credential data in it, is supplied by the wallet
+// and must not be trusted (RD-1291).
+//
+// authRequest: the authorization request that was sent to the user
+// verifierID: the expected verifier ID (must match authResponse.To)
 func (p *PrivadoVerifier) VerifyJWZ(ctx context.Context, jwzToken string, authRequest *protocol.AuthorizationRequestMessage, verifierID string) (string, error) {
-	result, err := p.VerifyJWZWithProofData(ctx, jwzToken, authRequest, verifierID)
-	if err != nil {
-		return "", err
-	}
-	return result.UserDID, nil
-}
-
-// VerifyJWZWithProofData verifies a Privado ID JWZ token and returns both the user DID and proof data
-// This extended version allows extraction of ZK-attested claims from the credential proofs
-func (p *PrivadoVerifier) VerifyJWZWithProofData(ctx context.Context, jwzToken string, authRequest *protocol.AuthorizationRequestMessage, verifierID string) (*VerificationResult, error) {
 	if p.verifier == nil {
-		return nil, fmt.Errorf("verifier not initialized")
+		return "", fmt.Errorf("verifier not initialized")
 	}
 
 	if authRequest == nil {
-		return nil, fmt.Errorf("authorization request is required")
+		return "", fmt.Errorf("authorization request is required")
 	}
 
 	// Verify the JWZ token against the original authorization request
@@ -223,56 +209,19 @@ func (p *PrivadoVerifier) VerifyJWZWithProofData(ctx context.Context, jwzToken s
 		*authRequest,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("JWZ verification failed: %w", err)
+		return "", fmt.Errorf("JWZ verification failed: %w", err)
 	}
 
 	// Security check: Verify that the proof was generated for our verifier ID
 	// The authResponse.To field should match our verifier ID
 	// This prevents accepting proofs intended for other verifiers
 	if verifierID != "" && authResponse.To != verifierID {
-		return nil, fmt.Errorf("verifier ID mismatch: proof intended for %s, but expected %s", authResponse.To, verifierID)
+		return "", fmt.Errorf("verifier ID mismatch: proof intended for %s, but expected %s", authResponse.To, verifierID)
 	}
 
-	// Extract user DID from the verified response
 	// authResponse.From contains the DID of the user who generated the proof
-	userDID := authResponse.From
-	if userDID == "" {
-		return nil, fmt.Errorf("user DID not found in verified response")
+	if authResponse.From == "" {
+		return "", fmt.Errorf("user DID not found in verified response")
 	}
-
-	// Extract proof data from the scope (ZK proof responses)
-	// Each proof in the scope contains credential data that may include role claims
-	var proofData []map[string]any
-	for _, zkProof := range authResponse.Body.Scope {
-		data := make(map[string]any)
-
-		// Add proof ID for reference
-		data["id"] = zkProof.ID
-		data["circuitID"] = zkProof.CircuitID
-
-		// Extract verifiable presentation data if available
-		if len(zkProof.VerifiablePresentation) > 0 {
-			var vp map[string]any
-			if err := json.Unmarshal(zkProof.VerifiablePresentation, &vp); err == nil {
-				// Look for credentialSubject in the verifiable presentation
-				if credSubject, ok := vp["credentialSubject"].(map[string]any); ok {
-					data["credentialSubject"] = credSubject
-				}
-				// Also include the full VP for any other claims
-				data["verifiablePresentation"] = vp
-			}
-		}
-
-		// Extract public signals from the ZK proof which may contain credential data
-		if zkProof.PubSignals != nil {
-			data["pubSignals"] = zkProof.PubSignals
-		}
-
-		proofData = append(proofData, data)
-	}
-
-	return &VerificationResult{
-		UserDID:   userDID,
-		ProofData: proofData,
-	}, nil
+	return authResponse.From, nil
 }
