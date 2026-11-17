@@ -92,9 +92,10 @@ func (r *Rule) Covers(scope Scope) bool {
 }
 
 // ProtectedUntil applies the current duration ceiling without extending an
-// already-issued case. Metadata administration has a separate access predicate.
+// already-issued case. The selected instant is canonical UTC without losing
+// precision. Metadata administration has a separate access predicate.
 func (r *Rule) ProtectedUntil(created, recordedExpiry time.Time) time.Time {
-	return minTime(recordedExpiry, minTime(created.Add(time.Duration(r.source.MaxCaseSeconds)*time.Second), time.Unix(r.source.Validity.ExpiresAt, 0)))
+	return minTime(recordedExpiry, minTime(created.Add(time.Duration(r.source.MaxCaseSeconds)*time.Second), time.Unix(r.source.Validity.ExpiresAt, 0))).UTC()
 }
 func minTime(a, b time.Time) time.Time {
 	if a.Before(b) {

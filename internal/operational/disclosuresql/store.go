@@ -74,6 +74,14 @@ func scanCase(row pgx.Row) (c.Case, error) {
 	if err != nil || len(raw) > c.MaxScopeBytes {
 		return c.Case{}, c.ErrUnavailable
 	}
+	// PostgreSQL preserves timestamptz instants, but pgx may label decoded values
+	// Local. Protected source scopes require canonical UTC, including when case
+	// expiry is the effective read deadline. Preserve all stored precision.
+	out.CreatedAt, out.ExpiresAt = out.CreatedAt.UTC(), out.ExpiresAt.UTC()
+	if out.RevokedAt != nil {
+		utc := out.RevokedAt.UTC()
+		out.RevokedAt = &utc
+	}
 	out.Scope, err = disclosurepolicy.DecodeScope(raw, disclosurepolicy.DefaultLimits())
 	if err != nil || c.ValidateCase(out) != nil {
 		return c.Case{}, c.ErrUnavailable
