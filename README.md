@@ -39,7 +39,7 @@ To develop or inspect signed producer approvals with Reth, run `make demo-reth`.
 It builds and starts Reth, OPS, its frontend and fixture tools entirely in Docker,
 then prints isolated localhost URLs. Use `make demo-reth-walkthrough` for a paused
 demonstration or `make demo-reth-check` for the acceptance scenarios. See the
-[Reth developer demo](node-approvals/docker/README.md) for requirements and cleanup.
+[Reth developer demo](demo/reth-approvals/README.md) for requirements and cleanup.
 
 ## Architecture
 

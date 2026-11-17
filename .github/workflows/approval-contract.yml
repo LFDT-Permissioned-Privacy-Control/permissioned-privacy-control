@@ -10,6 +10,10 @@ on:
       - '.github/workflows/approval-contract.yml'
       - 'go.mod'
       - 'go.sum'
+      - 'docker-compose.reth-demo.yml'
+      - 'scripts/reth-demo.sh'
+      - 'demo/reth-approvals/**'
+      - 'poc/reth-signed-approvals/**'
   push:
     branches: [main]
     paths:
@@ -21,6 +25,10 @@ on:
       - '.github/workflows/approval-contract.yml'
       - 'go.mod'
       - 'go.sum'
+      - 'docker-compose.reth-demo.yml'
+      - 'scripts/reth-demo.sh'
+      - 'demo/reth-approvals/**'
+      - 'poc/reth-signed-approvals/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -52,3 +60,17 @@ jobs:
           git diff --exit-code -- internal/nodeapproval/approvalpb
       - run: go test -race ./internal/nodeapproval/...
       - run: python3 scripts/approval_contract.py
+  # The Reth demo builds the integration from the pinned commit; its source,
+  # native builds and dependency audits run in gateway-fm/ops-node-integrations.
+  reth-demo:
+    name: Reth demo configuration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate demo wrapper, lifecycle and Compose file
+        run: |
+          bash -n scripts/reth-demo.sh
+          python3 -B -m unittest discover -s poc/reth-signed-approvals -p test_docker_demo.py
+          docker compose --env-file /dev/null -f docker-compose.reth-demo.yml config --quiet

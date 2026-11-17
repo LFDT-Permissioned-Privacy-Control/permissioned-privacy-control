@@ -32,9 +32,8 @@ bin/
 dist/
 coverage/
 .tmp/
-# Native integration source and historical PoC evidence do not belong in the
-# OPS backend build. Their Dockerfiles have explicit context allowlists.
-node-approvals/
+# Historical PoC evidence does not belong in the OPS backend build. The Reth
+# demo tools Dockerfile has an explicit context allowlist.
 poc/
 *.out
 *.test

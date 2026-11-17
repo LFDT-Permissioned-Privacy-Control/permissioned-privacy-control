@@ -1,16 +1,17 @@
 # Reth development demo
 
-From a clone of the signed-approvals branch, run:
+From an OPS checkout, run:
 
 ```sh
 make demo-reth
 ```
 
-Requirements: Docker with Compose, Make and Bash. No host Rust, Go, Python,
-Foundry, Solidity compiler, sibling clones or prebuilt local artifacts are needed.
-The first build downloads the pinned toolchains and compiles custom Reth, so it
-takes longer than subsequent cached starts. ARM64 and AMD64 use native Docker
-builds; the host's Docker resources must be sufficient for Rust compilation.
+Requirements: Docker with Compose (BuildKit), Make, Bash and network access to
+GitHub. No host Rust, Go, Python, Foundry, Solidity compiler, sibling clones or
+prebuilt local artifacts are needed. The first build downloads the pinned
+toolchains and compiles custom Reth, so it takes longer than subsequent cached
+starts. ARM64 and AMD64 use native Docker builds; the host's Docker resources
+must be sufficient for Rust compilation.
 Allow at least 10 GiB of free disk space for the initial build; additional
 builder caches and existing images may require more.
 
@@ -55,8 +56,14 @@ choose localhost ports. `RETH_DEMO_BUILD_JOBS` controls Rust build parallelism
 (default four). Existing stacks are not selected by these commands.
 
 Builds reuse `Dockerfile.backend` and `frontend/Dockerfile` development targets.
-The Reth Dockerfile verifies the upstream commit in `compatibility.json`, uses
-the matching Rust toolchain and locked dependencies, and runs as uid 1000.
+The Reth producer is built from
+[ops-node-integrations](https://github.com/gateway-fm/ops-node-integrations) at the
+commit pinned in [`approvals-contract.lock.json`](../../integrations/approvals-contract.lock.json);
+`scripts/approval_contract.py` rejects a different ref in `docker-compose.reth-demo.yml`.
+That repository's Reth Dockerfile verifies the upstream commit in its `compatibility.json`,
+uses the matching Rust toolchain and locked dependencies, and runs as uid 1000.
+Until the integration repository publishes a qualified release, the demo builds Reth
+from source; it then moves to that release's digest-pinned image.
 The container fixture compiler uses Solidity 0.8.35 and the existing genesis,
 seeding and demonstration code. Build inputs exclude host binaries and checkouts.
 These targets do not publish a release or qualify a production deployment.

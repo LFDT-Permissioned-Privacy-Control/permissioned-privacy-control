@@ -11,9 +11,9 @@ The local protobuf and Go golden vectors are verified copies of that contract. S
 [contract update procedure](../../integrations/README.md) before changing them.
 
 For deployment settings, trust keys, network isolation and recovery behavior, see the
-[approval operator guide](../../node-approvals/OPERATIONS.md). This contract pin does not change
-which native binaries the OPS demos use; the artifact-consumer transition is a separate migration
-step after qualified releases are available.
+[approval operator guide](https://github.com/gateway-fm/ops-node-integrations/blob/f9e039cbfabe82c3f8cc668d71fa437cde4856a0/node-approvals/OPERATIONS.md). The Reth demo builds its producer from the same
+pinned commit; it moves to a checksum- or digest-pinned artifact once the integration repository
+publishes a qualified release.
 
 <a id="7-settings"></a>
 

@@ -2,13 +2,13 @@
 
 Scope: OPS V1 signed approvals, its Besu plugin and custom Reth producer, rebased onto
 `origin/main` at `6ebc3b77b0f83770f894f3c93715bd088719e835`. This does not incorporate the OPS V2
-policy runtime. The supported source and release instructions are under
-[`node-approvals/`](../../node-approvals/README.md); fixtures and historical measurements stay in
-`poc/`. No approval persistence or synchronous storage step was added.
+policy runtime. The supported source and release instructions reviewed here were then under
+`node-approvals/` and are now maintained in [ops-node-integrations](https://github.com/gateway-fm/ops-node-integrations/tree/f9e039cbfabe82c3f8cc668d71fa437cde4856a0/node-approvals);
+fixtures and historical measurements stay in `poc/`. No approval persistence or synchronous storage step was added.
 
 This is an implementation/security review with local validation, not an independent penetration
 test or certification of a production deployment. Publication follows passing compatibility CI;
-deployment qualification follows the [operator guide](../../node-approvals/OPERATIONS.md).
+deployment qualification follows the [operator guide](https://github.com/gateway-fm/ops-node-integrations/blob/f9e039cbfabe82c3f8cc668d71fa437cde4856a0/node-approvals/OPERATIONS.md).
 
 ## Alignment with main
 
@@ -76,7 +76,7 @@ and renewed compatibility checks; adding another copy to the plugin would not up
 parent classloader. The initial scan previously covered 65 coordinates and had no findings.
 
 The corrected Rust lockfile has 854 registry packages; its remaining notices are explicitly recorded in
-[`advisory-review.json`](../../node-approvals/advisory-review.json), with a recheck deadline.
+[`advisory-review.json`](https://github.com/gateway-fm/ops-node-integrations/blob/f9e039cbfabe82c3f8cc668d71fa437cde4856a0/node-approvals/advisory-review.json), with a recheck deadline.
 Four are upstream maintenance notices. The remaining
 [LRU advisory](https://rustsec.org/advisories/RUSTSEC-2026-0253.html) requires a panicking key
 destructor: the pinned alloy-provider 2.3.0 caches use `u64` or `B256` keys, which have none.
@@ -103,8 +103,8 @@ Source evidence: pinned Besu's
 [`JsonRpcParserHandler`](https://github.com/besu-eth/besu/blob/26.8.1/ethereum/api/src/main/java/org/hyperledger/besu/ethereum/api/handlers/JsonRpcParserHandler.java),
 [`JsonRpcObjectExecutor`](https://github.com/besu-eth/besu/blob/26.8.1/ethereum/api/src/main/java/org/hyperledger/besu/ethereum/api/handlers/JsonRpcObjectExecutor.java)
 and [`JsonRpcRequest`](https://github.com/besu-eth/besu/blob/26.8.1/ethereum/api/src/main/java/org/hyperledger/besu/ethereum/api/jsonrpc/internal/JsonRpcRequest.java),
-plus the plugin's [`PrepareApprovalRpc`](../../node-approvals/besu/src/main/java/ops/approvals/PrepareApprovalRpc.java)
-and [`CanonicalJson`](../../node-approvals/besu/src/main/java/ops/approvals/CanonicalJson.java).
+plus the plugin's [`PrepareApprovalRpc`](https://github.com/gateway-fm/ops-node-integrations/blob/f9e039cbfabe82c3f8cc668d71fa437cde4856a0/node-approvals/besu/src/main/java/ops/approvals/PrepareApprovalRpc.java)
+and [`CanonicalJson`](https://github.com/gateway-fm/ops-node-integrations/blob/f9e039cbfabe82c3f8cc668d71fa437cde4856a0/node-approvals/besu/src/main/java/ops/approvals/CanonicalJson.java).
 Approval delivery uses bounded protobuf; fingerprint JSON uses the handwritten output encoder.
 The plugin has no Jackson parser or numeric coercion calls and its verified thin JAR contains
 no Jackson classes. Two exact-version exceptions are recorded with the existing review deadline.
