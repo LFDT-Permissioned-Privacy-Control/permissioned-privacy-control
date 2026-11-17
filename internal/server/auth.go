@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -300,59 +299,6 @@ func (s *Server) handleAuthRequest(c *gin.Context) {
 
 	// Schedule auto-auth for demo mode (if enabled)
 	s.scheduleDemoAutoAuth(sessionID)
-}
-
-// scheduleDemoAutoAuth schedules automatic session completion for demo mode.
-// Spawns a goroutine that completes the session with a mock DID after the configured delay.
-func (s *Server) scheduleDemoAutoAuth(sessionID string) {
-	delay := DemoAutoAuthDelay(s.config)
-	if delay <= 0 {
-		return
-	}
-
-	go func() {
-		time.Sleep(delay)
-
-		// Check if session still pending (may have been completed or expired)
-		session := s.sessionStore.GetSession(sessionID)
-		if session == nil || session.Completed {
-			return
-		}
-
-		// Generate mock DID and issue tokens
-		mockDID := fmt.Sprintf("did:privado:demo_%d", time.Now().UnixNano())
-		kyc := false
-		if s.rbacAccessCtrl != nil {
-			if user, err := s.rbacAccessCtrl.EnsureUserExists(context.Background(), mockDID, kyc, false); err == nil && user != nil {
-				kyc = user.KYC
-			}
-		}
-
-		accessToken, err := s.jwtService.IssueAccessToken(mockDID, kyc)
-		if err != nil {
-			slog.Error("demo auto-auth: failed to issue access token", "error", err)
-			return
-		}
-		refreshToken, err := s.jwtService.IssueRefreshToken(mockDID)
-		if err != nil {
-			slog.Error("demo auto-auth: failed to issue refresh token", "error", err)
-			return
-		}
-
-		tokenHash := auth.HashToken(refreshToken)
-		expiresAt := time.Now().Add(RefreshTokenTTL)
-		if err := s.db.SaveRefreshToken(context.Background(), tokenHash, mockDID, expiresAt); err != nil {
-			slog.Error("demo auto-auth: failed to save refresh token", "error", err)
-			return
-		}
-
-		if err := s.sessionStore.CompleteSession(sessionID, accessToken, refreshToken); err != nil {
-			slog.Error("demo auto-auth: failed to complete session", "error", err)
-			return
-		}
-
-		slog.Info("demo auto-auth: session completed", "session_id", sessionID, "did", mockDID)
-	}()
 }
 
 // handleAuthCallback handles POST /auth/callback - wallet callback with proof

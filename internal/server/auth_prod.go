@@ -3,6 +3,7 @@
 package server
 
 import (
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -29,3 +30,18 @@ func (s *Server) mockLoginEnabled() bool {
 func DemoAutoAuthDelay(*config.Config) time.Duration {
 	return 0
 }
+
+// Production builds contain none of the dev login shortcuts below; the real
+// implementations are in auth_dev.go, compiled only with the mockauth tag
+// (RD-1444).
+
+// handleOAuthMockComplete refuses: production builds have no mock login.
+func (s *Server) handleOAuthMockComplete(c *gin.Context) {
+	c.JSON(http.StatusForbidden, gin.H{"error": "mock login not available"})
+}
+
+// scheduleDemoAutoAuth is a no-op: production builds have no demo auto-auth.
+func (s *Server) scheduleDemoAutoAuth(string) {}
+
+// scheduleOAuthDemoAutoAuth is a no-op: production builds have no demo auto-auth.
+func (s *Server) scheduleOAuthDemoAutoAuth(string, string) {}
