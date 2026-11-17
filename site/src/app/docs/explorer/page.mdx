@@ -115,7 +115,7 @@ The Block Explorer never handles authentication directly — all credential veri
 | Variable (Open Privacy Suite) | Description |
 |--------------------------|-------------|
 | `FRONTEND_URL` | URL of the Open Privacy Suite frontend (e.g. `http://localhost:5173`). When set, browser OAuth requests redirect to the React login page instead of serving inline HTML. Must be HTTPS in production. |
-| `ALLOW_MOCK_LOGIN` | Set `true` in development to show a "Mock Login (Skip Wallet)" button on the login page. **Never enable in production.** |
+| `ALLOW_MOCK_LOGIN` | Set `true` in development to show a "Mock Login (Skip Wallet)" button on the login page. Only dev images built with the `mockauth` tag accept mock logins; production images ignore this setting. **Never enable in production.** |
 
 | Variable (Block Explorer) | Description |
 |---------------------------|-------------|

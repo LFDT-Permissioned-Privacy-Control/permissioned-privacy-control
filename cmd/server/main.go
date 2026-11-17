@@ -58,9 +58,9 @@ func main() {
 		}
 	}
 
-	// Log if demo auto-auth is enabled
-	if cfg.DemoAutoAuthDelay > 0 {
-		slog.Warn("demo mode: auth sessions will auto-complete", "delay", cfg.DemoAutoAuthDelay)
+	// Log if demo auto-auth is enabled (only mockauth builds honour it)
+	if delay := server.DemoAutoAuthDelay(cfg); delay > 0 {
+		slog.Warn("demo mode: auth sessions will auto-complete", "delay", delay)
 	}
 
 	srv, err := server.New(cfg) // Migrations run automatically in db.New()
