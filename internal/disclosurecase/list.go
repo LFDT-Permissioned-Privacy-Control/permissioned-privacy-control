@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"privacy-proxy/internal/disclosuredata"
 	"privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/runtimepolicy"
 )
@@ -19,14 +20,16 @@ type casePage struct {
 	ScanComplete bool           `json:"scanComplete"`
 }
 type auditItem struct {
-	EventID      string `json:"eventId"`
-	Time         int64  `json:"time"`
-	Action       string `json:"action"`
-	Outcome      string `json:"outcome"`
-	Count        int    `json:"count"`
-	RuleDigest   string `json:"ruleDigest"`
-	BundleDigest string `json:"bundleDigest"`
-	Actor        string `json:"actor,omitempty"`
+	EventID      string                    `json:"eventId"`
+	Time         int64                     `json:"time"`
+	Action       string                    `json:"action"`
+	Outcome      string                    `json:"outcome"`
+	Count        int                       `json:"count"`
+	RuleDigest   string                    `json:"ruleDigest"`
+	BundleDigest string                    `json:"bundleDigest"`
+	Actor        string                    `json:"actor,omitempty"`
+	Resource     disclosurepolicy.Resource `json:"resource,omitempty"`
+	View         disclosuredata.View       `json:"view,omitempty"`
 }
 type auditPage struct {
 	Items        []auditItem `json:"items"`
@@ -224,6 +227,10 @@ func (s *Service) Audit(ctx context.Context, token, id, cursor string, limit int
 			return nil, ErrUnavailable
 		}
 		item := auditItem{EventID: event.ID, Time: event.PreparedAt.Unix(), Action: event.Action, Outcome: event.Outcome, Count: event.Summary.Count, RuleDigest: event.RuleDigest, BundleDigest: event.BundleDigest}
+		if event.Action == "exposure_prepared" && event.Summary.Exposure != nil {
+			item.Resource = event.Summary.Exposure.Resource
+			item.View = event.Summary.Exposure.View
+		}
 		if event.Actor == v.ActorID() || role == "data-org-admin" {
 			item.Actor = event.Actor
 		}

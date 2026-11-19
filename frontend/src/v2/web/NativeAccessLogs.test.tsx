@@ -1,5 +1,6 @@
 import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { NativeAccessLogs } from './NativeAccessLogs'
@@ -37,6 +38,24 @@ it.each(['admin', 'readonly'] as const)('%s can investigate own-org records with
   expect(screen.queryByRole('button', { name: 'Create case' })).not.toBeInTheDocument()
   expect(s.request).toHaveBeenCalledTimes(1); expect(s.request.mock.calls[0][0]).toContain(`/api/v2/orgs/${org}/access-logs?`)
   expect(s.request.mock.calls.every(([path]) => !path.includes('/disclosure/'))).toBe(true)
+})
+it('keeps long identifiers on one bounded line with the full values available to inspect and copy', async () => {
+  const user = userEvent.setup(), copied = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue()
+  const s = scope(); show(s.value)
+  const identity = await screen.findByText(actor), reference = screen.getByText(ref)
+  for (const [element, value] of [[identity, actor], [reference, ref]] as const) {
+    expect(element).toHaveAttribute('title', value)
+    expect(element).toHaveClass('truncate', 'whitespace-nowrap', 'min-w-0')
+    expect(element.parentElement).toHaveClass('w-56', 'min-w-56')
+    expect(element.closest('table')?.parentElement).toHaveClass('overflow-auto')
+    expect(element).not.toHaveClass('break-all')
+  }
+  expect(screen.getByText('eth_call')).toHaveClass('whitespace-nowrap')
+  await user.click(screen.getByRole('button', { name: 'Copy actor ID' }))
+  expect(copied).toHaveBeenLastCalledWith(actor)
+  await user.click(screen.getByRole('button', { name: 'Copy request reference' }))
+  expect(copied).toHaveBeenLastCalledWith(ref)
+  expect(s.request).toHaveBeenCalledTimes(1)
 })
 it('a member cannot issue organization-admin reads or browse a local user directory', () => {
   const s = scope('member'); show(s.value)

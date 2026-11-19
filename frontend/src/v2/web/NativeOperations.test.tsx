@@ -196,6 +196,26 @@ it('a disclosure recheck reuses the original whole scope and idempotency key wit
 function baseID() {
   return '/api/v1/disclosure/cases/' + id
 }
+it('shows the recorded resource and view in the case audit without inventing missing legacy fields', async () => {
+  const s = scope(), original = s.request.getMockImplementation()!
+  s.request.mockImplementation(async (path, options) => path === baseID() + '/audit?limit=25'
+    ? { items: [
+      { eventId: '33333333-3333-4333-8333-333333333333', time: now - 1, action: 'exposure_prepared', outcome: 'allowed', count: 2, resource: 'activity_logs', view: 'list', actor, ruleDigest: currentCase.originalRuleDigest, bundleDigest: currentCase.originalBundleDigest },
+      { eventId: '44444444-4444-4444-8444-444444444444', time: now - 2, action: 'metadata_read', outcome: 'allowed', count: 1, ruleDigest: currentCase.originalRuleDigest, bundleDigest: currentCase.originalBundleDigest },
+    ], nextCursor: '', scanComplete: true }
+    : original(path, options))
+  render(<MemoryRouter><NativeDisclosures scope={s} /></MemoryRouter>)
+  await userEvent.click(await screen.findByRole('button', { name: 'Open case' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Audit trail' }))
+  const exposure = within((await screen.findByText('exposure_prepared')).closest('tr')!)
+  expect(exposure.getByText('Access logs')).toBeInTheDocument()
+  expect(exposure.getByText('List')).toBeInTheDocument()
+  const legacy = within(screen.getByText('metadata_read').closest('tr')!)
+  expect(legacy.getAllByText('Not recorded')).toHaveLength(2)
+  expect(exposure.queryByText('Not recorded')).not.toBeInTheDocument()
+  expect(screen.queryByText('queryDigest')).not.toBeInTheDocument()
+  expect(s.request).toHaveBeenCalledWith(baseID() + '/audit?limit=25')
+})
 it('case revocation collects its reason inside the actual confirmation dialog', async () => {
   const s = scope()
   s.request.mockImplementation(async (path, options) => {

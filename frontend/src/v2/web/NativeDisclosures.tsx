@@ -42,6 +42,7 @@ const resourceOptions = [
   { value: 'sanctions_report', label: 'Sanctions report' },
   { value: 'compliance_report', label: 'Compliance report' },
 ]
+const auditViewLabels: Record<string, string> = { list: 'List', detail: 'Detail', report: 'Report', resolve: 'Resolve' }
 export function NativeDisclosures({
   scope,
   logsOnly = false,
@@ -677,6 +678,8 @@ function CaseDetail({
             columns={[
               { key: 'time', label: 'Time', render: (r) => instant(r.time) },
               { key: 'action', label: 'Action' },
+              { key: 'resource', label: 'Resource', render: r => resourceOptions.find(option => option.value === r.resource)?.label ?? 'Not recorded' },
+              { key: 'view', label: 'View', render: r => auditViewLabels[optionalText(r.view)] ?? 'Not recorded' },
               { key: 'outcome', label: 'Outcome' },
               { key: 'count', label: 'Count', render: (r) => String(r.count) },
               { key: 'actor', label: 'Actor' },

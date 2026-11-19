@@ -4,6 +4,7 @@ import { Loader2, RefreshCw, ScrollText } from 'lucide-react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
+import { CopyValue } from '../../components/auth/AccountPresentation'
 import type { OperationScope } from './controller'
 import { accessLogOutcomes, accessLogPage, accessLogsEndpoint, logTime, outcomeLabels, sameLogSource, type AccessLogPage, type AccessLogQuery, type AccessLogSource } from './accessLogsModels'
 import { DataTable, Field, Panel, SelectField, TaskError } from './operationsUI'
@@ -24,6 +25,10 @@ function queryOf(filters: Filters): AccessLogQuery {
   return { from, to, limit: pageSize, ...Object.fromEntries(['actorId', 'method', 'outcome', 'requestReference'].filter(key => filters[key as keyof Filters].trim()).map(key => [key, filters[key as keyof Filters].trim()])) }
 }
 const utc = (value: string) => value.replace('T', ' ').replace(/Z$/, ' UTC')
+
+function LogIdentifier({ value, label }: { value: string; label: string }) {
+  return <div className="flex w-56 min-w-56 items-center gap-1"><code className="min-w-0 flex-1 truncate whitespace-nowrap text-xs" title={value}>{value}</code><CopyValue value={value} label={label} /></div>
+}
 
 export function NativeAccessLogs({ scope }: { scope: OperationScope }) {
   const location = useLocation(), orgs = scope.self.organizations.filter(org => org.isOrgAdmin || org.isOrgReadonlyAdmin)
@@ -129,9 +134,9 @@ function AccessLogSearch({ scope, org }: { scope: OperationScope; org: string })
         <div className="mb-4 space-y-2 rounded-lg border border-warning/30 bg-warning-light p-3 text-xs text-neutral-700" role="note"><p className="font-medium">Sealed records only — this is not a complete live traffic history.</p><p>Requests not yet sealed, outside this source, or without this organization’s recorded attribution are not included.</p><p>Source as of <time dateTime={result.source.sourceAsOf}>{utc(result.source.sourceAsOf)}</time>. Retained from <time dateTime={result.source.retainedFrom}>{utc(result.source.retainedFrom)}</time>.</p>{active && logTime(active.to) > logTime(result.source.sourceAsOf) && <p>The selected time window extends beyond this source snapshot. Newer requests may be missing.</p>}</div>
         <DataTable items={result.items as unknown as ObjectValue[]} empty="No sealed records match these filters in this organization." columns={[
           { key: 'observedAt', label: 'Observed (UTC)', render: row => <time dateTime={String(row.observedAt)} className="whitespace-nowrap text-xs">{utc(String(row.observedAt))}</time> },
-          { key: 'method', label: 'Method', render: row => <code className="text-xs">{String(row.method)}</code> },
-          { key: 'actorId', label: 'OPS actor ID', render: row => row.actorId ? <code className="break-all text-xs">{String(row.actorId)}</code> : 'Not recorded' },
-          { key: 'requestReference', label: 'Request reference', render: row => <code className="break-all text-xs">{String(row.requestReference)}</code> },
+          { key: 'method', label: 'Method', render: row => <code className="whitespace-nowrap text-xs">{String(row.method)}</code> },
+          { key: 'actorId', label: 'OPS actor ID', render: row => row.actorId ? <LogIdentifier value={String(row.actorId)} label="Copy actor ID" /> : 'Not recorded' },
+          { key: 'requestReference', label: 'Request reference', render: row => <LogIdentifier value={String(row.requestReference)} label="Copy request reference" /> },
           { key: 'outcome', label: 'Recorded outcome', render: row => <Badge variant={row.outcome === 'success' ? 'success' : row.outcome === 'denied' ? 'warning' : 'destructive'}>{outcomeLabels[row.outcome as keyof typeof outcomeLabels]}</Badge> },
           { key: 'httpStatus', label: 'Recorded HTTP', render: row => String(row.httpStatus) },
           { key: 'rpcErrorCode', label: 'RPC error', render: row => row.rpcErrorCode === null ? 'None recorded' : String(row.rpcErrorCode) },

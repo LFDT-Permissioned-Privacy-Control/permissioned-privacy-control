@@ -351,6 +351,13 @@ async function checkUIPreview(user) {
   assert.ok(Array.isArray(logPage.items) && logPage.items.length <= 50);
   assert.equal(logPage.source.coverage, 'committed-sealed-prefix');
   await page.getByText('Sealed records only', { exact: false }).waitFor();
+  const recordedActor = logPage.items.find(item => item.actorId)?.actorId;
+  assert.ok(recordedActor, 'The owned demo must contain an attributed request');
+  const actorCode = page.locator('table code[title]').filter({ hasText: recordedActor }).first();
+  const actorLayout = await actorCode.evaluate(element => ({ title: element.title, whiteSpace: getComputedStyle(element).whiteSpace, width: element.getBoundingClientRect().width, rowHeight: element.closest('tr').getBoundingClientRect().height }));
+  assert.equal(actorLayout.title, recordedActor, 'Full actor ID remains available');
+  assert.equal(actorLayout.whiteSpace, 'nowrap');
+  assert.ok(actorLayout.width >= 100 && actorLayout.rowHeight <= 128, 'Identifier wrapping must not create oversized access-log rows');
   await screenshot('admin-access-logs');
   passed('Admin reads organization Access Logs without a disclosure case, with a durable request reference');
   stage = 'ui-preview-admin-finance';
@@ -384,8 +391,18 @@ async function checkUIPreview(user) {
     await writeFile(path.join(directory, 'ui-finance-error.json'), JSON.stringify({ alerts: await page.getByRole('alert').allTextContents() }, null, 2) + '\n', { mode: 0o600 });
     throw error;
   }
+  const auditResponse = page.waitForResponse(response => new URL(response.url()).pathname === `/api/v1/disclosure/cases/${evidence.caseId}/audit` && response.request().method() === 'GET');
+  await page.getByRole('button', { name: 'Audit trail', exact: true }).click();
+  const audit = await json(await auditResponse);
+  assert.ok(Array.isArray(audit.items));
+  const exposure = audit.items.find(item => item.action === 'exposure_prepared' && item.resource === evidence.resource && item.view === evidence.view);
+  assert.ok(exposure, 'The current case audit must identify the actual compliance_report/list exposure');
+  for (const field of ['queryDigest', 'sourceSetDigest', 'renderDigest', 'outputDigest', 'outputBytes']) assert.equal(Object.hasOwn(exposure, field), false, 'Private exposure receipt field must not enter the audit projection: ' + field);
+  const auditRow = page.getByRole('row').filter({ hasText: 'exposure_prepared' }).filter({ hasText: 'Compliance report' }).first();
+  await auditRow.getByRole('cell', { name: 'Compliance report', exact: true }).waitFor();
+  await auditRow.getByRole('cell', { name: 'List', exact: true }).waitFor();
   await screenshot('admin-finance-evidence');
-  passed('Admin creates a case using the default expiry and reads a scoped admission-evidence page');
+  passed('Admin creates a case, reads scoped admission evidence and checks its recorded resource/view in the case audit');
   stage = 'ui-preview-account';
   await page.getByTestId('account-dropdown-trigger').click();
   await page.getByRole('menuitem', { name: 'Account', exact: true }).click();
