@@ -9,6 +9,7 @@ import (
 	"errors"
 	"time"
 
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/audit/buffer"
 	"privacy-proxy/internal/audit/sealer"
 	"privacy-proxy/internal/networkidentity"
@@ -50,6 +51,7 @@ type Completion struct {
 	HTTPStatus                  uint16
 	RPCErrorCode                *int32
 	Outcome                     Outcome
+	Reason                      activityreasondata.Code
 }
 
 // Envelope has exact field order and no optional fields. Only e is nullable.

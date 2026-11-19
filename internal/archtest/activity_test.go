@@ -8,7 +8,7 @@ import (
 
 func TestActivityRecorderHasNoSQLOrLegacyAuthority(t *testing.T) {
 	allowed := map[string]bool{}
-	for _, name := range []string{"activitylog", "activitymethoddata", "audit/buffer", "audit/sealer", "identity", "networkidentity", "strictjson"} {
+	for _, name := range []string{"activitylog", "activitymethoddata", "activityreasondata", "audit/buffer", "audit/sealer", "identity", "networkidentity", "strictjson"} {
 		allowed["privacy-proxy/internal/"+name] = true
 	}
 	for dep := range transitiveDeps(t, moduleRoot(t), "privacy-proxy/internal/activitylog") {
@@ -23,6 +23,20 @@ func TestActivityRecorderHasNoSQLOrLegacyAuthority(t *testing.T) {
 			if dep == p || strings.HasPrefix(dep, p) {
 				t.Errorf("recorder imports SQL/VM infrastructure %s", dep)
 			}
+		}
+	}
+}
+func TestActivityReasonDataStandardLibraryOnly(t *testing.T) {
+	const pkg = "privacy-proxy/internal/activityreasondata"
+	cmd := exec.Command("go", "list", "-deps", "-f", `{{if not .Standard}}{{.ImportPath}}{{end}}`, pkg)
+	cmd.Dir = moduleRoot(t)
+	raw, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("reason data closure: %v %s", err, raw)
+	}
+	for _, dep := range strings.Fields(string(raw)) {
+		if dep != pkg {
+			t.Errorf("reason data imports nonstdlib %s", dep)
 		}
 	}
 }
