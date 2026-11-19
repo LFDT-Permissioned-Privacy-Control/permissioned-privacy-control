@@ -493,7 +493,7 @@ function CaseDetail({
     try {
       const value = protectedData(
         await scope.request(base + '/' + selected.caseId + '/read', { method: 'POST', body: JSON.stringify(body) }),
-        selected, resource, { view: body.view, dataTime: narrowed.dataTime, limit: 25, until: scope.identity.expires },
+        selected, resource, { view: body.view, dataTime: narrowed.dataTime, limit: 25, sessionExpiresAt: scope.identity.expires },
       )
       scope.check()
       if (!alive.current || revision !== queryRevision.current) return
@@ -517,7 +517,7 @@ function CaseDetail({
   const cachedPage = (index: number) => {
     scope.check()
     const page = history[index]
-    if (!page || page.effectiveUntil <= Date.now() / 1000) { clearRead(); return }
+    if (!page || Math.min(page.effectiveUntil, scope.identity.expires) <= Date.now() / 1000) { clearRead(); return }
     setHistoryIndex(index); setData(page); setCursor(optionalText(page.result.nextCursor))
   }
   const loadAudit = async (next = '') => {
@@ -538,10 +538,10 @@ function CaseDetail({
     if (!data) return
     const timer = setTimeout(
       () => { clearRead() },
-      Math.max(1, Math.min(...history.map(p => p.effectiveUntil), data.effectiveUntil) * 1000 - Date.now()),
+      Math.max(1, Math.min(...history.map(p => p.effectiveUntil), data.effectiveUntil, scope.identity.expires) * 1000 - Date.now()),
     )
     return () => clearTimeout(timer)
-  }, [data, history])
+  }, [data, history, scope.identity.expires])
   const allowed =
     selected.status === 'open' &&
     selected.expiresAt > Date.now() / 1000 &&
@@ -635,7 +635,7 @@ function CaseDetail({
               size="sm"
               onClick={() =>
                 void task.run(async () => {
-                  if (data.effectiveUntil <= Date.now() / 1000) {
+                  if (Math.min(data.effectiveUntil, scope.identity.expires) <= Date.now() / 1000) {
                     clearRead()
                     throw Error('The case data expired. Read again if still permitted.')
                   }
@@ -652,7 +652,8 @@ function CaseDetail({
             {data.coverage.populations instanceof Array
               ? data.coverage.populations.map(String).join(', ')
               : ''}{' '}
-            · Valid until {instant(data.effectiveUntil)}
+            · Case/rule cutoff {instant(data.effectiveUntil)}
+            {' · '}Available in this session until {instant(Math.min(data.effectiveUntil, scope.identity.expires))}
           </p>
           {data.resource === 'compliance_report' && data.view === 'list' && <p className="mb-4 text-sm text-neutral-600">Matching retained admission decisions: <strong>{quantity(data.result.matchingRetainedCount)}</strong>. These are recorded decisions, not proof of mining or a complete compliance report. A source change requires a new read.</p>}
           {data.resource === 'activity_logs' && (

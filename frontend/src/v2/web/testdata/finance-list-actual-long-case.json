@@ -1,0 +1,26 @@
+{
+  "v": 1,
+  "readId": "6400b07e-9316-4562-a8c3-de286ae275c8",
+  "caseId": "29612f1b-9d58-40bc-ba53-af957dc32001",
+  "resource": "compliance_report",
+  "view": "list",
+  "level": "redacted",
+  "dataTime": {
+    "start": 1795016880,
+    "end": 1795103280
+  },
+  "effectiveUntil": 1795104180,
+  "coverage": {
+    "status": "RETAINED_AT_READ",
+    "populations": [
+      "RETAINED_ADMISSION_DECISIONS_AS_OF_SNAPSHOT"
+    ],
+    "sourceBasisDigest": "sha256:24d04c960631e50202b62860306b59e56a651b6d10cac748317d21052aef6b6f",
+    "preparedAt": 1795103311
+  },
+  "result": {
+    "items": [],
+    "nextCursor": null,
+    "matchingRetainedCount": "0"
+  }
+}

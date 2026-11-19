@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import actualHTTP from './testdata/finance-list-actual-http.json'
+import actualLongCase from './testdata/finance-list-actual-long-case.json'
 import { readNarrowing } from './disclosureEvidence'
 import { protectedData, type NativeCase } from './operationsModels'
 
@@ -27,6 +28,23 @@ it('decodes the actual restricted-PG retained-source case HTTP envelope', () => 
   } finally { clock.mockRestore() }
 })
 
+it('accepts the actual empty fifteen-minute case response under five-minute access without rewriting its cutoff', () => {
+  // Captured from the local demo: its case/rule lifetime is independent of this access token.
+  const at = actualLongCase.coverage.preparedAt, sessionExpiresAt = at + 300
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(at * 1000)
+  const actualCase = { ...selected, caseId: actualLongCase.caseId, expiresAt: actualLongCase.effectiveUntil, scope: { ...selected.scope, level: actualLongCase.level, dataTime: actualLongCase.dataTime } } as NativeCase
+  const expected = { view: 'list', limit: 25, sessionExpiresAt }
+  try {
+    const got = protectedData(actualLongCase, actualCase, 'compliance_report', expected)
+    expect(got.effectiveUntil).toBeGreaterThan(sessionExpiresAt)
+    expect(got).toEqual(actualLongCase)
+    expect(got.result).toEqual({ items: [], nextCursor: null, matchingRetainedCount: '0' })
+    expect(() => protectedData({ ...actualLongCase, effectiveUntil: actualCase.expiresAt + 1 }, actualCase, 'compliance_report', expected)).toThrow()
+    clock.mockReturnValue(sessionExpiresAt * 1000)
+    expect(() => protectedData(actualLongCase, actualCase, 'compliance_report', expected)).toThrow()
+  } finally { clock.mockRestore() }
+})
+
 it('rejects private fields, wrong sources, bad keys and false pagination shapes', () => {
   for (const change of [
     (v: any) => { v.result.items[0] = { ...item, reason: 'private' } },
@@ -50,9 +68,10 @@ it('binds the exact requested UTC narrowing, view and original session expiry', 
   v.dataTime = time
   v.result.items = [{ ...item, time: now - 3 }]
   expect(() => decode(v)).toThrow()
-  expect(protectedData(v, selected, 'compliance_report', { view: 'list', dataTime: time, until: now + 60 }).view).toBe('list')
+  expect(protectedData(v, selected, 'compliance_report', { view: 'list', dataTime: time, sessionExpiresAt: now + 60 }).view).toBe('list')
   expect(() => protectedData(v, selected, 'compliance_report', { view: 'report', dataTime: time })).toThrow()
-  expect(() => protectedData(v, selected, 'compliance_report', { view: 'list', dataTime: time, until: now + 30 })).toThrow()
+  expect(protectedData(v, selected, 'compliance_report', { view: 'list', dataTime: time, sessionExpiresAt: now + 30 }).effectiveUntil).toBe(now + 60)
+  expect(() => protectedData(v, selected, 'compliance_report', { view: 'list', dataTime: time, sessionExpiresAt: now })).toThrow()
 })
 
 it('narrows only existing targets and exact inclusive UTC instants', () => {

@@ -376,7 +376,14 @@ async function checkUIPreview(user) {
   assert.equal(evidence.view, 'list');
   assert.equal(evidence.resource, 'compliance_report');
   assert.match(evidence.result.matchingRetainedCount, /^(0|[1-9][0-9]*)$/);
-  await page.getByRole('button', { name: 'Download this page', exact: true }).waitFor();
+  await rm(path.join(directory, 'ui-finance-error.json'), { force: true });
+  await writeFile(path.join(directory, 'ui-finance-response.json'), JSON.stringify(evidence, null, 2) + '\n', { mode: 0o600 });
+  try {
+    await page.getByRole('button', { name: 'Download this page', exact: true }).waitFor({ timeout: 5000 });
+  } catch (error) {
+    await writeFile(path.join(directory, 'ui-finance-error.json'), JSON.stringify({ alerts: await page.getByRole('alert').allTextContents() }, null, 2) + '\n', { mode: 0o600 });
+    throw error;
+  }
   await screenshot('admin-finance-evidence');
   passed('Admin creates a case using the default expiry and reads a scoped admission-evidence page');
   stage = 'ui-preview-account';

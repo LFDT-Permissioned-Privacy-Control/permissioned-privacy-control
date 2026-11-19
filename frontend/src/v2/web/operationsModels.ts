@@ -132,7 +132,7 @@ export function protectedData(
   value: unknown,
   selected: NativeCase,
   resource: string,
-  expected: { view?: string; dataTime?: CaseScope['dataTime']; limit?: number; until?: number } = {},
+  expected: { view?: string; dataTime?: CaseScope['dataTime']; limit?: number; sessionExpiresAt?: number } = {},
 ): ProtectedData {
   const v = record(value),
     coverage = record(v.coverage),
@@ -148,7 +148,8 @@ export function protectedData(
     Number(time.start) < selected.scope.dataTime.start || Number(time.end) > selected.scope.dataTime.end ||
     expected.view !== undefined && v.view !== expected.view ||
     !Number.isSafeInteger(v.effectiveUntil) ||
-    Number(v.effectiveUntil) <= Date.now() / 1000 || Number(v.effectiveUntil) > Math.min(selected.expiresAt, expected.until ?? selected.expiresAt) ||
+    Number(v.effectiveUntil) <= Date.now() / 1000 || Number(v.effectiveUntil) > selected.expiresAt ||
+    expected.sessionExpiresAt !== undefined && (!Number.isSafeInteger(expected.sessionExpiresAt) || expected.sessionExpiresAt <= Date.now() / 1000) ||
     !['COMPLETE_AT_CUT', 'RETAINED_AT_READ'].includes(String(coverage.status)) ||
     !Array.isArray(coverage.populations)
   )
