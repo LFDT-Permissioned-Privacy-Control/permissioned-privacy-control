@@ -21,6 +21,7 @@ import (
 )
 
 const Path = "/api/v2/self"
+const SelectionPath = Path + "/selection"
 const MaxResponseBytes = 512 << 10
 const MaxOrganizations = 256
 
@@ -47,9 +48,21 @@ type Response struct {
 	Organizations       []Organization `json:"organizations"`
 }
 type Handler struct {
-	factory *runtimepolicy.Factory
-	host    string
-	orgs    map[string]policybundle.Organization
+	factory   *runtimepolicy.Factory
+	host      string
+	orgs      map[string]policybundle.Organization
+	selection Selection
+}
+
+// Selection describes only this process's immutable Core selection. It does
+// not expose policy documents, secret references or fleet convergence.
+type Selection struct {
+	ManifestDigest   string `json:"manifestDigest"`
+	SourceRevision   string `json:"sourceRevision"`
+	Environment      string `json:"environment"`
+	ChainID          string `json:"chainId"`
+	Profile          string `json:"profile"`
+	EvaluatorVersion string `json:"evaluatorVersion"`
 }
 
 func New(c Config) (*Handler, error) {
@@ -85,6 +98,8 @@ func New(c Config) (*Handler, error) {
 		return nil, ErrInvalid
 	}
 	h := &Handler{factory: factory, host: u.Host, orgs: map[string]policybundle.Organization{}}
+	m := c.Snapshot.Metadata()
+	h.selection = Selection{string(m.ManifestDigest), m.SourceRevision, m.Environment, m.ChainID, m.Profile, m.EvaluatorVersion}
 	for _, org := range orgs {
 		h.orgs[org.ID] = org
 	}
@@ -123,7 +138,10 @@ func canonicalHostname(host string) bool {
 	return true
 }
 
-func (h *Handler) Register(mux *http.ServeMux) { mux.Handle(Path, h) }
+func (h *Handler) Register(mux *http.ServeMux) {
+	mux.Handle(Path, h)
+	mux.Handle(SelectionPath, h)
+}
 func fail(w http.ResponseWriter, status int, code string) {
 	w.WriteHeader(status)
 	_, _ = io.WriteString(w, `{"error":"`+code+`"}`+"\n")
@@ -135,7 +153,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if r.URL.Path != Path {
+	if r.URL.Path != Path && r.URL.Path != SelectionPath {
 		fail(w, 404, "not_found")
 		return
 	}
@@ -148,7 +166,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "forbidden")
 		return
 	}
-	if r.URL.RawQuery != "" || r.URL.ForceQuery || r.URL.RawPath != "" && r.URL.RawPath != Path || r.ContentLength > 0 {
+	if r.URL.RawQuery != "" || r.URL.ForceQuery || r.URL.RawPath != "" && r.URL.RawPath != r.URL.Path || r.ContentLength > 0 {
 		fail(w, 400, "invalid_request")
 		return
 	}
@@ -184,6 +202,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	profile, digest := view.SourceProfile()
 	response := Response{ActorID: view.ActorID(), PrincipalKind: view.Kind(), SourceProfile: profile, SourceProfileDigest: digest, ExpiresAt: view.ExpiresAt().Unix(), Organizations: []Organization{}}
+	admin := false
 	for _, id := range view.OrgIDs() {
 		org, ok := view.Org(id)
 		metadata, found := h.orgs[id]
@@ -192,9 +211,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response.Organizations = append(response.Organizations, Organization{ID: id, Slug: metadata.Slug, Name: metadata.Name, IsOrgAdmin: org.IsOrgAdmin(), IsOrgReadonlyAdmin: org.IsOrgReadonlyAdmin()})
+		admin = admin || org.IsOrgAdmin() || org.IsOrgReadonlyAdmin()
+	}
+	var payload any = response
+	if r.URL.Path == SelectionPath {
+		if !admin {
+			fail(w, 403, "forbidden")
+			return
+		}
+		payload = h.selection
 	}
 	var body bytes.Buffer
-	if json.NewEncoder(&body).Encode(response) != nil || body.Len() > MaxResponseBytes || ctx.Err() != nil {
+	if json.NewEncoder(&body).Encode(payload) != nil || body.Len() > MaxResponseBytes || ctx.Err() != nil {
 		fail(w, 503, "self_unavailable")
 		return
 	}

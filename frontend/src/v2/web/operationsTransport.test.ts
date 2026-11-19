@@ -26,6 +26,7 @@ it('accepts only finite native operations and their exact query/method contracts
     [`/api/v1/disclosure/cases?role=data-org-admin&organizationId=${org}&limit=25`, 'GET'],
     [`/api/v1/disclosure/cases/${id}/read`, 'POST'],
     ['/health/ready', 'GET'],
+    ['/api/v2/self/selection', 'GET'],
     [`/rpc/${org}`, 'POST'],
   ])
     expect(operationEndpoint(path, method), path).toBe(true)
@@ -34,6 +35,8 @@ it('accepts only finite native operations and their exact query/method contracts
     ['https://evil.test/api', 'GET'],
     ['//evil.test/api', 'GET'],
     ['/api/v1/users', 'GET'],
+    ['/api/v2/self/selection?org=other', 'GET'],
+    ['/api/v2/self/selection', 'POST'],
     [`/api/v1/disclosure/cases?role=recipient&organizationId=${org}`, 'GET'],
     [`/api/v1/disclosure/cases?limit=1&limit=2`, 'GET'],
     [`/api/v1/disclosure/cases?offset=1`, 'GET'],

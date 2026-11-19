@@ -124,6 +124,11 @@ permissions and sends no source files to OPS. Account menu → **Account** opens
 the original identity, session, organization and linked-address cards, backed
 by the native V2 identity and wallet APIs.
 
+As Demo Admin, choose **Check this OPS instance** in the source workspace to
+read its selected Core revision and artifact digest. Different draft labels
+are reported explicitly; matching labels still do not compare file contents.
+This checks one OPS instance, not the broker or the whole deployment.
+
 Choose **Edit local proposal** to create organizations/groups or edit their
 permissions, contracts, read grants, execution rules, identity mappings and
 selected platform sources. **Configuration** compares and exports the complete

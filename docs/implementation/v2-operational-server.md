@@ -24,9 +24,18 @@ group cards and account presentation. Its source workspace supports complete
 Core/broker source import, organization/group and policy editing, comparison,
 export and offline Go validation. Imported files are local proposals, never
 proof of the serving configuration or the person's operational roles. Source
-files remain in document memory; account changes offer export/discard/cancel,
-and automatic identity expiry clears private work. See the
+files remain in document memory; account changes offer export/discard/cancel.
+Renewal hides and locks the draft until the same account is verified again;
+failure, cancellation, account replacement or page closure discards it. See the
 [policy workspace](v2-policy-workspace.md) for validation and operator handoff.
+
+**Check this OPS instance** reads `GET /api/v2/self/selection` using the current
+verified organization-admin or read-only-admin session. It returns only this
+instance's immutable Core manifest digest, source revision, environment, chain,
+profile and evaluator version. It returns no policy documents or secret
+references. The original `/api/v2/self` response is unchanged. Matching draft
+revision labels do not establish equal file contents, broker selection,
+operational readiness or agreement across the fleet.
 
 Separate native pages provide selected compliance settings, travel records,
 disclosure cases and authorized data/audit reads, case-bound access logs and

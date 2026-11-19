@@ -74,7 +74,7 @@ export function operationEndpoint(endpoint: string, method: string): boolean {
       valid = method === 'GET'
       if (action === 'audit') allowed = ['limit', 'cursor']
     }
-  } else if (path === '/health/live' || path === '/health/ready') valid = method === 'GET'
+  } else if (path === '/api/v2/self/selection' || path === '/health/live' || path === '/health/ready') valid = method === 'GET'
   else if (new RegExp('^/rpc/' + uuid + '$').test(path))
     valid = method === 'POST' && canonicalUUID(path.slice(5))
   if (!valid || (method !== 'GET' && raw !== '')) return false
