@@ -112,6 +112,9 @@ start_prepared() {
   compose run --rm --no-deps --entrypoint cat bootstrap /demo/indexer.env > "$OPS_V2_DEMO_CONTROL_DIR/indexer.env"
   compose up -d indexer
   compose run --rm --no-deps bootstrap configure --root /demo --wallet-output /wallet-output/wallet-state
+  # Offline owner upgrade also runs on retained, already-configured demos.
+  # Serving processes were drained above; this never reinitializes activity.
+  compose run --rm --no-deps bootstrap upgrade-activity --root /demo --drained
   copy_runtime
   export_serving
   compose run --rm --no-deps explorer-admin

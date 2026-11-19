@@ -16,7 +16,7 @@ import (
 func main() { os.Exit(run(os.Args[1:])) }
 func run(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "expected init, repair-tls, configure or revision")
+		fmt.Fprintln(os.Stderr, "expected init, repair-tls, configure, upgrade-activity or revision")
 		return 2
 	}
 	command := args[0]
@@ -24,6 +24,7 @@ func run(args []string) int {
 	root := fs.String("root", "", "owned isolated demo root")
 	wallet := fs.String("wallet-output", "", "exact demo wallet metadata directory")
 	databases := fs.Bool("prepare-databases", false, "create isolated empty databases/roles before actual indexer migrations")
+	drained := fs.Bool("drained", false, "upgrade-activity only: all activity writers/readers sharing the owned database are stopped")
 	privateNetwork := fs.Bool("private-network", false, "init only: separate Docker-network isolation fixture")
 	transaction := fs.String("transaction", "", "actual mined transaction hash")
 	block := fs.String("receipt-block", "", "actual decimal receipt block")
@@ -42,13 +43,14 @@ func run(args []string) int {
 	allowed["export"] = map[string]bool{"root": true}
 	allowed["check-identity"] = map[string]bool{"root": true, "wallet-output": true, "identity-file": true}
 	allowed["apply-identity"] = allowed["check-identity"]
+	allowed["upgrade-activity"] = map[string]bool{"root": true, "drained": true}
 	bad := allowed[command] == nil
 	fs.Visit(func(f *flag.Flag) {
 		if !allowed[command][f.Name] {
 			bad = true
 		}
 	})
-	if bad || (*databases && *wallet != "") {
+	if bad || (*databases && *wallet != "") || (command == "upgrade-activity" && !*drained) {
 		return 2
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -84,6 +86,8 @@ func run(args []string) int {
 		} else {
 			e = v2demo.Configure(ctx, *root, *wallet)
 		}
+	case "upgrade-activity":
+		e = v2demo.UpgradeActivity(ctx, *root, *drained)
 	case "explorer-state":
 		e = v2demo.ExplorerState(ctx, *root)
 	case "status":

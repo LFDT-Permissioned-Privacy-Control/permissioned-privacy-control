@@ -20,6 +20,10 @@ Resume uses existing images, installed dependencies and hash-checked circuits.
 It retains identities, wallet links, configuration and chain data. Missing
 prerequisites produce an error; this command does not build, download, reinstall
 packages or reset the demo. Use it when disk space is limited.
+Before restarting OPS, resume stops the serving processes and explicitly runs
+the offline owner activity-schema upgrade, including for an existing demo.
+The upgrade preserves recorded history, source identity and generation; it
+does not initialize a new activity source or reset the local buffer.
 
 Choose one way to run the complete scenario:
 
