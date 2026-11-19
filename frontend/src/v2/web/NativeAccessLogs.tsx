@@ -136,14 +136,14 @@ function AccessLogSearch({ scope, org }: { scope: OperationScope; org: string })
         <DataTable items={result.items as unknown as ObjectValue[]} empty="No sealed records match these filters in this organization." columns={[
           { key: 'observedAt', label: 'Observed (UTC)', render: row => <time dateTime={String(row.observedAt)} className="whitespace-nowrap text-xs">{utc(String(row.observedAt))}</time> },
           { key: 'method', label: 'Method', render: row => <code className="whitespace-nowrap text-xs">{String(row.method)}</code> },
+          { key: 'outcome', label: 'Recorded outcome', render: row => <Badge variant={row.outcome === 'success' ? 'success' : row.outcome === 'denied' ? 'warning' : 'destructive'}>{outcomeLabels[row.outcome as keyof typeof outcomeLabels]}</Badge> },
+          { key: 'reason', label: 'Reason', render: row => <span title={String(row.reason)}>{logReasonLabel(row.reason as AccessLogReason)}</span> },
           { key: 'actorId', label: 'OPS actor ID', render: row => row.actorId ? <LogIdentifier value={String(row.actorId)} label="Copy actor ID" /> : 'Not recorded' },
           { key: 'requestReference', label: 'Request reference', render: row => <LogIdentifier value={String(row.requestReference)} label="Copy request reference" /> },
-          { key: 'outcome', label: 'Recorded outcome', render: row => <Badge variant={row.outcome === 'success' ? 'success' : row.outcome === 'denied' ? 'warning' : 'destructive'}>{outcomeLabels[row.outcome as keyof typeof outcomeLabels]}</Badge> },
           { key: 'httpStatus', label: 'Recorded HTTP', render: row => String(row.httpStatus) },
           { key: 'rpcErrorCode', label: 'RPC error', render: row => row.rpcErrorCode === null ? 'None recorded' : String(row.rpcErrorCode) },
           { key: 'recordedStatus', label: 'Recorded status', render: row => String(row.recordedStatus) },
           { key: 'trustedIP', label: 'Recorded IP', render: row => row.trustedIP === null ? 'Not recorded' : String(row.trustedIP) },
-          { key: 'reason', label: 'Reason', render: row => <span title={String(row.reason)}>{logReasonLabel(row.reason as AccessLogReason)}</span> },
           { key: 'policyDigest', label: 'Policy details', render: row => <details className="text-xs"><summary className="cursor-pointer text-primary">Digests</summary><p className="mt-2">Policy: <code className="break-all">{row.policyDigest === null ? 'Not recorded' : String(row.policyDigest)}</code></p><p className="mt-2">Recorded configuration: <code className="break-all">{String(row.configurationDigest)}</code></p></details> },
         ]} />
         <p className="mt-3 text-xs text-neutral-500">Recorded status summarizes the outcome; Recorded HTTP is the selected response status. Final delivery may still fail or change. Older or unclassified operations show Not recorded for their reason. IP identifies the recorded direct peer.</p>
