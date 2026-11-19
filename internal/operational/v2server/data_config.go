@@ -50,11 +50,9 @@ type Activity struct {
 	BufferDirectory     string `json:"bufferDirectory"`
 }
 type Index struct {
-	ReaderDSNEnv          string `json:"readerDSNEnv"`
-	SourceReferenceDigest string `json:"sourceReferenceDigest"`
-	ConfiguredEpoch       string `json:"configuredEpoch"`
-	CursorKeyEnv          string `json:"cursorKeyEnv"`
-	PseudonymKeyEnv       string `json:"pseudonymKeyEnv"`
+	GRPCURL         string `json:"grpcURL"`
+	CursorKeyEnv    string `json:"cursorKeyEnv"`
+	PseudonymKeyEnv string `json:"pseudonymKeyEnv"`
 }
 type Data struct {
 	NodeSigning               bool      `json:"nodeSigning"`

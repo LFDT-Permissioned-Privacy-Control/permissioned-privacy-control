@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 const runtime = JSON.parse(await readFile('/demo/runtime.json', 'utf8'));
 const url = new URL(runtime.rpcUrl);
-assert.equal(url.protocol, 'http:'); assert.equal(url.hostname, '127.0.0.1');
+assert.equal(runtime.testOnly, true);
+assert.equal(url.protocol, 'http:'); assert.equal(url.hostname, runtime.privateNetwork === true ? 'reth' : '127.0.0.1');
 for (let attempt = 0; attempt < 60; attempt++) {
   try {
     const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }), signal: AbortSignal.timeout(1000), redirect: 'error' });

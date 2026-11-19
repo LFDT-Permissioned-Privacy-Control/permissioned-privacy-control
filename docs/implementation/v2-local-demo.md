@@ -38,6 +38,26 @@ action prints `PASS`. Actual transaction and disclosure links are printed at the
 end, and the browser windows stay open until you press Enter in the terminal.
 This is a finite functional walkthrough, not a load test.
 
+The original Explorer layout and named data pages use native session/data
+adapters, including approved-ABI contract Read and wallet-backed Write controls.
+Admin reuses the original layout, organization forms, group cards and account
+presentation. Its source workspace edits and exports complete file proposals;
+compliance, disclosure, case-bound logs and diagnostics use their native APIs.
+The walkthrough proves its listed API/privacy operations. File authoring and
+ordinary wallet setup have separate manual steps and qualification below.
+
+After the complete walkthrough has created a sample transaction, run
+`make demo-v2-ui-preview` for a headless check of these adapted screens. It
+exports a fresh source copy, performs real Privado login/renewal, imports the
+source into Admin, and saves screenshots and `ui-preview-results.json` under
+`.tmp/v2-demo/<project>/`. It preserves the current demo data and configuration.
+The exported folder is also suitable for the manual Admin steps below.
+The preview includes fresh and repeated signed-out visits, mobile entry,
+identity-proof and confirmation screens, and the original Account cards with
+verified wallet links. Its expiry checks advance only the browser clock past
+the original signed expiry to verify that private displays clear; they do not
+claim to test a provider or server clock.
+
 Prepared commands use installed Chrome by default. An already installed
 Playwright Chromium can be selected with `OPS_TEST_BROWSER_CHANNEL=chromium`.
 They do not install a browser. `make demo-v2-check` performs initial setup and is
@@ -66,15 +86,16 @@ requires an external membership assignment, not an OPS Git change.
 
 ## 1. Inspect the bank's configuration
 
-Export the current public authoring files into a **new** directory:
+Export the current configuration sources into a **new** directory:
 
 ```sh
 make demo-v2-export-config CONFIG_DIR=.tmp/demo-policy
 ```
 
 The command prints the current claim-to-group mappings. It exports an explicit
-allowlist of public JSON documents, excluding private state, environment files,
-database credentials and private keys. Existing directories are not overwritten.
+allowlist of JSON documents, excluding private state, environment files,
+database credentials and private keys. Policy sources can still be confidential;
+the export does not publish them. Existing directories are not overwritten.
 
 | File | What it defines |
 | --- | --- |
@@ -89,17 +110,63 @@ The local editor in step 6 changes only identity mappings within this bank's
 three existing groups. Other exported files are inspection examples; the helper
 does not apply arbitrary edits to them.
 
+To inspect them in the familiar Admin UI, open the OPS origin printed by
+`make demo-v2-info`, followed by `/admin`. Complete sign-in or the fresh Privado
+proof requested on reload. If shown, choose **Open configuration workspace**.
+Choose **Import source folder** and select the exported parent containing both
+`core` and `broker` (a single `core` root also works for inspection).
+The **Organizations** tab shows Demo Bank; select its row or the
+**Groups** tab to inspect Admin, Deployer and Reader. A group's gear button
+shows its declared permissions. This source is a local draft, not a report of
+the revision currently served by every OPS instance. Importing it applies no
+permissions and sends no source files to OPS. Account menu → **Account** opens
+the original identity, session, organization and linked-address cards, backed
+by the native V2 identity and wallet APIs.
+
+Choose **Edit local proposal** to create organizations/groups or edit their
+permissions, contracts, read grants, execution rules, identity mappings and
+selected platform sources. **Configuration** compares and exports the complete
+proposal; **Open saved package** recovers it later. Run the actual Go
+`policy unpack`, `prepare`, `check` and optional `simulate` commands from the
+[policy workspace guide](v2-policy-workspace.md). New organizations also require
+explicit compliance entries, matching Core/broker identity references, node
+bindings and deployment preparation described there. The browser does not
+activate proposals or provision a new organization's infrastructure.
+
 ## 2. Sign in as the prepared identities
+
+Once per browser profile, open the printed OPS and demo wallet URLs and accept
+their local certificate warnings. Chrome may remember the exceptions separately
+for each port. The launcher does not modify Keychain or install a system CA.
 
 Open the Explorer URL printed by `make demo-v2-info`, then:
 
 1. Choose **Sign in**.
-2. In OPS choose `demo-deployer`, or another prepared profile.
-3. Expand **Verification request** and copy its URL.
-4. Open the printed demo wallet URL in a second tab, choose the matching persona,
-   paste the request URL and choose **Generate and submit proof**.
-5. Return to OPS, inspect the verified holder DID, choose **Use this identity**,
-   then **Continue to application**.
+2. In OPS choose **Demo Deployer**, **Demo Admin**, **Demo Reader** or
+   **Demo Outsider**. Allow the local wallet popup when the browser asks.
+3. Wait while the wallet generates a fresh proof. OPS verifies the exact selected
+   holder, finishes that login and continues to the original application.
+
+If an existing Privado session has already opened a fresh verification request,
+use **Cancel sign in** to return to the identity choices, then choose the desired
+demo button. Real customer wallets complete that fresh proof themselves.
+
+For a direct visit to OPS, the same buttons open the configuration workspace for
+an administrator and Account for other identities. **Cancel demo sign in**
+retires the current attempt; choosing another identity starts a new one. Nothing
+is retried automatically after an uncertain confirmation.
+
+These buttons are compiled only into the local demo image. A normal V2 build
+keeps the ordinary Privado and Azure login. To inspect the ordinary Privado
+flow in the demo, choose **Continue with Privado ID**, expand **Verification
+request details**, and copy its URL to the printed demo wallet page. Select the
+matching persona there and choose **Generate and submit proof**; then inspect
+the verified holder in OPS and confirm it.
+
+`make demo-v2-check-login` checks the actual buttons, holder matching,
+cancellation, blocked popups and untrusted certificates in temporary browser
+profiles. It uses real proofs and saves results under
+`.tmp/v2-demo/<project>/demo-login/`.
 
 Use separate browser profiles/private windows for simultaneous identities.
 For a switch within one context, use **Sign out** and start a new login; another
@@ -114,7 +181,7 @@ consumers; identities and stored data remain.
 
 ## 3. Demonstrate wallet ownership
 
-Open **Wallets**. The walkthrough links Admin, Deployer and Reader through the
+Open Account → **Linked Addresses**. The walkthrough links Admin, Deployer and Reader through the
 normal challenge/sign/verify API, or verifies their retained links. It does not
 seed link rows directly. The automatic scenario needs no wallet extension.
 
@@ -128,9 +195,9 @@ isolated Ethereum browser-wallet profile. The Deployer private key is:
 Admin uses scalar 1, Reader 3 and Outsider 4, each padded to 32 bytes. These keys
 are public; use them only on this isolated chain, never for real funds.
 
-As Deployer choose **Link wallet**, select the account, choose **Sign ownership
-proof**, approve the signature in the wallet, then **Confirm link**. Choose
-**Refresh links** to inspect the result. A verified link may already exist after
+As Deployer choose **Link Wallet**, select the account, choose **Sign ownership
+proof**, approve the signature in the wallet, then **Confirm link**. The linked
+address appears in the list. A verified link may already exist after
 the automatic walkthrough. The demo identity wallet is a Privado proof tool;
 it is not an injected Ethereum wallet.
 
@@ -174,6 +241,51 @@ use native Go; the OPS delivery contains no Solidity compiler or EVM policy back
 The local node has node-owned unsigned signing disabled; the walkthrough also
 checks that `eth_sendTransaction` cannot send an unsigned transaction.
 
+### Use the Explorer contract forms with your Ethereum wallet
+
+Open the contract's **Contract** tab as Deployer. The approved ABI supplies
+**Read contract** and **Write contract**. Open `value()` and choose **Query**
+to read through your current Explorer session and OPS permissions.
+
+For a manual write, run the separate `jwt-injector` helper in its native V2
+mode on the wallet's machine. Sign in to OPS Account as the same Deployer,
+choose **Download wallet token**, and keep that file private with mode `0600`.
+Use the current OPS/Explorer URLs printed by `make demo-v2-info` and copy the
+approved chain ID/genesis hash from Explorer's **Network setup** page:
+
+```sh
+python -m jwt_injector --native-v2 \
+  --jwt-file /absolute/private/path/ops-wallet-token.jwt \
+  --port 8546 --upstream https://localhost:OPS_PORT \
+  --org-id 11111111-1111-4111-8111-111111111111 \
+  --chain-id 31337 --genesis-hash COPIED_GENESIS_HASH \
+  --ca-file /absolute/path/to/demo-control-directory/ca.crt \
+  --cors-allow-origin https://localhost:EXPLORER_PORT
+```
+
+Run the command from an installed native-mode `jwt-injector` checkout. The demo
+control directory is `.tmp/v2-demo/<project>` in this OPS checkout. Replace the
+explicit placeholders; the helper verifies TLS, network and the original token.
+If a wallet sends its extension Origin, add that exact trusted Origin to the
+comma-separated allowlist. Do not use a wildcard.
+
+Open `set(address,uint256)`, enter the helper origin
+`http://127.0.0.1:8546`, choose **Connect wallet**, and allow the browser's local
+network access prompt if shown. Select the linked Deployer account. Enter the
+Admin address as `subject` and `171` as `next`, choose **Write**, then review the
+transaction in the signing wallet. **Check receipt** reports the actual result.
+An already-known network may retain its old RPC URL: use **Manual wallet network
+setup** to copy the current private temporary URL into that wallet's network
+settings, then reconnect. Keep that URL private.
+
+This compatibility flow needs a fresh token file and reconnection when the
+original five-minute session expires. It does not silently renew wallet
+credentials. Once handed to the wallet, reject there to cancel; closing the
+page cannot undo a sent transaction. After an uncertain outcome, check wallet
+activity before another send. Automated qualification uses an injected signing
+provider and the real helper/OPS/node; a particular extension's interface is a
+separate environment check.
+
 ## 5. Open a disclosure without customer approval
 
 The walkthrough opens one case. To create another, sign in as Admin, choose
@@ -216,7 +328,7 @@ and restarts. Identities, operational epochs, wallet links and transactions
 remain. No customer approval or SQL policy edit is involved.
 
 To demonstrate the claim mapping itself, use the export from step 1. Save a
-rollback copy and optionally track those public sources in a local Git repo:
+rollback copy and optionally track those configuration sources in a local Git repo:
 
 ```sh
 cp .tmp/demo-policy/core/identity.json .tmp/demo-policy-reader.json
@@ -320,7 +432,7 @@ Serving containers receive only their own selected files, leaf TLS keys and
 restricted operational credentials. Offline bootstrap retains the owner
 credentials and CA private key separately. This walkthrough uses the OPS
 preflight submission mode; qualification of Guard v1's signed-approval mode is
-covered separately, not demonstrated by this stock Reth node.
+required separately and is not demonstrated by this stock Reth node.
 
 See [operational deployment](v2-operational-server.md),
 [policy authoring](policy-authoring.md) and [required automated checks](v2-testing.md).

@@ -181,6 +181,19 @@ func newWithData(config Config, dc DataConfig, retained d.RetainedSources) (*Ser
 	return s, nil
 }
 func (s *Service) DataEnabled() bool { return s != nil && s.data != nil }
+
+// DecodeDataQuery selects the wire shape belonging to this service's fixed
+// source profile. Decoding supplies no case or disclosure authority.
+func (s *Service) DecodeDataQuery(raw []byte) (d.Query, error) {
+	if !s.DataEnabled() {
+		return d.Query{}, d.ErrUnsupported
+	}
+	if s.data.retained != nil {
+		return d.DecodeRetainedQuery(raw)
+	}
+	return d.DecodeQuery(raw)
+}
+
 func (s *Service) TryAdmitHTTP() (func(), bool) {
 	if !s.DataEnabled() {
 		return nil, false

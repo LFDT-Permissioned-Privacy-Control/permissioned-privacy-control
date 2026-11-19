@@ -3,10 +3,34 @@ package disclosuredata
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	p "privacy-proxy/internal/disclosurepolicy"
 )
+
+func TestRetainedWireAddressListIsProfileBoundAndClosed(t *testing.T) {
+	raw := `{"v":1,"resource":"transactions","view":"list","addressId":"da1.render.AAAAAAAAAAAAAAAAAAAAAA","limit":50}`
+	if _, err := DecodeQuery([]byte(raw)); err == nil {
+		t.Fatal("legacy wire shape widened")
+	}
+	q, err := DecodeRetainedQuery([]byte(raw))
+	if err != nil || q.AddressID == nil || *q.Limit != 50 {
+		t.Fatal("retained address list rejected before normalization", err)
+	}
+	for _, bad := range []string{
+		strings.Replace(raw, `"transactions"`, `"activity_logs"`, 1),
+		strings.Replace(raw, `"list"`, `"report"`, 1),
+		strings.Replace(raw, `"limit":50`, `"limit":null`, 1),
+		strings.Replace(raw, `"limit":50`, `"limit":50,"limit":1`, 1),
+		strings.Replace(raw, `"limit":50`, `"limit":50,"url":"https://evil.test"`, 1),
+		strings.Replace(raw, `da1.render.AAAAAAAAAAAAAAAAAAAAAA`, strings.Repeat("a", 129), 1),
+	} {
+		if _, err := DecodeRetainedQuery([]byte(bad)); err == nil {
+			t.Fatal("invalid retained wire shape accepted")
+		}
+	}
+}
 
 func TestClosedQueryAndCanonicalSubset(t *testing.T) {
 	for _, raw := range []string{`{"v":1,"resource":"activity_summary","view":"report"}`, `{"v":1,"resource":"events","view":"list"}`} {

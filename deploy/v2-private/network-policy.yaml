@@ -1,0 +1,38 @@
+# Apply in the workload namespace with a CNI that enforces NetworkPolicy.
+# Keep these selectors aligned with the actual pod labels. The Indexer API
+# has no authentication; this ingress rule is its application boundary.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ops-indexer-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ops-indexer
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ops
+      ports:
+        - protocol: TCP
+          port: 50051
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ops-indexer-storage
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ops-indexer-postgres
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ops-indexer
+      ports:
+        - protocol: TCP
+          port: 5432

@@ -2,7 +2,7 @@
 // Actual public UI/provider + production API walkthrough. No test-control
 // routes, manufactured tokens, SQL-seeded identities or fake application node.
 import assert from 'node:assert/strict';
-import { readFile, writeFile, rename, rm } from 'node:fs/promises';
+import { readFile, writeFile, rename, rm, mkdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
@@ -14,10 +14,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const directory = path.resolve(process.argv[2] ?? '');
 assert.ok(directory.startsWith(path.join(root, '.tmp/v2-demo') + path.sep));
 const mode = process.argv[3] ?? 'walkthrough';
-assert.ok(['walkthrough', 'reader-admin', 'reader-reader', 'disclosure'].includes(mode), 'Unknown demo check mode');
+assert.ok(['walkthrough', 'reader-admin', 'reader-reader', 'disclosure', 'ui-preview', 'ui-transaction'].includes(mode), 'Unknown demo check mode');
 const interactive = process.env.OPS_DEMO_INTERACTIVE === '1';
 assert.ok(!interactive || process.stdin.isTTY, 'Run the visible walkthrough in an interactive terminal');
-const resultsFile = path.join(directory, mode === 'walkthrough' ? 'check-results.json' : 'mapping-results.json');
+const resultsFile = path.join(directory, mode === 'walkthrough' ? 'check-results.json' : mode === 'ui-preview' ? 'ui-preview-results.json' : mode === 'ui-transaction' ? 'transaction-ui-results.json' : 'mapping-results.json');
 await rm(resultsFile, { force: true });
 const runtime = JSON.parse(await readFile(path.join(directory, 'runtime.json'), 'utf8'));
 assert.equal(runtime.testOnly, true); assert.equal(runtime.chainId, '31337');
@@ -35,7 +35,7 @@ const abi = new Interface(contract.abi);
 let stage = 'browser-start', count = 0;
 const passed = label => { count++; console.log('PASS ' + label); };
 const browser = await chromium.launch({ channel: process.env.OPS_TEST_BROWSER_CHANNEL ?? 'chrome', headless: !interactive, slowMo: interactive ? 150 : 0, args: ['--no-proxy-server'] });
-const contexts = [], users = new Map();
+const contexts = [], users = new Map(), failedReads = [];
 let readerRevoked = false;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function boundedWait(work, seconds, label) {
@@ -48,20 +48,23 @@ async function json(response, status = 200) {
   assert.ok((await response.body()).length <= 8 << 20);
   return response.json();
 }
-async function login(persona) {
+async function login(persona, options = {}) {
   stage = 'login-' + persona;
   const context = await browser.newContext({ ignoreHTTPSErrors: true }); // This isolated demo's generated certificate only.
   contexts.push(context);
   const page = await context.newPage();
+  page.on('response', response => { const url = new URL(response.url()); if (url.origin === runtime.explorerOrigin && url.pathname.startsWith('/api/') && response.status() >= 400 && failedReads.length < 200) failedReads.push({ persona, path: url.pathname, status: response.status() }); });
+  if (options.clock) await page.clock.install({ time: new Date() });
   stage = persona + '-open-explorer';
   await page.goto(runtime.explorerOrigin);
   stage = persona + '-start-SSO';
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   stage = persona + '-select-native-profile';
-  await page.getByRole('button', { name: 'Sign in with Privado · demo-' + persona, exact: true }).click();
+  await page.locator('[data-profile-id="demo-' + persona + '"]').click();
   const request = page.locator('[data-field=requestUri]'); await request.waitFor({ state: 'attached' });
   const requestUri = await request.textContent();
   assert.ok(requestUri.startsWith(runtime.opsOrigin + '/api/v2/auth/privado/requests/'));
+  if (options.capture) await uiScreenshot(page, 'ops-proof-request');
   stage = persona + '-submit-public-proof-job';
   const job = await json(await context.request.post(runtime.walletOrigin + '/prove', { headers: { Origin: runtime.walletOrigin, 'Content-Type': 'application/json' }, data: { persona, requestUri } }), 202);
   await boundedWait(async () => {
@@ -73,6 +76,7 @@ async function login(persona) {
   const holder = page.locator('[data-field=holderDid]'); await holder.waitFor({ timeout: 20_000 });
   assert.equal(await holder.textContent(), metadata.personas.find(x => x.id === persona).holderDid);
   assert.equal(await page.locator('[data-field=actorId]').count(), 0);
+  if (options.capture) await uiScreenshot(page, 'ops-holder-confirmation');
   const delivered = page.waitForResponse(r => r.url() === runtime.opsOrigin + '/api/v2/auth/privado/complete' && r.request().method() === 'POST');
   stage = persona + '-confirm-native-identity';
   await page.getByRole('button', { name: 'Use this identity', exact: true }).click();
@@ -80,6 +84,8 @@ async function login(persona) {
   assert.equal(access.sourceProfile, 'demo-' + persona); assert.equal(access.provider, 'privado');
   assert.match(access.accessToken, /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
   stage = persona + '-explicit-app-handoff';
+  await page.getByRole('button', { name: 'Continue to application', exact: true }).waitFor();
+  if (options.capture) await uiScreenshot(page, 'ops-application-confirmation');
   await page.getByRole('button', { name: 'Continue to application', exact: true }).click();
   await page.waitForURL(url => url.origin === runtime.explorerOrigin && url.pathname === '/');
   await page.locator('[data-field=app-actor]').waitFor();
@@ -146,8 +152,13 @@ async function checkDisclosure(admin, deployer, reader, hash) {
   await admin.page.getByLabel('Legal basis', { exact: true }).fill('Isolated local demo; not a legal compliance assertion');
   const localDate = seconds => { const d = new Date(seconds * 1000); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
   const now = Math.floor(Date.now() / 1000);
-  await admin.page.getByLabel('From (local time)', { exact: true }).fill(localDate(now - 3600));
-  await admin.page.getByLabel('Through (local time)', { exact: true }).fill(localDate(now + 120));
+  // A retained dev chain can have a timestamp ahead of the host clock. Select
+  // the actual sample's data interval instead of silently excluding it.
+  const transaction = await nodeRPC(admin, 'eth_getTransactionByHash', [hash]);
+  const block = await nodeRPC(admin, 'eth_getBlockByNumber', [transaction.blockNumber, false]);
+  const sampleTime = Number(BigInt(block.timestamp));
+  await admin.page.getByLabel('From (local time)', { exact: true }).fill(localDate(Math.min(now, sampleTime) - 3600));
+  await admin.page.getByLabel('Through (local time)', { exact: true }).fill(localDate(Math.max(now, sampleTime) + 120));
   for (const label of ['Addresses', 'Activity', 'Activity summary', 'Sanctions', 'Compliance']) await admin.page.getByLabel(label, { exact: true }).uncheck();
   await admin.page.getByLabel('Detail level').selectOption('full');
   stage = 'disclosure-create-case';
@@ -157,11 +168,25 @@ async function checkDisclosure(admin, deployer, reader, hash) {
   stage = 'disclosure-read-transactions';
   const readResponse = admin.page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/disclosure/cases/' + new URL(caseUrl).pathname.split('/').at(-1) + '/read'));
   await admin.page.getByRole('button', { name: 'Transactions', exact: true }).click();
-  const read = await readResponse;
-  const protectedData = await read.json();
-  console.log('Disclosure transaction read: HTTP ' + read.status() + ', rows=' + (protectedData.result?.items?.length ?? 'unavailable'));
-  assert.equal(read.status(), 200);
-  assert.ok(protectedData.result.items.some(row => row.transactionHash === hash), 'Disclosure did not include the sample transaction');
+  let read = await readResponse;
+  const seen = new Set(), cursors = new Set();
+  for (let page = 1; ; page++) {
+    const protectedData = await read.json();
+    console.log('Disclosure transaction page ' + page + ': HTTP ' + read.status() + ', rows=' + (protectedData.result?.items?.length ?? 'unavailable'));
+    if (read.status() !== 200) await writeFile(path.join(directory, 'failed-disclosure-read.json'), JSON.stringify({ status: read.status(), error: typeof protectedData.error === 'string' ? protectedData.error.slice(0, 160) : 'unavailable' }, null, 2) + '\n', { mode: 0o600 });
+    assert.equal(read.status(), 200);
+    for (const row of protectedData.result.items) {
+      assert.equal(seen.has(row.transactionHash), false, 'Disclosure repeated a transaction between pages');
+      seen.add(row.transactionHash);
+    }
+    if (seen.has(hash)) break;
+    const cursor = protectedData.result.nextCursor;
+    assert.ok(cursor && !cursors.has(cursor) && page < 32, 'Disclosure continuation ended or repeated before the sample transaction');
+    cursors.add(cursor);
+    const nextRead = admin.page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/disclosure/cases/' + new URL(caseUrl).pathname.split('/').at(-1) + '/read'));
+    await admin.page.getByRole('button', { name: 'Next page', exact: true }).click();
+    read = await nextRead;
+  }
   await admin.page.locator('a[href$="/transactions/' + hash + '"]').first().waitFor({ timeout: 30_000 });
   assert.equal(await admin.page.getByRole('alert').count(), 0);
   stage = 'disclosure-reader-denied';
@@ -175,8 +200,191 @@ async function checkDisclosure(admin, deployer, reader, hash) {
   passed('admin opens a standing-rule disclosure and reads its transaction without customer approval; reader cannot use the case');
   return caseUrl;
 }
+async function uiScreenshot(page, name) {
+  const screenshots = path.join(directory, 'ui-preview');
+  await mkdir(screenshots, { recursive: true, mode: 0o700 });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: path.join(screenshots, name + '.png'), fullPage: true, animations: 'disabled' });
+}
+async function checkEntryScreens() {
+  stage = 'ui-preview-anonymous-explorer';
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  contexts.push(context);
+  const page = await context.newPage();
+  await page.setViewportSize({ width: 1440, height: 1040 });
+  const privateReads = [];
+  context.on('request', request => {
+    const u = new URL(request.url());
+    if (u.origin === runtime.explorerOrigin && /^\/api\/(?:v2\/explorer(?:\/|$)|eth\/|disclosure\/|grant\/|viewable-addresses)/.test(u.pathname)) privateReads.push(u.pathname);
+  });
+  await page.goto(runtime.explorerOrigin);
+  await page.locator('[data-testid=explorer-auth-entry][data-auth-state=anonymous]').waitFor();
+  assert.equal(await page.getByRole('alert').count(), 0);
+  assert.equal(await page.getByText('Genesis hash', { exact: true }).count(), 0);
+  assert.equal(await page.getByRole('heading', { name: 'Latest Transactions', exact: true }).count(), 0);
+  assert.ok((await page.getByTestId('entry-sign-in').getAttribute('class')).includes('btn-primary'));
+  await uiScreenshot(page, 'explorer-signed-out');
+  // Start mobile capture at its real viewport. Resizing a previously painted
+  // desktop page can produce a stitched full-page screenshot in headless Chrome.
+  const mobilePage = await context.newPage();
+  await mobilePage.setViewportSize({ width: 390, height: 844 });
+  await mobilePage.goto(runtime.explorerOrigin);
+  await mobilePage.locator('[data-testid=explorer-auth-entry][data-auth-state=anonymous]').waitFor();
+  assert.equal(await mobilePage.locator('header').count(), 1);
+  assert.equal(await mobilePage.getByTestId('explorer-auth-entry').count(), 1);
+  assert.equal(await mobilePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await uiScreenshot(mobilePage, 'explorer-signed-out-mobile');
+  stage = 'ui-preview-public-network';
+  await page.goto(runtime.explorerOrigin + '/chain-info');
+  await page.getByRole('heading', { name: 'Network setup', exact: true }).waitFor();
+  await page.getByText('31337 (0x7a69)', { exact: true }).waitFor();
+  assert.deepEqual(privateReads, [], 'Anonymous entry/public setup must not dispatch protected reads');
+  await uiScreenshot(page, 'explorer-network-setup');
+  passed('fresh Explorer entry uses the V1 prompt; public network setup dispatches no protected reads');
+  stage = 'ui-preview-anonymous-ops';
+  const opsContext = await browser.newContext({ ignoreHTTPSErrors: true });
+  contexts.push(opsContext);
+  const opsPage = await opsContext.newPage();
+  await opsPage.setViewportSize({ width: 1440, height: 1040 });
+  await opsPage.goto(runtime.opsOrigin + '/login');
+  await opsPage.locator('[data-profile-id="demo-admin"]').waitFor();
+  assert.equal(await opsPage.getByRole('alert').count(), 0, 'A fresh signed-out visit is not a failed login');
+  assert.equal(await opsPage.getByRole('heading', { name: /^Sign in$/i }).count(), 1);
+  await uiScreenshot(opsPage, 'ops-signed-out');
+  await opsPage.reload();
+  await opsPage.locator('[data-profile-id="demo-admin"]').waitFor();
+  assert.equal(await opsPage.getByRole('alert').count(), 0, 'A repeated ordinary visit must remain a normal sign-in state');
+  const opsMobilePage = await opsContext.newPage();
+  await opsMobilePage.setViewportSize({ width: 390, height: 844 });
+  await opsMobilePage.goto(runtime.opsOrigin + '/login');
+  await opsMobilePage.locator('[data-profile-id="demo-admin"]').waitFor();
+  assert.equal(await opsMobilePage.getByTestId('login-header').count(), 1);
+  assert.equal(await opsMobilePage.getByTestId('auth-card').count(), 1);
+  assert.equal(await opsMobilePage.getByRole('alert').count(), 0);
+  assert.equal(await opsMobilePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await uiScreenshot(opsMobilePage, 'ops-signed-out-mobile');
+  passed('fresh and repeated OPS login visits use the V1 login presentation without a false error');
+}
+async function checkUIPreview(user) {
+  const previous = JSON.parse(await readFile(path.join(directory, 'check-state.json'), 'utf8'));
+  assert.match(previous.lastTransaction ?? '', /^0x[0-9a-f]{64}$/);
+  const screenshots = path.join(directory, 'ui-preview');
+  await mkdir(screenshots, { recursive: true, mode: 0o700 });
+  const { page, context } = user;
+  await page.setViewportSize({ width: 1440, height: 1040 });
+  async function screenshot(name) {
+    await uiScreenshot(page, name);
+  }
+  stage = 'ui-preview-home';
+  await page.goto(runtime.explorerOrigin);
+  await page.getByRole('heading', { name: 'Latest Transactions', exact: true }).waitFor();
+  await page.getByTestId('header-brand').waitFor();
+  await page.getByTestId('block-row').first().waitFor();
+  await screenshot('explorer-home');
+  stage = 'ui-preview-transaction';
+  await page.goto(runtime.explorerOrigin + '/tx/' + previous.lastTransaction);
+  await page.locator('[data-testid=info-row][data-label="Transaction Hash"]').getByText(previous.lastTransaction, { exact: true }).waitFor();
+  await page.getByTestId('tx-status').filter({ hasText: 'Success' }).waitFor();
+  await screenshot('explorer-transaction');
+  await page.getByTestId('tab-logs').click();
+  await page.getByText(abi.getEvent('Changed').topicHash, { exact: true }).first().waitFor();
+  await screenshot('explorer-transaction-logs');
+  stage = 'ui-preview-address';
+  await page.goto(runtime.explorerOrigin + '/address/' + runtime.targetContract);
+  await page.getByTestId('tab-transactions').waitFor();
+  await page.getByTestId('tab-logs').click();
+  await page.getByText(abi.getEvent('Changed').topicHash, { exact: true }).first().waitFor();
+  await screenshot('explorer-address');
+  passed('original Explorer home, transaction and address presentations render real indexed data');
+  stage = 'ui-preview-admin';
+  await page.goto(runtime.opsOrigin + '/admin');
+  // A full document reload may require another real Privado proof. Complete
+  // that ordinary renewal; never inject a bearer or a manufactured browser state.
+  await page.locator('[data-testid=rbac-title], [data-field=requestUri], a[href="/admin/rbac/organizations"]').first().waitFor({ state: 'attached' });
+  if (await page.locator('[data-field=requestUri]').count()) {
+    const requestUri = await page.locator('[data-field=requestUri]').textContent();
+    assert.ok(requestUri.startsWith(runtime.opsOrigin + '/api/v2/auth/privado/requests/'));
+    await screenshot('ops-renewal-proof-request');
+    const job = await json(await context.request.post(runtime.walletOrigin + '/prove', { headers: { Origin: runtime.walletOrigin, 'Content-Type': 'application/json' }, data: { persona: 'admin', requestUri } }), 202);
+    await boundedWait(async () => {
+      const status = await json(await context.request.get(runtime.walletOrigin + '/jobs/' + job.id));
+      assert.notEqual(status.status, 'failed'); return status.status === 'submitted';
+    }, 120, 'Admin real renewal proof');
+    await page.locator('[data-field=holderDid]').waitFor();
+    await screenshot('ops-renewal-holder-confirmation');
+    await page.getByRole('button', { name: 'Use this identity', exact: true }).click();
+  }
+  await page.locator('[data-testid=rbac-title], a[href="/admin/rbac/organizations"]').first().waitFor();
+  if (!await page.getByTestId('rbac-title').count()) await page.getByRole('link', { name: 'Open configuration workspace', exact: true }).click();
+  await page.getByTestId('rbac-title').waitFor();
+  stage = 'ui-preview-import-source';
+  const source = path.resolve(process.env.OPS_DEMO_SOURCE_DIR ?? path.join(root, '.tmp/v2-demo/ui-recovery-source/core'));
+  assert.ok(source.startsWith(path.join(root, '.tmp/v2-demo') + path.sep));
+  await page.getByLabel('Policy source folder', { exact: true }).setInputFiles(source);
+  await page.getByTestId('workspace-source').waitFor();
+  await page.getByRole('cell', { name: 'Demo Bank', exact: true }).waitFor();
+  await screenshot('admin-organizations');
+  await page.getByTestId('tab-groups').click();
+  assert.equal(await page.getByTestId('tab-groups').getAttribute('aria-selected'), 'true');
+  for (const group of ['Admin', 'Deployer', 'Reader']) await page.getByTestId('group-card').getByText(group, { exact: true }).waitFor();
+  await screenshot('admin-groups');
+  assert.equal(await page.getByRole('alert').count(), 0);
+  passed('original Admin shell displays imported Demo Bank organizations and groups without SQL policy CRUD');
+  stage = 'ui-preview-account';
+  await page.getByTestId('account-dropdown-trigger').click();
+  await page.getByRole('menuitem', { name: 'Account', exact: true }).click();
+  await page.getByTestId('account-page').waitFor();
+  for (const card of ['identity', 'session', 'organizations', 'wallets']) await page.getByTestId('account-' + card).waitFor();
+  await page.locator('[data-field=actorId]').waitFor();
+  assert.equal(await page.locator('[data-field=actorId]').textContent(), user.access.actorId);
+  await page.getByTestId('linked-address').filter({ hasText: demoAccount('admin').address.toLowerCase() }).waitFor();
+  assert.equal(await page.getByRole('button', { name: /Forget remembered app|Cancel wallet operation/ }).count(), 0);
+  await screenshot('admin-account');
+  passed('actual V1 account cards display the verified identity and own linked wallet without irrelevant controls');
+  stage = 'ui-preview-client-account-expiry';
+  const expiry = Date.parse(await page.locator('time[data-field=sessionExpiresAt]').getAttribute('datetime'));
+  assert.ok(Number.isFinite(expiry));
+  await page.clock.fastForward(Math.max(1, expiry - await page.evaluate(() => Date.now()) + 1000));
+  await page.getByTestId('login-page').waitFor();
+  assert.equal(await page.getByTestId('account-page').count(), 0);
+  assert.equal(await page.locator('[data-field=actorId]').count(), 0);
+  await screenshot('ops-session-ended');
+  stage = 'ui-preview-client-explorer-expiry';
+  const expiredPage = await context.newPage();
+  await expiredPage.clock.install({ time: new Date() });
+  await expiredPage.setViewportSize({ width: 1440, height: 1040 });
+  await expiredPage.goto(runtime.explorerOrigin);
+  await expiredPage.locator('[data-field=app-actor]').waitFor();
+  const status = await expiredPage.evaluate(async () => (await fetch('/api/auth/status', { cache: 'no-store' })).json());
+  assert.equal(status.authenticated, true);
+  let readsAfterExpiry = 0;
+  expiredPage.on('request', request => { if (new URL(request.url()).pathname.startsWith('/api/v2/explorer/')) readsAfterExpiry++; });
+  await expiredPage.clock.fastForward(Math.max(1, status.expires_at * 1000 - await expiredPage.evaluate(() => Date.now()) + 1000));
+  await expiredPage.locator('[data-testid=explorer-auth-entry][data-auth-state=expired]').waitFor();
+  assert.equal(await expiredPage.locator('[data-field=app-actor]').count(), 0);
+  assert.equal(readsAfterExpiry, 0, 'Client expiry must stop protected read dispatch');
+  await uiScreenshot(expiredPage, 'explorer-session-expired');
+  passed('advancing browser clocks past original signed expiry clears private OPS/Explorer displays');
+  await writeFile(resultsFile, JSON.stringify({ passed: true, cases: count, scope: 'Stage 2 UI preview, not complete product parity', screenshots, transaction: previous.lastTransaction, importedSource: source }, null, 2) + '\n', { mode: 0o600 });
+}
 try {
   await (async () => {
+  if (mode === 'ui-preview') { await checkEntryScreens(); await checkUIPreview(await login('admin', { clock: true, capture: true })); return; }
+  if (mode === 'ui-transaction') {
+    const user = await login('deployer');
+    const saved = JSON.parse(await readFile(path.join(directory, 'check-state.json'), 'utf8'));
+    const responses = [];
+    user.page.on('response', response => { const url = new URL(response.url()); if (url.origin === runtime.explorerOrigin && url.pathname.startsWith('/api/')) responses.push({ path: url.pathname, status: response.status() }); });
+    stage = 'transaction-ui-read';
+    const transfers = user.page.waitForResponse(r => r.url().includes(saved.lastTransaction + '/transfers'), { timeout: 30_000 });
+    await user.page.goto(runtime.explorerOrigin + '/transactions/' + saved.lastTransaction);
+    await user.page.locator('[data-testid=info-row][data-label="Transaction Hash"]').getByText(saved.lastTransaction, { exact: true }).waitFor();
+    await transfers; await sleep(250);
+    const alerts = await user.page.getByRole('alert').allTextContents();
+    await writeFile(resultsFile, JSON.stringify({ passed: alerts.length === 0, alerts, responses }, null, 2) + '\n', { mode: 0o600 });
+    await user.page.screenshot({ path: path.join(directory, 'transaction-ui.png'), fullPage: true });
+    assert.equal(alerts.length, 0); passed('actual transaction page and transfers complete without a read error'); return;
+  }
   if (mode === 'disclosure') {
     for (const persona of ['admin', 'deployer', 'reader']) await login(persona);
     const previous = JSON.parse(await readFile(path.join(directory, 'check-state.json'), 'utf8'));
@@ -286,11 +494,11 @@ try {
   const r = await bff(reader, '/transactions/' + hash); assert.equal(r.status, 200); assert.equal(r.value, null);
   const o = await bff(users.get('outsider'), '/transactions/' + hash); assert.equal(o.status, 403);
   await deployer.page.goto(runtime.explorerOrigin + '/transactions/' + hash);
-  await deployer.page.getByRole('link', { name: hash, exact: true }).first().waitFor();
+  await deployer.page.locator('[data-testid=info-row][data-label="Transaction Hash"]').getByText(hash, { exact: true }).waitFor();
   assert.equal(await deployer.page.getByRole('alert').count(), 0);
   await reader.page.goto(runtime.explorerOrigin + '/transactions/' + hash);
-  await reader.page.getByText('This record is unavailable.', { exact: true }).waitFor();
-  assert.equal(await reader.page.getByRole('link', { name: hash, exact: true }).count(), 0);
+  await reader.page.getByRole('heading', { name: 'Transaction unavailable', exact: true }).waitFor();
+  assert.equal(await reader.page.getByText(hash, { exact: true }).count(), 0);
   passed('actual production Explorer BFF and built UI retain the same restricted views');
   stage = 'explicit-transaction-sharing';
   const shareNonce = Number(BigInt(await nodeRPC(deployer, 'eth_getTransactionCount', [signer.address, 'pending'])));
@@ -319,7 +527,7 @@ try {
   assert.equal((await rpc(reader, 'eth_getLogs', [filter]))[0].topics[1], '0x' + '0'.repeat(64));
   passed('new immutable config + drained OPS restart revokes and restores the reader event grant without replacing identities or SQL policy settings');
   await reader.page.goto(runtime.explorerOrigin + '/transactions/' + sharedHash);
-  await reader.page.getByRole('link', { name: sharedHash, exact: true }).first().waitFor();
+  await reader.page.locator('[data-testid=info-row][data-label="Transaction Hash"]').getByText(sharedHash, { exact: true }).waitFor();
   await writeFile(resultsFile, JSON.stringify({ passed: true, cases: count, transaction: hash, receiptBlock: previous.lastBlock, contract: runtime.targetContract, transactionUrl: runtime.explorerOrigin + '/transactions/' + hash, sharedTransaction: sharedHash, sharedTransactionUrl: runtime.explorerOrigin + '/transactions/' + sharedHash, contractUrl: runtime.explorerOrigin + '/addresses/' + runtime.targetContract + '/contract', disclosureUrl: caseUrl, deployerActorId: deployer.access.actorId, applicationNode: 'real-reth', identityState: 'public-controlled-Privado-fixture', receiptEnvelope: 'V1 retained sender/recipient visibility for event-entitled readers' }, null, 2) + '\n', { mode: 0o600 });
   console.log(`PASS ${count} native V2 real-chain walkthrough cases`);
   console.log('Transaction: ' + runtime.explorerOrigin + '/transactions/' + hash);
@@ -336,6 +544,12 @@ try {
     finally { terminal.close(); }
   }
 } catch (error) {
+  if (stage === 'actual-explorer-reads') {
+    const views = [];
+    for (const [persona, user] of users) { views.push({ persona, path: new URL(user.page.url()).pathname, alerts: (await user.page.getByRole('alert').allTextContents()).map(text => text.slice(0, 512)) }); }
+    await writeFile(path.join(directory, 'failed-explorer-reads.json'), JSON.stringify({ stage, views, failedReads }, null, 2) + '\n', { mode: 0o600 });
+    await users.get('deployer')?.page.screenshot({ path: path.join(directory, 'failed-explorer-reads.png'), fullPage: true });
+  }
   // Never print request headers, token bodies, cookies, DSNs or SDK internals.
   const location = /check\.mjs:(\d+):(\d+)/.exec(error?.stack ?? '');
   console.error('FAIL native V2 walkthrough stage=' + stage + ' category=' + (error?.name ?? 'Error') + (location ? ' line=' + location[1] : ''));

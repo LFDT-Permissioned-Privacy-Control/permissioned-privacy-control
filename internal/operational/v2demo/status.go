@@ -10,7 +10,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	indexerv1 "privacy-proxy/gen/go/chain_indexer/v1"
 	"privacy-proxy/internal/admission"
 	"privacy-proxy/internal/operational/admissionsql"
 )
@@ -79,13 +79,14 @@ func Status(parent context.Context, root string) (StatusResult, error) {
 		Authenticated bool   `json:"authenticated"`
 	}
 	result.ExplorerReady = get(s.ExplorerOrigin()+"/api/auth/status", &app) == 200 && app.Protocol == "ops-v2" && !app.Authenticated
-	if c, e := pgx.Connect(ctx, s.dsn("index", "postgres")); e == nil {
-		var height int64
-		if c.QueryRow(ctx, `SELECT last_indexed_block FROM public.sync_status ORDER BY id LIMIT 1`).Scan(&height) == nil {
+	if conn, client, err := indexerClient(s); err == nil {
+		if state, err := client.GetSyncStatus(ctx, &indexerv1.Empty{}); err == nil && state.LatestIndexedBlock <= 1<<63-1 {
+			height := int64(state.LatestIndexedBlock)
 			result.IndexedBlock = &height
 		}
-		c.Close(ctx)
+		_ = conn.Close()
 	}
+
 	binding := admission.NetworkBinding{Environment: Environment, ChainID: ChainID, GenesisHash: s.GenesisHash, DeploymentID: Deployment}
 	if status, e := admissionsql.CreationObserverStatus(ctx, s.dsn("admission", "postgres"), binding); e == nil {
 		result.ObserverReady = status.Ready && status.LeaseRemainingTTL > 0

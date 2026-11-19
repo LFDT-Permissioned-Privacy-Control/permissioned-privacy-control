@@ -8,11 +8,13 @@ import { privateKeyToAccount } from 'viem/accounts'
 import { WalletProvider } from './wallet'
 import { Controller } from './controller'
 import { FLOW_KEY } from './protocol'
+import { AuthError } from '../auth/protocol'
 
-const mocks = vi.hoisted(() => ({ next: null as unknown, own: vi.fn(), inspect: vi.fn(), complete: vi.fn(), wallet: vi.fn() }))
+const mocks = vi.hoisted(() => ({ next: null as unknown, own: vi.fn(), inspect: vi.fn(), complete: vi.fn(), wallet: vi.fn(), operation: vi.fn() }))
 vi.mock('../auth/multiClient', () => ({ NewMultiClient: () => mocks.next }))
 vi.mock('./protocol', async original => ({ ...await original<typeof import('./protocol')>(), ownSelf: mocks.own, inspectFlow: mocks.inspect, completeFlow: mocks.complete }))
 vi.mock('./walletTransport', () => ({ walletRequest: mocks.wallet }))
+vi.mock('./operationsTransport', async original => ({ ...await original<typeof import('./operationsTransport')>(), operationRequest: mocks.operation }))
 const a: MultiAccess = { accessToken: 'never-persist-this-token', tokenType: 'Bearer', actorId: 'ops:p1:' + 'A'.repeat(43),
   principalKind: 'human', provider: 'privado', sourceProfile: 'bank', browserSessionId: '11111111-1111-1111-1111-111111111111', expiresAt: 0 }
 const b = { ...a, actorId: 'ops:p1:' + 'B'.repeat(42) + 'A', browserSessionId: '22222222-2222-2222-2222-222222222222' }
@@ -40,9 +42,172 @@ beforeEach(() => {
   localStorage.clear(); sessionStorage.clear(); history.replaceState(null, '', '/login')
   mocks.own.mockReset().mockImplementation(async v => self(v)); mocks.inspect.mockReset(); mocks.complete.mockReset()
   mocks.wallet.mockReset()
+  mocks.operation.mockReset()
 })
 afterEach(() => { controller?.stop(); delete (window as unknown as { ethereum?: unknown }).ethereum; vi.useRealTimers(); vi.unstubAllGlobals() })
 describe('document context and flow ownership', () => {
+  it('owns native operation replies by the original verified session and rejects delayed or aborted delivery', async () => {
+    const client = fake(), response = deferred<unknown>(), abort = new AbortController()
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const scope = await controller.captureOperations(abort.signal)
+    expect(scope.self.actorId).toBe(a.actorId); expect(scope.identity.expires).toBe(a.expiresAt)
+    mocks.operation.mockReturnValueOnce(response.promise)
+    const reading = scope.request('/api/v1/disclosure/cases')
+    writeMultiMarker(activeMulti(b)); response.resolve({ cases: ['private old value'] })
+    await expect(reading).rejects.toThrow(); expect(controller.snapshot().self).toBeNull()
+    scope.dispose()
+    controller.stop(); mocks.next = client; writeMultiMarker(activeMulti(a)); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const cancelled = await controller.captureOperations(abort.signal); abort.abort()
+    await expect(cancelled.request('/health/ready')).rejects.toThrow(); expect(mocks.operation).toHaveBeenCalledTimes(1); cancelled.dispose()
+  })
+  it('does not publish a warm operation scope after the original displayed proof expires', async () => {
+    const client = fake(), held = deferred<ReturnType<typeof self>>()
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); mocks.own.mockReturnValueOnce(held.promise)
+    const capturing = controller.captureOperations(new AbortController().signal)
+    await flush(); vi.setSystemTime(new Date((a.expiresAt + 1) * 1000)); held.resolve({ ...self(a), expiresAt: a.expiresAt + 300 })
+    await expect(capturing).rejects.toThrow(); expect(mocks.operation).not.toHaveBeenCalled()
+  })
+  it('downloads the current verified wallet credential only on an explicit action and immediately revokes its URL', async () => {
+    const client = fake(), blobs: Blob[] = [], create = vi.fn((blob: Blob) => { blobs.push(blob); return 'blob:wallet-download' }), revoke = vi.fn()
+    vi.stubGlobal('URL', class extends URL { static createObjectURL = create; static revokeObjectURL = revoke })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      expect(this.download).toBe('ops-wallet-token.jwt'); expect(this.href).toBe('blob:wallet-download')
+    })
+    try {
+      controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+      expect(create).not.toHaveBeenCalled(); await controller.downloadOwnWalletToken()
+      expect(client.needAccess).toHaveBeenCalledTimes(1); expect(mocks.own).toHaveBeenCalledTimes(2)
+      expect(blobs[0].type).toBe('text/plain'); expect(blobs[0].size).toBe(a.accessToken.length)
+      expect(click).toHaveBeenCalledTimes(1); expect(revoke).toHaveBeenCalledWith('blob:wallet-download')
+      expect(JSON.stringify(controller.snapshot())).not.toContain(a.accessToken)
+      expect(JSON.stringify([...Object.values(localStorage), ...Object.values(sessionStorage)])).not.toContain(a.accessToken)
+    } finally { click.mockRestore() }
+  })
+  it.each(['changed', 'expired', 'wrong-profile'] as const)('does not download after a held wallet token check is %s', async kind => {
+    const client = fake(), held = deferred<ReturnType<typeof self>>(), create = vi.fn()
+    vi.stubGlobal('URL', class extends URL { static createObjectURL = create; static revokeObjectURL = vi.fn() })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    mocks.own.mockReturnValueOnce(held.promise)
+    const downloading = controller.downloadOwnWalletToken(); await flush()
+    if (kind === 'changed') writeMultiMarker(activeMulti(b))
+    if (kind === 'expired') vi.setSystemTime(new Date((a.expiresAt + 1) * 1000))
+    held.resolve(kind === 'wrong-profile' ? { ...self(a), sourceProfile: 'another-profile' } : self(a)); await downloading
+    expect(create).not.toHaveBeenCalled(); expect(controller.snapshot().busy).toBe(false)
+  })
+  it('forwards an explicit demo expected holder through the existing Privado helper only', async () => {
+    const client = fake(); client.restore.mockRejectedValue(new AuthError('login_required'))
+    const expected = 'did:iden3:polygon:mumbai:x3333333333'
+    client.startPrivadoLogin.mockResolvedValue({ requestId: '44444444-4444-4444-4444-444444444444', requestUri: location.origin + '/api/v2/auth/privado/requests/44444444-4444-4444-4444-444444444444', expiresAt: a.expiresAt, sourceProfile: 'bank', expectedActorId: null })
+    mocks.next = client
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    await controller.login('bank', 'privado', expected)
+    expect(client.startPrivadoLogin).toHaveBeenCalledWith('bank', expected)
+    expect(client.confirmPrivado).not.toHaveBeenCalled()
+  })
+  it.each(['absent', 'empty'] as const)('presents an %s prior identity as ordinary signed out on bootstrap denial', async prior => {
+    if (prior === 'empty') writeMultiMarker(deniedMulti())
+    const client = fake(); client.restore.mockRejectedValue(new AuthError('login_required'))
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    expect(controller.snapshot().phase).toBe('anonymous'); expect(controller.snapshot().self).toBeNull(); expect(controller.snapshot().error).toBeNull()
+  })
+  it.each(['actor', 'pending', 'malformed', 'outage'] as const)('retains explicit feedback for %s bootstrap', async prior => {
+    if (prior === 'actor') writeMultiMarker(activeMulti(a))
+    if (prior === 'pending') writeMultiMarker(activeMulti(a, { kind: 'privado', mode: 'renew', sourceProfile: 'bank', requestId: '44444444-4444-4444-4444-444444444444', expiresAt: a.expiresAt, expectedActorId: a.actorId, expectedSessionId: a.browserSessionId }))
+    if (prior === 'malformed') localStorage.setItem('ops-v2.browser-context', '{}')
+    const client = fake(); client.restore.mockRejectedValue(new AuthError(prior === 'outage' ? 'authentication_unavailable' : 'login_required'))
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    expect(controller.snapshot().self).toBeNull(); expect(controller.snapshot().error).not.toBeNull()
+  })
+  it('does not hide an application or callback authentication failure as normal signed out', async () => {
+    history.replaceState(null, '', '/auth/sso?flow=33333333-3333-3333-3333-333333333333')
+    mocks.inspect.mockResolvedValue({ id: '33333333-3333-3333-3333-333333333333', expiresAt: a.expiresAt, displayName: 'Explorer' })
+    const client = fake(); client.restore.mockRejectedValue(new AuthError('login_required'))
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    expect(controller.snapshot().error).toBe('login_required'); controller.stop(); sessionStorage.clear()
+    history.replaceState(null, '', '/auth/azure/callback')
+    controller = new Controller(fake() as unknown as MultiBrowserAuthClient)
+    await controller.start(Promise.resolve({ error: new AuthError('login_required') }))
+    expect(controller.snapshot().error).toBe('login_required')
+  })
+  it('clears an application flow that expires during awaited Continue work without waiting for a timer', async () => {
+    const id = '33333333-3333-3333-3333-333333333333'
+    history.replaceState(null, '', '/auth/sso?flow=' + id)
+    const flow = { id, expiresAt: a.expiresAt - 100, displayName: 'Explorer' }
+    mocks.inspect.mockResolvedValue(flow)
+    const client = fake(), held = deferred<void>()
+    client.withAccess.mockImplementation(async (_pair, fn) => { await held.promise; return { status: 'completed', value: await fn(a.accessToken) } })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const finishing = controller.continue(); await flush(); vi.setSystemTime(new Date((flow.expiresAt + 1) * 1000)); held.resolve(); await finishing
+    expect(controller.snapshot().phase).toBe('failed'); expect(controller.snapshot().self).toBeNull(); expect(controller.snapshot().flow).toBeNull()
+    expect(controller.snapshot().busy).toBe(false); expect(controller.snapshot().error).toBe('flow_expired')
+    expect(mocks.complete).not.toHaveBeenCalled(); expect(sessionStorage.getItem(FLOW_KEY)).toBeNull()
+  })
+  it.each(['/admin', '/admin/account', '/admin/rbac', '/admin/rbac/organizations', '/admin/rbac/groups?org=11111111-1111-1111-1111-111111111111'])(
+    'restores on the exact native Admin entry %s without resuming a saved application', async path => {
+      history.replaceState(null, '', path)
+      sessionStorage.setItem(FLOW_KEY, JSON.stringify({ version: 1, phase: 'pending', id: '33333333-3333-3333-3333-333333333333', expiresAt: a.expiresAt }))
+      const client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient)
+      await controller.start()
+      expect(controller.snapshot().phase).toBe('selected'); expect(controller.snapshot().flow).toBeNull()
+      expect(client.restore).toHaveBeenCalledTimes(1); expect(sessionStorage.getItem(FLOW_KEY)).toBeNull()
+      expect(mocks.inspect).not.toHaveBeenCalled(); expect(mocks.complete).not.toHaveBeenCalled()
+    })
+  it.each(['/admin/rbac?%6frg=11111111-1111-1111-1111-111111111111', '/admin/rbac?', '/admin/rbac?return=/admin', '/admin/users', '/admin/account#private'])(
+    'denies malformed Admin entry %s before restoring any account', async path => {
+      history.replaceState(null, '', path)
+      const client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+      expect(controller.snapshot().phase).toBe('failed'); expect(controller.snapshot().self).toBeNull()
+      expect(client.restore).not.toHaveBeenCalled(); expect(mocks.own).not.toHaveBeenCalled()
+    })
+  it('retains selected context across exact Admin Back/Forward and retires wallet work', async () => {
+    const client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const retire = vi.spyOn(controller.wallet, 'cancel'), scope = controller.scopeRevision
+    history.pushState(null, '', '/admin/rbac/groups?org=11111111-1111-1111-1111-111111111111')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(controller.snapshot().self?.actorId).toBe(a.actorId); expect(controller.scopeRevision).toBe(scope)
+    expect(retire).toHaveBeenCalledTimes(1); expect(client.restore).toHaveBeenCalledTimes(1)
+  })
+  it.each(['expired', 'changed', 'malformed'] as const)('does not retain private self on %s navigation', async kind => {
+    const client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    if (kind === 'expired') vi.setSystemTime(new Date((a.expiresAt + 1) * 1000))
+    if (kind === 'changed') writeMultiMarker(activeMulti(b))
+    history.pushState(null, '', kind === 'malformed' ? '/admin/rbac?unknown=1' : '/admin/account')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(controller.snapshot().phase).toBe('failed'); expect(controller.snapshot().self).toBeNull()
+  })
+  it('does not retain an in-progress proof or SSO flow as ordinary Admin navigation', async () => {
+    const client = fake(); mocks.next = client
+    client.startPrivadoLogin.mockResolvedValue({ requestId: '44444444-4444-4444-4444-444444444444',
+      requestUri: location.origin + '/api/v2/auth/privado/requests/44444444-4444-4444-4444-444444444444', expiresAt: a.expiresAt })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await controller.login('bank', 'privado')
+    history.pushState(null, '', '/admin/account'); window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(controller.snapshot().pending).toBeNull(); expect(controller.snapshot().self).toBeNull(); controller.stop()
+    history.replaceState(null, '', '/auth/sso?flow=33333333-3333-3333-3333-333333333333')
+    mocks.inspect.mockResolvedValue({ id: '33333333-3333-3333-3333-333333333333', expiresAt: a.expiresAt, displayName: 'Explorer' })
+    controller = new Controller(fake() as unknown as MultiBrowserAuthClient); await controller.start()
+    history.pushState(null, '', '/admin/account'); window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(controller.snapshot().self).toBeNull(); expect(controller.snapshot().phase).toBe('failed')
+    expect(mocks.complete).not.toHaveBeenCalled()
+  })
+  it('fences local source reads against a shared marker change before its storage event arrives', async () => {
+    const client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const revision = controller.scopeRevision
+    expect(controller.ownsScope(revision, a.actorId)).toBe(true)
+    writeMultiMarker(activeMulti(b))
+    expect(controller.ownsScope(revision, a.actorId)).toBe(false)
+    expect(controller.snapshot().self).toBeNull(); expect(controller.snapshot().phase).toBe('context-changed')
+  })
+  it('retires the confidential UI scope on expiry even when the same account renews immediately afterwards', async () => {
+    const client = fake(), renewal = deferred<{ status: 'access'; access: MultiAccess }>()
+    client.needAccess.mockReturnValue(renewal.promise)
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const revision = controller.scopeRevision
+    vi.setSystemTime(new Date((a.expiresAt + 1) * 1000)); await vi.advanceTimersByTimeAsync(1000)
+    expect(controller.snapshot().self).toBeNull(); expect(controller.scopeRevision).toBeGreaterThan(revision)
+    renewal.resolve({ status: 'access', access: { ...a, expiresAt: Math.floor(Date.now() / 1000) + 300 } }); await flush()
+    expect(controller.snapshot().self?.actorId).toBe(a.actorId)
+    expect(controller.ownsScope(revision, a.actorId)).toBe(false)
+  })
   it('restores once and requires explicit acceptance of an external account change', async () => {
     const first = fake(); mocks.next = first; controller = new Controller(first as unknown as MultiBrowserAuthClient)
     await controller.start(); await controller.start(); expect(first.restore).toHaveBeenCalledTimes(1)
@@ -174,6 +339,27 @@ function installWallet(sign?: (message: string) => Promise<string>) {
 async function openWallet() { await controller.wallet.connect(); await controller.wallet.select(walletAddress) }
 
 describe('central immutable wallet operation and renewal boundary', () => {
+  it('cancels an initial wallet-accounts prompt before its delayed result can create a challenge', async () => {
+    const request = installWallet(), held = deferred<string[]>(), original = request.getMockImplementation()!
+    request.mockImplementation(async args => args.method === 'eth_requestAccounts' ? held.promise : original(args))
+    const client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const connecting = controller.wallet.connect(); await flush()
+    expect(request).toHaveBeenCalledWith({ method: 'eth_requestAccounts' })
+    expect(controller.wallet.snapshot()).toMatchObject({ task: 'linking', stage: 'idle', busy: true, submitting: false })
+    controller.wallet.cancel(); held.resolve([walletAddress]); await connecting
+    expect(controller.wallet.snapshot()).toMatchObject({ task: null, stage: 'idle', busy: false, accounts: [] })
+    expect(mocks.wallet).not.toHaveBeenCalled()
+  })
+  it('marks the write as submitted before awaiting verify and clears that display flag on owned result', async () => {
+    installWallet()
+    const client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await openWallet(); await controller.wallet.sign()
+    const original = mocks.wallet.getMockImplementation()!, held = deferred<unknown>()
+    mocks.wallet.mockImplementation(async (...args) => args[1] === '/eth/link/verify' ? held.promise : original(...args))
+    const writing = controller.wallet.confirm(); await flush()
+    expect(controller.wallet.snapshot()).toMatchObject({ task: 'linking', submitting: true, busy: true })
+    held.resolve({ address: walletAddress, status: 'linked' }); await writing
+    expect(controller.wallet.snapshot()).toMatchObject({ task: null, submitting: false, busy: false, loaded: true })
+  })
   it('warms up exactly once with actual Self, then keeps one token across challenge/confirm/own', async () => {
     installWallet()
     const access = { ...a, accessToken: 'new-original-token' }, client = fake()

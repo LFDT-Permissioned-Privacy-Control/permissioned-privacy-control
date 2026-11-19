@@ -1,0 +1,98 @@
+# Native V2 backend topology. Populate the selected configuration volumes and
+# restricted environment files offline before starting these normal runtimes.
+# Public Explorer/Admin ingress attaches to front only. The local host-network
+# walkthrough is a separate public-test fixture, not this privacy boundary.
+services:
+  ops:
+    image: ${OPS_V2_IMAGE:?select the native V2 image}
+    env_file: ${OPS_V2_ENV_FILE:?select the restricted OPS environment file}
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ['exec ops-v2-serve --config /demo/ops/server.json --sha256 "$$(cat /demo/ops/server.sha256)"']
+    environment:
+      SSL_CERT_FILE: /demo/ca.crt
+    volumes: ["ops-config:/demo:ro", "ops-spool:/var/lib/ops/activity"]
+    ports: ["${OPS_V2_HOST_BIND:-127.0.0.1}:${OPS_V2_HOST_PORT:-8443}:${OPS_V2_TLS_PORT:-8443}"]
+    networks: [front, chain, operational-state, indexer-api]
+    stop_grace_period: 30s
+  explorer-api:
+    image: ${OPS_EXPLORER_IMAGE:?select the privacy-tagged native Explorer image}
+    env_file: ${OPS_EXPLORER_ENV_FILE:?select the restricted Explorer environment file}
+    environment:
+      EXPLORER_AUTH_PROTOCOL: ops-v2
+      SSL_CERT_FILE: /demo/ca.crt
+      API_LISTEN_HOST: 0.0.0.0
+    volumes: ["explorer-config:/demo:ro"]
+    networks: [front, explorer-state]
+  observer:
+    image: ${OPS_V2_IMAGE:?select the native V2 image}
+    env_file: ${OPS_OBSERVER_ENV_FILE:?select the restricted observer environment file}
+    entrypoint: ["/bin/sh", "/demo/observer/run.sh"]
+    volumes: ["observer-config:/demo:ro"]
+    networks: [chain, operational-state]
+    stop_grace_period: 30s
+  indexer:
+    image: ${OPS_INDEXER_IMAGE:?select the Indexer V1/V2 image}
+    env_file: ${OPS_INDEXER_ENV_FILE:?select the Indexer-only environment file}
+    environment:
+      # Bind only the API-network interface. Binding :50051 would expose the
+      # same unauthenticated API to peers on chain or indexer-state as well.
+      GRPC_LISTEN_ADDR: indexer-api:${OPS_INDEXER_GRPC_PORT:-50051}
+    networks:
+      indexer-api:
+        aliases: [indexer-api]
+      indexer-state: {}
+      chain: {}
+    depends_on:
+      indexer-postgres: {condition: service_healthy}
+  indexer-postgres:
+    image: postgres:16-alpine
+    env_file: ${OPS_INDEXER_POSTGRES_ENV_FILE:?select the Indexer-only owner environment file}
+    command: ["postgres", "-p", "${OPS_INDEXER_POSTGRES_PORT:-5432}"]
+    volumes: ["indexer-data:/var/lib/postgresql/data"]
+    networks: [indexer-state]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-p", "${OPS_INDEXER_POSTGRES_PORT:-5432}"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  operational-postgres:
+    image: postgres:16-alpine
+    env_file: ${OPS_OPERATIONAL_POSTGRES_ENV_FILE:?select the OPS owner environment file}
+    command: ["postgres", "-p", "${OPS_OPERATIONAL_POSTGRES_PORT:-5432}"]
+    volumes: ["operational-data:/var/lib/postgresql/data"]
+    networks: [operational-state]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-p", "${OPS_OPERATIONAL_POSTGRES_PORT:-5432}"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  explorer-postgres:
+    image: postgres:16-alpine
+    env_file: ${OPS_EXPLORER_POSTGRES_ENV_FILE:?select the Explorer owner environment file}
+    command: ["postgres", "-p", "${OPS_EXPLORER_POSTGRES_PORT:-5432}"]
+    volumes: ["explorer-data:/var/lib/postgresql/data"]
+    networks: [explorer-state]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-p", "${OPS_EXPLORER_POSTGRES_PORT:-5432}"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+networks:
+  front: {}
+  chain: &isolated
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+      com.docker.network.bridge.gateway_mode_ipv6: isolated
+  operational-state: *isolated
+  explorer-state: *isolated
+  indexer-api: *isolated
+  indexer-state: *isolated
+volumes:
+  ops-config: {}
+  explorer-config: {}
+  observer-config: {}
+  ops-spool: {}
+  indexer-data: {}
+  operational-data: {}
+  explorer-data: {}

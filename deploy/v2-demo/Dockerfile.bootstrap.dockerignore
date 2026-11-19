@@ -7,6 +7,8 @@
 !internal/**
 !proto/
 !proto/**
+!gen/
+!gen/**
 !tools/
 !tools/v2-test-wallet/
 !tools/v2-test-wallet/*.mjs

@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: '1.26.9'
+  GO_VERSION: '1.26.11'
   NODE_VERSION: '24.22.1'
   GOMAXPROCS: '2'
   OPS_TEST_BROWSER_CHANNEL: chromium
@@ -45,6 +45,14 @@ jobs:
           docker pull postgres:16-alpine
       - name: Provision and verify pinned public circuits
         run: node scripts/v2-test-prerequisites.mjs
+      - name: Fetch exact sources and build the indexer-owned gRPC fixture
+        run: |
+          node scripts/v2-ci-dependencies.mjs
+          INDEXER_SOURCE=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(".tmp/v2-ci-dependencies/selection.json")).dependencies.indexer.directory)')
+          mkdir -p .tmp/v2-indexer-fixture
+          go -C "$INDEXER_SOURCE" build -o "$PWD/.tmp/v2-indexer-fixture/server" ./internal/contractfixture
+          echo "OPS_TEST_INDEXER_SOURCE=$INDEXER_SOURCE" >> "$GITHUB_ENV"
+          echo "OPS_TEST_INDEXED_READ_SERVER=$PWD/.tmp/v2-indexer-fixture/server" >> "$GITHUB_ENV"
       - name: Test required-case enforcement and demo authentication boundary
         run: |
           node --test scripts/test-v2-runner.test.mjs scripts/v2-demo/ownership.test.mjs scripts/v2-demo/export-config.test.mjs tools/v2-demo-wallet/*.test.mjs
@@ -53,6 +61,8 @@ jobs:
         run: CGO_ENABLED=0 go test -p 1 -tags production,prover_disabled ./internal/disclosurepolicy ./internal/operational/disclosuresql -run '^(TestProtectedUntilCanonicalUTC|TestCaseTimestampRoundTripUTC)$' -count=1 -timeout=90s
       - name: Test native commands and architecture
         run: node scripts/test-v2.mjs core
+      - name: Test actual gRPC Explorer privacy, disclosure and Recorder paths
+        run: node scripts/test-v2.mjs indexer
       - name: Build native delivery
         run: make build-v2
       - name: Test native browser units

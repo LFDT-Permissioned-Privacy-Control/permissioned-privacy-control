@@ -54,6 +54,16 @@ func combination(r p.Resource, v View) bool {
 	return false
 }
 func DecodeQuery(raw []byte) (Query, error) {
+	return decodeQuery(raw, false)
+}
+
+// DecodeRetainedQuery admits the retained profile's opaque address selector
+// for a transaction list. Normalization and case authorization still follow.
+func DecodeRetainedQuery(raw []byte) (Query, error) {
+	return decodeQuery(raw, true)
+}
+
+func decodeQuery(raw []byte, retained bool) (Query, error) {
 	var q Query
 	if len(raw) == 0 || len(raw) > MaxRequestBytes {
 		return q, ErrInvalid
@@ -107,7 +117,8 @@ func DecodeQuery(raw []byte) (Query, error) {
 	if q.View != List && (q.Limit != nil || q.Cursor != nil) {
 		return Query{}, ErrInvalid
 	}
-	if q.View != Resolve && q.View != Detail && q.AddressID != nil || !(q.Resource == p.Transactions && q.View == Detail) && q.TransactionHash != nil {
+	addressList := retained && q.Resource == p.Transactions && q.View == List && q.AddressID != nil
+	if q.View != Resolve && q.View != Detail && !addressList && q.AddressID != nil || !(q.Resource == p.Transactions && q.View == Detail) && q.TransactionHash != nil {
 		return Query{}, ErrInvalid
 	}
 	// Required/value checks for detail locator/hash deliberately follow the service's Full gate.

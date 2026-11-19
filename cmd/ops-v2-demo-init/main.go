@@ -24,6 +24,7 @@ func run(args []string) int {
 	root := fs.String("root", "", "owned isolated demo root")
 	wallet := fs.String("wallet-output", "", "exact demo wallet metadata directory")
 	databases := fs.Bool("prepare-databases", false, "create isolated empty databases/roles before actual indexer migrations")
+	privateNetwork := fs.Bool("private-network", false, "init only: separate Docker-network isolation fixture")
 	transaction := fs.String("transaction", "", "actual mined transaction hash")
 	block := fs.String("receipt-block", "", "actual decimal receipt block")
 	contract := fs.String("contract", "", "actual demo application address")
@@ -36,6 +37,8 @@ func run(args []string) int {
 		return 2
 	}
 	allowed := map[string]map[string]bool{"init": {"root": true}, "repair-tls": {"root": true}, "configure": {"root": true, "wallet-output": true, "prepare-databases": true}, "revision": {"root": true, "wallet-output": true, "reader-grant": true}, "explorer-state": {"root": true}, "status": {"root": true}, "wait": {"root": true}, "check": {"root": true, "transaction": true, "receipt-block": true, "contract": true}}
+	allowed["init"]["private-network"] = true
+	allowed["check-indexer-boundary"] = map[string]bool{"root": true}
 	allowed["export"] = map[string]bool{"root": true}
 	allowed["check-identity"] = map[string]bool{"root": true, "wallet-output": true, "identity-file": true}
 	allowed["apply-identity"] = allowed["check-identity"]
@@ -52,6 +55,8 @@ func run(args []string) int {
 	defer cancel()
 	var e error
 	switch command {
+	case "check-indexer-boundary":
+		e = v2demo.CheckIndexerBoundary(ctx, *root)
 	case "export":
 		files, err := v2demo.ExportSources(*root)
 		if err != nil {
@@ -66,7 +71,11 @@ func run(args []string) int {
 	case "apply-identity":
 		e = v2demo.ApplyIdentity(ctx, *root, *wallet, *identityFile)
 	case "init":
-		e = v2demo.Init(*root)
+		if *privateNetwork {
+			e = v2demo.InitPrivateNetwork(*root)
+		} else {
+			e = v2demo.Init(*root)
+		}
 	case "repair-tls":
 		e = v2demo.RepairTLS(*root)
 	case "configure":

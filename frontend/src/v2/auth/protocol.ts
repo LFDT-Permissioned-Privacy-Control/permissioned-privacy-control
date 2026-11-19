@@ -77,8 +77,9 @@ export function providers(value: unknown): Providers {
 
 // JSON.parse alone accepts duplicate members. Bound depth/bytes and reject them
 // before interpreting this small closed protocol, including escaped spellings.
-export function closedJSON(raw: string, max: number): unknown {
+export function closedJSON(raw: string, max: number, depthLimit = 8): unknown {
   if (new TextEncoder().encode(raw).length > max) return invalid()
+  if (!Number.isInteger(depthLimit) || depthLimit < 1 || depthLimit > 64) return invalid()
   let at = 0
   const space = () => { while (/[\x20\t\r\n]/.test(raw[at] ?? '') && at < raw.length) at++ }
   function string(): string {
@@ -93,7 +94,7 @@ export function closedJSON(raw: string, max: number): unknown {
     return invalid()
   }
   function value(depth: number): void {
-    if (depth > 8) return invalid()
+    if (depth > depthLimit) return invalid()
     space()
     if (raw[at] === '"') { string(); return }
     if (raw[at] === '{' || raw[at] === '[') {

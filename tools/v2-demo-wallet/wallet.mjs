@@ -17,7 +17,10 @@ export async function startWallet() {
   child.stderr.resume()
   const fail = () => { rejectReady(Error('demo wallet failed to start')); pending?.reject(Error('demo wallet unavailable')); pending = null; stop() }
   child.on('error', fail)
-  child.on('exit', fail)
+  child.on('exit', (code, signal) => {
+    if (!closed) console.error('Demo wallet worker stopped: ' + (signal ?? ('exit ' + Number(code))) + '.')
+    fail()
+  })
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
   void (async () => {
     for await (const line of lines) {
@@ -46,7 +49,7 @@ export async function startWallet() {
     if (closed || pending) throw Error('demo wallet busy')
     return new Promise((resolve, reject) => {
       const id = randomUUID()
-      const timer = setTimeout(() => { reject(Error('demo proof generation timed out')); stop() }, 90_000)
+      const timer = setTimeout(() => { console.error('Demo wallet proof exceeded its original 90-second generation limit.'); reject(Error('demo proof generation timed out')); stop() }, 90_000)
       pending = { id, resolve: x => { clearTimeout(timer); resolve(x) }, reject: e => { clearTimeout(timer); reject(e) } }
       child.stdin.write(JSON.stringify({ id, holder: persona, request }) + '\n', error => { if (error) fail() })
     })

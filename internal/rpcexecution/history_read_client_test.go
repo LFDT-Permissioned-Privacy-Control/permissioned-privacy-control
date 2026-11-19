@@ -29,6 +29,7 @@ type readHistoryFixture struct {
 	reorg           bool
 	logs            []any
 	block           func() any
+	traces          map[string]any
 }
 
 func newReadHistoryFixture(t *testing.T, txs ...*types.Transaction) *readHistoryFixture {
@@ -155,6 +156,8 @@ func newReadHistoryFixture(t *testing.T, txs ...*types.Transaction) *readHistory
 						break
 					}
 				}
+			case "debug_traceTransaction":
+				value = f.traces[selector]
 			case "eth_getLogs":
 				value = f.logs
 			default:

@@ -47,3 +47,20 @@ as a substitute for Git review. The file workflow needs no published SDK.
 The browser editor is optional: serve `tools/ops-admin-ui` locally as described
 in the authoring workflow. Its syntax hints are preliminary; downloaded edits
 must be saved to the intended source folder and checked with the Go tool.
+
+The native Admin source workspace also imports complete Core/broker source
+folders and exports `ops-source-package.json`. Follow
+[the workspace handoff](../../../docs/implementation/v2-policy-workspace.md):
+`policy unpack --file PACKAGE --output NEW_DIR` restores the exact source bytes;
+prepare and check each root with its matching profile. New organizations need
+explicit compliance entries, matching identity catalogs and organization/group
+references across roots, plus the documented node and operational-store setup.
+Keep broker-only empty registry/execution scaffolding in its supported profile.
+An exported source package does not configure or restart an OPS instance.
+
+For an execution scenario exported by the native workspace, use `policy simulate`
+with the exact bundle/digest/environment/chain/profile and `--scenario FILE`.
+The result is hypothetical and binds operator-supplied facts; it does not prove
+a person's current memberships, establish live node ownership or approve a
+policy. Keep candidate simulation, current runtime authorization and Git review
+separate in the explanation to the operator.

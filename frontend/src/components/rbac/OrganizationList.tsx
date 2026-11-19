@@ -2,16 +2,6 @@ import { useEffect, useState } from 'react';
 import type { Organization } from '@/types/rbac';
 import { useOrgContext } from './RBACManager';
 import OrganizationForm from './OrganizationForm';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
 import {
   Dialog,
   DialogContent,
@@ -20,9 +10,9 @@ import {
 } from '@/components/ui/dialog';
 import { rbacApi } from '@/api/rbac';
 import Pagination from '@/components/ui/Pagination';
+import { OrganizationTable } from './OrganizationTable';
 import {
   Building2,
-  Pencil,
   Loader2,
 } from 'lucide-react';
 import { useAdmin } from '@/components/auth/RequireAdmin';
@@ -75,13 +65,7 @@ export default function OrganizationList() {
     await refreshOrgs(); // Update the dropdown
   };
 
-  const formatDate = (dateStr: string) => {
-    return new Date(dateStr).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    });
-  };
+
 
   return (
     <div className="space-y-4">
@@ -108,63 +92,10 @@ export default function OrganizationList() {
           <p className="text-neutral-500">No organizations found</p>
         </div>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Slug</TableHead>
-              <TableHead>Created</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {organizations.map((org, index) => (
-              <TableRow
-                key={org.id}
-                className="animate-fade-in cursor-pointer"
-                style={{ animationDelay: `${index * 30}ms` }}
-                onClick={() => setSelectedOrg(org)}
-              >
-                <TableCell>
-                  <div className="flex items-center gap-2">
-                    <Building2 className="w-4 h-4 text-primary" />
-                    <span className="font-medium">{org.name}</span>
-                  </div>
-                </TableCell>
-                <TableCell>
-                  <Badge variant="outline" className="font-mono text-xs">
-                    {org.slug}
-                  </Badge>
-                </TableCell>
-                <TableCell className="text-neutral-500 text-sm">
-                  {formatDate(org.created_at)}
-                </TableCell>
-                <TableCell>
-                  <div className="flex items-center justify-end gap-2">
-                    {/* Edit visible only on rows where the caller is a full
-                        is_org_admin of THIS org. Read-only-admin rows and any
-                        other-org leakage rows (shouldn't appear after the
-                        listOrganizations membership filter) get no edit
-                        button. Delete is super-admin-only — no UI button. */}
-                    {adminOrgIds.includes(org.id) && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={e => {
-                          e.stopPropagation();
-                          setEditing(org);
-                        }}
-                        title="Edit organization"
-                      >
-                        <Pencil className="w-4 h-4" />
-                      </Button>
-                    )}
-                  </div>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+        <OrganizationTable organizations={organizations.map(org => ({ id: org.id, name: org.name, slug: org.slug, createdAt: org.created_at }))}
+          onSelect={id => { const org = organizations.find(value => value.id === id); if (org) setSelectedOrg(org); }}
+          canEdit={id => adminOrgIds.includes(id)}
+          onEdit={id => { const org = organizations.find(value => value.id === id); if (org) setEditing(org); }} />
       )}
 
       <Pagination total={total} limit={PAGE_SIZE} offset={offset} onPageChange={(newOffset) => loadPage(newOffset)} />

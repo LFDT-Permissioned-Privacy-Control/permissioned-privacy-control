@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"math"
 	"slices"
 	"strconv"
 	"sync"
@@ -16,9 +17,10 @@ import (
 	d "privacy-proxy/internal/disclosuredata"
 	p "privacy-proxy/internal/disclosurepolicy"
 	"privacy-proxy/internal/disclosurewallet"
+	x "privacy-proxy/internal/explorerquery"
+	h "privacy-proxy/internal/historynamespace"
 	"privacy-proxy/internal/operational/activitysource"
 	"privacy-proxy/internal/operational/admissionsql"
-	x "privacy-proxy/internal/operational/explorerindex"
 )
 
 type snapshot struct {
@@ -34,7 +36,7 @@ type snapshot struct {
 	wallet             *disclosurewallet.Snapshot
 	finance            *admissionsql.FinanceSnapshot
 	activity           *activitysource.RetainedPartSnapshot
-	index              *x.ProtectedRead
+	index              x.ProtectedRead
 	node               *nodeRead
 	namespace          *namespaceRead
 	read, closed       bool
@@ -178,21 +180,18 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 		return err
 	}
 	read.node = node
-	upper, err := node.upper(ctx, original)
-	if err != nil {
-		return err
+	var upper h.CanonicalBlock
+	if original != nil {
+		upper, err = node.upper(ctx, original)
+		if err != nil {
+			return err
+		}
 	}
 	metadata := s.index.Metadata()
 	if metadata != s.indexMetadata {
 		return d.ErrConflict
 	}
-	read.basis = d.RetainedBasis{Version: 1, NetworkKey: s.plan.NetworkKey, NodeSource: d.Digest(config.Source.Digest().String()), IndexSource: digestArray(metadata.Binding.SourceReference), Schema: digestArray(metadata.Binding.SchemaDigest), ConfiguredEpoch: metadata.Binding.ConfiguredEpoch, Upper: d.RetainedAnchor{Number: d.Count(strconv.FormatUint(upper.Number, 10)), Hash: upper.Hash.String(), ParentHash: upper.ParentHash.String(), Timestamp: d.Count(strconv.FormatUint(upper.Timestamp, 10))}}
-	if !read.basis.Valid() {
-		return d.ErrUnavailable
-	}
-	if original != nil && !read.basis.Equal(*original) {
-		return d.ErrConflict
-	}
+
 	targets, actors, err := targetWallets(read.scope, read.facts.Wallets)
 	if err != nil {
 		return err
@@ -207,11 +206,33 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 		targets = [][20]byte{address}
 	}
 	qscope := read.scope.Query.Scope()
-	index, err := s.index.BeginProtected(ctx, x.ProtectedSelection{Expected: s.indexMetadata, Targets: targets, FromTime: uint64(qscope.DataTime.Start), ThroughTime: uint64(qscope.DataTime.End), FromNumber: s.namespaceMetadata.Era.EntryNumber, ThroughNumber: upper.Number})
+	selection := x.ProtectedSelection{Expected: s.indexMetadata, Targets: targets, FromTime: uint64(qscope.DataTime.Start), ThroughTime: uint64(qscope.DataTime.End), FromNumber: s.namespaceMetadata.Era.EntryNumber, ThroughNumber: math.MaxInt64 - 1}
+	if original != nil {
+		selection.ThroughNumber = upper.Number
+		selection.ReadAt = &x.Anchor{Number: upper.Number, Hash: upper.Hash.String()}
+		selection.DatasetEpoch = original.DatasetEpoch
+		floor := original.RunFloor
+		selection.RunFloor = &floor
+	}
+	index, err := s.index.BeginProtected(ctx, selection)
 	if err != nil {
 		return indexError(err)
 	}
 	read.index = index
+	snap := index.Snapshot()
+	if original == nil {
+		upper, err = node.indexedUpper(ctx, snap.ReadAt)
+		if err != nil {
+			return err
+		}
+	}
+	read.basis = d.RetainedBasis{Version: 2, NetworkKey: s.plan.NetworkKey, NodeSource: d.Digest(config.Source.Digest().String()), APIVersion: metadata.Binding.APIVersion, DatasetEpoch: snap.DatasetEpoch, RunFloor: snap.RunFloor, Upper: d.RetainedAnchor{Number: d.Count(strconv.FormatUint(upper.Number, 10)), Hash: upper.Hash.String(), ParentHash: upper.ParentHash.String(), Timestamp: d.Count(strconv.FormatUint(upper.Timestamp, 10))}}
+	if !read.basis.Valid() {
+		return d.ErrUnavailable
+	}
+	if original != nil && !read.basis.Equal(*original) {
+		return d.ErrConflict
+	}
 	destinations, err := index.ReadDestinations(ctx)
 	if err != nil {
 		return indexError(err)
@@ -229,7 +250,7 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 	if expected != nil && expected.ID != ref {
 		return d.ErrConflict
 	}
-	epoch := digestParts("ops.disclosure.retained-history-epoch/v1", read.basis.NetworkKey, read.basis.NodeSource, read.basis.IndexSource, read.basis.Schema, read.basis.ConfiguredEpoch)
+	epoch := digestParts("ops.disclosure.retained-history-epoch/v1", read.basis.NetworkKey, read.basis.NodeSource, read.basis.APIVersion, read.basis.DatasetEpoch, read.basis.RunFloor)
 	descriptor := d.SourceDescriptor{Version: 2, Kind: d.HistorySource, Reference: ref, NetworkKey: s.plan.NetworkKey, Epoch: epoch, Generation: namespace.rangePass.Generation(), PlanDigest: s.plan.PlanDigest, FormatDigest: digestParts("ops.disclosure.retained-history-format/v1"), CoverageDigest: d.Digest(namespace.rangePass.AuthorityDigest().String()), AsOf: s.now(), Population: d.RetainedHistoryPopulation}
 	read.descriptors = append(read.descriptors, descriptor)
 	if read.scope.Query.Resource() == p.Transactions {
@@ -260,6 +281,12 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 				return d.ErrNotFound
 			}
 			witnessRows = append(witnessRows, witnesses[0].Row)
+		}
+		if read.scope.Query.View() == d.List {
+			// Whole-block qualification and all delivery checks spend the same
+			// finite node budget. Reserve the selected address's extra witness
+			// and return a real continuation before exhausting that budget.
+			query.Limit = min(query.Limit, uint16(2-len(witnessRows)))
 		}
 		rows, end, err := index.ReadTransactions(ctx, predicate, query)
 		if err != nil {

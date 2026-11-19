@@ -18,8 +18,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	c "privacy-proxy/internal/creationfacts"
 	d "privacy-proxy/internal/disclosuredata"
+	x "privacy-proxy/internal/explorerquery"
 	h "privacy-proxy/internal/historynamespace"
-	x "privacy-proxy/internal/operational/explorerindex"
 	r "privacy-proxy/internal/rpcexecution"
 )
 
@@ -151,7 +151,7 @@ func (n *nodeRead) remember(header h.CanonicalBlock) error {
 	return nil
 }
 
-// upper is called before the first indexed SQL read. A continuation chooses
+// upper establishes the trusted node ceiling. A continuation chooses
 // its authenticated original NUMBER and verifies the actual canonical header.
 func (n *nodeRead) upper(ctx context.Context, basis *d.RetainedBasis) (h.CanonicalBlock, error) {
 	query := r.HeaderQuery{NumberOrTag: "latest"}
@@ -172,6 +172,33 @@ func (n *nodeRead) upper(ctx context.Context, basis *d.RetainedBasis) (h.Canonic
 	}
 	header := canonicalHeader(values[0])
 	if basis != nil && (basis.Upper.Hash != header.Hash.String() || basis.Upper.ParentHash != header.ParentHash.String() || basis.Upper.Timestamp != d.Count(strconv.FormatUint(header.Timestamp, 10)) || basis.Upper.Transactions != nil) {
+		return h.CanonicalBlock{}, d.ErrConflict
+	}
+	if err = n.remember(header); err != nil {
+		return h.CanonicalBlock{}, err
+	}
+	return header, nil
+}
+
+// indexedUpper qualifies the producer's committed anchor against the selected
+// live node. Indexer lag narrows the first read; it never changes a continuation
+// or supplies trusted parent/timestamp facts on its own.
+func (n *nodeRead) indexedUpper(ctx context.Context, anchor x.Anchor) (h.CanonicalBlock, error) {
+	// Share network/sync checks across the ceiling and selected header. The
+	// unused ceiling supplies no basis facts and need not be retained/rechecked.
+	batch, err := n.headers.Read(ctx, []r.HeaderQuery{{NumberOrTag: "latest"}, {NumberOrTag: fmt.Sprintf("0x%x", anchor.Number)}})
+	if err != nil {
+		return h.CanonicalBlock{}, n.sourceError(err)
+	}
+	values := batch.Headers()
+	if !batch.Synced() || batch.Source() != n.config.Source || len(values) != 2 {
+		return h.CanonicalBlock{}, d.ErrUnavailable
+	}
+	ceiling, header := canonicalHeader(values[0]), canonicalHeader(values[1])
+	if header.Number > ceiling.Number {
+		return h.CanonicalBlock{}, d.ErrUnavailable
+	}
+	if header.Number != anchor.Number || header.Hash.String() != anchor.Hash {
 		return h.CanonicalBlock{}, d.ErrConflict
 	}
 	if err = n.remember(header); err != nil {
@@ -306,7 +333,7 @@ func (n *nodeRead) qualify(ctx context.Context, rows []x.ProtectedRow, full bool
 			row := rows[index]
 			tx, ok := block.Transaction(row.Position.Index)
 			receipt, receiptOK := block.Receipt(row.Position.Index)
-			if !ok || !receiptOK || [32]byte(tx.Hash()) != row.Position.Hash || [32]byte(header.Hash) != row.BlockHash || header.Number != row.Position.Number || header.Timestamp != row.Timestamp || [20]byte(tx.From()) != row.From {
+			if !ok || !receiptOK || [32]byte(tx.Hash()) != row.Position.Hash || header.Number != row.Position.Number || header.Timestamp != row.Timestamp || [20]byte(tx.From()) != row.From {
 				return nil, d.ErrUnavailable
 			}
 			to, hasTo := tx.To()

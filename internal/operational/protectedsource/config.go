@@ -19,14 +19,13 @@ import (
 	"privacy-proxy/internal/operational/activitysource"
 	"privacy-proxy/internal/operational/activitysql"
 	"privacy-proxy/internal/operational/admissionsql"
-	"privacy-proxy/internal/operational/explorerindex"
 	"privacy-proxy/internal/policybundle"
 )
 
 type Config struct {
 	Snapshot      *policybundle.CatalogSnapshot
 	Network       d.NetworkBinding
-	Index         *explorerindex.Reader
+	Index         explorerquery.ProtectedSource
 	ExpectedIndex explorerquery.Metadata
 	Namespace     *admissionsql.NamespaceReader
 	Nodes         map[string]NodeConfig
@@ -41,7 +40,7 @@ type Config struct {
 // migration, policy projection, user directory or persistent cursor registry.
 type Sources struct {
 	plan              d.SourcePlan
-	index             *explorerindex.Reader
+	index             explorerquery.ProtectedSource
 	indexMetadata     explorerquery.Metadata
 	namespace         *admissionsql.NamespaceReader
 	namespaceMetadata admissionsql.NamespaceMetadata
@@ -77,7 +76,7 @@ func digestParts(domain string, parts ...any) d.Digest {
 func digestArray(value [32]byte) d.Digest { return d.Digest("sha256:" + hex.EncodeToString(value[:])) }
 
 func New(ctx context.Context, c Config) (*Sources, error) {
-	if ctx == nil || c.Snapshot == nil || c.Index == nil || c.Namespace == nil || c.Activity == nil || c.Clock == nil || c.Index.Metadata() != c.ExpectedIndex || !c.ExpectedIndex.Identity.Valid() || !c.ExpectedIndex.Binding.Valid() || c.ExpectedIndex.Binding.Network != c.Network {
+	if ctx == nil || c.Snapshot == nil || nilValue(c.Index) || c.Namespace == nil || c.Activity == nil || c.Clock == nil || c.Index.Metadata() != c.ExpectedIndex || !c.ExpectedIndex.Identity.Valid() || !c.ExpectedIndex.Binding.Valid() || c.ExpectedIndex.Binding.Network != c.Network {
 		return nil, d.ErrInvalid
 	}
 	network, err := c.Network.Key()

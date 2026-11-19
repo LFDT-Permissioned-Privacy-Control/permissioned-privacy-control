@@ -72,7 +72,8 @@ not identity, permissions or disclosure consent.
 The noncredential local marker contains at most 32 clients, at most 2 KiB per
 entry and 64 KiB overall. Each choice keeps its original 24-hour expiry; automatic
 handoffs never extend it. Account, profile, digest or family changes require
-explicit Continue again. **Forget remembered app choices** removes these markers.
+explicit Continue again. The sign-in and account screens expose no app-choice
+reset setting; each flow already names its configured destination.
 An ambiguous completion is retired without retry. Privado never uses automatic
 handoff: a new document still requires genuine fresh proof and explicit holder
 selection. No JWT or cached proof is reconstructed from a cookie.

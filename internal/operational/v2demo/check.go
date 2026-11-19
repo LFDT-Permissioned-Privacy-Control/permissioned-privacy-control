@@ -13,6 +13,9 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	indexerv1 "privacy-proxy/gen/go/chain_indexer/v1"
 	"privacy-proxy/internal/admission"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/operational/admissionsql"
@@ -74,11 +77,12 @@ func Check(parent context.Context, root, transaction, contract string, block uin
 	if e != nil {
 		return e
 	}
-	index, e := pgx.Connect(ctx, s.dsn("index", "postgres"))
+	conn, index, e := indexerClient(s)
 	if e != nil {
 		return e
 	}
-	defer index.Close(ctx)
+	defer conn.Close()
+
 	facts, e := pgx.Connect(ctx, s.dsn("admission", "postgres"))
 	if e != nil {
 		return e
@@ -88,15 +92,24 @@ func Check(parent context.Context, root, transaction, contract string, block uin
 	key, _ := binding.Key()
 	target := common.HexToAddress(contract)
 	for ctx.Err() == nil {
-		var indexed bool
-		var synced int64
-		e = index.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.transactions t JOIN public.blocks b ON t.block_number=b.number WHERE lower(t.hash)=$1 AND t.block_number=$2 AND lower(b.hash)=$3)`, transaction, int64(block), receipt.BlockHash.Hex()).Scan(&indexed)
-		if e != nil {
-			return e
+		indexed := false
+		tx, err := index.GetTransaction(ctx, &indexerv1.GetTransactionRequest{Hash: transaction})
+		if err != nil && status.Code(err) != codes.NotFound {
+			return fmt.Errorf("indexer transaction API unavailable")
 		}
-		if e = index.QueryRow(ctx, `SELECT last_indexed_block FROM public.sync_status ORDER BY id LIMIT 1`).Scan(&synced); e != nil {
-			return e
+		if err == nil && tx != nil && tx.Hash == transaction && tx.BlockNumber == block {
+			indexedBlock, err := index.GetBlock(ctx, &indexerv1.GetBlockRequest{Selector: &indexerv1.GetBlockRequest_Number{Number: block}})
+			if err != nil && status.Code(err) != codes.NotFound {
+				return fmt.Errorf("indexer block API unavailable")
+			}
+			indexed = err == nil && indexedBlock != nil && strings.EqualFold(indexedBlock.Hash, receipt.BlockHash.Hex())
 		}
+		sync, err := index.GetSyncStatus(ctx, &indexerv1.Empty{})
+		if err != nil || sync == nil {
+			return fmt.Errorf("indexer sync API unavailable")
+		}
+		synced := sync.LatestIndexedBlock
+
 		status, e := admissionsql.CreationObserverStatus(ctx, s.dsn("admission", "postgres"), binding)
 		if e != nil {
 			return e
@@ -108,7 +121,7 @@ func Check(parent context.Context, root, transaction, contract string, block uin
 		if e != nil && e != pgx.ErrNoRows {
 			return e
 		}
-		if indexed && synced >= int64(block) && status.Ready && status.CaptureReady && status.Head.Number >= block && status.LeaseRemainingTTL > 0 && e == nil {
+		if indexed && synced >= block && status.Ready && status.CaptureReady && status.Head.Number >= block && status.LeaseRemainingTTL > 0 && e == nil {
 			original, e := node.HeaderByNumber(ctx, big.NewInt(birthNumber))
 			if e != nil || !bytes.Equal(original.Hash().Bytes(), birthHash) {
 				return ErrInvalid

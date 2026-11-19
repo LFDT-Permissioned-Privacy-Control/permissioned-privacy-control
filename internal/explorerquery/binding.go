@@ -1,5 +1,4 @@
-// Package explorerquery defines the bounded indexed-read purpose boundary.
-// A configured binding is not an attestation of database chain contents.
+// Package explorerquery defines bounded indexed chain facts; they grant no permissions.
 package explorerquery
 
 import (
@@ -7,20 +6,19 @@ import (
 	"privacy-proxy/internal/networkidentity"
 )
 
+const APIVersion = "chain_indexer.v2"
+const Mode = "chain_indexer.v2/typed-reads"
+
 type Binding struct {
-	Network         networkidentity.Binding
-	SourceReference [32]byte
-	SchemaDigest    [32]byte
-	ConfiguredEpoch string
+	Network    networkidentity.Binding
+	APIVersion string
 }
 
 func (b Binding) Valid() bool {
 	_, err := b.Network.Key()
-	id, epochErr := uuid.Parse(b.ConfiguredEpoch)
-	return err == nil && epochErr == nil && id != uuid.Nil && id.String() == b.ConfiguredEpoch && b.SourceReference != ([32]byte{}) && b.SchemaDigest != ([32]byte{})
+	return err == nil && b.APIVersion == APIVersion
 }
 
-// ReaderIdentity distinguishes concrete borrowed instances, not permissions.
 type ReaderIdentity struct{ marker byte }
 
 func NewReaderIdentity() *ReaderIdentity { return &ReaderIdentity{1} }
@@ -30,4 +28,9 @@ type Metadata struct {
 	Binding  Binding
 	Mode     string
 	Identity *ReaderIdentity
+}
+
+func ValidDatasetEpoch(s string) bool {
+	id, e := uuid.Parse(s)
+	return e == nil && id != uuid.Nil && id.String() == s
 }

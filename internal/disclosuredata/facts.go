@@ -215,7 +215,11 @@ func validateFactsForHistory(scope ReadScope, ds []SourceDescriptor, f Facts, af
 				return c, ErrUnavailable
 			}
 		} else {
-			if len(positions) != int(q.limit) || f.Next == nil {
+			filled := len(positions) == int(q.limit)
+			if historyKind == RetainedHistoryPopulation && q.resource == p.Transactions {
+				filled = len(positions) > 0 && len(positions) <= int(q.limit)
+			}
+			if !filled || f.Next == nil {
 				return c, ErrUnavailable
 			}
 			n, e := ComparePositions(*f.Next, positions[len(positions)-1])

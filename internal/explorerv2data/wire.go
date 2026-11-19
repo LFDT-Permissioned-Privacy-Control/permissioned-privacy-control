@@ -27,9 +27,13 @@ type PageInfo struct {
 	Total       *Quantity `json:"total,omitempty"`
 	Population  string    `json:"population"`
 	Coverage    string    `json:"coverage,omitempty"`
+	Consistency string    `json:"consistency,omitempty"`
+	EndedAt     string    `json:"endedAt,omitempty"`
+	HistoryFrom *Quantity `json:"historyFromBlock,omitempty"`
 }
 
 type Block struct {
+	Source           string    `json:"source,omitempty"`
 	Number           Quantity  `json:"number"`
 	Hash             Hash      `json:"hash"`
 	ParentHash       Hash      `json:"parentHash"`
@@ -49,6 +53,7 @@ type Block struct {
 }
 
 type Transaction struct {
+	Source               string           `json:"source,omitempty"`
 	Hash                 Hash             `json:"hash"`
 	BlockNumber          *Quantity        `json:"blockNumber"`
 	BlockTimestamp       *Quantity        `json:"blockTimestamp,omitempty"`

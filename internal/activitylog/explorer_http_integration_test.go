@@ -15,12 +15,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"privacy-proxy/internal/activitymethoddata"
 	a "privacy-proxy/internal/admission"
 	f "privacy-proxy/internal/disclosuretest"
 	"privacy-proxy/internal/explorerquery"
 	"privacy-proxy/internal/historyfacts"
+	"privacy-proxy/internal/indexertest"
 	"privacy-proxy/internal/networkidentity"
 	"privacy-proxy/internal/operational/admissionsql"
 	"privacy-proxy/internal/operational/explorerindex"
@@ -38,6 +38,13 @@ import (
 )
 
 func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
+	testExplorerActualHTTP(t, false)
+}
+func TestExplorerActualPrunedNodePointsPrivacyAndFinalReorgHTTP(t *testing.T) {
+	testExplorerActualHTTP(t, true)
+}
+func testExplorerActualHTTP(t *testing.T, nodeFallback bool) {
+	indexertest.Require(t)
 	d := rawPostgres(t)
 	ctx := t.Context()
 	for _, role := range []string{"history_observer", "history_facts"} {
@@ -153,7 +160,11 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	index, indexOwner, binding := actualExplorerIndex(t, d.owner, d.ownerDSN, network)
+	var fallbackNode *f.HistoryNode
+	if nodeFallback {
+		fallbackNode = node
+	}
+	index, indexOwner, binding := actualExplorerIndex(t, d.owner, d.ownerDSN, network, fallbackNode)
 	if _, err = indexOwner.Exec(ctx, `UPDATE blocks SET hash=$1,gas_used=$2,transaction_count=$3 WHERE number=1`, strings.ToLower(node.Hash().Hex()), 21000*len(txs), len(txs)); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +197,11 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 	methods = append(methods, activitymethoddata.ExplorerLabels()...)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var sealCount atomic.Int32
+	var reorgAtSeal atomic.Bool
 	recorder := rpcRecorder(t, activity, clock, func(uint64) error {
+		if reorgAtSeal.Swap(false) {
+			node.Reorg(true)
+		}
 		if sealCount.Add(1) == 1 {
 			close(entered)
 			<-release
@@ -249,14 +264,36 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 			Next        string
 			HasMore     *bool
 			ScanLimited bool
+			EndedAt     string
 		}
 	}
 	if json.Unmarshal(first.body, &page) != nil || len(page.Items) != 1 || page.Items[0].Hash != strings.ToLower(listed.Hash().Hex()) || page.Items[0].Value == nil || *page.Items[0].Value != "7" || page.Page.Next == "" {
 		t.Fatal("lossless genuine listed row and continuation", string(first.body))
 	}
+	if page.Page.EndedAt != "ENDED_AT_UNSPECIFIED" {
+		t.Fatal("continued visible page incorrectly reports a terminal raw-index boundary", page.Page.EndedAt)
+	}
 	next := <-get("/api/v2/explorer/transactions?limit=1&cursor=" + url.QueryEscape(page.Page.Next))
 	if next.status != 200 || !bytes.Contains(next.body, []byte(strings.ToLower(txs[0].Hash().Hex()))) {
 		t.Fatal("actual current wallet row next", next.status, string(next.body))
+	}
+	for _, search := range []struct{ query, kind, value string }{{strings.ToLower(node.Hash().Hex()), "block", "1"}, {strings.ToLower(listed.Hash().Hex()), "transaction", strings.ToLower(listed.Hash().Hex())}} {
+		response := <-get("/api/v2/explorer/search/suggestions?q=" + url.QueryEscape(search.query))
+		var suggestions struct {
+			Items []struct{ Type, Value string }
+		}
+		if response.status != 200 || json.Unmarshal(response.body, &suggestions) != nil {
+			t.Fatal("actual node-qualified search failed", response.status, string(response.body))
+		}
+		found := false
+		for _, item := range suggestions.Items {
+			if item.Type == search.kind && item.Value == search.value {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("actual node-qualified search omitted existing result", search.kind, string(response.body))
+		}
 	}
 	filtered := <-get("/api/v2/explorer/transactions?category=coin_transfer&limit=10")
 	if filtered.status != 200 || !bytes.Contains(filtered.body, []byte(strings.ToLower(coin.Hash().Hex()))) || bytes.Contains(filtered.body, []byte(strings.ToLower(listed.Hash().Hex()))) {
@@ -400,9 +437,55 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 		t.Fatal("reorg published protected indexed row", string(changed.body))
 	}
 	node.Reorg(false)
+	if nodeFallback {
+		head := node.AdvanceEmptyHead2()
+		if _, err = indexOwner.Exec(ctx, `INSERT INTO blocks(number,hash,parent_hash,timestamp,gas_used,gas_limit,transaction_count)VALUES(2,$1,$2,$3,0,30000000,0)`, strings.ToLower(head.Hash().Hex()), strings.ToLower(node.Hash().Hex()), head.Time); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = indexOwner.Exec(ctx, `UPDATE sync_status SET last_indexed_block=2;UPDATE prune_state SET pruned_through=1`); err != nil {
+			t.Fatal(err)
+		}
+		// A physically retained index row below the watermark is unavailable on
+		// the actual node. It must look identical to hidden and wholly absent rows.
+		ghost := common.Hash{0x99}.Hex()
+		absent := common.Hash{0x98}.Hex()
+		if _, err = indexOwner.Exec(ctx, `INSERT INTO transactions(hash,block_number,tx_index,from_address,to_address,value,gas_used,gas_price,status,input_data)VALUES($1,1,9,$2,$3,7,21000,1,1,'')`, ghost, strings.ToLower(ownerAddress.Hex()), strings.ToLower(target.Hex())); err != nil {
+			t.Fatal(err)
+		}
+		for _, point := range []struct{ path, hash string }{{"/api/v2/explorer/transactions/" + strings.ToLower(coin.Hash().Hex()), strings.ToLower(coin.Hash().Hex())}, {"/api/v2/explorer/blocks/1", strings.ToLower(node.Hash().Hex())}, {"/api/v2/explorer/blocks/hash/" + strings.ToLower(node.Hash().Hex()), strings.ToLower(node.Hash().Hex())}} {
+			response := <-get(point.path)
+			var object struct{ Hash, Source string }
+			if response.status != 200 || json.Unmarshal(response.body, &object) != nil || object.Hash != point.hash || object.Source != "NODE" {
+				t.Fatal("authorized actual NODE point failed", point.path, response.status, string(response.body))
+			}
+		}
+		var opaque []byte
+		for _, hash := range []string{strings.ToLower(hidden.Hash().Hex()), ghost, absent} {
+			response := <-get("/api/v2/explorer/transactions/" + hash)
+			if response.status != 200 || !bytes.Equal(bytes.TrimSpace(response.body), []byte("null")) || bytes.Contains(response.body, []byte("source")) {
+				t.Fatal("hidden/pruned-unavailable/absent point leaked existence or provenance", response.status, string(response.body))
+			}
+			if opaque == nil {
+				opaque = bytes.Clone(response.body)
+			} else if !bytes.Equal(opaque, response.body) {
+				t.Fatal("opaque point responses differ")
+			}
+		}
+		callsBefore := node.Calls()["eth_getTransactionByHash"]
+		historical := <-get("/api/v2/explorer/blocks/1/transactions")
+		if historical.status != 410 || !bytes.Contains(historical.body, []byte("history_pruned")) || node.Calls()["eth_getTransactionByHash"] != callsBefore {
+			t.Fatal("historical range fell back to node or hid pruning", historical.status, string(historical.body))
+		}
+		reorgAtSeal.Store(true)
+		rejected := <-get("/api/v2/explorer/transactions/" + strings.ToLower(coin.Hash().Hex()))
+		node.Reorg(false)
+		if rejected.status == 200 || bytes.Contains(rejected.body, []byte(strings.ToLower(coin.Hash().Hex()))) || bytes.Contains(rejected.body, []byte(`"source":"NODE"`)) {
+			t.Fatal("NODE point escaped final canonical reorg fence", rejected.status, string(rejected.body))
+		}
+	}
 }
 
-func actualExplorerIndex(t *testing.T, root *pgx.Conn, ownerDSN string, network networkidentity.Binding) (*explorerindex.Reader, *pgx.Conn, explorerquery.Binding) {
+func actualExplorerIndex(t *testing.T, root *pgx.Conn, ownerDSN string, network networkidentity.Binding, node *f.HistoryNode) (*explorerindex.Reader, *pgx.Conn, explorerquery.Binding) {
 	t.Helper()
 	ctx := t.Context()
 	if _, err := root.Exec(ctx, `CREATE DATABASE explorer_http_test`); err != nil {
@@ -415,59 +498,20 @@ func actualExplorerIndex(t *testing.T, root *pgx.Conn, ownerDSN string, network 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = owner.Close(context.Background()) })
-	schema, err := os.ReadFile("../operational/explorerindex/testdata/existing-indexer.sql")
-	if err != nil {
+	indexertest.Schema(t, owner, network)
+	if _, err = owner.Exec(ctx, `CREATE ROLE explorer_http_reader LOGIN NOINHERIT PASSWORD 'public-test-only'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = owner.Exec(ctx, string(schema)); err != nil {
-		t.Fatal(err)
-	}
-	for _, sql := range []string{`CREATE ROLE explorer_http_reader LOGIN NOINHERIT PASSWORD 'public-test-only'`, `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, `GRANT USAGE ON SCHEMA public TO explorer_http_reader`} {
-		if _, err = owner.Exec(ctx, sql); err != nil {
-			t.Fatal(err)
-		}
-	}
-	raw, err := os.ReadFile("../operational/explorerindex/schema-columns.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var catalog struct {
-		Tables []struct {
-			Name    string
-			Columns []struct {
-				Name   string
-				Select bool
-			}
-		}
-	}
-	if json.Unmarshal(raw, &catalog) != nil {
-		t.Fatal("fixture catalog")
-	}
-	for _, table := range catalog.Tables {
-		columns := []string{}
-		for _, c := range table.Columns {
-			if c.Select {
-				columns = append(columns, pgx.Identifier{c.Name}.Sanitize())
-			}
-		}
-		if _, err = owner.Exec(ctx, "GRANT SELECT("+strings.Join(columns, ",")+") ON public."+pgx.Identifier{table.Name}.Sanitize()+" TO explorer_http_reader"); err != nil {
-			t.Fatal(err)
-		}
-	}
+	indexertest.Grant(t, owner, "explorer_http_reader")
 	if _, err = owner.Exec(ctx, `INSERT INTO blocks(number,hash,parent_hash,timestamp,gas_used,gas_limit,transaction_count)VALUES(1,$1,$2,$3,42000,30000000,2)`, network.GenesisHash, network.GenesisHash, f.Now); err != nil {
 		t.Fatal(err)
 	}
 	// Caller replaces the selected actual upper with its node hash before querying.
 	u.User = url.UserPassword("explorer_http_reader", "public-test-only")
-	reference, err := explorerindex.ConnectionReference(u.String())
-	if err != nil {
-		t.Fatal(err)
+	if node != nil {
+		reader, binding := indexertest.OpenWithNode(t, u.String(), network, node.Source("").URL, node.CertificatePEM())
+		return reader, owner, binding
 	}
-	binding := explorerquery.Binding{Network: network, SourceReference: reference, SchemaDigest: explorerindex.SchemaDigest(), ConfiguredEpoch: uuid.NewString()}
-	reader, err := explorerindex.OpenReader(ctx, u.String(), binding, explorerindex.DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(reader.Close)
+	reader, binding := indexertest.Open(t, u.String(), network)
 	return reader, owner, binding
 }

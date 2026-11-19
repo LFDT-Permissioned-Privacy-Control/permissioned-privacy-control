@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-const required = ['TestNativeV2ServingExcludesLegacyServerAndEVMPolicyBackend', 'TestPinnedArtifactRejectsMixedMissingAndUnexpectedFiles']
+const required = ['TestNativeV2ServingExcludesLegacyServerAndEVMPolicyBackend', 'TestNativeIndexerConsumerUsesOnlyServiceAPI', 'TestPinnedArtifactRejectsMixedMissingAndUnexpectedFiles']
 for (const [name, events, want] of [
   ['zero executed cases is a failure', [], 1],
   ['skipped required case is a failure', required.map(Test => ({ Action: 'skip', Test })), 1],

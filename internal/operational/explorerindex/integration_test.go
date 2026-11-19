@@ -1,8 +1,9 @@
-package explorerindex
+package explorerindex_test
 
 import (
 	"context"
-	_ "embed"
+	"errors"
+	"fmt"
 	"net/url"
 	"os/exec"
 	"strings"
@@ -11,347 +12,281 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"privacy-proxy/internal/explorerquery"
+	"privacy-proxy/internal/admissionsharedata"
+	q "privacy-proxy/internal/explorerquery"
+	"privacy-proxy/internal/indexertest"
 	"privacy-proxy/internal/networkidentity"
+	x "privacy-proxy/internal/operational/explorerindex"
 )
 
-//go:embed testdata/existing-indexer.sql
-var existingIndexerSQL string
-
-//go:embed testdata/indexer-009-up.sql
-var currentCounterSQL string
-
-type pgFixture struct {
-	owner   *pgx.Conn
-	dsn     string
-	binding explorerquery.Binding
-}
-
-func testBinding(reference [32]byte) explorerquery.Binding {
-	return explorerquery.Binding{Network: networkidentity.Binding{Environment: "test", ChainID: "1", GenesisHash: "0x" + strings.Repeat("0", 63) + "1", DeploymentID: "index-reader-test"}, SourceReference: reference, SchemaDigest: SchemaDigest(), ConfiguredEpoch: uuid.NewString()}
-}
-
-func indexFixture(t *testing.T) *pgFixture { return indexFixtureVersion(t, true) }
-func indexFixtureVersion(t *testing.T, current bool) *pgFixture {
+func actualReader(t *testing.T) (*x.Reader, *pgx.Conn, networkidentity.Binding) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 40*time.Second)
+	indexertest.Require(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
-	if output, err := exec.CommandContext(ctx, "docker", "image", "inspect", "postgres:16-alpine").CombinedOutput(); err != nil {
-		t.Fatal("owned cached PostgreSQL required", err, string(output))
+	name := "ops-typed-indexer-test-" + uuid.NewString()[:8]
+	out, e := exec.CommandContext(ctx, "docker", "run", "--rm", "--pull", "never", "--detach", "--publish", "127.0.0.1::5432", "--env", "POSTGRES_PASSWORD=typed-test-only", "--env", "POSTGRES_DB=typed", "--name", name, "postgres:16-alpine").CombinedOutput()
+	if e != nil {
+		t.Fatalf("ownedtestpostgres: %v %s", e, out)
 	}
-	output, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--detach", "--pull=never", "--memory=256m", "--cpus=1", "--publish", "127.0.0.1::5432", "--env", "POSTGRES_PASSWORD=index-public-test-only", "--env", "POSTGRES_DB=index_test", "--name", "ops-v2-index-test-"+uuid.NewString()[:8], "postgres:16-alpine").CombinedOutput()
-	if err != nil {
-		t.Fatal(err, string(output))
-	}
-	id := strings.TrimSpace(string(output))
 	t.Cleanup(func() {
-		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
-		defer done()
-		if output, err := exec.CommandContext(cleanup, "docker", "rm", "--force", id).CombinedOutput(); err != nil {
-			t.Error("owned PostgreSQL cleanup", err, string(output))
-		}
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		_ = exec.CommandContext(cleanup, "docker", "rm", "--force", name).Run()
 	})
-	output, err = exec.CommandContext(ctx, "docker", "port", id, "5432/tcp").Output()
+	out, e = exec.CommandContext(ctx, "docker", "port", name, "5432/tcp").Output()
+	if e != nil {
+		t.Fatal(e)
+	}
+	dsn := "postgres://postgres:typed-test-only@" + strings.TrimSpace(string(out)) + "/typed?sslmode=disable"
+	config, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := url.Parse("postgres://postgres:index-public-test-only@" + strings.TrimSpace(string(output)) + "/index_test?sslmode=disable")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := &pgFixture{}
+	config.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	var owner *pgx.Conn
 	for ctx.Err() == nil {
-		f.owner, err = pgx.Connect(ctx, u.String())
-		if err == nil {
+		owner, e = pgx.ConnectConfig(ctx, config.Copy())
+		if e == nil {
 			break
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 	}
-	if err != nil {
-		t.Fatal(err)
+	if e != nil {
+		t.Fatal("postgresnotready")
 	}
-	t.Cleanup(func() {
-		cleanup, done := context.WithTimeout(context.Background(), time.Second)
-		defer done()
-		_ = f.owner.Close(cleanup)
-	})
-	f.exec(t, existingIndexerSQL)
-	if current {
-		f.exec(t, currentCounterSQL)
+	t.Cleanup(func() { _ = owner.Close(context.Background()) })
+	network := networkidentity.Binding{Environment: "test", ChainID: "31337", GenesisHash: fmt.Sprintf("0x%064x", 100), DeploymentID: "typed-client-tests"}
+	indexertest.Schema(t, owner, network)
+	_, e = owner.Exec(t.Context(), `INSERT INTO blocks(number,hash,parent_hash,timestamp,gas_used,gas_limit,transaction_count) VALUES(0,$1,$2,1,0,30000000,0),(1,$3,$1,5,0,30000000,0),(2,$4,$3,10,63000,30000000,3);UPDATE sync_status SET last_indexed_block=2`, network.GenesisHash, fmt.Sprintf("0x%064x", 0), fmt.Sprintf("0x%064x", 101), fmt.Sprintf("0x%064x", 102))
+	if e != nil {
+		t.Fatal(e)
 	}
-	f.exec(t, "CREATE ROLE index_reader LOGIN NOINHERIT PASSWORD 'index-public-test-only'")
-	f.exec(t, "REVOKE CREATE ON SCHEMA public FROM PUBLIC")
-	f.exec(t, "GRANT USAGE ON SCHEMA public TO index_reader")
-	definition, err := compiledDefinition()
-	if err != nil {
-		t.Fatal(err)
+	_, e = owner.Exec(t.Context(), `INSERT INTO transactions(hash,block_number,block_timestamp,tx_index,from_address,to_address,value,gas_used,gas_price,status,input_data) SELECT '0x'||lpad(to_hex(1000+n),64,'0'),2,10,n,'0x1111111111111111111111111111111111111111','0x2222222222222222222222222222222222222222',1,21000,1,1,'0x' FROM generate_series(0,2)n`)
+	if e != nil {
+		t.Fatal(e)
 	}
-	for _, table := range definition.Tables {
-		var columns []string
-		for _, column := range table.Columns {
-			if column.Select {
-				columns = append(columns, pgx.Identifier{column.Name}.Sanitize())
-			}
-		}
-		f.exec(t, "GRANT SELECT ("+strings.Join(columns, ",")+") ON public."+pgx.Identifier{table.Name}.Sanitize()+" TO index_reader")
-	}
-	u.User = url.UserPassword("index_reader", "index-public-test-only")
-	f.dsn = u.String()
-	reference, err := ConnectionReference(f.dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.binding = testBinding(reference)
-	return f
+	// The producer owns this SQL credential; OPS receives its gRPC endpoint only.
+	parsed, _ := url.Parse(dsn)
+	parsed.User = url.UserPassword("postgres", "typed-test-only")
+	reader, _ := indexertest.Open(t, parsed.String(), network)
+	return reader, owner, network
 }
-
-func (f *pgFixture) exec(t *testing.T, sql string, args ...any) {
+func typedQuery(t *testing.T, f q.Family) q.Query {
 	t.Helper()
-	if _, err := f.owner.Exec(t.Context(), sql, args...); err != nil {
-		t.Fatal("owned test setup", err)
+	fence, e := admissionsharedata.NewFence(t.Context(), 5*time.Second)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return q.Query{Family: f, RawLimit: 1, Fence: fence}
+}
+func TestActualTokenSearchTraversesMatchingPages(t *testing.T) {
+	reader, owner, _ := actualReader(t)
+	_, e := owner.Exec(t.Context(), `INSERT INTO tokens(address,symbol,name,decimals,token_type,block_number) VALUES
+	('0x1111111111111111111111111111111111111111','ALP','Alpha Bank',18,'ERC20',2),
+	('0x2222222222222222222222222222222222222222','BET','Beta Bank',18,'ERC20',2),
+	('0x3333333333333333333333333333333333333333','AL2','Alpha Credit',18,'ERC20',2)`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	query := typedQuery(t, q.Tokens)
+	query.Search = "Alpha"
+	var got []string
+	for page := 0; page < 5; page++ {
+		pass, e := reader.ReadCohort(t.Context(), query)
+		if e != nil {
+			t.Fatal(e)
+		}
+		data := pass.Data()
+		pass.Close()
+		for _, row := range data.Rows {
+			got = append(got, row.Position.Hash)
+		}
+		if data.Next == nil {
+			break
+		}
+		query.Upper, query.After, query.DatasetEpoch = data.Upper, data.Next, data.DatasetEpoch
+		floor := data.RunFloor
+		query.RunFloor = &floor
+	}
+	if len(got) != 2 || got[0] == got[1] || strings.Contains(strings.Join(got, ","), "2222222222222222222222222222222222222222") {
+		t.Fatalf("search skipped/repeated/unfiltered token: %v", got)
 	}
 }
-
-func (f *pgFixture) open(t *testing.T) *Reader {
-	t.Helper()
-	r, err := OpenReader(t.Context(), f.dsn, f.binding, DefaultLimits())
-	if err != nil {
-		f.diagnoseCold(t)
-		t.Fatal("expected fixed read-only reader", err)
-	}
-	t.Cleanup(r.Close)
-	return r
+func TestActualTypedV2ClientSnapshotKeysCurrentnessProtectedAndChildFallback(t *testing.T) {
+	reader, owner, _ := actualReader(t)
+	t.Run("pinned_snapshot_unique_keys_and_epoch_delivery", func(t *testing.T) {
+		query := typedQuery(t, q.Transactions)
+		first, e := reader.ReadCohort(t.Context(), query)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer first.Close()
+		d := first.Data()
+		if len(d.Rows) != 1 || d.Next == nil || d.DatasetEpoch == "" || d.Upper.Number != 2 || d.RunFloor != 0 {
+			t.Fatalf("invalidfirstsnapshot:%+v", d)
+		}
+		_, e = owner.Exec(t.Context(), `INSERT INTO blocks(number,hash,parent_hash,timestamp,gas_used,gas_limit,transaction_count)VALUES(3,$1,$2,15,1,30000000,1);INSERT INTO transactions(hash,block_number,block_timestamp,tx_index,from_address,value,gas_used,gas_price,status,input_data)VALUES($3,3,15,0,'0x1111111111111111111111111111111111111111',1,1,1,1,'0x');UPDATE sync_status SET last_indexed_block=3`, fmt.Sprintf("0x%064x", 103), fmt.Sprintf("0x%064x", 102), fmt.Sprintf("0x%064x", 2000))
+		if e != nil {
+			t.Fatal(e)
+		}
+		query.Upper = d.Upper
+		query.DatasetEpoch = d.DatasetEpoch
+		floor := d.RunFloor
+		query.RunFloor = &floor
+		pos := d.Rows[0].Position
+		query.After = &pos
+		second, e := reader.ReadCohort(t.Context(), query)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer second.Close()
+		if second.Data().Rows[0].Position.Block != 2 || second.Data().Rows[0].Position == pos {
+			t.Fatal("resumereturnednewheadorrepeatedkey")
+		}
+		if e = reader.Recheck(t.Context(), first); e != nil {
+			t.Fatal(e)
+		}
+		_, e = owner.Exec(t.Context(), `UPDATE indexer_dataset_metadata SET dataset_epoch=$1 WHERE id=1`, uuid.NewString())
+		if e != nil {
+			t.Fatal(e)
+		}
+		if !errors.Is(reader.Recheck(t.Context(), first), q.ErrConflict) {
+			t.Fatal("datasetreplacementnotdetected")
+		}
+	})
+	t.Run("current_label_and_pruned_cursor_reason", func(t *testing.T) {
+		_, e := owner.Exec(t.Context(), `INSERT INTO tokens(address,symbol,decimals,token_type,block_number)VALUES('0x2222222222222222222222222222222222222222','TST',18,'ERC20',2)`)
+		if e != nil {
+			t.Fatal(e)
+		}
+		pass, e := reader.ReadCohort(t.Context(), typedQuery(t, q.Tokens))
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer pass.Close()
+		if pass.Data().Consistency != "CURRENT" {
+			t.Fatal("mutablefactslabelledsnapshot")
+		}
+		d := pass.Data()
+		_, e = owner.Exec(t.Context(), `UPDATE prune_state SET pruned_through=1`)
+		if e != nil {
+			t.Fatal(e)
+		}
+		query := typedQuery(t, q.Blocks)
+		query.Upper = d.Upper
+		query.DatasetEpoch = d.DatasetEpoch
+		floor := d.RunFloor
+		query.RunFloor = &floor
+		query.After = &q.Position{Block: 1}
+		if _, e = reader.ReadCohort(t.Context(), query); !errors.Is(e, q.ErrPruned) {
+			t.Fatal("prunedcursorreasonlost", e)
+		}
+		_, _ = owner.Exec(t.Context(), `UPDATE prune_state SET pruned_through=0`)
+	})
+	t.Run("protected_exact_current_destinations_rechecked", func(t *testing.T) {
+		a := [20]byte{}
+		b := [20]byte{}
+		for i := range a {
+			a[i] = 0x11
+			b[i] = 0x22
+		}
+		read, e := reader.BeginProtected(t.Context(), q.ProtectedSelection{Expected: reader.Metadata(), Targets: [][20]byte{a}, FromNumber: 0, ThroughNumber: 3, FromTime: 0, ThroughTime: 20})
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer read.Close()
+		dest, e := read.ReadDestinations(t.Context())
+		if e != nil || len(dest.Addresses) != 1 || dest.Addresses[0] != b {
+			t.Fatal(dest, e)
+		}
+		pred := q.ProtectedPredicate{Intervals: []q.ProtectedInterval{{Address: b, FromNumber: 0, BeforeNumber: 4}}}
+		w, e := read.ReadWitnesses(t.Context(), pred)
+		if e != nil || len(w) != 1 || w[0].Address != a {
+			t.Fatal(w, e)
+		}
+		rows, end, e := read.ReadTransactions(t.Context(), pred, q.ProtectedTransactionQuery{Limit: 100})
+		if e != nil || len(rows) != 3 || !end {
+			t.Fatal(len(rows), end, e)
+		}
+		if e = read.Recheck(t.Context()); e != nil {
+			t.Fatal(e)
+		}
+		_, e = owner.Exec(t.Context(), `INSERT INTO transactions(hash,block_number,block_timestamp,tx_index,from_address,to_address,value,gas_used,gas_price,status,input_data)VALUES($1,2,10,8,'0x1111111111111111111111111111111111111111','0x3333333333333333333333333333333333333333',1,1,1,1,'0x')`, fmt.Sprintf("0x%064x", 3000))
+		if e != nil {
+			t.Fatal(e)
+		}
+		if !errors.Is(read.Recheck(t.Context()), q.ErrConflict) {
+			t.Fatal("currentdestinationschangedwithoutconflict")
+		}
+	})
+	t.Run("child_overflow_keeps_parent_only_lookup_and_requested_child_page_reachable", func(t *testing.T) {
+		parent := fmt.Sprintf("0x%064x", 1000)
+		_, e := owner.Exec(t.Context(), `INSERT INTO internal_transactions(tx_hash,block_number,trace_address,from_address,to_address,value,call_type,timestamp) SELECT $1,2,n::text,'0x1111111111111111111111111111111111111111','0x2222222222222222222222222222222222222222',1,'call',10 FROM generate_series(1,20001)n`, parent)
+		if e != nil {
+			t.Fatal(e)
+		}
+		query := typedQuery(t, q.Internals)
+		query.Hash = parent
+		pass, e := reader.ReadCohort(t.Context(), query)
+		if e != nil {
+			t.Fatal("requestedchildpageunreachableafterbundlecap", e)
+		}
+		defer pass.Close()
+		d := pass.Data()
+		if len(d.Rows) != 1 || len(d.Context) != 1 || d.Context[0].Family != q.Transactions || d.Next == nil {
+			t.Fatal("parentfallbackwaspartialorcopiedunusedsiblings", len(d.Rows), len(d.Context))
+		}
+	})
 }
 
-func (f *pgFixture) diagnoseCold(t *testing.T) {
-	t.Helper()
-	c, err := pgx.Connect(t.Context(), f.dsn)
-	if err != nil {
-		t.Log("owned cold diagnostic connect", err)
-		return
-	}
-	defer c.Close(t.Context())
-	definition, _ := compiledDefinition()
-	names := make([]string, len(definition.Tables))
-	for i, table := range definition.Tables {
-		names[i] = table.Name
-	}
-	for _, sql := range []string{"begin isolation level repeatable read read only", "set local search_path = pg_catalog;set local row_security=off", lockCatalogSQL} {
-		if _, err := c.Exec(t.Context(), sql); err != nil {
-			t.Log("owned cold diagnostic command", err)
-			return
-		}
-	}
-	var allowed bool
-	if err := c.QueryRow(t.Context(), rolesSQL, "index_reader", names).Scan(&allowed); err != nil {
-		t.Log("owned cold diagnostic ACL", err)
-		return
-	}
-	t.Log("owned cold diagnostic ACL allowed", allowed)
-	var catalog *string
-	if err := c.QueryRow(t.Context(), catalogSQL, names, 2<<20).Scan(&catalog); err != nil {
-		t.Log("owned cold diagnostic catalog", err)
-		return
-	}
-	if catalog == nil {
-		t.Log("owned catalog over cap")
-		return
-	}
-	t.Log("owned catalog validation", validateSchema([]byte(*catalog), 2<<20))
-	if validateSchema([]byte(*catalog), 2<<20) != nil {
-		t.Log("owned catalog", *catalog)
-	}
-}
-
-func TestReaderPostgres(t *testing.T) {
-	f := indexFixture(t)
-	r := f.open(t)
-	t.Run("exact actual schema and excluded ABI", func(t *testing.T) {
-		metadata := r.Metadata()
-		if metadata.Binding != f.binding || !metadata.Identity.Valid() || metadata.Mode != "existing-indexer-fixed-reads/v1" {
-			t.Fatal("reader metadata did not bind actual instance")
-		}
-		var abiSelect, tempAllowed bool
-		err := r.withSnapshot(t.Context(), newBudget(r.limits), func(s *snapshot) error {
-			return s.one("SELECT has_column_privilege('public.contracts','abi','SELECT'), has_database_privilege(current_database(),'TEMP')", nil, &abiSelect, &tempAllowed)
-		})
-		if err != nil || abiSelect || !tempAllowed {
-			t.Fatal("column ceiling or ordinary TEMP precision", abiSelect, tempAllowed, err)
-		}
-	})
-	t.Run("repeatable snapshot then fresh snapshot", func(t *testing.T) {
-		f.exec(t, "INSERT INTO address_stats(address,tx_count) VALUES ('snapshot-address',1)")
-		var before, after int
-		read := func(s *snapshot, dest *int) error {
-			return s.one("SELECT tx_count FROM public.address_stats WHERE address=$1", []any{"snapshot-address"}, dest)
-		}
-		err := r.withSnapshot(t.Context(), newBudget(r.limits), func(s *snapshot) error {
-			if err := read(s, &before); err != nil {
-				return err
+func TestActualProtectedResultRowsShareOriginalLedger(t *testing.T) {
+	_, owner, network := actualReader(t)
+	for _, kind := range []string{"witness", "transactions", "recheck"} {
+		t.Run(kind, func(t *testing.T) {
+			limits := x.DefaultLimits()
+			limits.MaxResultRows = 1
+			if kind == "recheck" {
+				limits.MaxResultRows = 2
 			}
-			f.exec(t, "UPDATE address_stats SET tx_count=2 WHERE address='snapshot-address'")
-			return read(s, &after)
-		})
-		if err != nil || before != 1 || after != 1 {
-			t.Fatal("mixed RR snapshot", before, after, err)
-		}
-		err = r.withSnapshot(t.Context(), newBudget(r.limits), func(s *snapshot) error { return read(s, &after) })
-		if err != nil || after != 2 {
-			t.Fatal("fresh recheck did not see committed write", after, err)
-		}
-	})
-	t.Run("write and wrong role rejected", func(t *testing.T) {
-		err := r.withSnapshot(t.Context(), newBudget(r.limits), func(s *snapshot) error { return s.exec("UPDATE public.address_stats SET tx_count=3") })
-		if err != ErrUnavailable {
-			t.Fatal("write not refused", err)
-		}
-		r.role = "foreign_reader"
-		err = r.withSnapshot(t.Context(), newBudget(r.limits), func(*snapshot) error { t.Fatal("wrong role reached purpose"); return nil })
-		r.role = "index_reader"
-		if err != ErrUnavailable {
-			t.Fatal("wrong role accepted", err)
-		}
-	})
-	t.Run("effective ACL and structural changes reject cold", func(t *testing.T) {
-		cases := []struct{ name, apply, undo string }{
-			{"extra column privilege", "GRANT SELECT(abi) ON contracts TO index_reader", "REVOKE SELECT(abi) ON contracts FROM index_reader"},
-			{"column write", "GRANT UPDATE(tx_count) ON address_stats TO index_reader", "REVOKE UPDATE(tx_count) ON address_stats FROM index_reader"},
-			{"public write", "GRANT DELETE ON address_stats TO PUBLIC", "REVOKE DELETE ON address_stats FROM PUBLIC"},
-			{"grant option", "GRANT SELECT(tx_count) ON address_stats TO index_reader WITH GRANT OPTION", "REVOKE GRANT OPTION FOR SELECT(tx_count) ON address_stats FROM index_reader"},
-			{"role membership", "CREATE ROLE test_extra; GRANT test_extra TO index_reader", "REVOKE test_extra FROM index_reader; DROP ROLE test_extra"},
-			{"schema CREATE", "GRANT CREATE ON SCHEMA public TO index_reader", "REVOKE CREATE ON SCHEMA public FROM index_reader"},
-			{"foreign relation", "GRANT SELECT ON chain_counters TO index_reader", "REVOKE SELECT ON chain_counters FROM index_reader"},
-			{"sequence", "GRANT USAGE ON SEQUENCE logs_id_seq TO index_reader", "REVOKE USAGE ON SEQUENCE logs_id_seq FROM index_reader"},
-			{"application function", "CREATE FUNCTION public.test_unreviewed() RETURNS int LANGUAGE SQL AS 'SELECT 1'", "DROP FUNCTION public.test_unreviewed()"},
-			{"owned persistent enum", "CREATE TYPE public.test_owned_enum AS ENUM ('public-test'); ALTER TYPE public.test_owned_enum OWNER TO index_reader", "DROP TYPE public.test_owned_enum"},
-			{"RLS", "ALTER TABLE address_stats ENABLE ROW LEVEL SECURITY", "ALTER TABLE address_stats DISABLE ROW LEVEL SECURITY"},
-			{"extra column", "ALTER TABLE address_stats ADD COLUMN extra int", "ALTER TABLE address_stats DROP COLUMN extra"},
-			{"missing unique key", "ALTER TABLE blocks DROP CONSTRAINT blocks_hash_key", "ALTER TABLE blocks ADD UNIQUE(hash)"},
-		}
-		for _, c := range cases {
-			t.Run(c.name, func(t *testing.T) {
-				f.exec(t, c.apply)
-				unexpected, err := OpenReader(t.Context(), f.dsn, f.binding, DefaultLimits())
-				if unexpected != nil {
-					unexpected.Close()
+			reader, _ := indexertest.OpenWithLimits(t, owner.Config().ConnString(), network, limits)
+			var target, destination [20]byte
+			for i := range target {
+				target[i] = 0x11
+				destination[i] = 0x22
+			}
+			read, e := reader.BeginProtected(t.Context(), q.ProtectedSelection{Expected: reader.Metadata(), Targets: [][20]byte{target}, FromNumber: 0, ThroughNumber: 2, FromTime: 0, ThroughTime: 20})
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer read.Close()
+			got, e := read.ReadDestinations(t.Context())
+			if e != nil || len(got.Addresses) != 1 {
+				t.Fatal(got, e)
+			}
+			predicate := q.ProtectedPredicate{Intervals: []q.ProtectedInterval{{Address: destination, FromNumber: 0, BeforeNumber: 3}}}
+			switch kind {
+			case "witness":
+				rows, err := read.ReadWitnesses(t.Context(), predicate)
+				if !errors.Is(err, q.ErrTooBroad) || rows != nil {
+					t.Fatal("witness renewed original result-row budget", rows, err)
 				}
-				f.exec(t, c.undo)
-				if err != ErrUnavailable {
-					t.Fatal("changed ACL/catalog accepted", err)
+			case "transactions":
+				rows, _, err := read.ReadTransactions(t.Context(), predicate, q.ProtectedTransactionQuery{Limit: 1})
+				if !errors.Is(err, q.ErrTooBroad) || rows != nil {
+					t.Fatal("transaction page renewed original result-row budget", rows, err)
 				}
-			})
-		}
-	})
-	t.Run("budget counts setup and reserves completion", func(t *testing.T) {
-		b := newBudget(r.limits)
-		called := false
-		err := r.withSnapshot(t.Context(), b, func(s *snapshot) error {
-			called = true
-			for i := 0; i < 200; i++ {
-				if err := s.exec("SELECT 1 WHERE false"); err != nil {
-					return err
+			case "recheck":
+				if e = read.Recheck(t.Context()); e != nil {
+					t.Fatal("second original row should fit", e)
+				}
+				if e = read.Recheck(t.Context()); !errors.Is(e, q.ErrTooBroad) {
+					t.Fatal("CURRENT destinations recheck renewed row budget", e)
 				}
 			}
-			return nil
-		})
-		if err != ErrTooBroad || !called || b.queries != r.limits.MaxQueries-1 {
-			t.Fatal("dispatch/cleanup cap", b.queries, err)
-		}
-		if err := r.withSnapshot(t.Context(), b, func(*snapshot) error { return nil }); err != ErrTooBroad {
-			t.Fatal("recheck reset budget", err)
-		}
-	})
-	t.Run("row field and parameter caps", func(t *testing.T) {
-		err := r.withSnapshot(t.Context(), newBudget(r.limits), func(s *snapshot) error {
-			rows, err := s.query("SELECT 'bounded'::text FROM generate_series(1,20001)")
-			if err != nil {
-				return err
+			if e = read.Recheck(context.Background()); e == nil {
+				t.Fatal("fresh caller renewed exhausted protected purpose")
 			}
-			defer rows.Close()
-			for rows.Next() {
-				var value string
-				if err := rows.Scan(&value); err != nil {
-					return err
-				}
-			}
-			return rows.Err()
 		})
-		if err != ErrTooBroad {
-			t.Fatal("row cap", err)
-		}
-		err = r.withSnapshot(t.Context(), newBudget(r.limits), func(s *snapshot) error {
-			var value string
-			return s.one("SELECT $1::text", []any{strings.Repeat("p", r.limits.MaxParamBytes)}, &value)
-		})
-		if err != ErrTooBroad {
-			t.Fatal("parameter cap", err)
-		}
-		// Fixed purposes guard variable fields in SQL before transport. NULL is
-		// an explicit too-broad marker, never an empty/absent success.
-		f.exec(t, "INSERT INTO blocks(number,hash,parent_hash,timestamp,gas_used,gas_limit,transaction_count) VALUES (0,'field-block','parent',0,0,0,1)")
-		f.exec(t, "INSERT INTO transactions(hash,block_number,tx_index,from_address,value,gas_used,gas_price,status,error) VALUES ('field-tx',0,0,'sender',0,0,0,1,$1)", strings.Repeat("a", r.limits.MaxFieldBytes+1))
-		var field *string
-		err = r.withSnapshot(t.Context(), newBudget(r.limits), func(s *snapshot) error {
-			if err := s.one("SELECT CASE WHEN octet_length(error)<=$1::int THEN error ELSE NULL END FROM public.transactions WHERE hash='field-tx'", []any{r.limits.MaxFieldBytes}, &field); err != nil {
-				return err
-			}
-			if field == nil {
-				return ErrTooBroad
-			}
-			return nil
-		})
-		if err != ErrTooBroad {
-			t.Fatal("SQL field guard", err)
-		}
-		f.exec(t, "DELETE FROM blocks WHERE number=0")
-	})
-	t.Run("original budget deadline cancellation and final usability", func(t *testing.T) {
-		b := newBudget(r.limits)
-		b.deadline = time.Now().Add(-time.Second)
-		if err := r.withSnapshot(t.Context(), b, func(*snapshot) error { t.Fatal("expired original pass reached SQL purpose"); return nil }); err != ErrUnavailable {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
-		if err := r.withSnapshot(ctx, newBudget(r.limits), func(*snapshot) error { t.Fatal("cancelled request reached SQL purpose"); return nil }); err != ErrUnavailable {
-			t.Fatal(err)
-		}
-		if err := r.withSnapshot(t.Context(), newBudget(r.limits), func(*snapshot) error { return nil }); err != nil {
-			t.Fatal("cleanup poisoned healthy pool", err)
-		}
-	})
-	t.Run("server committed but response lost stays unavailable", func(t *testing.T) {
-		proxy := commitResponseProxy(t, f.dsn)
-		u, _ := url.Parse(f.dsn)
-		u.Host = proxy.address
-		expected := f.binding
-		var err error
-		expected.SourceReference, err = ConnectionReference(u.String())
-		if err != nil {
-			t.Fatal(err)
-		}
-		reader, err := OpenReader(t.Context(), u.String(), expected, DefaultLimits())
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer reader.Close()
-		proxy.drop.Store(true)
-		purposeRan := false
-		err = reader.withSnapshot(t.Context(), newBudget(reader.limits), func(s *snapshot) error {
-			var one int
-			if err := s.one("SELECT 1", nil, &one); err != nil {
-				return err
-			}
-			purposeRan = one == 1
-			return nil
-		})
-		if err != ErrUnavailable || !purposeRan {
-			t.Fatal("uncertain completion exposed positive result", purposeRan, err)
-		}
-		select {
-		case <-proxy.committed:
-		case <-time.After(time.Second):
-			t.Fatal("did not observe actual server COMMIT before dropped response")
-		}
-	})
+	}
 }

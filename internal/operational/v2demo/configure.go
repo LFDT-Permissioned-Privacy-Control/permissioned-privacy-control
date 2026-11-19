@@ -23,7 +23,6 @@ import (
 	"privacy-proxy/internal/operational/activitysql"
 	"privacy-proxy/internal/operational/admissionsql"
 	"privacy-proxy/internal/operational/disclosuresql"
-	"privacy-proxy/internal/operational/explorerindex"
 	"privacy-proxy/internal/operational/identitysql"
 	"privacy-proxy/internal/operational/ssosql"
 	vs "privacy-proxy/internal/operational/v2server"
@@ -77,7 +76,7 @@ func Configure(ctx context.Context, root, walletOutput string) error {
 	if e != nil {
 		return fmt.Errorf("approved files: %w", e)
 	}
-	cfg := vs.Config{APIVersion: "ops.server/v2", Kind: "OperationalServer", Listen: fmt.Sprintf("127.0.0.1:%d", s.Ports.OPS), TLSCertificateFile: s.file("tls.crt"), TLSPrivateKeyFile: s.file("tls.key"), WebDirectory: "/app/web", ExplorerOrganizationID: Organization, Core: cs, BrokerSelection: bs}
+	cfg := vs.Config{APIVersion: "ops.server/v2", Kind: "OperationalServer", Listen: fmt.Sprintf("%s:%d", s.listenHost(), s.Ports.OPS), TLSCertificateFile: s.file("tls.crt"), TLSPrivateKeyFile: s.file("tls.key"), WebDirectory: "/app/web", ExplorerOrganizationID: Organization, Core: cs, BrokerSelection: bs}
 	network := networkidentity.Binding{Environment: Environment, ChainID: ChainID, GenesisHash: s.GenesisHash, DeploymentID: Deployment}
 	networkKey, e := network.Key()
 	if e != nil {
@@ -190,15 +189,10 @@ func Configure(ctx context.Context, root, walletOutput string) error {
 			return e
 		}
 	}
-	if e = grantIndex(ctx, s); e != nil {
-		return fmt.Errorf("actual index schema minimum grants: %w", e)
-	}
-	indexDSN := s.dsn("index", "demo_index_reader")
-	iref, e := explorerindex.ConnectionReference(indexDSN)
-	if e != nil {
+	if e = writeIndexerEnvironment(s); e != nil {
 		return e
 	}
-	cfg.Data.Index = vs.Index{ReaderDSNEnv: "DEMO_INDEX_DSN", SourceReferenceDigest: digest(iref[:]), ConfiguredEpoch: s.Epochs["index"], CursorKeyEnv: "DEMO_INDEX_CURSOR", PseudonymKeyEnv: "DEMO_INDEX_PSEUDONYM"}
+	cfg.Data.Index = vs.Index{GRPCURL: s.indexerAddress(), CursorKeyEnv: "DEMO_INDEX_CURSOR", PseudonymKeyEnv: "DEMO_INDEX_PSEUDONYM"}
 	conf := sha256.Sum256([]byte("native-v2-local-demo-activity:" + s.GenesisHash))
 	cfg.Data.Activity = vs.Activity{WriterDSNEnv: "DEMO_ACTIVITY_WRITER_DSN", ReaderDSNEnv: "DEMO_ACTIVITY_READER_DSN", SourceID: s.Epochs["activitySource"], ProducerID: s.Epochs["activityProducer"], Generation: s.ActivityGeneration, ConfigurationDigest: digest(conf[:]), BufferDirectory: "/var/lib/ops/activity"}
 	if e = runtimeFiles(ctx, s, core, broker, &cfg); e != nil {
@@ -210,6 +204,7 @@ func Configure(ctx context.Context, root, walletOutput string) error {
 	s.Configured = true
 	return save(s)
 }
+
 func digest(b []byte) string { return "sha256:" + hex.EncodeToString(b) }
 func initializeActivity(ctx context.Context, s *State, network networkidentity.Binding) error {
 	dsn := s.dsn("activity", "postgres")

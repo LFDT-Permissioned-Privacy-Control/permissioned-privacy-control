@@ -414,16 +414,8 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 	if e != nil {
 		return nil, e
 	}
-	dsn, e = secret(c.Index.ReaderDSNEnv)
-	if e != nil {
-		return nil, e
-	}
-	indexRef, e := digest(c.Index.SourceReferenceDigest)
-	if e != nil {
-		return nil, e
-	}
-	p.indexBinding = explorerquery.Binding{Network: p.network, SourceReference: indexRef, SchemaDigest: explorerindex.SchemaDigest(), ConfiguredEpoch: c.Index.ConfiguredEpoch}
-	p.index, e = explorerindex.OpenReader(ctx, dsn, p.indexBinding, explorerindex.DefaultLimits())
+	p.indexBinding = explorerquery.Binding{Network: p.network, APIVersion: "chain_indexer.v2"}
+	p.index, e = explorerindex.OpenReader(ctx, c.Index.GRPCURL, p.indexBinding, explorerindex.DefaultLimits())
 	if e != nil {
 		return nil, e
 	}
@@ -440,7 +432,6 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 	if e != nil {
 		return nil, e
 	}
-	s.readyChecks = append(s.readyChecks, p.index.CheckReady)
 
 	scope := activitysql.Scope{NetworkKey: key, SourceID: c.Activity.SourceID, ExpectedGeneration: c.Activity.Generation}
 	dsn, e = secret(c.Activity.WriterDSNEnv)

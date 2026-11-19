@@ -1,0 +1,82 @@
+import { useState } from 'react'
+import { Button } from '../../components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
+import { SourceRecordForm, SourceRecords, type SourceField } from './SourceRecords'
+import { createCatalog, documentFor, documentValue, object, referenceFiles, rootOf, updateDocument, type JSONObject, type SourceProject } from './sourceProject'
+
+interface Props { project: SourceProject; root: string; organization: string; page: string; editing: boolean; onChange(project: SourceProject): void }
+const field = (key: string, label: string, kind?: SourceField['kind'], optional = false, help?: string): SourceField => ({ key, label, kind, optional, help })
+const uid = () => crypto.randomUUID()
+const profileVariants: Record<string, string[]> = {
+  'azure-human/v1': ['tenantId', 'issuer', 'apiAudience', 'clientId', 'delegatedScope', 'factSource'],
+  'azure-service/v1': ['tenantId', 'issuer', 'apiAudience', 'allowedClientIds', 'factSource'],
+  'privado-identity/v1': ['verifierId', 'network', 'identityStateContract'],
+  'privado-role-query/v1': ['verifierId', 'network', 'identityStateContract', 'allowedCredentialIssuers', 'contextDigest', 'context', 'type', 'circuitId', 'predicates'],
+}
+const labels: Record<string, string> = { tenantId: 'Azure tenant ID', issuer: 'Azure issuer', apiAudience: 'API audience', clientId: 'Client ID', delegatedScope: 'Delegated scope', factSource: 'Fact source', verifierId: 'Privado verifier ID', network: 'Privado network', identityStateContract: 'Identity state contract', contextDigest: 'Context digest', context: 'Credential context', type: 'Credential type', circuitId: 'Circuit ID', allowedClientIds: 'Allowed client IDs', allowedCredentialIssuers: 'Allowed credential issuers', predicates: 'Verified predicates' }
+const profileFields: SourceField[] = [field('id', 'Profile ID'), { ...field('kind', 'Verification kind'), options: Object.keys(profileVariants) }, ...Object.entries(labels).map(([key, label]): SourceField => ({
+  ...field(key, label, key === 'predicates' ? 'json' : key.startsWith('allowed') ? 'list' : 'text'),
+  onlyFor: Object.keys(profileVariants).filter(variant => profileVariants[variant].includes(key)),
+  ...(key === 'factSource' ? { options: ['appRoles', 'groupIds'] } : {}),
+}))]
+const ruleFields: SourceField[] = [field('id', 'Rule ID'), field('dataOrganizationId', 'Data organization ID'), field('viewers', 'Permitted viewers', 'json', false, 'Group references {organizationId,groupId} and/or canonical verified actor IDs.'), field('targets', 'Permitted target actors', 'json'), field('resources', 'Permitted resources', 'list'), field('addresses', 'Address scope', 'json'), field('dataTime', 'Data time interval', 'json'), { ...field('maxLevel', 'Maximum detail'), options: ['redacted', 'pseudonymous', 'full'] }, field('validity', 'Rule validity', 'json'), field('maxCaseSeconds', 'Maximum case seconds', 'number')]
+export function SourceCatalogs(props: Props) {
+  const { project, root, organization, page, editing, onChange } = props, source = rootOf(project, root)
+  const [grantIndex, setGrantIndex] = useState<number | null>(null)
+  const get = (key: string) => source.draft[key] === undefined ? null : { path: String(object(source.draft[key]).path), value: documentValue(project, root, String(object(source.draft[key]).path)) }
+  const save = (path: string, value: JSONObject) => onChange(updateDocument(project, root, path, value))
+  function missing(key: string, title: string, value: JSONObject) { return <div className="space-y-3"><h3 className="text-sm font-medium">{title}</h3><p className="text-sm text-neutral-500">This source root has no {title.toLowerCase()} document. Import the matching complete source or add a local catalog proposal. Its profile and coordinated deployment must support it.</p>{editing && <Button variant="outline" onClick={() => onChange(createCatalog(project, root, key, value))}>Add {title.toLowerCase()} draft</Button>}</div> }
+  if (page === 'contracts') {
+    if (!organization) return <p className="text-sm text-neutral-500 py-12 text-center">Select an organization from the imported source</p>
+    const path = documentFor(source, organization, 'contract-registry'), doc = documentValue(project, root, path), spec = object(doc.spec), contracts = spec.contracts as JSONObject[]
+    const contract = grantIndex === null ? null : object(contracts[grantIndex]), grants = contract?.readGrants
+    return <div className="space-y-5"><SourceRecords title="Contracts" description="Registered addresses, public ABI, read grants and event visibility. Execution permissions are authored separately in Execution Policy." records={contracts} editing={editing}
+      fields={[field('id', 'Contract ID'), field('name', 'Name'), field('address', 'Contract address'), field('abi', 'Public ABI', 'json'), field('allowVisibleToUnlock', 'Visible to unlock', 'boolean'), field('eventsAllowDynamicPayload', 'Allow dynamic event payload', 'boolean')]}
+      defaults={() => ({ id: uid(), name: '', address: '', abi: [], allowVisibleToUnlock: false, eventsAllowDynamicPayload: false, readGrants: [] })}
+      onChange={rows => save(path, { ...doc, spec: { ...spec, contracts: rows } })} dependencies={r => referenceFiles(project, root, String(r.address), path)} renderActions={(_, index) => <Button variant="outline" size="sm" onClick={() => setGrantIndex(index)}>Read grants</Button>} />
+      <Dialog open={contract !== null} onOpenChange={open => { if (!open) setGrantIndex(null) }}><DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{String(contract?.name ?? '')} — read grants</DialogTitle></DialogHeader>{contract && <SourceRecords title="Read grants" description="Each grant selects a group and an explicit event rule. No grant is inferred from group membership." records={grants} editing={editing} fields={[field('id', 'Grant ID'), field('groupId', 'Group ID'), { ...field('eventRules.mode', 'Event visibility mode'), options: ['none', 'all', 'allowlist'] }, field('eventRules.rules', 'Custom event rules', 'json', false, 'Each rule carries topic0, name and paramRules [{index,must_be}]. Go checks signatures and arguments against the ABI.')]}
+        defaults={() => ({ id: uid(), groupId: '', eventRules: { mode: 'none', rules: [] } })} onChange={readGrants => save(path, { ...doc, spec: { ...spec, contracts: contracts.map((c, i) => i === grantIndex ? { ...c, readGrants } : c) } })} />}</DialogContent></Dialog>
+    </div>
+  }
+  if (page === 'identity-profiles' || page === 'claim-mappings' || page === 'azure-tenants') {
+    const catalog = get('identityCatalog')
+    if (!catalog) return missing('identityCatalog', 'Identity catalog', { apiVersion: 'ops.identity-catalog/v1alpha1', kind: 'IdentityCatalog', issuers: [], profiles: [], mappings: [] })
+    const { path, value } = catalog
+    if (page === 'claim-mappings') return <SourceRecords title="Claim mappings" description="Map verified provider facts to organization groups. These are rules, not a directory of people. An identity alone does not grant a claim." records={value.mappings} editing={editing}
+      fields={[field('id', 'Mapping ID'), field('profileId', 'Verified profile ID'), field('organizationId', 'Organization ID'), { ...field('principalKind', 'Principal kind'), options: ['human', 'service'] }, { ...field('fact.kind', 'Verified fact kind'), options: ['azure.role', 'azure.group', 'privado.predicate'] }, field('fact.value', 'Verified fact value', 'text', false, 'Exact role name, Azure group ID, or verified Privado predicate ID supported by the profile.'), field('groupIds', 'Group IDs', 'list')]}
+      defaults={() => ({ id: uid(), profileId: '', organizationId: organization, principalKind: 'human', fact: { kind: 'azure.role', value: '' }, groupIds: [] })} onChange={mappings => save(path, { ...value, mappings })} />
+    return <div className="space-y-8"><SourceRecords title={page === 'azure-tenants' ? 'Azure tenant profiles' : 'Identity profiles'} description="Public verification profiles. Select the exact Azure or Privado variant; the Go compiler checks required fields, trust bindings and mutually exclusive variants. No credentials or provider calls are performed here." records={page === 'azure-tenants' ? (value.profiles as JSONObject[]).filter(p => String(p.kind).startsWith('azure-')) : value.profiles} editing={editing} fields={profileFields}
+      defaults={() => ({ id: '', kind: 'azure-human/v1' })} onChange={profiles => save(path, { ...value, profiles: page === 'azure-tenants' ? [...(value.profiles as JSONObject[]).filter(p => !String(p.kind).startsWith('azure-')), ...profiles] : profiles })} dependencies={r => [...referenceFiles(project, root, String(r.id), path), ...((value.mappings as JSONObject[]).some(m => m.profileId === r.id) || (value.issuers as JSONObject[]).some(i => Array.isArray(i.allowedProfiles) && i.allowedProfiles.includes(r.id)) ? [path] : [])]} />
+      <SourceRecords title="Assertion issuers" description="Approved public signing keys and allowed profile IDs. Never paste private keys or client secrets." records={value.issuers} editing={editing} fields={[field('id', 'Issuer ID'), field('issuer', 'Issuer'), field('audience', 'Audience'), field('allowedProfiles', 'Allowed profiles', 'list'), field('keys', 'Public JWK keys', 'json', false, 'Public fields only: kid, alg, kty, crv, x. Go rejects unsupported keys.')]} defaults={() => ({ id: '', issuer: '', audience: '', allowedProfiles: [], keys: [] })} onChange={issuers => save(path, { ...value, issuers })} />
+    </div>
+  }
+  if (page === 'disclosure-source') {
+    const catalog = get('disclosureCatalog')
+    if (!catalog) return missing('disclosureCatalog', 'Standing disclosure rules', { apiVersion: 'ops.disclosure-policy/v1alpha1', kind: 'DisclosurePolicy', rules: [] })
+    return <SourceRecords title="Standing disclosure rules" description="Approved through Git with the source bundle. Case opening uses these limits directly; no customer approve/reject step is added." records={catalog.value.rules} fields={ruleFields} editing={editing}
+      defaults={() => ({ id: uid(), dataOrganizationId: organization, viewers: { groups: [], actors: [] }, targets: { mode: 'actors', actors: [] }, resources: [], addresses: { mode: 'list', values: [] }, dataTime: { start: 0, end: 0 }, maxLevel: 'redacted', validity: { notBefore: 0, expiresAt: 0 }, maxCaseSeconds: 3600 })} onChange={rules => save(catalog.path, { ...catalog.value, rules })} />
+  }
+  if (page === 'compliance-source') {
+    const catalog = get('complianceCatalog')
+    if (!catalog) return missing('complianceCatalog', 'Compliance policy', { apiVersion: 'ops.compliance-policy/v1alpha1', kind: 'CompliancePolicy', organizations: [], sanctions: [] })
+    return <div className="space-y-8"><SourceRecords title="Organization compliance policies" records={catalog.value.organizations} fields={[field('organizationId', 'Organization ID'), field('spec', 'Compliance settings, address thresholds and token prices', 'json', false, 'spec.settings: enabled, thresholdFiat, currency, unknownPricePolicy, enforcementMode; addressThresholds[] and tokenPrices[]. Exact Go schema is authoritative.'), field('recordMaxSeconds', 'Maximum travel record seconds', 'number'), field('priceMaxAgeSeconds', 'Maximum price age seconds', 'number')]} editing={editing}
+      defaults={() => ({ organizationId: organization, spec: { settings: { enabled: false, thresholdFiat: 1000, currency: 'usd', unknownPricePolicy: 'forbidden', enforcementMode: 'enforce' }, addressThresholds: [], tokenPrices: [] }, recordMaxSeconds: 3600, priceMaxAgeSeconds: 300 })} onChange={organizations => save(catalog.path, { ...catalog.value, organizations })} />
+      <SourceRecords title="Sanctions" records={catalog.value.sanctions} fields={[field('id', 'Sanction ID'), field('scope', 'Scope'), field('organizationId', 'Organization ID'), field('address', 'Address'), field('reason', 'Reason'), field('source', 'Source')]} editing={editing} defaults={() => ({ id: uid(), scope: 'organization', organizationId: organization, address: '', reason: '', source: '' })} onChange={sanctions => save(catalog.path, { ...catalog.value, sanctions })} /></div>
+  }
+  const runtime = get('runtimeCatalog'), broker = get('authCatalog')
+  return <div className="space-y-8">
+    {runtime ? <SettingsForm title="Runtime policy" value={runtime.value} editing={editing} fields={[field('readProfile', 'Read profile'), field('nodeEvidenceProfile', 'Node evidence profile'), field('intraOrgGrantTracing', 'Trace intra-organization grants', 'boolean'), { ...field('rawSubmissionMode', 'Signed submission Guard mode', 'text', true), options: ['guard-v1', 'ops-preflight'] }, field('sharedInfrastructure', 'Shared infrastructure', 'json'), field('addressScopes', 'Address organization scopes', 'json'), field('priceFeed', 'Public price feed bindings', 'json', true)]} onSave={v => save(runtime.path, v)} /> : <p className="text-sm text-neutral-500">This source has no runtime catalog. Import the coordinated runtime source before proposing runtime changes.</p>}
+    {broker && <><SettingsForm title="Authentication broker" value={broker.value} editing={editing} fields={[field('issuerId', 'Assertion issuer ID'), field('accessKeyId', 'Access signing key ID'), field('webOrigin', 'Web origin'), field('completionUri', 'Completion URI'), field('renewalKeys', 'Renewal key environment references', 'json'), field('encryptionKeys', 'Encryption key environment references', 'json')]} onSave={v => save(broker.path, v)} />
+      {(['azureProfiles', 'privadoProfiles', 'privadoNetworks', 'pinnedDocuments'] as const).filter(k => broker.value[k] !== undefined).map(key => <SourceRecords key={key} title={{ azureProfiles: 'Azure provider bindings', privadoProfiles: 'Privado provider bindings', privadoNetworks: 'Privado networks', pinnedDocuments: 'Pinned public documents' }[key]} records={broker.value[key]} editing={editing}
+        fields={key === 'azureProfiles' ? [field('profileId', 'Profile ID'), field('redirectUri', 'Redirect URI', 'text', true), field('clientSecret', 'Client secret environment reference', 'json', true, 'Only {fromEnv:OPS_BROKER_AZURE_...}; never a secret value.')]
+          : key === 'privadoProfiles' ? [field('profileId', 'Profile ID')]
+            : key === 'pinnedDocuments' ? [field('url', 'Public context URL'), field('path', 'Local source filename'), field('sha256', 'Exact byte SHA-256')]
+              : [field('network', 'Network'), field('chainId', 'Chain ID'), field('stateContract', 'State contract'), field('rpcUrl', 'RPC URL'), field('allowPrivate', 'Allow configured private network', 'boolean'), field('credential', 'RPC credential environment reference', 'json', true)]}
+        defaults={() => ({})} onChange={rows => save(broker.path, { ...broker.value, [key]: rows })} />)}</>}
+    <p className="text-xs text-neutral-500">These files contain public trust and environment references only. OPS nodes, SSO clients and runtime read-policy pins are coordinated by the operator; an exported catalog does not activate or test them.</p>
+  </div>
+}
+function SettingsForm({ title, value, fields, editing, onSave }: { title: string; value: JSONObject; fields: SourceField[]; editing: boolean; onSave(value: JSONObject): void }) {
+  const [open, setOpen] = useState(false)
+  return <section className="space-y-3"><div className="flex justify-between items-center gap-3"><h3 className="text-sm font-medium">{title}</h3>{editing && <Button variant="outline" size="sm" onClick={() => setOpen(true)}>Edit {title.toLowerCase()} draft</Button>}</div><dl className="grid gap-3 sm:grid-cols-2">{fields.map(f => <div key={f.key} className="rounded-lg border border-neutral-200 p-3"><dt className="text-xs text-neutral-500">{f.label}</dt><dd className="text-sm mt-1 break-all whitespace-pre-wrap max-h-48 overflow-auto">{typeof value[f.key] === 'object' ? JSON.stringify(value[f.key], null, 2) : String(value[f.key] ?? 'Not set')}</dd></div>)}</dl><Dialog open={open} onOpenChange={setOpen}><DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{title} draft</DialogTitle></DialogHeader><SourceRecordForm value={value} fields={fields} onClose={() => setOpen(false)} onSave={v => { onSave(v); setOpen(false) }} /></DialogContent></Dialog></section>
+}

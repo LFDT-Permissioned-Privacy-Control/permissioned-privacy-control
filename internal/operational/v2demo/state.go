@@ -65,12 +65,32 @@ type State struct {
 	ActivityGeneration string            `json:"activityGeneration"`
 	ReaderGrant        bool              `json:"readerGrant"`
 	WalletOutput       string            `json:"walletOutput"`
+	PrivateNetwork     bool              `json:"privateNetwork,omitempty"`
 }
 
-func (s State) OPSOrigin() string       { return fmt.Sprintf("https://localhost:%d", s.Ports.OPS) }
-func (s State) ExplorerOrigin() string  { return fmt.Sprintf("https://localhost:%d", s.Ports.Explorer) }
-func (s State) WalletOrigin() string    { return fmt.Sprintf("https://localhost:%d", s.Ports.Wallet) }
-func (s State) RPCURL() string          { return fmt.Sprintf("http://127.0.0.1:%d", s.Ports.RPC) }
+func (s State) OPSOrigin() string      { return fmt.Sprintf("https://localhost:%d", s.Ports.OPS) }
+func (s State) ExplorerOrigin() string { return fmt.Sprintf("https://localhost:%d", s.Ports.Explorer) }
+func (s State) WalletOrigin() string   { return fmt.Sprintf("https://localhost:%d", s.Ports.Wallet) }
+func (s State) RPCURL() string {
+	host := "127.0.0.1"
+	if s.PrivateNetwork {
+		host = "reth"
+	}
+	return fmt.Sprintf("http://%s:%d", host, s.Ports.RPC)
+}
+func (s State) indexerAddress() string {
+	host := "127.0.0.1"
+	if s.PrivateNetwork {
+		host = "indexer-api"
+	}
+	return fmt.Sprintf("%s:%d", host, s.Ports.IndexerGRPC)
+}
+func (s State) listenHost() string {
+	if s.PrivateNetwork {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
+}
 func (s State) file(name string) string { return filepath.Join(s.Root, name) }
 func readState(root string) (State, error) {
 	var s State
@@ -135,13 +155,22 @@ func freePort() (int, error) {
 	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
-func Init(root string) error {
+func Init(root string) error { return initState(root, false) }
+
+// InitPrivateNetwork reuses the real provisioner for a separate isolation
+// fixture. Existing host-demo state cannot be converted in place.
+func InitPrivateNetwork(root string) error { return initState(root, true) }
+
+func initState(root string, privateNetwork bool) error {
 	var e error
 	root, e = canonicalRoot(root)
 	if e != nil {
 		return e
 	}
 	if old, e := readState(root); e == nil {
+		if old.PrivateNetwork != privateNetwork {
+			return ErrInvalid
+		}
 		if old.Version == 1 {
 			if e := ensureTLS(old); e != nil {
 				return e
@@ -172,6 +201,7 @@ func Init(root string) error {
 		}
 	}
 	s := State{Version: 1, Root: root, CreatedAt: time.Now().Unix(), Ports: Ports{values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8], values[9]}, Secrets: map[string]string{}, Epochs: map[string]string{}, ReaderGrant: true}
+	s.PrivateNetwork = privateNetwork
 	for _, name := range []string{"broker", "wallet", "admission", "sso", "disclosure", "index", "activitySource", "activityProducer"} {
 		s.Epochs[name] = uuid.NewString()
 	}
@@ -202,11 +232,11 @@ func Init(root string) error {
 	if _, e = writeBytes(s.file("private/engine.jwt"), []byte(hex.EncodeToString(engine))); e != nil {
 		return e
 	}
-	wallet := map[string]any{"listenHost": "127.0.0.1", "listenPort": s.Ports.Wallet, "origin": s.WalletOrigin(), "opsOrigin": s.OPSOrigin(), "opsUpstream": s.OPSOrigin(), "stateRpcUrl": s.WalletOrigin() + "/rpc", "tlsCertificateFile": s.file("tls.crt"), "tlsPrivateKeyFile": s.file("tls.key"), "outputDirectory": s.file("wallet-state")}
+	wallet := map[string]any{"listenHost": s.listenHost(), "listenPort": s.Ports.Wallet, "origin": s.WalletOrigin(), "opsOrigin": s.OPSOrigin(), "opsUpstream": s.OPSOrigin(), "stateRpcUrl": s.WalletOrigin() + "/rpc", "tlsCertificateFile": s.file("tls.crt"), "tlsPrivateKeyFile": s.file("tls.key"), "outputDirectory": s.file("wallet-state")}
 	if _, e = writeJSON(s.file("wallet.json"), wallet); e != nil {
 		return e
 	}
-	if _, e = writeJSON(s.file("runtime.json"), map[string]any{"version": 1, "testOnly": true, "ports": s.Ports, "opsOrigin": s.OPSOrigin(), "explorerOrigin": s.ExplorerOrigin(), "walletOrigin": s.WalletOrigin(), "rpcUrl": s.RPCURL(), "chainId": ChainID, "organizationId": Organization, "targetContract": s.TargetContract}); e != nil {
+	if _, e = writeJSON(s.file("runtime.json"), map[string]any{"version": 1, "testOnly": true, "privateNetwork": s.PrivateNetwork, "ports": s.Ports, "opsOrigin": s.OPSOrigin(), "explorerOrigin": s.ExplorerOrigin(), "walletOrigin": s.WalletOrigin(), "rpcUrl": s.RPCURL(), "chainId": ChainID, "organizationId": Organization, "targetContract": s.TargetContract}); e != nil {
 		return e
 	}
 	if e = save(s); e != nil {
@@ -233,6 +263,13 @@ func writeTLS(s State) error {
 	now := time.Now()
 	ca := &x509.Certificate{SerialNumber: big.NewInt(now.UnixNano()), Subject: pkix.Name{CommonName: "Isolated V2 demo CA"}, NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(1, 0, 0), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
 	caDER, e := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
+	if e != nil {
+		return e
+	}
+	// CreateCertificate adds the CA's subject key identifier to the encoded
+	// certificate. Parse that result so the leaf receives the matching
+	// authority key identifier required by strict X.509 clients.
+	ca, e = x509.ParseCertificate(caDER)
 	if e != nil {
 		return e
 	}
@@ -297,7 +334,7 @@ func compatibleTLS(s State) bool {
 		return false
 	}
 	leaf, e := x509.ParseCertificate(readPEM("tls.crt", "CERTIFICATE"))
-	if e != nil || leaf.IsCA || leaf.SignatureAlgorithm != x509.ECDSAWithSHA256 || leaf.CheckSignatureFrom(ca) != nil {
+	if e != nil || leaf.IsCA || leaf.SignatureAlgorithm != x509.ECDSAWithSHA256 || leaf.CheckSignatureFrom(ca) != nil || len(ca.SubjectKeyId) == 0 || !bytes.Equal(leaf.AuthorityKeyId, ca.SubjectKeyId) {
 		return false
 	}
 	for _, item := range []struct {

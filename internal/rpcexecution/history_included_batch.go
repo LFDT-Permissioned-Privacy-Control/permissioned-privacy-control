@@ -21,6 +21,7 @@ type IncludedHistoryBatch struct {
 	anchor    *HistoryHeader
 	anchors   []HistoryHeader
 	digest    common.Hash
+	traces    map[common.Hash]map[string]IndexedInternalFrame
 }
 
 func (c *HistoryReadClient) AcquireIncludedBatch(ctx context.Context, hashes []common.Hash, anchor *HistoryHeader, fence HistoryOperationFence, reserved int) (*IncludedHistoryBatch, error) {
@@ -32,7 +33,7 @@ func (c *HistoryReadClient) AcquireIncludedBatch(ctx context.Context, hashes []c
 // selected node supplies and canonically rechecks every full typed header.
 func (c *HistoryReadClient) AcquireExplorerBatch(ctx context.Context, hashes []common.Hash, anchor *HistoryHeader, anchors []HistoryHeader, fence HistoryOperationFence, reserved int) (*IncludedHistoryBatch, error) {
 
-	if c == nil || len(hashes) > min(64, c.limits.MaxParents) || len(anchors) > min(64, c.limits.MaxHeaders-1) {
+	if c == nil || len(hashes) > min(256, c.limits.MaxParents) || len(anchors) > min(256, c.limits.MaxHeaders-1) {
 		return nil, failure(EvidenceLimit)
 	}
 	if reserved < 0 || reserved > c.limits.MaxChargedBytes {
@@ -231,7 +232,8 @@ func (b *IncludedHistoryBatch) computeDigest() (common.Hash, error) {
 		Anchor  *HistoryHeader
 		Anchors []HistoryHeader
 		Data    common.Hash
-	}{"ops-explorer-included-batch/v1", b.requested, b.anchor, b.anchors, data})
+		Traces  map[common.Hash]map[string]IndexedInternalFrame
+	}{"ops-explorer-included-batch/v1", b.requested, b.anchor, b.anchors, data, b.traces})
 	if err != nil {
 		return common.Hash{}, err
 	}

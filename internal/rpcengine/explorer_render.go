@@ -382,7 +382,7 @@ func (x *explorerRender) transaction(row explorerquery.Record) (any, bool, error
 	fees := v.Fees()
 	ix := t.Location.TransactionIndex
 	gas := v.GasLimit()
-	result := wire.Transaction{Hash: hash, BlockNumber: qptr(t.Location.BlockNumber), TxIndex: &ix, From: maskAddress(red.From), To: maskAddressPtr(red.To), ContractAddress: maskAddressPtr(red.ContractAddress), Value: maskedQuantity(red.Value), GasUsed: qptr(r.Receipt.GasUsed()), GasPrice: qbig(t.GasPrice), GasLimit: qptr(gas), TxType: v.Type(), InputData: wire.Hex(red.InputData), AddressMetadata: metadataWire(red.AddressMetadata)}
+	result := wire.Transaction{Source: row.Source, Hash: hash, BlockNumber: qptr(t.Location.BlockNumber), TxIndex: &ix, From: maskAddress(red.From), To: maskAddressPtr(red.To), ContractAddress: maskAddressPtr(red.ContractAddress), Value: maskedQuantity(red.Value), GasUsed: qptr(r.Receipt.GasUsed()), GasPrice: qbig(t.GasPrice), GasLimit: qptr(gas), TxType: v.Type(), InputData: wire.Hex(red.InputData), AddressMetadata: metadataWire(red.AddressMetadata)}
 	if red.InputData == "" {
 		result.InputData = "0x"
 	}
@@ -770,7 +770,7 @@ func (x *explorerRender) other(row explorerquery.Record) (any, bool, error) {
 		if !ok {
 			return nil, false, errExplorer
 		}
-		out := wire.Block{Number: decimal(n), Hash: hash, ParentHash: strings.ToLower(h.ParentHash.Hex()), Timestamp: decimal(h.Time), GasLimit: decimal(h.GasLimit), Difficulty: qbig(h.Difficulty), Nonce: wire.Hex("0x" + hex.EncodeToString(h.Nonce[:])), Miner: strings.ToLower(h.Coinbase.Hex()), ExtraData: wire.Hex("0x" + hex.EncodeToString(h.Extra)), StateRoot: strings.ToLower(h.Root.Hex()), TransactionsRoot: strings.ToLower(h.TxHash.Hex()), ReceiptsRoot: strings.ToLower(h.ReceiptHash.Hex()), CreatedAt: f.text("created_at")}
+		out := wire.Block{Source: row.Source, Number: decimal(n), Hash: hash, ParentHash: strings.ToLower(h.ParentHash.Hex()), Timestamp: decimal(h.Time), GasLimit: decimal(h.GasLimit), Difficulty: qbig(h.Difficulty), Nonce: wire.Hex("0x" + hex.EncodeToString(h.Nonce[:])), Miner: strings.ToLower(h.Coinbase.Hex()), ExtraData: wire.Hex("0x" + hex.EncodeToString(h.Extra)), StateRoot: strings.ToLower(h.Root.Hex()), TransactionsRoot: strings.ToLower(h.TxHash.Hex()), ReceiptsRoot: strings.ToLower(h.ReceiptHash.Hex()), CreatedAt: f.text("created_at")}
 		if h.BaseFee != nil {
 			q := qbig(h.BaseFee)
 			out.BaseFeePerGas = &q
@@ -837,6 +837,15 @@ func (x *explorerRender) other(row explorerquery.Record) (any, bool, error) {
 		return out, true, nil
 	case explorerquery.Search:
 		switch f.text("kind") {
+		case "block":
+			hash := f.text("value")
+			if !explorerquery.ValidHash(hash) || row.Position.Hash != hash {
+				return nil, false, errExplorer
+			}
+			if _, ok := x.result.batch.Header(row.Position.Block, common.HexToHash(hash)); !ok {
+				return nil, false, errExplorer
+			}
+			return wire.SearchSuggestion{Type: "block", Value: strconv.FormatUint(row.Position.Block, 10)}, true, nil
 		case "transaction":
 			v := f.text("value")
 			if _, ok, e := x.transaction(explorerquery.Record{Family: explorerquery.Transactions, JSON: func() json.RawMessage { b, _ := json.Marshal(x.fields[v]); return b }()}); e != nil || !ok {
@@ -895,7 +904,7 @@ func (x *explorerRender) render(data explorerquery.Data, count int) ([]byte, err
 		}
 		return json.Marshal(items[0])
 	}
-	page := wire.PageInfo{Population: wire.Population}
+	page := wire.PageInfo{Population: wire.Population, Consistency: data.Consistency, EndedAt: data.EndedAt, HistoryFrom: qptr(data.HistoryFrom)}
 	exhausted := data.Exhausted && processed == len(data.Rows) && count == len(data.Rows) && !moreVisible
 	if exhausted {
 		v := false
@@ -906,6 +915,10 @@ func (x *explorerRender) render(data explorerquery.Data, count int) ([]byte, err
 			v := true
 			page.HasMore = &v
 		}
+		if processed == len(data.Rows) && count == len(data.Rows) && !moreVisible && data.Next != nil {
+			pos := *data.Next
+			last = &pos
+		}
 		if last == nil {
 			return nil, explorerquery.ErrTooBroad
 		}
@@ -914,6 +927,9 @@ func (x *explorerRender) render(data explorerquery.Data, count int) ([]byte, err
 			return nil, e
 		}
 		page.Next = &next
+		// The raw Indexer page may already have reached its floor, while OPS
+		// stopped at an earlier visible row. This continuation still has work.
+		page.EndedAt = "ENDED_AT_UNSPECIFIED"
 	}
 	if request.operation.Label == "explorer.stats" || request.operation.Label == "explorer.tx_history" {
 		page.Coverage = wire.ObservedVisiblePage

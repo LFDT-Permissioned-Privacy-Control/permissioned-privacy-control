@@ -5,7 +5,9 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --ignore-scripts && npm rebuild esbuild
 COPY frontend/ ./
-RUN npm run build:v2
+ARG OPS_LOCAL_DEMO=0
+ARG OPS_DEMO_WALLET_ORIGIN=
+RUN VITE_OPS_LOCAL_DEMO="${OPS_LOCAL_DEMO}" VITE_OPS_DEMO_WALLET_ORIGIN="${OPS_DEMO_WALLET_ORIGIN}" npm run build:v2
 
 FROM golang:1.26.9-trixie AS go-deps
 WORKDIR /app

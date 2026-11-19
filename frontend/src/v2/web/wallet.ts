@@ -22,6 +22,7 @@ export interface WalletState {
   links: OwnWallet[]; accounts: string[]; selected: string | null;
   stage: 'idle' | 'choose' | 'sign' | 'confirm'; message: string | null;
   busy: boolean; error: string | null; unlink: string | null;
+  loaded: boolean; submitting: boolean; task: 'loading' | 'linking' | 'unlinking' | null;
 }
 interface Owner {
   scope: WalletScope; provider: WalletProvider | null; clean: () => void;
@@ -64,7 +65,7 @@ function accounts(value: unknown): string[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 256 || value.some(v => typeof v !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(v))) throw Error('Invalid wallet accounts');
   return [...new Set((value as string[]).map(v => v.toLowerCase()))];
 }
-const empty = (): WalletState => ({ links: [], accounts: [], selected: null, stage: 'idle', message: null, busy: false, error: null, unlink: null });
+const empty = (): WalletState => ({ links: [], accounts: [], selected: null, stage: 'idle', message: null, busy: false, error: null, unlink: null, loaded: false, submitting: false, task: null });
 export function injectedWallet(): WalletProvider | null {
   const value = (window as unknown as { ethereum?: WalletProvider }).ethereum;
   return value && typeof value.request === 'function' ? value : null;
@@ -98,15 +99,15 @@ export class WalletController {
     this.set(empty());
   };
   stop = () => { this.live = false; this.cancel(); };
-  private async begin(provider: WalletProvider | null = null): Promise<Owner> {
+  private async begin(provider: WalletProvider | null = null, task: 'loading' | 'linking' = 'loading'): Promise<Owner> {
     this.cancel();
     if (!this.live) throw Error('Wallet panel is closed');
     const warmup = new AbortController(); this.warmup = warmup;
-    this.set({ busy: true });
+    this.set({ busy: true, task });
     let scope: WalletScope;
     try { scope = await this.capture(warmup.signal); }
     catch (error) {
-      if (this.warmup === warmup) { this.warmup = null; this.set({ busy: false, error: 'Cannot verify the current identity. Refresh the session before starting a new wallet action.' }); }
+      if (this.warmup === warmup) { this.warmup = null; this.set({ busy: false, task: null, error: 'Cannot verify the current identity. Refresh the session before starting a new wallet action.' }); }
       throw error;
     }
     if (!this.live || this.warmup !== warmup || warmup.signal.aborted) { scope.dispose(); throw Error('Wallet warm-up changed'); }
@@ -135,7 +136,7 @@ export class WalletController {
     try { this.check(owner); } catch { this.cancel(); return; }
     owner.signature = null; owner.challenge = null;
     this.expiry(owner);
-    this.set({ links: [], stage: 'idle', message: null, accounts: [], selected: null, busy: false, unlink: null,
+    this.set({ links: [], stage: 'idle', message: null, accounts: [], selected: null, busy: false, unlink: null, loaded: false, submitting: false, task: null,
       error: error instanceof WalletHTTPError ? error.message : 'The wallet operation did not complete. Refresh links before starting a new action; an uncertain action is not retried.' });
   }
   private async currentAccount(owner: Owner) {
@@ -147,7 +148,7 @@ export class WalletController {
   private async list(owner: Owner) {
     const value = await owner.scope.request('/eth/addresses'); this.check(owner);
     const links = ownWallets(value); this.check(owner);
-    this.set({ links, busy: false, stage: 'idle', accounts: [], selected: null, message: null, unlink: null, error: null });
+    this.set({ links, busy: false, stage: 'idle', accounts: [], selected: null, message: null, unlink: null, error: null, loaded: true, submitting: false, task: null });
     owner.signature = null; owner.challenge = null;
     this.expiry(owner);
   }
@@ -161,7 +162,7 @@ export class WalletController {
     try {
       const provider = this.provider();
       if (!provider) { this.cancel(); this.set({ error: 'Connect an injected Ethereum wallet to link an address.' }); return; }
-      owner = await this.begin(provider); this.check(owner); this.set({ busy: true });
+      owner = await this.begin(provider, 'linking'); this.check(owner); this.set({ busy: true });
       const selected = accounts(await provider.request({ method: 'eth_requestAccounts' })); this.check(owner);
       this.set({ accounts: selected, stage: 'choose', busy: false });
     } catch (e) { this.failed(owner, e); }
@@ -198,6 +199,7 @@ export class WalletController {
     try {
       this.check(owner); this.set({ busy: true });
       await this.currentAccount(owner); this.check(owner);
+      this.set({ submitting: true });
       const value = await owner.scope.request('/eth/link/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nonce: owner.challenge.nonce, address: owner.address, signature: owner.signature }) }); this.check(owner);
       const result = object(value, ['address', 'status']);
       if (result.address !== owner.address || result.status !== 'linked') throw Error('Invalid wallet result');
@@ -208,13 +210,13 @@ export class WalletController {
   prepareUnlink = (selected: string) => {
     const owner = this.owner;
     if (!owner || this.state.busy || !this.state.links.some(v => v.address === selected)) return;
-    try { this.check(owner); this.set({ unlink: selected }); } catch { this.cancel(); }
+    try { this.check(owner); this.set({ unlink: selected, task: 'unlinking' }); } catch { this.cancel(); }
   };
   unlink = async () => {
     const owner = this.owner, selected = this.state.unlink;
     if (!owner || !selected || this.state.busy) return;
     try {
-      this.check(owner); this.set({ busy: true });
+      this.check(owner); this.set({ busy: true, submitting: true });
       const value = await owner.scope.request('/eth/addresses/' + selected, { method: 'DELETE' }); this.check(owner);
       const result = object(value, ['address', 'status']);
       if (result.address !== selected || result.status !== 'revoked') throw Error('Invalid wallet result');

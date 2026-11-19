@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"math/big"
 	"net/http"
@@ -23,15 +24,17 @@ import (
 )
 
 type HistoryNode struct {
-	mu              sync.Mutex
-	server          *httptest.Server
-	genesis, header *types.Header
-	transactions    []*types.Transaction
-	block           map[string]any
-	receipts        []any
-	logs            []any
-	reorg           bool
-	calls           map[string]int
+	mu                      sync.Mutex
+	server                  *httptest.Server
+	genesis, header         *types.Header
+	head                    *types.Header
+	genesisBlock, headBlock map[string]any
+	transactions            []*types.Transaction
+	block                   map[string]any
+	receipts                []any
+	logs                    []any
+	reorg                   bool
+	calls                   map[string]int
 }
 
 func HistoryKey(n byte) *ecdsa.PrivateKey {
@@ -107,6 +110,9 @@ func NewHistoryNode(t testing.TB, txs []*types.Transaction, perTxLogs [][]*types
 		n.receipts = append(n.receipts, map[string]any{"transactionHash": tx.Hash().Hex(), "blockHash": h.Hash().Hex(), "blockNumber": "0x1", "transactionIndex": historyHex(uint64(i)), "from": from.Hex(), "to": to, "type": "0x0", "contractAddress": nil, "status": "0x1", "gasUsed": "0x5208", "cumulativeGasUsed": historyHex(21000 * uint64(i+1)), "effectiveGasPrice": "0x1", "logsBloom": "0x" + common.Bytes2Hex(bloom[:]), "logs": logs})
 	}
 	n.block["transactions"] = items
+	n.genesisBlock = fixtureObject(t, g)
+	n.genesisBlock["transactions"] = []any{}
+	n.genesisBlock["uncles"] = []any{}
 	n.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "" {
 			t.Error("history fixture transport or leaked OPS JWT")
@@ -151,22 +157,78 @@ func NewHistoryNode(t testing.TB, txs []*types.Transaction, perTxLogs [][]*types
 			case "eth_syncing":
 				result = false
 			case "eth_getHeaderByNumber":
-				result = n.header
-				if selector == "0x0" {
-					result = n.genesis
-				} else if n.reorg {
-					copy := types.CopyHeader(n.header)
-					copy.Extra = []byte{9}
-					result = copy
+				var selected *types.Header
+				switch selector {
+				case "0x0":
+					selected = n.genesis
+				case "0x1":
+					selected = n.header
+				case "0x2":
+					selected = n.head
+				case "latest", "safe", "finalized":
+					selected = n.header
+					if n.head != nil {
+						selected = n.head
+					}
+				}
+				if selected != nil {
+					if n.reorg && selected.Number.Sign() != 0 {
+						copy := types.CopyHeader(selected)
+						copy.Extra = []byte{9}
+						result = copy
+					} else {
+						result = selected
+					}
 				}
 			case "eth_getHeaderByHash":
-				if selector == n.header.Hash().Hex() {
+				switch selector {
+				case n.genesis.Hash().Hex():
+					result = n.genesis
+				case n.header.Hash().Hex():
 					result = n.header
+				default:
+					if n.head != nil && selector == n.head.Hash().Hex() {
+						result = n.head
+					}
 				}
-			case "eth_getBlockByHash", "eth_getBlockByNumber":
-				result = n.block
+			case "eth_getBlockByHash":
+				switch selector {
+				case n.genesis.Hash().Hex():
+					result = n.genesisBlock
+				case n.header.Hash().Hex():
+					result = n.block
+				default:
+					if n.head != nil && selector == n.head.Hash().Hex() {
+						result = n.headBlock
+					}
+				}
+			case "eth_getBlockByNumber":
+				switch selector {
+				case "0x0":
+					result = n.genesisBlock
+				case "0x1":
+					result = n.block
+				case "0x2":
+					if n.head != nil {
+						result = n.headBlock
+					}
+				case "latest", "safe", "finalized":
+					result = n.block
+					if n.head != nil {
+						result = n.headBlock
+					}
+				}
 			case "eth_getBlockReceipts":
-				result = n.receipts
+				switch selector {
+				case "0x1", n.header.Hash().Hex():
+					result = n.receipts
+				case "0x0":
+					result = []any{}
+				case "0x2":
+					if n.head != nil {
+						result = []any{}
+					}
+				}
 			case "eth_getTransactionByHash", "eth_getTransactionByBlockHashAndIndex", "eth_getTransactionByBlockNumberAndIndex":
 				index := -1
 				if q.Method == "eth_getTransactionByHash" {
@@ -176,7 +238,7 @@ func NewHistoryNode(t testing.TB, txs []*types.Transaction, perTxLogs [][]*types
 							break
 						}
 					}
-				} else if len(q.Params) > 1 {
+				} else if len(q.Params) > 1 && (selector == "0x1" || selector == n.header.Hash().Hex()) {
 					var s string
 					_ = json.Unmarshal(q.Params[1], &s)
 					value, e := strconv.ParseUint(strings.TrimPrefix(s, "0x"), 16, 64)
@@ -232,4 +294,34 @@ func (n *HistoryNode) Calls() map[string]int {
 		out[k] = v
 	}
 	return out
+}
+
+// CertificatePEM returns only the fixture's public certificate for an explicit
+// trust pool in the independently running producer. TLS validation stays on.
+func (n *HistoryNode) CertificatePEM() []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: n.server.Certificate().Raw})
+}
+
+// AdvanceEmptyHead2 leaves every signed transaction/receipt in block1 and
+// exposes a separate complete empty canonical head for retention fallback.
+func (n *HistoryNode) AdvanceEmptyHead2() *types.Header {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.head == nil {
+		h := types.CopyHeader(n.header)
+		h.Number = big.NewInt(2)
+		h.ParentHash = n.header.Hash()
+		h.Time++
+		h.GasUsed = 0
+		h.TxHash = types.EmptyTxsHash
+		h.ReceiptHash = types.EmptyReceiptsHash
+		h.Bloom = types.Bloom{}
+		n.head = h
+		raw, _ := json.Marshal(h)
+		n.headBlock = map[string]any{}
+		_ = json.Unmarshal(raw, &n.headBlock)
+		n.headBlock["transactions"] = []any{}
+		n.headBlock["uncles"] = []any{}
+	}
+	return types.CopyHeader(n.head)
 }

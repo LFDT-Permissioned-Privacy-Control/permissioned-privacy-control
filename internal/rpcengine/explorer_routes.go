@@ -146,6 +146,9 @@ func parseExplorerRequest(path, rawQuery string) (explorerRequest, error) {
 	if r.query.Family == explorerquery.Tokens {
 		allowed["type"] = true
 	}
+	if label == "explorer.tokens" {
+		allowed["search"] = true
+	}
 	if label == "explorer.search_suggestions" {
 		allowed["q"] = true
 		r.limit = 10
@@ -213,9 +216,9 @@ func parseExplorerRequest(path, rawQuery string) (explorerRequest, error) {
 			default:
 				return r, errExplorerRequest
 			}
-		case "q":
+		case "q", "search":
 			value = strings.TrimSpace(value)
-			if len(value) < 1 || len(value) > 128 || !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
+			if len(value) < 1 || len(value) > 128 || !utf8.ValidString(value) || strings.ContainsFunc(value, func(c rune) bool { return c < 32 || c == 127 }) {
 				return r, errExplorerRequest
 			}
 			r.query.Search = value

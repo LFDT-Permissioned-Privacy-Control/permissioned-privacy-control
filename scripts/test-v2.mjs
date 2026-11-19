@@ -14,7 +14,14 @@ const suites = {
   core: {
     packages: [...commands.map(name => `./cmd/${name}`), './internal/archtest', './internal/policycore',
       './internal/runtimepolicy', './internal/policybundle', './internal/identity'],
-    required: ['TestNativeV2ServingExcludesLegacyServerAndEVMPolicyBackend', 'TestPinnedArtifactRejectsMixedMissingAndUnexpectedFiles'],
+    required: ['TestNativeV2ServingExcludesLegacyServerAndEVMPolicyBackend', 'TestNativeIndexerConsumerUsesOnlyServiceAPI', 'TestPinnedArtifactRejectsMixedMissingAndUnexpectedFiles'],
+  },
+  indexer: {
+    packages: ['./internal/operational/explorerindex', './internal/operational/protectedsource', './internal/activitylog'],
+    required: ['TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP', 'TestActualRetainedSourcesComposeAllResources',
+      'TestRetainedActualContinuationAndRecoveryFences', 'TestActualProtectedResultRowsShareOriginalLedger',
+      'TestExplorerActualPrunedNodePointsPrivacyAndFinalReorgHTTP', 'TestActualRetainedTransactionPagingFitsOriginalDeliveryBudget',
+      'TestRetainedAddressTransactionsThroughActualHTTP'],
   },
   identity: {
     packages: ['./internal/operational/identitysql'],
@@ -38,13 +45,13 @@ async function run(name) {
   if (name !== 'core') {
     await command('docker', ['info', '--format', '{{.ServerVersion}}'])
     await command('docker', ['image', 'inspect', 'postgres:16-alpine', '--format', '{{.Id}}'])
-    if (!await verifyArtifacts()) throw new Error('Pinned public circuits missing: run npm run circuits in tools/v2-test-wallet first')
+    if (name !== 'indexer' && !await verifyArtifacts()) throw new Error('Pinned public circuits missing: run npm run circuits in tools/v2-test-wallet first')
   }
   const args = ['test', '-json', '-p', '1', '-tags', 'production,prover_disabled', '-count=1', '-timeout', '10m']
   if (name !== 'core') args.push('-run', `^(${suite.required.join('|')})$`)
   args.push(...suite.packages)
   const child = spawn(process.env.GO ?? 'go', args, { cwd: repositoryRoot,
-    env: { ...process.env, OPS_TEST_NODE: process.execPath, OPS_PRIVADO_WALLET_INTEGRATION: '1', OPS_PRIVADO_WALLET_DEMO: '0',
+    env: { ...process.env, GOFLAGS: `${process.env.GOFLAGS ?? ''} -tags=production,prover_disabled`.trim(), OPS_TEST_NODE: process.execPath, OPS_PRIVADO_WALLET_INTEGRATION: '1', OPS_PRIVADO_WALLET_DEMO: '0',
       OPS_BROWSER_INTEGRATION: name === 'browser' ? '1' : '0', GOMAXPROCS: process.env.GOMAXPROCS ?? '2' },
     stdio: ['ignore', 'pipe', 'inherit'] })
   const completed = new Set(), skipped = new Set(), failed = new Set()
@@ -81,6 +88,6 @@ async function run(name) {
 }
 try {
   const selected = process.argv[2] ?? 'all'
-  if (process.argv.length > 3 || selected !== 'all' && !Object.hasOwn(suites, selected)) throw new Error('Usage: node scripts/test-v2.mjs [core|identity|browser|all]')
+  if (process.argv.length > 3 || selected !== 'all' && !Object.hasOwn(suites, selected)) throw new Error('Usage: node scripts/test-v2.mjs [core|indexer|identity|browser|all]')
   for (const name of selected === 'all' ? Object.keys(suites) : [selected]) await run(name)
 } catch (error) { process.stderr.write(`${error.message}\n`); process.exitCode = 1 }

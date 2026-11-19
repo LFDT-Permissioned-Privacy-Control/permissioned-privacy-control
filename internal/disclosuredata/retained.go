@@ -40,13 +40,13 @@ type RetainedAnchor struct {
 // marker or completeness certificate. A real count may be supplied only by an
 // actual qualified block acquisition. The source rechecks canonical identity.
 type RetainedBasis struct {
-	Version         uint8          `json:"v"`
-	NetworkKey      Digest         `json:"network"`
-	NodeSource      Digest         `json:"node"`
-	IndexSource     Digest         `json:"index"`
-	Schema          Digest         `json:"schema"`
-	ConfiguredEpoch string         `json:"epoch"`
-	Upper           RetainedAnchor `json:"upper"`
+	Version      uint8          `json:"v"`
+	NetworkKey   Digest         `json:"network"`
+	NodeSource   Digest         `json:"node"`
+	APIVersion   string         `json:"apiVersion"`
+	DatasetEpoch string         `json:"datasetEpoch"`
+	RunFloor     uint64         `json:"runFloor"`
+	Upper        RetainedAnchor `json:"upper"`
 }
 
 func canonicalHash(s string) bool {
@@ -62,11 +62,11 @@ func canonicalHash(s string) bool {
 }
 
 func (b RetainedBasis) Valid() bool {
-	if b.Version != 1 || !digestValid(b.NetworkKey) || !digestValid(b.NodeSource) || !digestValid(b.IndexSource) || !digestValid(b.Schema) || len(b.ConfiguredEpoch) != 36 || !uuidValid(b.ConfiguredEpoch) || !canonicalHash(b.Upper.Hash) || b.Upper.Hash == "0x"+strings.Repeat("0", 64) || !canonicalHash(b.Upper.ParentHash) || len(b.Upper.Number) > 19 || len(b.Upper.Timestamp) > 12 {
+	if b.Version != 2 || !digestValid(b.NetworkKey) || !digestValid(b.NodeSource) || b.APIVersion != "chain_indexer.v2" || !uuidValid(b.DatasetEpoch) || !canonicalHash(b.Upper.Hash) || b.Upper.Hash == "0x"+strings.Repeat("0", 64) || !canonicalHash(b.Upper.ParentHash) || len(b.Upper.Number) > 19 || len(b.Upper.Timestamp) > 12 {
 		return false
 	}
 	number, err := strconv.ParseUint(string(b.Upper.Number), 10, 63)
-	if err != nil || strconv.FormatUint(number, 10) != string(b.Upper.Number) || number > math.MaxInt64 {
+	if err != nil || strconv.FormatUint(number, 10) != string(b.Upper.Number) || number > math.MaxInt64 || b.RunFloor > number {
 		return false
 	}
 	timestamp, err := strconv.ParseUint(string(b.Upper.Timestamp), 10, 64)

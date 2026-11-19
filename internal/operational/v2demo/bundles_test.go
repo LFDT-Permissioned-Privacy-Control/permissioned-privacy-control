@@ -81,6 +81,9 @@ func TestInitPersistsIdentityAuthorityAndNativeRevision(t *testing.T) {
 	if e != nil || leaf.CheckSignatureFrom(ca) != nil {
 		t.Fatal("owned CA did not sign serving leaf", e)
 	}
+	if len(ca.SubjectKeyId) == 0 || !bytes.Equal(leaf.AuthorityKeyId, ca.SubjectKeyId) {
+		t.Fatal("serving leaf lacks the CA key identifier required by strict X.509 clients")
+	}
 	if _, e = os.Stat(s.file("private/ca.key")); e != nil {
 		t.Fatal(e)
 	}

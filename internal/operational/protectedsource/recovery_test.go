@@ -3,6 +3,7 @@ package protectedsource
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,12 +37,18 @@ func TestRetainedActualContinuationAndRecoveryFences(t *testing.T) {
 		t.Cleanup(r.Close)
 		return r
 	}
+	// The node may be one block ahead of the committed producer. The first
+	// read uses the producer's actual cut, qualified against the live node.
+	node.advanceHead(true)
 	first := open(t.Context())
 	facts, err := first.Read(t.Context(), scope, nil)
 	if err != nil || len(facts.Transactions) != 1 {
 		t.Fatal(err)
 	}
 	basis := first.Basis()
+	if basis.Upper.Number != "1" || basis.Upper.Hash != node.head.Hash().Hex() {
+		t.Fatal("lagging producer did not retain its qualified original anchor", basis.Upper)
+	}
 	refs, err := d.SourceReferencesRetained(plan, first.Descriptors())
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +78,7 @@ func TestRetainedActualContinuationAndRecoveryFences(t *testing.T) {
 	if err = next.CheckCurrent(t.Context()); err != nil {
 		t.Fatal("normal head advance invalidated original cut", err)
 	}
-	for _, mutate := range []func(*d.RetainedBasis){func(b *d.RetainedBasis) { b.ConfiguredEpoch = uuid.NewString() }, func(b *d.RetainedBasis) { b.NodeSource = digestParts("other-node") }, func(b *d.RetainedBasis) { b.IndexSource = digestParts("other-index") }} {
+	for _, mutate := range []func(*d.RetainedBasis){func(b *d.RetainedBasis) { b.DatasetEpoch = uuid.NewString() }, func(b *d.RetainedBasis) { b.NodeSource = digestParts("other-node") }, func(b *d.RetainedBasis) { b.APIVersion = "other-api" }} {
 		bad := basis.Clone()
 		mutate(&bad)
 		if read, e := source.OpenRetained(t.Context(), scope, refs, &bad, position); e == nil {
@@ -80,6 +87,22 @@ func TestRetainedActualContinuationAndRecoveryFences(t *testing.T) {
 		}
 	}
 	node.advanceHead(false)
+	t.Run("producer-ahead-of-node", func(t *testing.T) {
+		functionalExec(t, control.index, `INSERT INTO public.blocks(number,hash,parent_hash,timestamp,gas_used,gas_limit,transaction_count)VALUES(2,$1,$2,$3,0,30000000,0)`, "0x"+strings.Repeat("8", 64), node.head.Hash().Hex(), node.head.Time+1)
+		defer functionalExec(t, control.index, `DELETE FROM public.blocks WHERE number=2`)
+		if read, e := source.OpenRetained(t.Context(), scope, nil, nil, nil); e == nil {
+			read.Close()
+			t.Fatal("producer anchor beyond trusted node ceiling accepted")
+		}
+	})
+	t.Run("producer-anchor-hash-mismatch", func(t *testing.T) {
+		functionalExec(t, control.index, `UPDATE public.blocks SET hash=$1 WHERE number=1`, "0x"+strings.Repeat("9", 64))
+		defer functionalExec(t, control.index, `UPDATE public.blocks SET hash=$1 WHERE number=1`, node.head.Hash().Hex())
+		if read, e := source.OpenRetained(t.Context(), scope, nil, nil, nil); e == nil {
+			read.Close()
+			t.Fatal("producer anchor with a different canonical node hash accepted")
+		}
+	})
 	t.Run("original-parent", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		read := open(ctx)

@@ -29,7 +29,43 @@ func retainedFixture(t *testing.T, resource p.Resource, view View, level p.Level
 
 func testRetainedBasis() RetainedBasis {
 	count := uint32(17)
-	return RetainedBasis{Version: 1, NetworkKey: testDigest(13), NodeSource: testDigest(30), IndexSource: testDigest(31), Schema: testDigest(32), ConfiguredEpoch: "77777777-7777-4777-8777-777777777777", Upper: RetainedAnchor{Number: "100", Hash: hashString(testHash(41)), ParentHash: hashString(testHash(40)), Timestamp: "1800000000", Transactions: &count}}
+	return RetainedBasis{Version: 2, NetworkKey: testDigest(13), NodeSource: testDigest(30), APIVersion: "chain_indexer.v2", DatasetEpoch: "77777777-7777-4777-8777-777777777777", Upper: RetainedAnchor{Number: "100", Hash: hashString(testHash(41)), ParentHash: hashString(testHash(40)), Timestamp: "1800000000", Transactions: &count}}
+}
+
+func TestRetainedTransactionListAllowsBoundedEarlyContinuationOnly(t *testing.T) {
+	s, plan, descriptors, facts, _ := retainedFixture(t, p.Transactions, List, p.Full)
+	tx := facts.Transactions[0]
+	facts.End = false
+	facts.Next = &Position{Kind: HistorySource, Transaction: &TransactionPosition{tx.BlockNumber, tx.TransactionIndex, tx.Hash}}
+	if len(facts.Transactions) >= int(s.Query.Limit()) {
+		t.Fatal("fixture must exercise a short nonterminal page")
+	}
+	if err := ValidateFactsRetained(plan, s, descriptors, facts, nil); err != nil {
+		t.Fatal("bounded early retained continuation rejected", err)
+	}
+	for _, change := range []func(*Facts){
+		func(f *Facts) { f.Transactions = []TransactionFact{} },
+		func(f *Facts) { f.Next = nil },
+		func(f *Facts) { f.Next = ClonePosition(f.Next); f.Next.Transaction.TransactionIndex++ },
+		func(f *Facts) { f.End = true },
+	} {
+		bad := facts
+		change(&bad)
+		if err := ValidateFactsRetained(plan, s, descriptors, bad, nil); err == nil {
+			t.Fatal("invalid early continuation accepted")
+		}
+	}
+	legacyScope, legacyDescriptors, legacyFacts, _ := testFixture(t, p.Transactions, List, p.Full)
+	legacyFacts.End, legacyFacts.Next = false, facts.Next
+	if _, err := validateFacts(legacyScope, legacyDescriptors, legacyFacts, nil); err == nil {
+		t.Fatal("legacy exact-fill contract widened")
+	}
+	addressScope, addressPlan, addressDescriptors, addressFacts, _ := retainedFixture(t, p.AddressHistory, List, p.Full)
+	addressFacts.End = false
+	addressFacts.Next = &Position{Kind: HistorySource, Address: &AddressPosition{Address: addressFacts.Addresses[0].Address}}
+	if err := ValidateFactsRetained(addressPlan, addressScope, addressDescriptors, addressFacts, nil); err == nil {
+		t.Fatal("address exact-fill contract widened")
+	}
 }
 
 func TestRetainedCursorOriginalAnchorAndSeparateDomain(t *testing.T) {
@@ -149,7 +185,7 @@ func TestRetainedBasisClosedShapeAndResourceChoice(t *testing.T) {
 	if BasisForResource(p.ActivityLogs, basis) == nil || BasisForResource(p.Transactions, RetainedBasis{}) == nil {
 		t.Fatal("anchor omission/resource confusion")
 	}
-	for _, change := range []func(*RetainedBasis){func(b *RetainedBasis) { b.Upper.Number = "0100" }, func(b *RetainedBasis) { b.Upper.Timestamp = "1800000000000" }, func(b *RetainedBasis) { b.Upper.Hash = "0x" + strings.Repeat("0", 64) }, func(b *RetainedBasis) { b.ConfiguredEpoch = "00000000-0000-0000-0000-000000000000" }, func(b *RetainedBasis) { b.Version = 2 }} {
+	for _, change := range []func(*RetainedBasis){func(b *RetainedBasis) { b.Upper.Number = "0100" }, func(b *RetainedBasis) { b.Upper.Timestamp = "1800000000000" }, func(b *RetainedBasis) { b.Upper.Hash = "0x" + strings.Repeat("0", 64) }, func(b *RetainedBasis) { b.DatasetEpoch = "00000000-0000-0000-0000-000000000000" }, func(b *RetainedBasis) { b.Version = 1 }} {
 		bad := basis.Clone()
 		change(&bad)
 		if bad.Valid() {

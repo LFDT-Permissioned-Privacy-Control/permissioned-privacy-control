@@ -19,9 +19,11 @@ import (
 const help = `OPS policy files
   ops-v2 policy profiles
   ops-v2 policy abi --file ABI.json
+  ops-v2 policy unpack --file SOURCE_PACKAGE.json --output NEW_DIR
   ops-v2 policy prepare --source DIR --output NEW_DIR --profile ID
   ops-v2 policy check --bundle DIR --expected-digest sha256:HEX --environment ENV --chain-id ID --profile ID
   ops-v2 policy inspect --bundle DIR --expected-digest sha256:HEX --environment ENV --chain-id ID --profile ID
+  ops-v2 policy simulate --bundle DIR --expected-digest sha256:HEX --environment ENV --chain-id ID --profile ID --scenario FILE.json
 
 Results and errors are JSON. Profiles are compiled support, not Git approval or
 runtime readiness. Preparation writes a new proposal directory; it never updates
@@ -62,8 +64,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if args[1] == "abi" {
 		return inspectABI(ctx, args[2:], stdout, stderr)
 	}
+	if args[1] == "unpack" {
+		return unpackSource(ctx, args[2:], stdout, stderr)
+	}
 	command := args[1]
-	if command != "prepare" && command != "check" && command != "inspect" {
+	if command != "prepare" && command != "check" && command != "inspect" && command != "simulate" {
 		return reportError(stderr, "usage", errors.New("unknown policy command; use --help"), 2)
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -71,6 +76,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	profile := flags.String("profile", "", "explicit compiled profile ID")
 	consumer := flags.String("consumer", "", "explicit compiled consumer: history or delivery (creation-observed only)")
 	var source, output, bundle, digest, environment, chain string
+	var scenario string
+	if command == "simulate" {
+		flags.StringVar(&scenario, "scenario", "", "bounded hypothetical policy scenario")
+	}
 	if command == "prepare" {
 		flags.StringVar(&source, "source", "", "flat draft source directory")
 		flags.StringVar(&output, "output", "", "new artifact directory")
@@ -134,6 +143,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	snapshot, err := policybundle.LoadDirectory(ctx, selection, options)
 	if err != nil {
 		return reportError(stderr, command, err, 1)
+	}
+	if command == "simulate" {
+		if scenario == "" {
+			return reportError(stderr, "usage", errors.New("scenario file is required"), 2)
+		}
+		return simulate(ctx, snapshot, scenario, stdout, stderr)
 	}
 	return report(stdout, stderr, Report{Action: command, Profile: description, ManifestDigest: snapshot.Metadata().ManifestDigest, Requirements: snapshot.Requirements(), Metadata: snapshot.Metadata()})
 }

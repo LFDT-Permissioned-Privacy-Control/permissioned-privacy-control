@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"privacy-proxy/internal/policybundle"
 )
 
@@ -49,10 +51,13 @@ func New(c Config) (*Handler, error) {
 		return nil, ErrInvalid
 	}
 	complete, err := url.Parse(source.CompletionURI)
-	if err != nil || complete.Scheme+"://"+complete.Host != source.WebOrigin || complete.RawQuery != "" || complete.Fragment != "" || !pagePath(complete.Path) || strings.HasPrefix(complete.Path, "/api/") || strings.HasPrefix(complete.Path, "/assets-v2/") || complete.Path == "/login" || complete.Path == "/auth/sso" || complete.Path == "/auth/azure/callback" {
+	if err != nil || complete.Scheme+"://"+complete.Host != source.WebOrigin || complete.RawQuery != "" || complete.Fragment != "" || !pagePath(complete.Path) || strings.HasPrefix(complete.Path, "/api/") || strings.HasPrefix(complete.Path, "/assets-v2/") || complete.Path == "/login" || complete.Path == "/auth/sso" || complete.Path == "/auth/azure/callback" || adminPage(complete.Path) {
 		return nil, ErrInvalid
 	}
 	h := &Handler{host: origin.Host, pages: map[string]bool{"/login": true, "/auth/sso": true, "/auth/azure/callback": true, complete.Path: true}, assets: map[string]asset{}}
+	for _, p := range adminPages {
+		h.pages[p] = true
+	}
 	total, count := 0, 0
 	err = fs.WalkDir(c.Files, ".", func(name string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -118,6 +123,44 @@ func New(c Config) (*Handler, error) {
 func pagePath(value string) bool {
 	return strings.HasPrefix(value, "/") && value != "/" && path.Clean(value) == value && !strings.ContainsAny(value, "%\\?# \t\r\n")
 }
+
+// Admin routes serve only the selected static entry. Authentication and actual
+// operation authority still belong to the native client and API handlers.
+// Keep this list exact: an unknown API or legacy path must never become a SPA.
+var adminPages = []string{
+	"/admin", "/admin/account", "/admin/rbac", "/admin/rbac/organizations", "/admin/rbac/groups",
+	"/admin/rbac/contracts", "/admin/rbac/execution-policy", "/admin/rbac/configuration",
+	"/admin/rbac/identity-profiles", "/admin/rbac/claim-mappings", "/admin/rbac/azure-tenants", "/admin/rbac/platform-configuration",
+	"/admin/rbac/disclosure-source", "/admin/rbac/compliance-source",
+	"/admin/compliance", "/admin/disclosure", "/admin/disclosures", "/admin/logs", "/admin/diagnostics", "/disclosures",
+}
+
+func adminPage(value string) bool {
+	for _, page := range adminPages {
+		if value == page {
+			return true
+		}
+	}
+	return false
+}
+
+func adminQuery(value, raw string, force bool) bool {
+	if raw == "" {
+		return !force
+	}
+	if !adminPage(value) || value == "/admin" || value == "/admin/account" {
+		return false
+	}
+	// A single canonical organization selector is the only accepted query.
+	// Reject percent aliases as well as duplicate or unrelated parameters.
+	if len(raw) != len("org=")+36 || !strings.HasPrefix(raw, "org=") {
+		return false
+	}
+	selected := strings.TrimPrefix(raw, "org=")
+	id, err := uuid.Parse(selected)
+	return err == nil && id != uuid.Nil && id.String() == selected
+}
+
 func (h *Handler) Register(mux *http.ServeMux) {
 	for p := range h.pages {
 		mux.Handle(p, h)
@@ -140,6 +183,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.RawPath != "" && r.URL.RawPath != r.URL.Path || r.ContentLength > 0 || len(r.URL.RawQuery) > 32768 {
+		http.Error(w, "invalid request", 400)
+		return
+	}
+	if adminPage(r.URL.Path) && !adminQuery(r.URL.Path, r.URL.RawQuery, r.URL.ForceQuery) {
 		http.Error(w, "invalid request", 400)
 		return
 	}

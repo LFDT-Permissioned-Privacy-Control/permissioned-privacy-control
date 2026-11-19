@@ -9,9 +9,9 @@ import (
 	"slices"
 
 	d "privacy-proxy/internal/disclosuredata"
+	x "privacy-proxy/internal/explorerquery"
 	h "privacy-proxy/internal/historynamespace"
 	a "privacy-proxy/internal/operational/admissionsql"
-	x "privacy-proxy/internal/operational/explorerindex"
 )
 
 type namespaceRead struct {

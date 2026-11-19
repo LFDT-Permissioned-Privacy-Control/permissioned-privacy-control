@@ -80,6 +80,7 @@ func (s *Service) serveExplorer(w http.ResponseWriter, r *http.Request, org stri
 		return
 	}
 	result := s.explorer.QueryHTTPObserved(ctx, rpcengine.MetadataAuthorization(r.Header.Values("Authorization")), org, r.URL.Path, r.URL.RawQuery)
+	defer result.Close()
 	m, err := result.MetadataFor(s.explorer)
 	if err != nil {
 		_, _ = slot.Complete(activitylog.Completion{Method: "explorer.invalid_request", HTTPStatus: 503, Outcome: activitylog.Unavailable})

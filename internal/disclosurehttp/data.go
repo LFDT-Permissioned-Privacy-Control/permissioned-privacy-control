@@ -62,7 +62,7 @@ func (h *Handler) read(ctx context.Context, token string, r *http.Request) (*c.R
 	if e != nil || len(raw) > d.MaxRequestBytes || !utf8.Valid(raw) {
 		return nil, c.ErrInvalid
 	}
-	q, e := d.DecodeQuery(raw)
+	q, e := h.service.DecodeDataQuery(raw)
 	if e != nil {
 		return nil, e
 	}

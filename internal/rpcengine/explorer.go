@@ -52,7 +52,7 @@ func NewExplorer(c ExplorerConfig) (*ExplorerEngine, error) {
 		}
 	}
 	metadata := c.Index.Metadata()
-	if metadata.Binding != c.IndexExpected || !metadata.Identity.Valid() || metadata.Mode != "existing-indexer-fixed-reads/v1" {
+	if metadata.Binding != c.IndexExpected || !metadata.Identity.Valid() || metadata.Mode != explorerquery.Mode {
 		return nil, errExplorer
 	}
 	for _, method := range c.Snapshot.Methods() {
@@ -153,6 +153,9 @@ func (e *ExplorerEngine) QueryHTTPObserved(ctx context.Context, assertion Metada
 	r.captured.ActorID = current.OriginalView().ActorID()
 	r.captured.OrganizationID = current.Organization()
 	if err = e.openExplorerCursor(r); err != nil {
+		if errors.Is(err, errExplorerCursorInvalid) {
+			return r.fail(400, "cursor_invalid", InvalidCompletion)
+		}
 		return r.fail(409, "cursor_stale", InvalidCompletion)
 	}
 	fence, err := newExplorerQueryFence(ctx, current)
@@ -175,7 +178,11 @@ func (e *ExplorerEngine) QueryHTTPObserved(ctx context.Context, assertion Metada
 	}
 	// One bounded, fully processed prefix. Never advance across an unqualified
 	// candidate. A short/empty page can carry an authenticated continuation.
-	count, hashes, err := explorerPrefix(data, client.Bounds())
+	prefixData := data
+	if r.request.query.Family == explorerquery.Blocks || r.request.query.Family == explorerquery.Search {
+		prefixData.Rows = data.Rows[:min(len(data.Rows), explorerCapacity(client.Bounds()))]
+	}
+	count, hashes, err := explorerPrefix(prefixData, client.Bounds())
 	if err != nil {
 		return r.fail(422, "too_broad", UnavailableCompletion)
 	}
@@ -184,6 +191,9 @@ func (e *ExplorerEngine) QueryHTTPObserved(ctx context.Context, assertion Metada
 		anchor = &rpcexecution.HistoryHeader{Number: data.Upper.Number, Hash: common.HexToHash(data.Upper.Hash)}
 	}
 	d, done := current.OriginalFence()
+	if indexedDeadline := pass.Query().Deadline(); indexedDeadline.Before(d) {
+		d = indexedDeadline
+	}
 	anchors := []rpcexecution.HistoryHeader{}
 	if r.request.query.Family == explorerquery.Blocks {
 		count = min(count, explorerCapacity(client.Bounds()))
@@ -199,11 +209,29 @@ func (e *ExplorerEngine) QueryHTTPObserved(ctx context.Context, assertion Metada
 			anchors = append(anchors, rpcexecution.HistoryHeader{Number: n, Hash: common.HexToHash(f.text("hash"))})
 		}
 	}
+	if r.request.query.Family == explorerquery.Search {
+		for _, row := range data.Rows[:count] {
+			f, e := fieldsOf(row)
+			if e != nil {
+				return r.fail(503, "unavailable", UnavailableCompletion)
+			}
+			if f.text("kind") == "block" {
+				hash := f.text("value")
+				if !explorerquery.ValidHash(hash) || row.Position.Hash != hash {
+					return r.fail(503, "unavailable", UnavailableCompletion)
+				}
+				anchors = append(anchors, rpcexecution.HistoryHeader{Number: row.Position.Block, Hash: common.HexToHash(hash)})
+			}
+		}
+	}
 	batch, err := client.AcquireExplorerBatch(ctx, hashes, anchor, anchors, rpcexecution.HistoryOperationFence{Deadline: d, Done: done}, current.ChargedBytes()+2*pass.ChargedBytes())
 	if err != nil {
 		return r.fail(503, "unavailable", UnavailableCompletion)
 	}
 	r.batch = batch
+	if err = qualifyExplorerInternalFrames(ctx, batch, data.Rows[:count]); err != nil {
+		return r.fail(503, "unavailable", UnavailableCompletion)
+	}
 	renderer, err := newExplorerRender(r, data)
 	if err != nil {
 		return r.fail(503, "unavailable", UnavailableCompletion)
@@ -234,6 +262,19 @@ func explorerSourceFailure(r *ExplorerOperationResult, err error) *ExplorerOpera
 	switch {
 	case errors.Is(err, explorerquery.ErrTooBroad):
 		return r.fail(422, "too_broad", UnavailableCompletion)
+	case errors.Is(err, explorerquery.ErrPruned):
+		if !r.request.collection {
+			r.body = []byte("null")
+			r.captured.HTTPStatus = 200
+			r.captured.Class = SuccessfulCompletion
+			return r
+		}
+		return r.fail(410, "history_pruned", InvalidCompletion)
+	case errors.Is(err, explorerquery.ErrNotFound):
+		r.body = []byte("null")
+		r.captured.HTTPStatus = 200
+		r.captured.Class = SuccessfulCompletion
+		return r
 	case errors.Is(err, explorerquery.ErrConflict):
 		return r.fail(409, "cursor_stale", InvalidCompletion)
 	default:
@@ -253,6 +294,12 @@ func explorerPrefix(data explorerquery.Data, l rpcexecution.HistoryReadLimits) (
 		var hash string
 		if row.Family == explorerquery.Transactions {
 			_ = json.Unmarshal(fields["hash"], &hash)
+		} else if row.Family == explorerquery.Search {
+			var kind string
+			_ = json.Unmarshal(fields["kind"], &kind)
+			if kind == "transaction" {
+				_ = json.Unmarshal(fields["value"], &hash)
+			}
 		} else {
 			_ = json.Unmarshal(fields["tx_hash"], &hash)
 		}
@@ -333,6 +380,8 @@ type explorerCursor struct {
 	Query                       [32]byte
 	Source                      explorerquery.Binding
 	Upper                       *explorerquery.Anchor
+	DatasetEpoch                string
+	RunFloor                    uint64
 	After                       explorerquery.Position
 	Expires                     int64
 }
@@ -347,7 +396,7 @@ func sortedHashes(hashes []common.Hash) []common.Hash {
 }
 
 func explorerCapacity(l rpcexecution.HistoryReadLimits) int {
-	ceiling := min(64, l.MaxParents, l.MaxHeaders-1, (l.MaxRPCItems-16)/6)
+	ceiling := min(256, l.MaxParents, l.MaxHeaders-1, (l.MaxRPCItems-16)/6)
 	ceil := func(n int) int { return (n + l.MaxBatchItems - 1) / l.MaxBatchItems }
 	for ceiling > 0 && 4*ceil(3)+2*ceil(ceiling)+4*ceil(ceiling+1) > l.MaxHTTPAttempts {
 		ceiling--
@@ -363,4 +412,11 @@ func newExplorerQueryFence(ctx context.Context, current *historyfacts.Current) (
 		return historyfacts.Fence{}, errExplorer
 	}
 	return fence, nil
+}
+
+// Close retires a borrowed indexed purpose after delivery or a failed attempt.
+func (r *ExplorerOperationResult) Close() {
+	if r != nil && r.pass != nil {
+		r.pass.Close()
+	}
 }

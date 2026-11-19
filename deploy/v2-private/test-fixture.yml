@@ -1,0 +1,82 @@
+# Only for the finite, fresh-state network test. All three serving processes
+# retain the normal entrypoints and the production network attachments.
+services:
+  bootstrap:
+    image: ${OPS_V2_TOOLS_IMAGE:?select the isolated offline tools image}
+    volumes:
+      - state:/demo
+      - wallet-config:/wallet-output:ro
+      - ops-config:/exports/ops
+      - explorer-config:/exports/explorer
+      - observer-config:/exports/observer
+      - wallet-config:/exports/wallet
+      - reth-config:/exports/reth
+      - ops-spool:/exports/ops-spool
+      - reth-data:/exports/reth-data
+      - circuits:/circuits
+      - ${OPS_V2_CIRCUITS_DIRECTORY:?select the existing hash-checked circuits}:/host-circuits:ro
+    networks: [chain, operational-state, explorer-state, indexer-state]
+  reth:
+    image: ${OPS_V2_RETH_IMAGE:-ghcr.io/paradigmxyz/reth:v2.5.2@sha256:68e76b32ad9ac1a3de54984d6f15bbce2047a92a771ff4efbcd08ee8f9dbd4d1}
+    user: "1000:1000"
+    environment: {OPS_APPROVALS: "0"}
+    command:
+      - node
+      - --dev
+      - --dev.block-time
+      - 1s
+      - --chain
+      - /demo/genesis.json
+      - --datadir
+      - /data
+      - --http
+      - --http.addr
+      - 0.0.0.0
+      - --http.port
+      - ${OPS_V2_RETH_PORT:-8545}
+      - --http.api
+      - eth,debug,web3,net,txpool
+      - --authrpc.addr
+      - 127.0.0.1
+      - --authrpc.port
+      - ${OPS_V2_ENGINE_PORT:-8551}
+      - --authrpc.jwtsecret
+      - /demo/engine.jwt
+      - --ipcdisable
+      - --disable-discovery
+      - --addr
+      - 127.0.0.1
+      - --port
+      - "0"
+      - --max-outbound-peers
+      - "0"
+      - --max-inbound-peers
+      - "0"
+    volumes: ["reth-config:/demo:ro", "reth-data:/data"]
+    networks: [chain]
+  explorer-admin:
+    image: ${OPS_EXPLORER_IMAGE:?select the privacy-tagged native Explorer image}
+    env_file: ${OPS_EXPLORER_ADMIN_ENV_FILE:?select the isolated offline owner environment file}
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ['exec sso-v2-admin --source /demo/explorer/source.json --sha256 "$$(cat /demo/explorer/source.sha256)" --action migrate']
+    volumes: ["explorer-config:/demo:ro"]
+    networks: [explorer-state]
+  demo-wallet:
+    image: ${OPS_V2_TOOLS_IMAGE:?select the isolated offline tools image}
+    entrypoint: ["node", "tools/v2-demo-wallet/server.mjs", "--config", "/demo/wallet.json"]
+    environment:
+      NODE_EXTRA_CA_CERTS: /demo/ca.crt
+      OPS_PRIVADO_CIRCUITS_DIR: /circuits
+    volumes: ["wallet-config:/demo", "circuits:/circuits:ro"]
+    networks: [chain]
+    healthcheck:
+      test: ["CMD", "node", "-e", "const c=JSON.parse(require('fs').readFileSync('/demo/wallet.json'));fetch(c.origin+'/health').then(async r=>{if(!r.ok||!(await r.json()).ready)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+volumes:
+  state: {}
+  reth-config: {}
+  reth-data: {}
+  wallet-config: {}
+  circuits: {}

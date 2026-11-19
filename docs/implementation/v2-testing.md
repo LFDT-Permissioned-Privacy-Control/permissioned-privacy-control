@@ -18,7 +18,7 @@ node scripts/v2-test-prerequisites.mjs
 OPS_TEST_BROWSER_CHANNEL=chromium node scripts/test-v2.mjs all
 ```
 
-The runner supports `core`, `identity` and `browser` separately. It records
+The runner supports `core`, `indexer`, `identity` and `browser` separately. It records
 results in `.tmp/v2-test-results/` and fails if any required named case is
 missing, skipped or unsuccessful. `core` covers the ten native commands,
 architecture boundaries, policy evaluation, immutable configuration and pure
@@ -36,6 +36,35 @@ qualification.
 The test wallet is separate from the application dependency graph. It uses new
 public test keys and never opens an existing user's emulator identity files.
 Ordinary integration tests explicitly disable the demo-persona mode.
+
+## Real indexer fixture
+
+The `indexer` lane exercises the existing Explorer privacy/Recorder and
+protected disclosure regressions against the actual indexer gRPC service.
+Prepare its test server from the same exact indexer checkout selected in
+`scripts/v2-demo/dependencies.json` (Go 1.26.11 or newer):
+
+```sh
+node scripts/v2-ci-dependencies.mjs
+export OPS_TEST_INDEXER_SOURCE="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(".tmp/v2-ci-dependencies/selection.json")).dependencies.indexer.directory)')"
+mkdir -p .tmp/v2-indexer-fixture
+go -C "$OPS_TEST_INDEXER_SOURCE" build -o "$PWD/.tmp/v2-indexer-fixture/server" ./internal/contractfixture
+export OPS_TEST_INDEXED_READ_SERVER="$PWD/.tmp/v2-indexer-fixture/server"
+node scripts/test-v2.mjs indexer
+```
+
+The indexer owns both the fixture schema and its read implementation. OPS tests
+seed controlled rows using an offline owner connection, launch that service in
+a separate process, and access those rows through the production gRPC adapter.
+They exercise changed data, expiry/recovery, visibility and final recording
+without preserving an OPS SQL fallback. The named `indexer` lane fails if any
+of its seven required integration cases is missing or skipped. These include
+shared protected-read row budgets and pruned point recovery, privacy and final
+reorg checks against the actual producer, sparse transaction continuation under
+the original node budget, and real HTTP address-selected disclosure reads.
+A general Go
+test run without these fixture variables reports those cases as skipped; it
+is not equivalent to this release check. Native V2 CI prepares and runs them.
 
 ## Public proving artifacts
 

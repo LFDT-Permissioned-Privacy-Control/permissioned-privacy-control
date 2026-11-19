@@ -105,6 +105,9 @@ services:
     build:
       context: ${OPS_V2_DEMO_ROOT}
       dockerfile: Dockerfile.v2
+      args:
+        OPS_LOCAL_DEMO: "1"
+        OPS_DEMO_WALLET_ORIGIN: https://localhost:${OPS_V2_DEMO_WALLET_PORT:-8445}
     env_file: ${OPS_V2_DEMO_CONTROL_DIR}/ops.env
     environment:
       SSL_CERT_FILE: /demo/ca.crt

@@ -2,11 +2,11 @@ import { useEffect, useState } from 'react';
 import { rbacApi } from '@/api/rbac';
 import type { Group, GroupWithAccess } from '@/types/rbac';
 import GroupForm from './GroupForm';
+import { GroupCards } from './GroupCards';
 import GroupAccessForm from './GroupAccessForm';
 import BatchDeleteConfirmDialog from './BatchDeleteConfirmDialog';
 import { useOrgContext } from './RBACManager';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
@@ -24,9 +24,6 @@ import {
   Trash2,
   Settings,
   Loader2,
-  ChevronRight,
-  Shield,
-  Eye,
   X,
   Search,
 } from 'lucide-react';
@@ -254,97 +251,18 @@ export default function GroupList() {
           </>
         </div>
       ) : (
-        <div className="space-y-2">
-          {groups.map(gwa => {
-            const hasMethods =
-              gwa.access &&
-              (gwa.access.allowed_methods?.length || 0) > 0;
-
-            return (
-              <div key={gwa.group.id} data-testid="group-card" className="animate-fade-in">
-                <div
-                  className={`flex items-center gap-3 p-3 rounded-lg bg-neutral-100 hover:bg-primary-50 transition-colors ${
-                    selectedIds.has(gwa.group.id) ? 'ring-2 ring-primary/30' : ''
-                  }`}
-                >
-                  <Checkbox
-                    checked={selectedIds.has(gwa.group.id)}
-                    onCheckedChange={() => toggleSelect(gwa.group.id)}
-                    className="flex-shrink-0"
-                  />
-                  <div className="flex items-center gap-2 flex-1 min-w-0">
-                    <Users className="w-5 h-5 text-primary flex-shrink-0" />
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium truncate text-neutral-900">{gwa.group.name}</span>
-                        <Badge variant="outline" className="font-mono text-xs flex-shrink-0">
-                          {gwa.group.slug}
-                        </Badge>
-                        {gwa.group.is_org_admin && (
-                          <Badge className="bg-warning-light text-warning-dark border-warning/40 gap-1 flex-shrink-0">
-                            <Shield className="w-3 h-3" />
-                            Org Admin
-                          </Badge>
-                        )}
-                        {gwa.group.is_org_readonly_admin && (
-                          <Badge
-                            variant="outline"
-                            className="bg-neutral-50 text-neutral-700 border-neutral-300 gap-1 flex-shrink-0"
-                          >
-                            <Eye className="w-3 h-3" />
-                            Read-only Admin
-                          </Badge>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-1 text-xs text-neutral-400 mt-0.5">
-                        {hasMethods && (
-                          <>
-                            <ChevronRight className="w-3 h-3" />
-                            <span>
-                              {gwa.access?.allowed_methods?.length || 0} methods
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    {canEdit && (
-                      <>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setEditingAccess(gwa.group)}
-                          title="Edit access settings"
-                        >
-                          <Settings className="w-4 h-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setEditing(gwa.group)}
-                          title="Edit group"
-                        >
-                          <Pencil className="w-4 h-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setDeleteTarget(gwa.group)}
-                          className="text-error-dark hover:text-error-dark hover:bg-error-light"
-                          title="Delete group"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        <GroupCards groups={groups.map(({ group, access }) => ({ id: group.id, name: group.name, slug: group.slug,
+          isOrgAdmin: !!group.is_org_admin, isOrgReadonlyAdmin: !!group.is_org_readonly_admin, methodCount: access?.allowed_methods?.length ?? 0 }))}
+          selectedIds={selectedIds} onToggle={toggleSelect}
+          renderActions={id => {
+            const group = groups.find(value => value.group.id === id)?.group;
+            if (!canEdit || !group) return null;
+            return <>
+              <Button variant="ghost" size="sm" onClick={() => setEditingAccess(group)} title="Edit access settings"><Settings className="w-4 h-4" /></Button>
+              <Button variant="ghost" size="sm" onClick={() => setEditing(group)} title="Edit group"><Pencil className="w-4 h-4" /></Button>
+              <Button variant="ghost" size="sm" onClick={() => setDeleteTarget(group)} className="text-error-dark hover:text-error-dark hover:bg-error-light" title="Delete group"><Trash2 className="w-4 h-4" /></Button>
+            </>;
+          }} />
       )}
 
       <Pagination total={total} limit={PAGE_SIZE} offset={offset} onPageChange={(newOffset) => loadGroups(newOffset)} />

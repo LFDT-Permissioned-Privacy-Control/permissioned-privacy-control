@@ -19,6 +19,23 @@ Native builds use `production,prover_disabled` and disable CGO. The latter
 disables the unused C proof generator, not the real Go Groth16 verifier. The
 native runtime image contains neither `solc` nor the optional EVM backend.
 
+The central browser adapts the original Admin layout, organization forms,
+group cards and account presentation. Its source workspace supports complete
+Core/broker source import, organization/group and policy editing, comparison,
+export and offline Go validation. Imported files are local proposals, never
+proof of the serving configuration or the person's operational roles. Source
+files remain in document memory; account changes offer export/discard/cancel,
+and automatic identity expiry clears private work. See the
+[policy workspace](v2-policy-workspace.md) for validation and operator handoff.
+
+Separate native pages provide selected compliance settings, travel records,
+disclosure cases and authorized data/audit reads, case-bound access logs and
+read-only diagnostics. Configuration changes still require the approved Git
+and deployment process. These pages do not introduce a mutable policy API or
+an unrestricted user/log directory. The account page supports operational
+wallet linking and an explicit short-lived own-token download for the optional
+local wallet helper. See the [local walkthrough](v2-local-demo.md).
+
 ## Configuration and startup
 
 The deployment selects immutable approved files, then starts the server with
@@ -66,7 +83,9 @@ it returns 503 without dependency details. It checks live SQL roles, schemas,
 recovery bindings and reported observer readiness, the audit recorder, node
 network identity/sync status, Guard producer readiness and any mandatory price
 observations. Monitoring should use this endpoint before returning an instance
-to traffic. All configured data-plane node credentials are checked against chain ID and genesis.
+to traffic. Indexer availability is checked by Explorer and disclosure reads,
+not by this global gate: an Indexer outage does not block ordinary OPS RPC or
+startup. All configured data-plane node credentials are checked against chain ID and genesis.
 Sync status is additionally checked on the default/protected nodes and on
 credential bindings used by history, mined traces, submission or explicit sync
 queries. A call/state-only key does not need a new sync permission for health.
@@ -95,7 +114,7 @@ not initialized as empty to bypass lost revocations or admission facts.
 | Activity | Sealed request completions and their local durable spool. | Apply the repository's exact lean audit migrations 001–004 offline first, then `ops-activity-admin migrate` applies 005; [recording](v2-rpc-activity.md). |
 | Disclosures | Operational cases, revocations and exposure audit records. | `ops-v2-disclosure-migrate`; [protected data](v2-protected-data.md). |
 | SSO | Bounded one-use application handoffs. | `ops-v2-sso-migrate`; [SSO storage](v2-enterprise-sso-storage.md), [runtime](v2-enterprise-sso-runtime.md). |
-| Explorer index | Retained indexed candidates, never policy authority. | A separately managed indexer and restricted selected-schema reader. |
+| Explorer index | Retained indexed candidates, never policy authority. | A separately managed indexer, accessed only through its bounded gRPC read service. Its database credentials stay inside the indexer. |
 
 The server runs its activity sealing and health loop. The deployment separately
 runs the required indexer, creation observer and selected retention workers.
@@ -104,6 +123,43 @@ the original spool across restarts; do not start a second spool owner.
 The native image does not contain the baseline audit migration files or a SQL
 client. Apply that prerequisite from the repository with separate offline
 tooling; `ops-activity-admin` is not a replacement for migrations 001–004.
+
+OPS's `data.index` selection contains `grpcURL`, `cursorKeyEnv` and
+`pseudonymKeyEnv`. The consumer uses the typed `chain_indexer.v2` service,
+bound to the configured chain and genesis. There is no Indexer DSN, SQL
+fallback or operator-supplied dataset epoch. The Indexer supplies its durable
+dataset epoch and contiguous coverage floor; sealed OPS cursors bind these
+facts to the query, actor, selected policies and wallet state.
+
+The Indexer owns its schema, SQL and short read transactions. RPCs are
+stateless; every continuation carries a typed position and the original
+anchor, epoch and floor. OPS retains the original operation deadline and
+cumulative rows/bytes/call budgets across RPCs and delivery checks. No read
+handle or database transaction persists between calls. Epoch, anchor or floor
+conflicts fail explicitly; pruned history returns `history_pruned` instead of
+an empty list. OPS performs permission checks, live-node qualification,
+privacy rendering and final audit/output checks. Authorized historical point
+lookups may use the existing node fallback; range reads do not invent missing
+history.
+
+A first protected history read selects the Indexer's committed anchor at or
+below the observed node head, then independently qualifies that exact header
+against the configured live node. Ordinary ingestion lag therefore narrows
+the read's labelled retained cut. Continuations retain their original anchor,
+epoch and floor; they never move forward to a newer head.
+Protected transaction lists return at most two rows per page, or one when an
+address-specific read also needs a separate eligibility witness. Follow the
+opaque continuation to retrieve the rest. The requested limit is an upper bound;
+the original query and cursor binding remain unchanged. This keeps whole-block
+qualification and final checks inside the existing physical-call budget.
+Scopes whose mandatory ownership evidence exceeds that budget still fail
+explicitly; an empty or final page is never used to hide exhausted work.
+
+The unauthenticated Indexer listener must be reachable only from OPS. Its
+database must be reachable only from the Indexer. The Explorer backend must
+reach neither that listener/database nor raw node RPC. The deployment in
+`deploy/v2-private` and `scripts/check-v2-indexer-network.mjs` provide the
+private-network configuration and actual namespace connectivity checks.
 
 Schedule the `cleanup` subcommands of `ops-v2-wallet-migrate`,
 `ops-v2-admission-migrate` and `ops-v2-disclosure-migrate` with their separate
@@ -129,6 +185,8 @@ Disclosure authorization comes from standing Git-approved rules. A permitted
 case is checked and audited automatically; there is no customer approval step.
 The Explorer adapts its protected views to the existing case/read API rather
 than introducing a second grant authority.
+Event disclosure reads are unavailable in the current protected-data API;
+mixed cases retain their other usable resources and show this limitation.
 Full transaction rows include a case-bound `addressId` for an actual in-scope
 target participant. It permits detail navigation in a transaction-only case;
 it does not grant the separate address-browsing resource.
@@ -146,8 +204,10 @@ amounts are null; missing/private singleton records have the same unavailable
 result. Totals that cannot be established for the permitted retained population
 are omitted. Token transfers come from qualified token event logs; native-value
 transactions and retained internal frames have their respective views. The
-selected indexer remains trusted for candidate enumeration and retained internal
-frame contents; an included parent receipt does not prove every internal frame.
+selected Indexer supplies candidate enumeration. Every displayed retained
+internal frame is checked against the bounded cached parent trace from the
+configured node. This verifies displayed frame contents; it does not prove
+that ingestion retained every frame.
 
 Both Guard v1 transaction modes retain their existing approval lifetime and
 used-approval rules. Native access lists are conservative usable lists, checked

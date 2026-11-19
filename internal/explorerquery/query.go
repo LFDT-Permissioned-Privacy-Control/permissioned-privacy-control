@@ -16,6 +16,8 @@ var (
 	ErrUnavailable = errors.New("indexed source unavailable")
 	ErrTooBroad    = errors.New("indexed read exceeds limit")
 	ErrConflict    = errors.New("indexed read changed")
+	ErrPruned      = errors.New("indexed history pruned")
+	ErrNotFound    = errors.New("indexed object not found")
 )
 
 type Family string
@@ -51,6 +53,8 @@ type Query struct {
 	Block, From, Through                 *uint64
 	Upper                                *Anchor
 	After                                *Position
+	DatasetEpoch                         string
+	RunFloor                             *uint64
 	RawLimit                             int
 	Fence                                admissionsharedata.Fence `json:"-"`
 }
@@ -91,7 +95,7 @@ func Normalize(q Query) (Query, error) {
 		}
 		q.After = &c
 	}
-	for _, n := range []**uint64{&q.Block, &q.From, &q.Through} {
+	for _, n := range []**uint64{&q.Block, &q.From, &q.Through, &q.RunFloor} {
 		if *n != nil {
 			v := **n
 			*n = &v

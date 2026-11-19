@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { startWallet } from './wallet.mjs'
 import { demoAccounts } from './accounts.mjs'
+import { bridgeConfig } from './bridge-config.mjs'
 import { callerAllowed, checkedChallenge, exactOrigin, personas, requestLocation } from './boundary.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -35,29 +36,33 @@ async function boundedFetch(url, options, max, fetcher) {
   return { response, raw }
 }
 function json(response, code, value) { response.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value)) }
-export function handler(config, wallet, metadata, fetcher = fetch) {
+export function handler(config, wallet, metadata, fetcher = fetch, reportFailure = () => {}) {
   const jobs = new Map(); let busy = false
   const publicHost = new URL(config.origin).host, rpcHost = new URL(config.stateRpcUrl).host
   const cleanup = () => { for (const [key, job] of jobs) if (job.expires <= Date.now()) jobs.delete(key) }
   async function prove(job, persona, location) {
+    let phase = 'request-fetch'
     try {
       const { response, raw } = await boundedFetch(config.opsUpstream + location.path,
         { headers: { Accept: 'application/json' } }, 64 << 10, fetcher)
       assert.equal(response.status, 200)
       assert.match(response.headers.get('content-type') ?? '', /^application\/json(?:;\s*charset=utf-8)?$/i)
+      phase = 'request-validation'
       const request = JSON.parse(raw.toString('utf8'))
       const callback = checkedChallenge(request, location, persona, metadata, config.opsOrigin)
       // The callback must remain the exact public URI from the original saved
       // request. Only its preconfigured origin is translated to the internal
       // Docker endpoint; credentials and browser cookies are never forwarded.
       assert.equal(callback, config.opsOrigin + '/api/v2/auth/privado/proofs/' + location.id)
+      phase = 'proof-generation'
       const generated = await wallet.prove(persona, request)
       assert.equal(typeof generated.compact, 'string'); assert.ok(generated.compact.length <= 1 << 20)
+      phase = 'proof-submission'
       const posted = await boundedFetch(config.opsUpstream + new URL(callback).pathname,
         { method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: generated.compact }, 4096, fetcher)
       assert.equal(posted.response.status, 200); assert.equal(posted.raw.length, 0)
       job.status = 'submitted'
-    } catch { job.status = 'failed' }
+    } catch { job.status = 'failed'; reportFailure(phase) }
     finally { busy = false }
   }
   return async (request, response) => {
@@ -84,9 +89,13 @@ export function handler(config, wallet, metadata, fetcher = fetch) {
       }
       if (request.method === 'GET' && url.pathname === '/health' && !url.search && !url.hash && [publicHost, rpcHost].includes(request.headers.host)) return json(response, wallet.healthy() ? 200 : 503, { ready: wallet.healthy(), testOnly: true })
       if (request.headers.host !== publicHost || url.search || url.hash) return json(response, 403, { error: 'request_denied' })
+      if (request.method === 'GET' && url.pathname === '/bridge-config') {
+        if (request.headers.origin && request.headers.origin !== config.origin) return json(response, 403, { error: 'request_denied' })
+        return json(response, 200, bridgeConfig(metadata, config.opsOrigin))
+      }
       if (request.method === 'GET' && url.pathname === '/metadata') return json(response, 200, metadata)
-      if (request.method === 'GET' && ['/', '/picker.js', '/picker.css'].includes(url.pathname)) {
-        const file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1)
+      if (request.method === 'GET' && ['/', '/picker.js', '/picker.css', '/bridge', '/bridge.js'].includes(url.pathname)) {
+        const file = url.pathname === '/' ? 'index.html' : url.pathname === '/bridge' ? 'bridge.html' : url.pathname.slice(1)
         response.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
         response.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript; charset=utf-8' : file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/html; charset=utf-8')
         response.end(await readFile(path.join(here, 'public', file))); return
@@ -147,7 +156,7 @@ async function main() {
     credentialType: 'BankRole', circuitId: 'credentialAtomicQuerySigV2', personas: ready.personas }
   await atomicJSON(path.join(config.outputDirectory, 'metadata.json'), metadata)
   await atomicJSON(path.join(config.outputDirectory, 'evm-wallets.json'), { version: 1, testOnly: true, accounts: demoAccounts() })
-  const server = createServer({ cert: await readFile(config.tlsCertificateFile), key: await readFile(config.tlsPrivateKeyFile) }, handler(config, wallet, metadata))
+  const server = createServer({ cert: await readFile(config.tlsCertificateFile), key: await readFile(config.tlsPrivateKeyFile) }, handler(config, wallet, metadata, fetch, phase => console.error('Demo proof job failed during ' + phase + '.')))
   server.requestTimeout = 25_000; server.headersTimeout = 5000; server.maxHeadersCount = 32
   let stopping = false
   const stop = () => { if (stopping) return; stopping = true; wallet.close(); server.closeAllConnections(); server.close() }

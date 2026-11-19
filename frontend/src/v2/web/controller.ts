@@ -7,6 +7,8 @@ import { completeFlow, Flow, FLOW_KEY, inspectFlow, ownSelf, readContinuation, s
 import { forgetRemembered, remember, remembered } from './remembered'
 import { WalletController, WalletHTTPError, WalletScope } from './wallet'
 import { walletRequest } from './walletTransport'
+import { OperationHTTPError, operationRequest } from './operationsTransport'
+import { adminLocation, plainLoginLocation } from './routes'
 
 export type Phase = 'booting' | 'anonymous' | 'selected' | 'proof-pending' | 'context-changed' | 'failed'
 type Profiles = Awaited<ReturnType<MultiBrowserAuthClient['providers']>>
@@ -15,6 +17,7 @@ export interface State {
   pending: Pending | null; candidate: Candidate | null; busy: boolean; error: string | null
 }
 interface Owner { epoch: number; revision: number; operation: number; kind: string; pair: MultiSession | null; abort: AbortController }
+export interface OperationScope extends WalletScope { readonly self: Self }
 class Stale extends Error {}
 
 // One controller per document. No component effect performs restore or owns a
@@ -24,6 +27,7 @@ export class Controller {
   private state: State = { phase: 'booting', profiles: [], self: null, flow: null, pending: null, candidate: null, busy: false, error: null }
   private selected: MultiSession | null = null
   private epoch = 0
+  private uiRevision = 0
   private revision = 0
   private serial = 0
   private alive = true
@@ -43,10 +47,22 @@ export class Controller {
   }
   snapshot = (): State => this.state
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener) }
+  // Noncredential document ownership for imported UI drafts. Renewing the same
+  // context preserves it; replacement/logout/suspension invalidates it.
+  get scopeRevision(): number { return this.uiRevision }
+  ownsScope(revision: number, actor: string): boolean {
+    if (!this.alive || revision !== this.uiRevision || !this.selected || this.state.phase !== 'selected' || this.state.flow || this.state.pending ||
+      !this.state.self || this.state.self.actorId !== actor || this.state.self.expiresAt <= Date.now() / 1000) return false
+    try {
+      const marker = readMultiMarker()
+      if (marker?.phase === 'active' && sameSession(this.selected, multiPair(marker))) return true
+    } catch { /* A corrupt marker invalidates the same private context. */ }
+    this.changed(); return false
+  }
   private set(next: Partial<State>): void { this.state = { ...this.state, ...next }; for (const f of this.listeners) f() }
   private invalidate(): void {
     this.retireWallet()
-    this.epoch++; this.revision++
+    this.epoch++; this.revision++; this.uiRevision++
     for (const op of this.latest.values()) op.abort.abort()
     this.latest.clear(); clearTimeout(this.pollTimer); this.completing = false
     clearTimeout(this.expiryTimer)
@@ -56,10 +72,19 @@ export class Controller {
     for (const scope of this.walletScopes) scope.abort()
     this.walletScopes.clear(); this.wallet.cancel()
   }
-  private async captureWallet(signal: AbortSignal): Promise<WalletScope> {
-    if (!this.alive || !this.selected || !this.state.self || this.state.phase !== 'selected' || this.state.flow || this.state.pending) throw new Stale()
-    const op = this.owner('wallet-warmup'), pair = { ...this.selected }, walletRevision = this.walletRevision
-    const warm = () => { this.check(op); if (signal.aborted || walletRevision !== this.walletRevision) throw new Stale() }
+  captureOperations = async (signal: AbortSignal): Promise<OperationScope> => {
+    const scope = await this.captureWallet(signal, operationRequest, 'operations-warmup')
+    try {
+      scope.check()
+      const self = this.state.self
+      if (!self || self.actorId !== scope.identity.actor || self.expiresAt !== scope.identity.expires) throw new Stale()
+      return Object.freeze({ ...scope, self })
+    } catch (error) { scope.dispose(); throw error }
+  }
+  private async captureWallet(signal: AbortSignal, transport = walletRequest, kind = 'wallet-warmup'): Promise<WalletScope> {
+    if (!this.alive || !this.selected || !this.state.self || this.state.self.expiresAt <= Date.now() / 1000 || this.state.phase !== 'selected' || this.state.flow || this.state.pending) throw new Stale()
+    const op = this.owner(kind), pair = { ...this.selected }, walletRevision = this.walletRevision, warmExpiry = this.state.self.expiresAt
+    const warm = () => { this.check(op); if (signal.aborted || walletRevision !== this.walletRevision || warmExpiry <= Date.now() / 1000) throw new Stale() }
     try {
       warm()
       // One explicit pre-scope warm-up. Confirm never invokes a helper again.
@@ -77,20 +102,20 @@ export class Controller {
       const epoch = this.epoch, revision = this.revision, abort = new AbortController(), token = access.accessToken, originalExpiry = self.expiresAt
       this.walletScopes.add(abort)
       const check = () => {
-        if (!this.alive || abort.signal.aborted || epoch !== this.epoch || revision !== this.revision || walletRevision !== this.walletRevision || this.state.self !== self || originalExpiry <= Date.now() / 1000 || !this.selected || !sameSession(pair, this.selected)) throw new Stale()
+        if (!this.alive || signal.aborted || abort.signal.aborted || epoch !== this.epoch || revision !== this.revision || walletRevision !== this.walletRevision || this.state.self !== self || originalExpiry <= Date.now() / 1000 || !this.selected || !sameSession(pair, this.selected)) throw new Stale()
         const current = readMultiMarker()
         if (!current || current.phase !== 'active' || !sameSession(pair, multiPair(current))) { this.changed(); throw new Stale() }
       }
       const scope: WalletScope = Object.freeze({
-        identity: Object.freeze({ actor: self.actorId, expires: originalExpiry }), signal: abort.signal, check,
+        identity: Object.freeze({ actor: self.actorId, expires: originalExpiry }), signal: AbortSignal.any([signal, abort.signal]), check,
         request: async <T,>(endpoint: string, options: RequestInit = {}): Promise<T> => {
           check()
           try {
-            const value = await walletRequest(token, endpoint, options, abort.signal, check); check()
+            const value = await transport(token, endpoint, options, AbortSignal.any([signal, abort.signal]), check); check()
             return value as T
           } catch (error) {
             check()
-            if (error instanceof WalletHTTPError && error.status === 401) this.changed()
+            if ((error instanceof WalletHTTPError || error instanceof OperationHTTPError) && error.status === 401) this.changed()
             throw error
           }
         },
@@ -129,7 +154,12 @@ export class Controller {
   private signal(op: Owner): AbortSignal { return AbortSignal.any([op.abort.signal, AbortSignal.timeout(25000)]) }
   private error(op: Owner, error: unknown): void {
     if (error instanceof Stale) return
-    try { this.check(op) } catch { return }
+    try { this.check(op) } catch {
+      // check() also rejects an expired application flow. Its own failure
+      // must clear that flow instead of silently leaving a selected/busy UI.
+      if (this.owns(op) && this.state.flow && this.state.flow.expiresAt <= Date.now() / 1000) this.expireFlow()
+      return
+    }
     if (error instanceof AuthError && error.code === 'session_changed') { this.changed(); return }
     this.set({ phase: error instanceof AuthError && error.code === 'login_required' ? 'anonymous' : 'failed',
       self: null, candidate: null, pending: null, busy: false,
@@ -155,16 +185,21 @@ export class Controller {
     document.addEventListener('visibilitychange', this.visibility)
     this.tickTimer = setInterval(this.tick, 1000)
     await this.work('bootstrap', async op => {
+      const initialMarker = readMultiMarker()
       const providers = await this.client.providers(); this.check(op)
-      if (!['/login', '/auth/sso', '/auth/azure/callback', providers.completionPath].includes(location.pathname)) throw new AuthError('invalid_response')
+      const admin = adminLocation(location)
+      if (!['/login', '/auth/sso', '/auth/azure/callback', providers.completionPath].includes(location.pathname) && !admin) throw new AuthError('invalid_response')
       this.set({ profiles: providers.profiles })
-      let saved = readContinuation()
+      // An explicit workspace visit starts a different task. Never silently
+      // complete an old application's SSO flow while opening the Admin UI.
+      if (admin) sessionStorage.removeItem(FLOW_KEY)
+      let saved = admin ? null : readContinuation()
       if (location.pathname === '/auth/sso') {
         const query = new URLSearchParams(location.search)
         if (query.size !== 1 || query.getAll('flow').length !== 1 || !session(query.get('flow'))) throw new AuthError('invalid_response')
         const id = query.get('flow')!
         if (saved?.id !== id) saved = { id, expiresAt: Math.floor(Date.now() / 1000) + 300 }
-      } else if (location.pathname !== '/auth/azure/callback' && (location.search || location.hash)) throw new AuthError('invalid_response')
+      } else if (location.pathname !== '/auth/azure/callback' && !admin && (location.search || location.hash)) throw new AuthError('invalid_response')
       if (saved) {
         // This inspect is bounded by the earlier local/original expiry. Only
         // the first current inspect may set it, and it can never extend it.
@@ -177,7 +212,19 @@ export class Controller {
         if (!result.access) throw result.error
         await this.accept(op, result.access)
       } else {
-        const result = await this.client.restore(); this.check(op)
+        let result: AccessOutcome
+        try { result = await this.client.restore(); this.check(op) }
+        catch (error) {
+          this.check(op)
+          const empty = (marker: ReturnType<typeof readMultiMarker>) => !marker || marker.phase === 'require-login' && marker.actorId === null && marker.pendingFlow === null
+          // A fresh bootstrap denial is ordinary signed-out state. Do not
+          // relabel a prior identity, app flow, callback or real outage.
+          if (!saved && !callback && (admin || plainLoginLocation(location)) && empty(initialMarker) &&
+            error instanceof AuthError && error.code === 'login_required' && empty(readMultiMarker())) {
+            this.set({ phase: 'anonymous', self: null, pending: null, candidate: null, busy: false, error: null }); return
+          }
+          throw error
+        }
         await this.outcome(op, result)
       }
     })
@@ -223,7 +270,7 @@ export class Controller {
       const result = await this.client.restore(); this.check(op); await this.outcome(op, result)
     })
   }
-  login = async (profile: string, kind: 'azure' | 'privado'): Promise<void> => {
+  login = async (profile: string, kind: 'azure' | 'privado', expectedHolderDid?: string): Promise<void> => {
     if (!this.state.profiles.some(p => p.id === profile && p.provider === kind)) return
     if (!this.replace()) return
     await this.work('login', async op => {
@@ -231,7 +278,7 @@ export class Controller {
         const result = await this.client.startAzureLogin(profile); this.check(op)
         location.replace(result.authorizationUrl)
       } else {
-        const result = await this.client.startPrivadoLogin(profile); this.check(op)
+        const result = await (expectedHolderDid === undefined ? this.client.startPrivadoLogin(profile) : this.client.startPrivadoLogin(profile, expectedHolderDid)); this.check(op)
         this.set({ phase: 'proof-pending', busy: false, pending: { status: 'login_in_progress', provider: 'privado', sourceProfile: profile,
           expiresAt: result.expiresAt, requestId: result.requestId, requestUri: result.requestUri } })
         this.schedulePoll()
@@ -247,6 +294,39 @@ export class Controller {
       const result = await this.client.needAccess(expected); this.check(op); await this.outcome(op, result)
     })
   }
+  // Explicit compatibility handoff to the local wallet helper. The credential
+  // stays in this action and its download Blob; it is never a UI state value.
+  downloadOwnWalletToken = async (): Promise<void> => {
+    const pair = this.selected && { ...this.selected }, original = this.state.self
+    if (!pair || !original || this.state.busy || this.state.phase !== 'selected' || this.state.flow || this.state.pending) return
+    this.set({ busy: true, error: null })
+    await this.work('wallet-token-download', async op => {
+      const current = () => {
+        this.check(op)
+        if (this.state.phase !== 'selected' || this.state.flow || this.state.pending || this.state.self !== original ||
+          original.expiresAt <= Date.now() / 1000) throw new Stale()
+      }
+      try {
+        current()
+        const result = await this.client.needAccess(pair); current()
+        if (result.status !== 'access') { await this.outcome(op, result); return }
+        const access = result.access
+        if (!sameSession(pair, access)) throw new AuthError('session_changed')
+        const verified = await ownSelf(access, this.signal(op)); current()
+        const marker = readMultiMarker()
+        if (!marker || marker.phase !== 'active' || !sameSession(pair, multiPair(marker))) { this.changed(); throw new Stale() }
+        if (verified.actorId !== original.actorId || verified.sourceProfile !== original.sourceProfile ||
+          verified.actorId !== access.actorId || verified.sourceProfile !== access.sourceProfile ||
+          verified.expiresAt !== access.expiresAt || verified.expiresAt <= Date.now() / 1000) throw new AuthError('invalid_response')
+        const url = URL.createObjectURL(new Blob([access.accessToken], { type: 'text/plain' }))
+        try {
+          const link = document.createElement('a')
+          link.href = url; link.download = 'ops-wallet-token.jwt'
+          current(); link.click()
+        } finally { URL.revokeObjectURL(url) }
+      } finally { if (this.owns(op)) this.set({ busy: false }) }
+    })
+  }
   private schedulePoll(): void {
     clearTimeout(this.pollTimer)
     if (!this.alive || document.visibilityState === 'hidden' || this.state.candidate || this.state.pending?.provider !== 'privado') return
@@ -255,7 +335,7 @@ export class Controller {
   private async poll(): Promise<void> {
     const pending = this.state.pending
     if (!pending?.requestId || pending.provider !== 'privado' || document.visibilityState === 'hidden' || this.latest.has('poll')) return
-    if (pending.expiresAt <= Date.now() / 1000) { this.set({ phase: 'anonymous', pending: null, candidate: null, error: 'login_required' }); return }
+    if (pending.expiresAt <= Date.now() / 1000) { this.set({ phase: 'anonymous', pending: null, candidate: null, error: 'proof_expired' }); return }
     await this.work('poll', async op => {
       const result = await this.client.previewPrivado(pending.requestId!); this.check(op)
       if (this.state.pending?.requestId !== pending.requestId) throw new Stale()
@@ -305,7 +385,8 @@ export class Controller {
         // finally must not erase a later account's flow, busy state or storage.
         if (this.owns(op) && this.completing) {
           this.completing = false
-          this.set({ flow: null, busy: false }); sessionStorage.removeItem(FLOW_KEY)
+          if (flow.expiresAt <= Date.now() / 1000) this.expireFlow()
+          else { this.set({ flow: null, busy: false }); sessionStorage.removeItem(FLOW_KEY) }
         }
       }
     })
@@ -338,18 +419,33 @@ export class Controller {
   private tick = (): void => {
     if (!this.alive) return
     if (this.state.flow && this.state.flow.expiresAt <= Date.now() / 1000) {
-      this.invalidate(); sessionStorage.removeItem(FLOW_KEY)
-      this.set({ flow: null, self: null, pending: null, candidate: null, busy: false, phase: 'failed', error: 'login_required' }); return
+      this.expireFlow(); return
     }
     if (this.state.pending && this.state.pending.expiresAt <= Date.now() / 1000) {
       this.invalidate()
-      this.set({ self: null, pending: null, candidate: null, busy: false, phase: 'anonymous', error: 'login_required' }); return
+      this.set({ self: null, pending: null, candidate: null, busy: false, phase: 'anonymous', error: 'proof_expired' }); return
     }
-    if (this.state.self && this.state.self.expiresAt <= Date.now() / 1000) { this.retireWallet(); this.set({ self: null }) }
+    if (this.state.self && this.state.self.expiresAt <= Date.now() / 1000) { this.retireWallet(); this.uiRevision++; this.set({ self: null }) }
     if (this.selected && this.state.phase === 'selected' && !this.state.busy && document.visibilityState !== 'hidden' &&
       (!this.state.self || this.state.self.expiresAt <= Date.now() / 1000 + 5)) void this.refresh()
   }
-  private navigation = (): void => { this.invalidate(); this.set({ phase: 'failed', self: null, pending: null, candidate: null, busy: false, error: 'login_required' }) }
+  private expireFlow(): void {
+    this.invalidate(); sessionStorage.removeItem(FLOW_KEY)
+    this.set({ flow: null, self: null, pending: null, candidate: null, busy: false, phase: 'failed', error: 'flow_expired' })
+  }
+  private navigation = (): void => {
+    // Back/Forward inside the ordinary selected-account UI is presentation
+    // navigation, not a new authentication flow. Check freshness and the same
+    // shared marker before retaining private context; retire wallet actions.
+    if (this.alive && this.selected && this.state.phase === 'selected' && this.state.self && !this.state.flow && !this.state.pending &&
+      this.state.self.expiresAt > Date.now() / 1000 && (adminLocation(location) || plainLoginLocation(location))) {
+      try {
+        const marker = readMultiMarker()
+        if (marker?.phase === 'active' && sameSession(this.selected, multiPair(marker))) { this.retireWallet(); return }
+      } catch { /* Invalid shared context falls through to the original deny. */ }
+    }
+    this.invalidate(); this.set({ phase: 'failed', self: null, pending: null, candidate: null, busy: false, error: 'login_required' })
+  }
   private suspend = (event: PageTransitionEvent): void => {
     this.flushSuspension(this.stop)
     if (event.persisted) window.addEventListener('pageshow', this.resume, { once: true })

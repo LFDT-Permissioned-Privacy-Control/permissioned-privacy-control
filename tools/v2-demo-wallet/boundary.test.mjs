@@ -8,7 +8,7 @@ import { handler } from './server.mjs'
 const ops = 'https://localhost:8443', origin = 'https://localhost:9444'
 const id = '11111111-2222-4333-8444-555555555555'
 const requestUri = ops + '/api/v2/auth/privado/requests/' + id
-const metadata = { issuerDid: 'did:example:issuer', verifierDid: 'did:example:verifier', contextUrl: 'https://schemas.test/role.jsonld', credentialType: 'BankRole', circuitId: 'credentialAtomicQuerySigV2', stateContract: '0x1111111111111111111111111111111111111111' }
+const metadata = { testOnly: true, network: 'polygon:mumbai', personas: ['admin', 'deployer', 'reader', 'outsider'].map(id => ({ id, profileId: 'demo-' + id, holderDid: 'did:example:holder-' + id })), issuerDid: 'did:example:issuer', verifierDid: 'did:example:verifier', contextUrl: 'https://schemas.test/role.jsonld', credentialType: 'BankRole', circuitId: 'credentialAtomicQuerySigV2', stateContract: '0x1111111111111111111111111111111111111111' }
 function challenge() { return { id, type: 'https://iden3-communication.io/authorization/1.0/request', from: metadata.verifierDid, created_time: 1000, expires_time: 1300, body: { callbackUrl: ops + '/api/v2/auth/privado/proofs/' + id, scope: [{ id: 1, circuitId: metadata.circuitId, optional: false, query: { allowedIssuers: [metadata.issuerDid], context: metadata.contextUrl, type: metadata.credentialType, proofType: 'BJJSignature2021', skipClaimRevocationCheck: false, credentialSubject: { role: { $eq: 3 } } } }] } } }
 
 test('only the exact saved public request can select a source or callback', () => {
@@ -32,7 +32,7 @@ async function fixture(t, fetcher) {
   t.after(() => { server.closeAllConnections(); server.close() })
   const request = (route, body, headers = {}) => new Promise((resolve, reject) => {
     const call = httpRequest({ host: '127.0.0.1', port: server.address().port, path: route, method: body === undefined ? 'GET' : 'POST', headers: { Host: 'localhost:9444', Origin: origin, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers } }, response => {
-      let raw = ''; response.setEncoding('utf8'); response.on('data', x => { raw += x }); response.on('end', () => resolve({ status: response.statusCode, json: async () => JSON.parse(raw) }))
+      let raw = ''; response.setEncoding('utf8'); response.on('data', x => { raw += x }); response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, text: async () => raw, json: async () => JSON.parse(raw) }))
     }); call.on('error', reject); call.end(body === undefined ? undefined : JSON.stringify(body))
   })
   return { request, proofs: () => proofs }
@@ -84,5 +84,28 @@ test('RPC adapter cannot select another target or mutate chain state', async t =
   const host = { Host: 'demo-wallet:9444' }
   assert.equal((await x.request('/rpc', { jsonrpc: '2.0', id: 1, method: 'eth_sendRawTransaction', params: [] }, host)).status, 400)
   assert.equal((await x.request('/rpc', { jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: '0x2222222222222222222222222222222222222222' }, 'latest'] }, host)).status, 400)
+  assert.equal(fetched, 0)
+})
+
+test('demo bridge serves only fixed same-origin files and public projected config', async t => {
+  let fetched = 0
+  const x = await fixture(t, async () => { fetched++; throw Error('unexpected network') })
+  const page = await x.request('/bridge')
+  assert.equal(page.status, 200)
+  assert.match(page.headers['content-security-policy'], /connect-src 'self'/)
+  assert.equal(page.headers['access-control-allow-origin'], undefined)
+  assert.match(await page.text(), /src="\/bridge.js"/)
+  assert.equal((await x.request('/bridge.js')).status, 200)
+  const config = await x.request('/bridge-config')
+  // A browser's same-origin GET may omit Origin; a foreign Origin is rejected.
+  assert.equal(config.status, 200)
+  const value = await config.json()
+  assert.equal(value.opsOrigin, ops)
+  assert.deepEqual(value.personas.map(p => p.id), ['admin', 'deployer', 'reader', 'outsider'])
+  assert.equal(JSON.stringify(value).includes('private'), false)
+  assert.equal((await x.request('/bridge-config', undefined, { Origin: 'https://evil.test' })).status, 403)
+  assert.equal((await x.request('/bridge?nonce=x')).status, 403)
+  assert.equal((await x.request('/bridge-config?x=1')).status, 403)
+  assert.equal((await x.request('/bridge-other.js')).status, 404)
   assert.equal(fetched, 0)
 })

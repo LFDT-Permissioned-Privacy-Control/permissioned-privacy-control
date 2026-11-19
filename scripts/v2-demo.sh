@@ -72,6 +72,10 @@ export_serving() { compose run --rm --no-deps --user 0 --entrypoint sh bootstrap
 copy_public() {
   compose run --rm --no-deps --entrypoint cat bootstrap /demo/runtime.json > "$OPS_V2_DEMO_CONTROL_DIR/runtime.json"
   compose run --rm --no-deps --entrypoint cat bootstrap /wallet-output/wallet-state/metadata.json > "$OPS_V2_DEMO_CONTROL_DIR/wallet-metadata.json"
+  # Public certificates let browser checks pin the owned localhost leaf before
+  # accepting its normal Chrome interstitial; no private key is exported.
+  compose run --rm --no-deps --entrypoint cat bootstrap /demo/ca.crt > "$OPS_V2_DEMO_CONTROL_DIR/ca.crt"
+  compose run --rm --no-deps --entrypoint cat bootstrap /demo/tls.crt > "$OPS_V2_DEMO_CONTROL_DIR/tls.crt"
 }
 stop_serving() {
   # Keep Postgres available until serving requests and observer leases drain.
@@ -127,7 +131,18 @@ case "${1:-up}" in
   build-indexer) compose build indexer;;
   build-ops) compose build ops;;
   resume) require_prepared; start_prepared;;
+  check-indexer-boundary) require_prepared; compose run --rm --no-deps bootstrap check-indexer-boundary --root /demo;;
+  check-login)
+    export OPS_TEST_BROWSER_CHANNEL="${OPS_TEST_BROWSER_CHANNEL:-chrome}"
+    require_prepared browser
+    NODE_EXTRA_CA_CERTS="$OPS_V2_DEMO_CONTROL_DIR/ca.crt" node "$ROOT/scripts/v2-demo/check-demo-login.mjs" "$OPS_V2_DEMO_CONTROL_DIR";;
   check-prepared) check_prepared;;
+  check-ui)
+    export OPS_TEST_BROWSER_CHANNEL="${OPS_TEST_BROWSER_CHANNEL:-chrome}"
+    require_prepared browser
+    UI_SOURCE="$OPS_V2_DEMO_CONTROL_DIR/ui-source-$(node -e 'console.log(Date.now())')"
+    node "$ROOT/scripts/v2-demo/export-config.mjs" "$UI_SOURCE"
+    OPS_DEMO_SOURCE_DIR="$UI_SOURCE/core" node "$ROOT/scripts/v2-demo/check.mjs" "$OPS_V2_DEMO_CONTROL_DIR" ui-preview;;
   info) node "$ROOT/scripts/v2-demo/info.mjs";;
   check-mapping)
     case "${2:-}" in admin|reader) check_prepared "reader-${2}";; *) echo 'Expected admin or reader.' >&2; exit 2;; esac;;
@@ -181,5 +196,5 @@ case "${1:-up}" in
     export_serving
     compose up -d --force-recreate ops
     compose run --rm --no-deps bootstrap wait --root /demo;;
-  *) echo 'Usage: v2-demo.sh up|resume|check|check-prepared|walkthrough|export-config DIR|check-config FILE|apply-config FILE|check-mapping admin|reader|status|down|reset|logs|repair-tls|revision on|off' >&2; exit 2;;
+  *) echo 'Usage: v2-demo.sh up|resume|check|check-prepared|check-ui|walkthrough|export-config DIR|check-config FILE|apply-config FILE|check-mapping admin|reader|status|down|reset|logs|repair-tls|revision on|off' >&2; exit 2;;
 esac

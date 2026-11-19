@@ -35,6 +35,11 @@ func TestSelectedBuildPagesAssetsAndNoLegacyFallback(t *testing.T) {
 		contains           string
 	}{
 		{"/login", "GET", "", 200, "<!doctype html>"}, {"/auth/sso?flow=owned", "GET", "", 200, "<!doctype html>"}, {"/auth/azure/callback?code=owned", "GET", "", 200, "<!doctype html>"}, {"/auth/selected-complete", "GET", "", 200, "<!doctype html>"},
+		{"/admin", "GET", "", 200, "<!doctype html>"}, {"/admin/rbac", "GET", "", 200, "<!doctype html>"}, {"/admin/rbac/organizations", "GET", "", 200, "<!doctype html>"}, {"/admin/rbac/groups", "GET", "", 200, "<!doctype html>"}, {"/admin/account", "GET", "", 200, "<!doctype html>"},
+		{"/admin/rbac?org=11111111-1111-4111-8111-111111111111", "GET", "", 200, "<!doctype html>"}, {"/admin/rbac/groups?org=11111111-1111-4111-8111-111111111111", "GET", "", 200, "<!doctype html>"}, {"/admin/rbac/organizations?org=11111111-1111-4111-8111-111111111111", "GET", "", 200, "<!doctype html>"},
+		{"/admin/rbac/groups?org=00000000-0000-0000-0000-000000000000", "GET", "", 400, ""}, {"/admin/rbac/groups?org=AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA", "GET", "", 400, ""}, {"/admin/rbac/groups?org=11111111-1111-4111-8111-111111111111&org=11111111-1111-4111-8111-111111111111", "GET", "", 400, ""},
+		{"/admin/rbac/groups?%6frg=11111111-1111-4111-8111-111111111111", "GET", "", 400, ""}, {"/admin/rbac/groups?flow=owned", "GET", "", 400, ""}, {"/admin/rbac/groups?", "GET", "", 400, ""}, {"/admin?org=11111111-1111-4111-8111-111111111111", "GET", "", 400, ""}, {"/admin/account?org=11111111-1111-4111-8111-111111111111", "GET", "", 400, ""},
+		{"/admin/rbac/users", "GET", "", 404, ""}, {"/admin/rbac/groups/deeper", "GET", "", 404, ""}, {"/api/v2/unknown", "GET", "", 404, ""}, {"/admin/rbac/groups", "POST", "", 405, ""},
 		{"/assets-v2/app.js", "GET", "", 200, "document.title"}, {"/api/v1/me", "GET", "", 404, ""}, {"/auth/complete", "GET", "", 404, ""}, {"/assets-v2/app.js?x=1", "GET", "", 404, ""}, {"/assets-v2/../index-v2.html", "GET", "", 404, ""}, {"/login", "HEAD", "", 405, ""}, {"/login", "GET", "evil.test", 403, ""},
 	} {
 		t.Run(tc.path+tc.method+tc.host, func(t *testing.T) {
@@ -54,6 +59,19 @@ func TestSelectedBuildPagesAssetsAndNoLegacyFallback(t *testing.T) {
 			}
 			if res.Header.Get("Cache-Control") != "no-store" || res.Header.Get("Referrer-Policy") != "no-referrer" || !strings.Contains(res.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") {
 				t.Fatal("unsafe browser headers")
+			}
+		})
+	}
+}
+
+func TestAdminPageCannotBeSelectedAuthenticationCompletion(t *testing.T) {
+	for _, selected := range adminPages {
+		t.Run(selected, func(t *testing.T) {
+			snapshot := f.MultiSnapshot(t, func(_ *identity.SourceCatalog, s *brokerpolicy.SourceV2) {
+				s.CompletionURI = "https://ops.test" + selected
+			})
+			if _, err := New(Config{snapshot, buildFS()}); err == nil {
+				t.Fatal("authentication completion overlaps an Admin route")
 			}
 		})
 	}

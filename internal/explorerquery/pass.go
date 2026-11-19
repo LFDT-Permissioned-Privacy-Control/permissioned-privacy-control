@@ -7,16 +7,21 @@ import (
 )
 
 type Record struct {
+	Source   string
 	Family   Family
 	Key      string
 	Position Position
 	JSON     json.RawMessage
 }
 type Data struct {
-	Upper     *Anchor
-	Rows      []Record
-	Context   []Record
-	Exhausted bool
+	Upper                 *Anchor
+	Rows                  []Record
+	Context               []Record
+	Exhausted             bool
+	Next                  *Position
+	DatasetEpoch          string
+	RunFloor, HistoryFrom uint64
+	EndedAt, Consistency  string
 }
 type Source interface {
 	Metadata() Metadata
@@ -32,11 +37,11 @@ type ReadPass struct {
 	state    any
 }
 
-// NewReadPass is for a trusted fixed-purpose operational adapter AFTER known
-// COMMIT. It grants no permission and cannot certify all-chain completeness.
+// NewReadPass is for a trusted fixed-purpose transport adapter after a complete
+// service observation. It grants no permission and cannot certify all-chain completeness.
 func NewReadPass(m Metadata, q Query, d Data, charged int, state any) (*ReadPass, error) {
 	q, err := Normalize(q)
-	if err != nil || !m.Binding.Valid() || !m.Identity.Valid() || m.Mode != "existing-indexer-fixed-reads/v1" || q.Fence.Check() != nil || state == nil || charged < 0 || charged > 16<<20 || len(d.Rows) > q.RawLimit+1 || len(d.Rows)+len(d.Context) > 20000 {
+	if err != nil || !m.Binding.Valid() || !m.Identity.Valid() || m.Mode != Mode || q.Fence.Check() != nil || !ValidDatasetEpoch(d.DatasetEpoch) || q.DatasetEpoch != d.DatasetEpoch || q.RunFloor == nil || *q.RunFloor != d.RunFloor || q.Upper == nil || d.Upper == nil || *q.Upper != *d.Upper || d.RunFloor > d.Upper.Number || d.Exhausted != (d.Next == nil) || state == nil || charged < 0 || charged > 16<<20 || len(d.Rows) > q.RawLimit+1 || len(d.Rows)+len(d.Context) > 20000 {
 		return nil, ErrInvalid
 	}
 	for _, rows := range [][]Record{d.Rows, d.Context} {
@@ -95,6 +100,10 @@ func (p *ReadPass) Data() Data {
 		return Data{}
 	}
 	d := p.data
+	if d.Next != nil {
+		v := *d.Next
+		d.Next = &v
+	}
 	if d.Upper != nil {
 		c := *d.Upper
 		d.Upper = &c
@@ -117,4 +126,27 @@ func (p *ReadPass) Upper() *Anchor {
 	}
 	copy := *p.data.Upper
 	return &copy
+}
+
+// Close releases an operational source's short-lived read purpose. It grants
+// no authority and is harmless for detached test adapters without resources.
+func (p *ReadPass) Close() {
+	if p != nil {
+		if state, ok := p.state.(interface{ Close() }); ok {
+			state.Close()
+		}
+	}
+}
+
+func (p *ReadPass) DatasetEpoch() string {
+	if p == nil {
+		return ""
+	}
+	return p.data.DatasetEpoch
+}
+func (p *ReadPass) RunFloor() uint64 {
+	if p == nil {
+		return 0
+	}
+	return p.data.RunFloor
 }

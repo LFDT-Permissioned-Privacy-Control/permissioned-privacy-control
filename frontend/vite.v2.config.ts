@@ -6,6 +6,7 @@ import { resolve } from 'node:path'
 // external fonts and directory UI from entering the V2 browser graph.
 export default defineConfig({
   plugins: [react()],
+  resolve: { alias: { '@': resolve(__dirname, 'src') } },
   publicDir: false,
   build: {
     outDir: 'dist-v2', assetsDir: 'assets-v2', emptyOutDir: true,
