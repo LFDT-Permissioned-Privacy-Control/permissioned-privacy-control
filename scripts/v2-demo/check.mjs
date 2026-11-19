@@ -60,6 +60,7 @@ async function login(persona, options = {}) {
   stage = persona + '-start-SSO';
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   stage = persona + '-select-native-profile';
+  await page.locator('[data-profile-id="demo-privado"]').waitFor({ state: 'attached' });
   if (await page.getByTestId('manual-wallet-login').count()) await page.getByText('Use a wallet manually', { exact: true }).click();
   await page.locator('[data-profile-id="demo-privado"]').click();
   const request = page.locator('[data-field=requestUri]'); await request.waitFor({ state: 'attached' });
@@ -325,6 +326,7 @@ async function checkUIPreview(user) {
   await page.getByTestId('workspace-source').waitFor();
   await page.getByRole('cell', { name: 'Demo Bank', exact: true }).waitFor();
   await screenshot('admin-organizations');
+  await page.getByRole('cell', { name: 'Demo Bank', exact: true }).click();
   await page.getByTestId('tab-groups').click();
   assert.equal(await page.getByTestId('tab-groups').getAttribute('aria-selected'), 'true');
   for (const group of ['Admin', 'Deployer', 'Reader']) await page.getByTestId('group-card').getByText(group, { exact: true }).waitFor();

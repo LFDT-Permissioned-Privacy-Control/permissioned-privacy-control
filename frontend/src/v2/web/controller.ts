@@ -359,9 +359,11 @@ export class Controller {
   cancel = async (): Promise<void> => {
     if (!this.alive) return
     const id = this.state.pending?.requestId
-    this.invalidate(); this.set({ self: null, pending: null, candidate: null, busy: false, phase: 'anonymous', error: null })
+    // Cancellation also changes the shared browser marker under its lock.
+    // Keep new sign-in gestures disabled until that owned change finishes.
+    this.invalidate(); this.set({ self: null, pending: null, candidate: null, busy: !!id, phase: 'anonymous', error: null })
     if (!id) return
-    await this.work('cancel', async op => { await this.client.cancelPrivado(id); this.check(op) })
+    await this.work('cancel', async op => { await this.client.cancelPrivado(id); this.check(op); this.set({ busy: false }) })
   }
   continue = async (): Promise<void> => this.finish(false)
   forgetAppChoices = (): void => { forgetRemembered() }

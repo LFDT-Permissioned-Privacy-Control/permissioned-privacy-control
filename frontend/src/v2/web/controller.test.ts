@@ -293,6 +293,32 @@ describe('document context and flow ownership', () => {
     await controller.login('bank', 'privado'); await vi.advanceTimersByTimeAsync(3000)
     expect(controller.snapshot().pending).toBeNull(); expect(controller.snapshot().candidate).toBeNull(); expect(controller.snapshot().phase).toBe('anonymous')
   })
+  it('finishes its shared-marker cancellation before accepting another demo gesture', async () => {
+    const client = fake(), held = deferred<void>()
+    client.restore.mockRejectedValue(new AuthError('login_required'))
+    client.providers.mockResolvedValue({ profiles: [{ id: 'demo-privado', provider: 'privado', principalKind: 'human' }], completionPath: '/auth/complete' } as never)
+    const requestId = '44444444-4444-4444-4444-444444444444'
+    client.startPrivadoLogin.mockResolvedValue({ requestId, requestUri: location.origin + '/api/v2/auth/privado/requests/' + requestId, expiresAt: a.expiresAt, sourceProfile: 'demo-privado', expectedActorId: null })
+    client.cancelPrivado.mockImplementation(async () => { await held.promise; writeMultiMarker(deniedMulti()) })
+    mocks.next = client; controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    await controller.login('demo-privado', 'privado')
+    const cancelling = controller.cancel()
+    expect(controller.snapshot().pending).toBeNull(); expect(controller.snapshot().busy).toBe(true)
+    let receive!: (event: MessageEvent) => void
+    const popup = { closed: false, close: vi.fn(), postMessage: vi.fn() }, open = vi.fn(() => popup)
+    const driver = new LocalDemoDriver(controller, { origin: location.origin, walletOrigin: 'https://localhost:9444', nonce: () => 'a'.repeat(64), open, listen: fn => { receive = fn; return () => {} }, navigate: vi.fn() })
+    try {
+      driver.start('reader'); expect(open).not.toHaveBeenCalled()
+      held.resolve(); await cancelling
+      expect(controller.snapshot().busy).toBe(false)
+      driver.start('reader'); expect(open).toHaveBeenCalledTimes(1)
+      receive({ origin: 'https://localhost:9444', source: popup, data: { v: 1, type: 'ready', nonce: 'a'.repeat(64), config: { v: 1, testOnly: true, opsOrigin: location.origin, network: 'polygon:mumbai', issuerDid: 'did:iden3:polygon:mumbai:x11111', verifierDid: 'did:iden3:polygon:mumbai:x22222', personas: ['admin', 'deployer', 'reader', 'outsider'].map((id, n) => ({ id, profileId: 'demo-privado', holderDid: 'did:iden3:polygon:mumbai:x' + String(n + 3).repeat(10) })) } } } as unknown as MessageEvent)
+      await flush()
+      expect(client.startPrivadoLogin).toHaveBeenCalledTimes(2)
+      expect(popup.postMessage).toHaveBeenCalledTimes(1)
+      expect(driver.snapshot().error).toBeNull()
+    } finally { driver.dispose() }
+  })
   it('retires only the original completion while a new account completion is pending', async () => {
     history.replaceState(null, '', '/auth/sso?flow=33333333-3333-3333-3333-333333333333')
     const flow = { id: '33333333-3333-3333-3333-333333333333', expiresAt: a.expiresAt, displayName: 'Explorer' }

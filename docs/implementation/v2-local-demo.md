@@ -115,8 +115,9 @@ To inspect them in the familiar Admin UI, open the OPS origin printed by
 proof requested on reload. If shown, choose **Open configuration workspace**.
 Choose **Import source folder** and select the exported parent containing both
 `core` and `broker` (a single `core` root also works for inspection).
-The **Organizations** tab shows Demo Bank; select its row or the
-**Groups** tab to inspect Admin, Deployer and Reader. A group's gear button
+The **Organizations** tab shows Demo Bank. Select its row to open that bank's
+groups, or choose Demo Bank in **Scope** before opening the **Groups** tab.
+You can then inspect Admin, Deployer and Reader. A group's gear button
 shows its declared permissions. This source is a local draft, not a report of
 the revision currently served by every OPS instance. Importing it applies no
 permissions and sends no source files to OPS. Account menu → **Account** opens
@@ -376,6 +377,15 @@ Keys, provider trust and proof requirements stay fixed. Invalid input rejects
 before drain. On a later failure, the launcher attempts to stop affected
 consumers and retains the selected source for a corrected retry or resume.
 Operational data is not reset.
+
+Changing trusted identity profiles can also change Explorer's approved SSO
+source. Its existing session store deliberately rejects a different source
+digest. Drain Explorer before using the offline `sso-v2-admin` tool with the
+new source, its exact SHA-256, `--action drained-recover --traffic-drained`.
+This invalidates Explorer login contexts; people sign in again. It does not
+reset wallets, chain data, disclosure cases or access logs. A normal `resume`
+never performs that recovery automatically. Plain permission-mapping edits
+that leave the trusted profiles unchanged do not need this SSO transition.
 
 Sign out and sign in again as `demo-reader`, using the same role credential.
 The new permissions come from the file mapping. The change affects **every

@@ -73,7 +73,10 @@ function observe(page) {
 }
 async function finish(page, data, persona) {
   const expected = metadata.personas.find(p => p.id === persona);
-  await page.waitForURL(url => url.origin === runtime.opsOrigin && ['/admin/account', '/admin/rbac/organizations'].includes(url.pathname), { timeout: 170000 });
+  await Promise.race([
+    page.waitForURL(url => url.origin === runtime.opsOrigin && ['/admin/account', '/admin/rbac/organizations'].includes(url.pathname), { timeout: 170000 }),
+    page.getByText('Demo sign-in stopped', { exact: true }).waitFor({ state: 'visible', timeout: 170000 }).then(() => { throw Error('The demo sign-in UI reported a failure'); }),
+  ]);
   await page.waitForFunction(() => { const text = document.body.textContent?.toLowerCase() ?? ''; return text.includes('ops identity') || text.includes('policy source workspace'); });
   const until = Date.now() + 10000;
   while ((!data.self || !data.completes.length || !data.candidates.length) && Date.now() < until) await page.waitForTimeout(50);
@@ -85,7 +88,7 @@ async function finish(page, data, persona) {
   const admin = self.organizations.some(org => org.isOrgAdmin || org.isOrgReadonlyAdmin);
   assert.equal(new URL(page.url()).pathname, admin ? '/admin/rbac/organizations' : '/admin/account');
   assert.equal(data.completes.filter(x => x.sourceProfile === expected.profileId).length, 1);
-  await page.screenshot({ path: path.join(output, persona + '-signed-in.png'), fullPage: true });
+  await page.screenshot({ path: path.join(output, persona + '-signed-in.png'), fullPage: true, animations: 'disabled' });
   return { persona, profile: self.sourceProfile, path: new URL(page.url()).pathname, verifiedHolder: candidate.holderDid, popupClosed: true };
 }
 try {
@@ -159,7 +162,12 @@ try {
     try { await Promise.race([candidateHeld, new Promise((_, reject) => { candidateTimer = setTimeout(() => reject(Error('candidate not held')), 150000); })]); }
     finally { clearTimeout(candidateTimer); }
     await page.getByRole('button', { name: 'Cancel demo sign in', exact: true }).click();
-    await page.getByTestId('demo-persona-reader').click(); release();
+    // The canceled preview still holds the browser identity lock. A new
+    // gesture must wait for cancellation to consume the original marker.
+    // Releasing only AFTER clicking a disabled button would deadlock the test.
+    assert.equal(await page.getByTestId('demo-persona-reader').isDisabled(), true);
+    release();
+    await page.getByTestId('demo-persona-reader').click();
     await finish(page, data, 'reader');
     const expectedReader = metadata.personas.find(p => p.id === 'reader');
     const readerCandidate = data.candidates.find(x => x.holderDid === expectedReader.holderDid);
