@@ -11,6 +11,16 @@ import (
 )
 
 const RetainedSourceProfile = "ops.disclosure.retained-data-sources/v1"
+const NativeFinanceSourceProfile = "ops.disclosure.retained-data-sources/v2"
+
+// NativeFinancePlan selects the fixed live financial paging/report contract.
+// It supplies no permission or source readiness.
+func NativeFinancePlan(plan SourcePlan) bool {
+	return plan.Version == 3 && plan.Profile == NativeFinanceSourceProfile
+}
+func FinanceSummaryFormat() Digest { return hashParts("ops.disclosure.finance-summary/v1") }
+func FinanceLiveFormat() Digest    { return hashParts("ops.disclosure.finance-live-page/v1") }
+
 const RetainedHistoryPopulation = "RETAINED_AND_POSITIVELY_ATTRIBUTED_WALLET_HISTORY"
 const SealedRequestPopulation = "SEALED_REQUEST_COMPLETIONS_AS_OF_CHAIN_HEAD"
 
@@ -114,7 +124,7 @@ func basisForKinds(kinds []SourceKind, err error, b RetainedBasis) error {
 }
 
 func ValidRetainedPlan(plan SourcePlan) bool {
-	if plan.Version != 2 || plan.Profile != RetainedSourceProfile || !digestValid(plan.BundleDigest) || !digestValid(plan.NetworkKey) || !digestValid(plan.PlanDigest) || len(plan.Resources) < 1 || len(plan.Resources) > 6 {
+	if !(plan.Version == 2 && plan.Profile == RetainedSourceProfile || NativeFinancePlan(plan)) || !digestValid(plan.BundleDigest) || !digestValid(plan.NetworkKey) || !digestValid(plan.PlanDigest) || len(plan.Resources) < 1 || len(plan.Resources) > 6 {
 		return false
 	}
 	for i, resource := range plan.Resources {
@@ -145,6 +155,9 @@ func SourceReferencesRetained(plan SourcePlan, descriptors []SourceDescriptor) (
 	refs := make([]SourceRef, 0, len(descriptors))
 	for i, d := range descriptors {
 		version, population := retainedPopulation(d.Kind)
+		if NativeFinancePlan(plan) && d.Kind == FinanceSource {
+			version = 2
+		}
 		if population == "" || d.Version != version || d.Population != population || d.NetworkKey != plan.NetworkKey || d.PlanDigest != plan.PlanDigest || !digestValid(d.Reference) || !digestValid(d.Epoch) || !digestValid(d.FormatDigest) || !digestValid(d.CoverageDigest) || !uuidValid(d.Generation) || !utc(d.AsOf) || i > 0 && descriptors[i-1].Kind >= d.Kind {
 			return nil, ErrUnavailable
 		}
@@ -161,6 +174,17 @@ func SourceSetDigestRetained(plan SourcePlan, descriptors []SourceDescriptor, re
 	if !slices.Contains(plan.Resources, resource) {
 		return "", ErrUnsupported
 	}
+	if NativeFinancePlan(plan) && resource == p.ComplianceReport {
+		want := FinanceSummaryFormat()
+		if view == List {
+			want = FinanceLiveFormat()
+		}
+		for _, descriptor := range descriptors {
+			if descriptor.Kind == FinanceSource && descriptor.FormatDigest != want {
+				return "", ErrUnavailable
+			}
+		}
+	}
 	return sourceSetDigest(descriptors, resource, view, refs, 2, "ops.disclosure.source-set/v2")
 }
 
@@ -171,6 +195,6 @@ func ValidateFactsRetained(plan SourcePlan, scope ReadScope, descriptors []Sourc
 	if _, err := SourceSetDigestRetained(plan, descriptors, scope.Query.Resource(), scope.Query.View()); err != nil {
 		return err
 	}
-	_, err := validateFactsForHistory(scope, descriptors, facts, after, RetainedHistoryPopulation)
+	_, err := validateFactsForHistoryMode(scope, descriptors, facts, after, RetainedHistoryPopulation, true, NativeFinancePlan(plan))
 	return err
 }

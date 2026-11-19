@@ -134,44 +134,95 @@ func compareRoots(a, b h.Root) int {
 
 // Included ROOTs come only from actual CB1 acquisitions. A positive range is
 // merely an indexed query predicate; this point resolution is still required.
-func (n *namespaceRead) qualify(ctx context.Context, roots []qualifiedRoot, organization string) error {
-	if n == nil || n.pointInput != nil || len(roots) > 4096 {
-		return d.ErrInvalid
-	}
+func pointScope(n *namespaceRead, roots []qualifiedRoot) h.TrustedRootScope {
 	selected := make([]h.Root, len(roots))
 	for i, root := range roots {
 		selected[i] = root.root
 	}
 	slices.SortFunc(selected, compareRoots)
 	selected = slices.CompactFunc(selected, func(a, b h.Root) bool { return compareRoots(a, b) == 0 })
-	input := h.TrustedRootScope{Network: n.rangeInput.Network, Era: n.rangeInput.Era, CanonicalViewID: n.rangeInput.CanonicalViewID, Head: n.rangeInput.Head, Roots: selected}
-	n.pointInput = &input
-	pass, err := n.resolvePoints(ctx)
+	return h.TrustedRootScope{Network: n.rangeInput.Network, Era: n.rangeInput.Era, CanonicalViewID: n.rangeInput.CanonicalViewID, Head: n.rangeInput.Head, Roots: selected}
+}
+
+func (n *namespaceRead) qualify(ctx context.Context, roots []qualifiedRoot, organization string) error {
+	_, err := n.qualifyPrefix(ctx, roots, 0, organization, false)
+	return err
+}
+
+// Discover point support without fetching it. At most eight metadata planning
+// passes halve an ordered transaction prefix. No monotonicity/maximality claim
+// is made; only the chosen fitting prefix acquires its support body/header set.
+func (n *namespaceRead) qualifyPrefix(ctx context.Context, roots []qualifiedRoot, witnesses int, organization string, prefix bool) ([]qualifiedRoot, error) {
+	if n == nil || n.pointInput != nil || len(roots) > 4096 || witnesses < 0 || witnesses > len(roots) {
+		return nil, d.ErrInvalid
+	}
+	selectedCount, requirements, err := fitPointPrefix(len(roots), witnesses, prefix, func(count int) (*h.Requirements, error) {
+		input := pointScope(n, roots[:count])
+		requirements, err := n.reader.DiscoverRequirements(ctx, input)
+		if err != nil {
+			return nil, namespaceError(err)
+		}
+		return requirements, nil
+	}, n.node.canSupport)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	input := pointScope(n, roots[:selectedCount])
+	n.pointInput = &input
+	pass, err := n.resolvePointsRequirements(ctx, requirements, true)
+	if err != nil {
+		return nil, err
 	}
 	results := pass.Results()
-	if len(results) != len(selected) {
-		return d.ErrUnavailable
+	if len(results) != len(input.Roots) {
+		return nil, d.ErrUnavailable
 	}
 	for i, result := range results {
-		if compareRoots(result.Root, selected[i]) != 0 || result.Kind != h.KnownOrg || result.OrganizationID == nil || *result.OrganizationID != organization {
-			return d.ErrUnavailable
+		if compareRoots(result.Root, input.Roots[i]) != 0 || result.Kind != h.KnownOrg || result.OrganizationID == nil || *result.OrganizationID != organization {
+			return nil, d.ErrUnavailable
 		}
 	}
 	n.pointPass = pass
-	return nil
+	return roots[:selectedCount], nil
 }
 
-func (n *namespaceRead) resolvePoints(ctx context.Context) (*h.NamespacePass, error) {
+// This planner grants no namespace authority and performs no node acquisition.
+// Its opaque requirement is still checked by the actual ResolvePass afterward.
+func fitPointPrefix(total, witnesses int, prefix bool, discover func(int) (*h.Requirements, error), fits func(*h.Requirements) bool) (int, *h.Requirements, error) {
+	if total < 0 || witnesses < 0 || witnesses > total || prefix && total-witnesses > 100 {
+		return 0, nil, d.ErrInvalid
+	}
+	count := total
+	for attempt := 0; attempt < 8; attempt++ {
+		requirements, err := discover(count)
+		if err != nil {
+			return 0, nil, err
+		}
+		if requirements == nil {
+			return 0, nil, d.ErrUnavailable
+		}
+		if fits(requirements) {
+			return count, requirements, nil
+		}
+		if !prefix || count-witnesses <= 1 {
+			return 0, nil, d.ErrTooBroad
+		}
+		count = witnesses + (count-witnesses)/2
+	}
+	return 0, nil, d.ErrTooBroad
+}
+
+func (n *namespaceRead) resolvePointsRequirements(ctx context.Context, requirements *h.Requirements, acquire bool) (*h.NamespacePass, error) {
 	if n.pointInput == nil {
 		return nil, d.ErrInvalid
 	}
-	requirements, err := n.reader.DiscoverRequirements(ctx, *n.pointInput)
-	if err != nil {
-		return nil, namespaceError(err)
+	var blocks []h.CanonicalBlock
+	var err error
+	if acquire {
+		blocks, err = n.node.supports(ctx, requirements)
+	} else {
+		blocks, err = n.node.knownSupport(requirements)
 	}
-	blocks, err := n.node.supports(ctx, requirements)
 	if err != nil {
 		return nil, err
 	}
@@ -193,15 +244,36 @@ func (n *namespaceRead) check(ctx context.Context) error {
 	if metadata != n.metadata {
 		return d.ErrConflict
 	}
-	ranges, err := n.resolveRange(ctx)
+	rangeRequirements, err := n.reader.DiscoverRangeRequirements(ctx, n.rangeInput)
+	if err != nil {
+		return namespaceError(err)
+	}
+	if rangeRequirements.ScopeDigest() != n.rangePass.ScopeDigest() || rangeRequirements.Digest() != n.rangePass.RequirementsDigest() {
+		return d.ErrConflict
+	}
+	blocks, err := n.node.knownSupport(rangeRequirements)
 	if err != nil {
 		return err
+	}
+	ranges, err := n.reader.ResolveRangePass(ctx, h.TrustedRangePass{Scope: n.rangeInput, CanonicalBlocks: blocks, ExpectedScopeDigest: rangeRequirements.ScopeDigest(), ExpectedRequirementsDigest: rangeRequirements.Digest()})
+	if err != nil {
+		return namespaceError(err)
+	}
+	if ranges == nil {
+		return d.ErrUnavailable
 	}
 	if ranges.ScopeDigest() != n.rangePass.ScopeDigest() || ranges.RequirementsDigest() != n.rangePass.RequirementsDigest() || ranges.AuthorityDigest() != n.rangePass.AuthorityDigest() || ranges.CanonicalContextDigest() != n.rangePass.CanonicalContextDigest() || ranges.Generation() != n.rangePass.Generation() {
 		return d.ErrConflict
 	}
 	if n.pointPass != nil {
-		points, err := n.resolvePoints(ctx)
+		requirements, err := n.reader.DiscoverRequirements(ctx, *n.pointInput)
+		if err != nil {
+			return namespaceError(err)
+		}
+		if requirements.ScopeDigest() != n.pointPass.ScopeDigest() || requirements.Digest() != n.pointPass.RequirementsDigest() {
+			return d.ErrConflict
+		}
+		points, err := n.resolvePointsRequirements(ctx, requirements, false)
 		if err != nil {
 			return err
 		}

@@ -295,6 +295,8 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	rule, _ := s.catalog.Rule(c.RuleID)
 	scope := d.ReadScope{Namespace: d.Digest(s.epoch), CaseID: c.ID, CaseVersion: c.Version, RecipientActorID: v.ActorID(), DataOrganizationID: c.DataOrg, BundleDigest: d.Digest(s.snapshot.Metadata().ManifestDigest), RuleDigest: d.Digest(rule.Digest()), EffectiveUntil: until, Query: query}
 	binding := d.CursorBinding{Namespace: scope.Namespace, CaseID: c.ID, CaseVersion: c.Version, RecipientActorID: v.ActorID(), BundleDigest: scope.BundleDigest, RuleDigest: scope.RuleDigest, QueryDigest: query.Digest(), RenderGeneration: s.data.generation, SourcePlanDigest: s.data.plan.PlanDigest}
+	liveFinance := d.LiveFinanceRead(s.data.plan, query)
+	var liveContinuation *d.FinanceLiveContinuation
 	var continuation *d.Continuation
 	var retainedContinuation *d.RetainedContinuation
 	var originalBasis *d.RetainedBasis
@@ -302,7 +304,16 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	var after *d.Position
 	var refs []d.SourceRef
 	if q.Cursor != nil {
-		if s.data.retained == nil {
+		if liveFinance {
+			got, err := s.data.cursors.OpenLiveFinance(*q.Cursor, s.data.plan, binding, s.clock())
+			if err != nil {
+				return nil, dataError(err)
+			}
+			liveContinuation = &got
+			refs = []d.SourceRef{{Kind: d.FinanceSource, ID: got.SourceIdentity()}}
+			position := got.Position()
+			after = &position
+		} else if s.data.retained == nil {
 			got, err := s.data.cursors.Open(*q.Cursor, binding, s.clock())
 			if err != nil {
 				return nil, dataError(err)
@@ -367,6 +378,15 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 	for _, desc := range descriptors {
 		if desc.NetworkKey != s.data.network || desc.PlanDigest != s.data.plan.PlanDigest {
 			return nil, ErrUnavailable
+		}
+	}
+	if liveContinuation != nil {
+		if len(descriptors) != 1 {
+			return nil, ErrUnavailable
+		}
+		identity, err := d.FinanceLiveIdentity(s.data.plan, descriptors[0])
+		if err != nil || identity != liveContinuation.SourceIdentity() {
+			return nil, ErrConflict
 		}
 	}
 	if (continuation != nil || retainedContinuation != nil) && !slices.Equal(refs, actualRefs) {
@@ -443,7 +463,16 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 			return nil, ErrUnauthorized
 		}
 		var raw string
-		if s.data.retained == nil {
+		if liveFinance {
+			if len(descriptors) != 1 {
+				return nil, ErrUnavailable
+			}
+			identity, err := d.FinanceLiveIdentity(s.data.plan, descriptors[0])
+			if err != nil {
+				return nil, ErrUnavailable
+			}
+			raw, e = s.data.cursors.SealLiveFinance(s.data.plan, binding, identity, *facts.Next, expires)
+		} else if s.data.retained == nil {
 			raw, e = s.data.cursors.Seal(binding, set, actualRefs, *facts.Next, expires)
 		} else {
 			raw, e = s.data.cursors.SealRetained(s.data.plan, binding, query.Resource(), selectedBasis, set, actualRefs, *facts.Next, expires)
@@ -547,7 +576,7 @@ func ValidateExposureEvent(e Event) error {
 			return ErrInvalid
 		}
 		total, _ := strconv.ParseUint(string(*x.QualifiedTotal), 10, 64)
-		if total < uint64(x.ReturnedRows) || total > d.MaxEntries {
+		if total < uint64(x.ReturnedRows) {
 			return ErrInvalid
 		}
 	}

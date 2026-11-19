@@ -16,11 +16,12 @@ import (
 )
 
 type factContext struct {
-	scope       ReadScope
-	descriptors map[SourceKind]SourceDescriptor
-	targets     map[[20]byte][]string
-	mine        map[[20]byte]bool
-	historyKind string
+	scope         ReadScope
+	descriptors   map[SourceKind]SourceDescriptor
+	targets       map[[20]byte][]string
+	mine          map[[20]byte]bool
+	historyKind   string
+	nativeFinance bool
 }
 
 func scopeAddress(q NormalizedQuery, a [20]byte) bool {
@@ -52,8 +53,8 @@ func validateFactsForHistory(scope ReadScope, ds []SourceDescriptor, f Facts, af
 // Rendering revalidates detached page contents but has no caller's cursor. The
 // service/source validators separately enforce the authenticated initial/after
 // boundary; the renderer still verifies counts, ordering, End and exact Next.
-func validateFactsForHistoryMode(scope ReadScope, ds []SourceDescriptor, f Facts, after *Position, historyKind string, checkInitial bool) (factContext, error) {
-	c := factContext{scope: scope, descriptors: map[SourceKind]SourceDescriptor{}, targets: map[[20]byte][]string{}, mine: map[[20]byte]bool{}, historyKind: historyKind}
+func validateFactsForHistoryMode(scope ReadScope, ds []SourceDescriptor, f Facts, after *Position, historyKind string, checkInitial bool, native ...bool) (factContext, error) {
+	c := factContext{scope: scope, descriptors: map[SourceKind]SourceDescriptor{}, targets: map[[20]byte][]string{}, mine: map[[20]byte]bool{}, historyKind: historyKind, nativeFinance: len(native) == 1 && native[0]}
 	if e := PositionForQuery(scope.Query, after); e != nil {
 		return c, e
 	}
@@ -64,7 +65,7 @@ func validateFactsForHistoryMode(scope ReadScope, ds []SourceDescriptor, f Facts
 		return c, ErrTooBroad
 	}
 	branches := 0
-	for _, present := range []bool{f.Addresses != nil, f.Activities != nil, f.Transactions != nil, f.ActivitySummary != nil, f.Sanctions != nil, f.Compliance != nil, f.FinanceEvidence != nil} {
+	for _, present := range []bool{f.Addresses != nil, f.Activities != nil, f.Transactions != nil, f.ActivitySummary != nil, f.Sanctions != nil, f.Compliance != nil, f.FinanceEvidence != nil, f.FinanceLive != nil} {
 		if present {
 			branches++
 		}
@@ -79,6 +80,9 @@ func validateFactsForHistoryMode(scope ReadScope, ds []SourceDescriptor, f Facts
 		c.descriptors[d.Kind] = d
 	}
 	q := scope.Query
+	if c.nativeFinance && q.resource == p.ComplianceReport && q.view == List && after != nil && after.FinanceLive == nil {
+		return c, ErrInvalid
+	}
 	needsWallet := false
 	for _, d := range ds {
 		if d.Kind == WalletSource {
@@ -189,6 +193,26 @@ func validateFactsForHistoryMode(scope ReadScope, ds []SourceDescriptor, f Facts
 			return c, ErrUnavailable
 		}
 	case p.ComplianceReport:
+		if c.nativeFinance && q.view == List {
+			v := f.FinanceLive
+			if v == nil || v.Items == nil || !countValid(v.MatchingRetainedCount) || countValue(v.MatchingRetainedCount) < uint64(len(v.Items)) || len(v.Items) > int(q.limit) || !utc(v.ObservedAt) || !v.ObservedAt.Equal(c.descriptors[FinanceSource].AsOf) {
+				return c, ErrUnavailable
+			}
+			for _, ev := range v.Items {
+				if !c.evidence(ev) {
+					return c, ErrUnavailable
+				}
+				positions = append(positions, Position{Kind: FinanceSource, FinanceLive: &FinanceLivePosition{ObservedAtMicros: ev.DecisionAt.UnixMicro(), ID: ev.ID}})
+			}
+			break
+		}
+		if c.nativeFinance {
+			v := f.Compliance
+			if v == nil || !summaryValid(v.Activity) || !c.sanctions(v.Sanctions) || v.KYC != "not_evaluated" || v.Evidence != nil || v.Finance == nil || !countValid(v.Finance.MatchingRetainedCount) || !utc(v.Finance.ObservedAt) || !v.Finance.ObservedAt.Equal(c.descriptors[FinanceSource].AsOf) {
+				return c, ErrUnavailable
+			}
+			break
+		}
 		if q.view == List {
 			v := f.FinanceEvidence
 			if historyKind != RetainedHistoryPopulation || v == nil || v.Items == nil || !countValid(v.MatchingRetainedCount) || !countValid(v.BeforeCount) || len(v.Items) > int(q.limit) {
@@ -206,7 +230,7 @@ func validateFactsForHistoryMode(scope ReadScope, ds []SourceDescriptor, f Facts
 			}
 			break
 		}
-		if f.Compliance == nil || !summaryValid(f.Compliance.Activity) || !c.sanctions(f.Compliance.Sanctions) || f.Compliance.KYC != "not_evaluated" || len(f.Compliance.Evidence) > 100 {
+		if f.Compliance == nil || f.Compliance.Finance != nil || !summaryValid(f.Compliance.Activity) || !c.sanctions(f.Compliance.Sanctions) || f.Compliance.KYC != "not_evaluated" || len(f.Compliance.Evidence) > 100 {
 			return c, ErrUnavailable
 		}
 		var last uint64

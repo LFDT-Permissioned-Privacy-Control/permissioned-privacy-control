@@ -82,6 +82,7 @@ type HistoryBlockObservation struct {
 	digest           common.Hash
 	originalDone     <-chan struct{}
 	originalDeadline time.Time
+	ownedBytes       int
 }
 
 // HistoryFieldPresence preserves optional node metadata, including explicit
@@ -179,6 +180,15 @@ func (b *HistoryBlockObservation) Digest() common.Hash {
 		return common.Hash{}
 	}
 	return b.digest
+}
+
+// OwnedBytes is the decoder's normalized ownership charge, including receipts
+// and logs. It excludes transport buffers and is not a Go heap/RSS estimate.
+func (b *HistoryBlockObservation) OwnedBytes() int {
+	if !b.valid() {
+		return 0
+	}
+	return b.ownedBytes
 }
 
 // HistoryTransaction has no conversion to admission VerifiedTransaction. Types

@@ -11,6 +11,10 @@ func ClonePosition(p *Position) *Position {
 		return nil
 	}
 	c := *p
+	if p.FinanceLive != nil {
+		f := *p.FinanceLive
+		c.FinanceLive = &f
+	}
 	if p.Finance != nil {
 		f := *p.Finance
 		c.Finance = &f
@@ -31,6 +35,9 @@ func ClonePosition(p *Position) *Position {
 }
 func validPosition(a Position) bool {
 	n := 0
+	if a.FinanceLive != nil {
+		n++
+	}
 	if a.Finance != nil {
 		n++
 	}
@@ -48,6 +55,9 @@ func validPosition(a Position) bool {
 	}
 	switch a.Kind {
 	case FinanceSource:
+		if a.FinanceLive != nil {
+			return a.FinanceLive.ObservedAtMicros >= 0 && a.FinanceLive.ObservedAtMicros <= p.MaxUnixSeconds*1000000+999999 && countValid(a.FinanceLive.ID) && countValue(a.FinanceLive.ID) > 0 && countValue(a.FinanceLive.ID) <= 9223372036854775807
+		}
 		return a.Finance != nil && countValid(a.Finance.ID) && countValue(a.Finance.ID) > 0 && countValue(a.Finance.ID) <= 9223372036854775807
 	case ActivitySource:
 		x := a.Activity
@@ -89,6 +99,15 @@ func ComparePositions(a, b Position) (int, error) {
 	}
 	switch a.Kind {
 	case FinanceSource:
+		if a.FinanceLive != nil || b.FinanceLive != nil {
+			if a.FinanceLive == nil || b.FinanceLive == nil {
+				return 0, ErrInvalid
+			}
+			if n := cmp.Compare(b.FinanceLive.ObservedAtMicros, a.FinanceLive.ObservedAtMicros); n != 0 {
+				return n, nil
+			}
+			return cmp.Compare(countValue(b.FinanceLive.ID), countValue(a.FinanceLive.ID)), nil
+		}
 		return cmp.Compare(countValue(a.Finance.ID), countValue(b.Finance.ID)), nil
 	case ActivitySource:
 		x, y := a.Activity, b.Activity

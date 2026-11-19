@@ -67,7 +67,7 @@ func retainedCursorSelection(plan SourcePlan, resource p.Resource, basis Retaine
 			return ErrInvalid
 		}
 	}
-	if !validPosition(position) {
+	if !validPosition(position) || position.FinanceLive != nil {
 		return ErrInvalid
 	}
 	switch resource {

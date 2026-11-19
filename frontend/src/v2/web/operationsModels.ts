@@ -1,4 +1,4 @@
-import { validateEvidencePage } from './disclosureEvidence'
+import { validateComplianceSummary, validateEvidencePage } from './disclosureEvidence'
 
 export type ObjectValue = Record<string, unknown>
 export function record(value: unknown): ObjectValue {
@@ -154,14 +154,19 @@ export function protectedData(
     !Array.isArray(coverage.populations)
   )
     throw Error('Disclosure response does not match this case')
-  if (resource === 'compliance_report' && v.view === 'list') {
-    if (Object.keys(v).sort().join() !== 'caseId,coverage,dataTime,effectiveUntil,level,readId,resource,result,v,view' ||
+  if (resource === 'compliance_report') {
+    const populations = v.view === 'list'
+      ? ['RETAINED_ADMISSION_DECISIONS_AS_OF_SNAPSHOT']
+      : ['CURRENT_APPROVED_SANCTIONS', 'CURRENT_PROVED_ASSOCIATIONS', 'RETAINED_ADMISSION_DECISIONS_AS_OF_SNAPSHOT', 'RETAINED_AND_POSITIVELY_ATTRIBUTED_WALLET_HISTORY', 'SEALED_REQUEST_COMPLETIONS_AS_OF_CHAIN_HEAD']
+    if (!['list', 'report'].includes(String(v.view)) ||
+      Object.keys(v).sort().join() !== 'caseId,coverage,dataTime,effectiveUntil,level,readId,resource,result,v,view' ||
       Object.keys(time).sort().join() !== 'end,start' ||
       coverage.status !== 'RETAINED_AT_READ' || Object.keys(coverage).sort().join() !== 'populations,preparedAt,sourceBasisDigest,status' ||
-      JSON.stringify(coverage.populations) !== '["RETAINED_ADMISSION_DECISIONS_AS_OF_SNAPSHOT"]' || typeof coverage.sourceBasisDigest !== 'string' ||
+      JSON.stringify(coverage.populations) !== JSON.stringify(populations) || typeof coverage.sourceBasisDigest !== 'string' ||
       !/^sha256:[0-9a-f]{64}$/.test(coverage.sourceBasisDigest) || !Number.isSafeInteger(coverage.preparedAt) ||
       Number(coverage.preparedAt) < 0 || Number(coverage.preparedAt) >= Number(v.effectiveUntil)) throw Error('Invalid admission evidence coverage')
-    validateEvidencePage(result, String(v.level), expected.dataTime ?? selected.scope.dataTime, expected.limit ?? 100)
+    if (v.view === 'list') validateEvidencePage(result, String(v.level), expected.dataTime ?? selected.scope.dataTime, expected.limit ?? 100, Number(coverage.preparedAt))
+    else validateComplianceSummary(result, selected.scope, Number(coverage.preparedAt))
   }
   text(v.readId)
   if (resource === 'activity_logs')

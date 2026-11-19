@@ -484,11 +484,11 @@ function CaseDetail({
     task.clearError()
   }
   const recipient = selected.recipientActorId === scope.identity.actor
-  const read = async (next = '') => {
+  const read = async (next = '', view = readView) => {
     const revision = queryRevision.current
     setData(undefined)
     const narrowed = readNarrowing(selected.scope, target, from, to)
-    const report = resource === 'compliance_report' ? readView === 'report' : resource.endsWith('_report') || resource === 'activity_summary'
+    const report = resource === 'compliance_report' ? view === 'report' : resource.endsWith('_report') || resource === 'activity_summary'
     const body = {
       v: 1,
       resource,
@@ -503,13 +503,6 @@ function CaseDetail({
       )
       scope.check()
       if (!alive.current || revision !== queryRevision.current) return
-      if (next && resource === 'compliance_report') {
-        const previous = history[historyIndex]
-        if (!previous || previous.coverage.sourceBasisDigest !== value.coverage.sourceBasisDigest ||
-          previous.result.matchingRetainedCount !== value.result.matchingRetainedCount ||
-          (rows(previous.result.items).length && rows(value.result.items).length &&
-            BigInt(text(rows(value.result.items)[0].id)) <= BigInt(text(rows(previous.result.items).at(-1)!.id)))) throw Error('The admission evidence changed. Start a new read; pages have been cleared.')
-      }
       const loaded = next ? [...history.slice(0, historyIndex + 1), value] : [value]
       if (loaded.length > 10) setHistoryTrimmed(true)
       setHistory(loaded.slice(-10)); setHistoryIndex(Math.min(loaded.length, 10) - 1)
@@ -541,10 +534,10 @@ function CaseDetail({
     setAuditCursor(text(value.nextCursor))
   }
   useEffect(() => {
-    if (!data) return
+    if (!data && !history.length) return
     const timer = setTimeout(
       () => { clearRead() },
-      Math.max(1, Math.min(...history.map(p => p.effectiveUntil), data.effectiveUntil, scope.identity.expires) * 1000 - Date.now()),
+      Math.max(1, Math.min(...history.map(p => p.effectiveUntil), data?.effectiveUntil ?? Infinity, scope.identity.expires) * 1000 - Date.now()),
     )
     return () => clearTimeout(timer)
   }, [data, history, scope.identity.expires])
@@ -601,7 +594,7 @@ function CaseDetail({
                 (!logsOnly || o.value === 'activity_logs' || o.value === 'activity_summary'),
             )}
           />
-          {resource === 'compliance_report' && <SelectField label="Compliance view" value={readView} disabled={task.busy} onChange={value => { clearRead(); setReadView(value) }} options={[{ value: 'list', label: 'Admission decisions' }, { value: 'report', label: 'Complete report (up to 100 admission decisions)' }]} />}
+          {resource === 'compliance_report' && <SelectField label="Compliance view" value={readView} disabled={task.busy} onChange={value => { clearRead(); setReadView(value) }} options={[{ value: 'list', label: 'Admission decisions' }, { value: 'report', label: 'Summary report' }]} />}
           <Button disabled={task.busy || !allowed} onClick={() => void task.run(() => read())}>
             Read permitted data
           </Button>
@@ -634,7 +627,7 @@ function CaseDetail({
       </Panel>
       {data && (
         <Panel
-          title={data.resource === 'compliance_report' && data.view === 'list' ? 'Admission decisions' : resourceOptions.find((o) => o.value === data.resource)?.label ?? data.resource}
+          title={data.resource === 'compliance_report' ? data.view === 'list' ? 'Admission decisions' : 'Compliance summary report' : resourceOptions.find((o) => o.value === data.resource)?.label ?? data.resource}
           actions={
             <Button
               variant="outline"
@@ -649,7 +642,7 @@ function CaseDetail({
                 })
               }
             >
-              {data.view === 'list' ? 'Download this page' : 'Download report'}
+              {data.view === 'list' ? 'Download this page' : data.resource === 'compliance_report' ? 'Download summary report' : 'Download report'}
             </Button>
           }
         >
@@ -661,7 +654,8 @@ function CaseDetail({
             · Case/rule cutoff {instant(data.effectiveUntil)}
             {' · '}Available in this session until {instant(Math.min(data.effectiveUntil, scope.identity.expires))}
           </p>
-          {data.resource === 'compliance_report' && data.view === 'list' && <p className="mb-4 text-sm text-neutral-600">Matching retained admission decisions: <strong>{quantity(data.result.matchingRetainedCount)}</strong>. These are recorded decisions, not proof of mining or a complete compliance report. A source change requires a new read.</p>}
+          {data.resource === 'compliance_report' && <p className="mb-4 text-sm text-neutral-600">Matching retained admission decisions: <strong>{quantity(data.view === 'list' ? data.result.matchingRetainedCount : record(data.result.finance).matchingRetainedCount)}</strong> as of <time dateTime={text(data.view === 'list' ? data.result.observedAt : record(data.result.finance).observedAt)}>{text(data.view === 'list' ? data.result.observedAt : record(data.result.finance).observedAt)}</time>. These are recorded decisions, not proof of mining. {data.view === 'list' ? 'Each page is a live retained read; counts can change. Refresh starts at the newest decisions.' : 'This summary includes aggregate counts. Open admission decisions to read individual records with these same filters.'}</p>}
+          {data.resource === 'compliance_report' && data.view === 'report' && <Button variant="outline" disabled={task.busy} className="mb-4" onClick={() => void task.run(async () => { clearRead(); setReadView('list'); await read('', 'list') })}>View admission decisions</Button>}
           {data.resource === 'activity_logs' && (
             <div className="mb-3 max-w-md">
               <Field
@@ -673,7 +667,7 @@ function CaseDetail({
             </div>
           )}
           <ProtectedResult data={data} filter={filter} />
-          {data.view === 'list' && <div className="flex flex-wrap items-center justify-between gap-3 pt-4"><div className="text-xs text-neutral-500">{historyTrimmed ? 'Earlier pages were released; the latest 10 pages are kept in this tab.' : 'Up to 10 loaded pages are kept in this tab until expiry.'} Previous shows an already loaded page.</div><div className="flex gap-2"><Button variant="outline" disabled={task.busy || historyIndex === 0} onClick={() => void task.run(async () => cachedPage(historyIndex - 1))}>Previous page</Button>{(cursor || historyIndex + 1 < history.length) && <Button variant="outline" disabled={task.busy} onClick={() => void task.run(async () => { if (historyIndex + 1 < history.length) cachedPage(historyIndex + 1); else await read(cursor) })}>Next page</Button>}</div></div>}
+          {data.view === 'list' && <div className="flex flex-wrap items-center justify-between gap-3 pt-4"><div className="text-xs text-neutral-500">{historyTrimmed ? 'Earlier pages were released; the latest 10 pages are kept in this tab.' : 'Up to 10 loaded pages are kept in this tab until expiry.'} Previous shows an already loaded page.</div><div className="flex gap-2">{data.resource === 'compliance_report' && <Button variant="outline" disabled={task.busy || !allowed} onClick={() => void task.run(async () => { clearRead(); await read() })}>Refresh admission decisions</Button>}<Button variant="outline" disabled={task.busy || historyIndex === 0} onClick={() => void task.run(async () => cachedPage(historyIndex - 1))}>Previous page</Button>{(cursor || historyIndex + 1 < history.length) && <Button variant="outline" disabled={task.busy} onClick={() => void task.run(async () => { if (historyIndex + 1 < history.length) cachedPage(historyIndex + 1); else await read(cursor) })}>Next page</Button>}</div></div>}
         </Panel>
       )}
       {!!audit.length && (
@@ -805,17 +799,6 @@ function ProtectedResult({ data, filter }: { data: ProtectedData; filter: string
         <Summary data={record(result.activity)} />
         <Sanctions data={record(result.sanctions)} />
         <p className="text-sm">KYC: {text(result.kyc).replace(/_/g, ' ')}</p>
-        <DataTable
-          items={rows(result.evidence)}
-          columns={[
-            { key: 'time', label: 'Time', render: (r) => instant(r.time) },
-            { key: 'decision', label: 'Admission decision' },
-            { key: 'coverage', label: 'Coverage' },
-            { key: 'transactionHash', label: 'Transaction' },
-            { key: 'reason', label: 'Reason' },
-            { key: 'policyDigest', label: 'Policy digest' },
-          ]}
-        />
       </div>
     )
   throw Error('Unsupported protected report')
@@ -836,7 +819,7 @@ function Summary({ data }: { data: ObjectValue }) {
         ))}
       </dl>
       <DataTable
-        items={rows(data.methodBreakdown)}
+        items={rows(data.methodBreakdown, 512)}
         columns={[
           { key: 'method', label: 'Method' },
           { key: 'total', label: 'Requests' },
@@ -850,15 +833,15 @@ function Summary({ data }: { data: ObjectValue }) {
 function Sanctions({ data }: { data: ObjectValue }) {
   return (
     <div className="space-y-3">
-      <p className="text-sm">
+      <div className="text-sm">
         Sanctions result:{' '}
         <Badge variant={data.status === 'hit' ? 'destructive' : 'secondary'}>
           {text(data.status)}
         </Badge>{' '}
         · Qualified addresses: {String(data.scopedAddressCount)}
-      </p>
+      </div>
       <DataTable
-        items={rows(data.matches)}
+        items={rows(data.matches, 4096)}
         columns={[
           { key: 'address', label: 'Wallet', render: (r) => text(record(r.address).display) },
           { key: 'sourceId', label: 'Source' },

@@ -49,7 +49,7 @@ func setup(t *testing.T) *database {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
-	raw, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--detach", "--publish", "127.0.0.1::5432", "--env", "POSTGRES_PASSWORD=admission-test-only", "--env", "POSTGRES_DB=admission_test", "--name", "ops-v2-admission-test-"+uuid.NewString()[:8], "postgres:16-alpine").CombinedOutput()
+	raw, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--detach", "--pull=never", "--memory=384m", "--publish", "127.0.0.1::5432", "--env", "POSTGRES_PASSWORD=admission-test-only", "--env", "POSTGRES_DB=admission_test", "--name", "ops-v2-admission-test-"+uuid.NewString()[:8], "postgres:16-alpine").CombinedOutput()
 	if err != nil {
 		t.Fatalf("owned PostgreSQL: %v %s", err, raw)
 	}

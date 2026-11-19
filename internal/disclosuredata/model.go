@@ -55,7 +55,7 @@ type SourcePlan struct {
 	Version      uint8
 	BundleDigest Digest
 	NetworkKey   Digest
-	Profile      string // closed legacy Version1 or explicitly retained Version2 profile
+	Profile      string // closed legacy v1, retained v2, or native-finance v3 profile
 	PlanDigest   Digest
 	Resources    []disclosurepolicy.Resource // sorted, unique, exact actually supported set
 }
@@ -63,7 +63,7 @@ type SourcePlan struct {
 // Immutable references name qualified owned source cuts, never URLs or authority tokens.
 // Activity ref ID names an immutable SEALED audit chain head, excluding buffered/unlogged operations.
 // Legacy History ref ID names an immutable coverage/canonical cut incl R.
-// Explicit retained Version2 History instead names a source basis, not an
+// Retained History instead names a source basis, not an
 // immutable list of rows, a ROOT or an A2 birth proof.
 // Wallet ref ID is exact current snapshot digest; Finance ref ID is the exact retained scoped row sample.
 type SourceRef struct {
@@ -208,12 +208,26 @@ type QuoteFact struct {
 type ComplianceAggregate struct {
 	Activity  ActivityAggregate
 	Sanctions SanctionsAggregate
-	Evidence  []ComplianceEvidence // sortedbounded<=100, reportTooBroad rather thantruncate
+	Evidence  []ComplianceEvidence // legacy report only
+	Finance   *FinanceSummary      // native aggregate: sampled counts, no all-inline detail obligation
 	KYC       string               // literal not_evaluated inA unless a separately approved actual source added
 }
 
-// FinanceEvidencePage carries one page and exact counts from the entire bounded
-// retained finance observation. BeforeCount is private scan evidence, not OFFSET.
+// FinanceSummary counts the scoped retained rows in one successful observation.
+// It carries no inline bodies or cross-observation completeness promise.
+type FinanceSummary struct {
+	MatchingRetainedCount Count
+	ObservedAt            time.Time
+}
+
+type FinanceLivePage struct {
+	Items                 []ComplianceEvidence
+	MatchingRetainedCount Count
+	ObservedAt            time.Time
+}
+
+// FinanceEvidencePage is the older complete-cohort paging contract. BeforeCount
+// is private scan evidence, not OFFSET.
 type FinanceEvidencePage struct {
 	Items                 []ComplianceEvidence
 	MatchingRetainedCount Count
@@ -225,8 +239,13 @@ type Position struct {
 	Transaction *TransactionPosition
 	Address     *AddressPosition
 	Finance     *FinancePosition
+	FinanceLive *FinanceLivePosition
 }
 type FinancePosition struct{ ID Count }
+type FinanceLivePosition struct {
+	ObservedAtMicros int64
+	ID               Count
+}
 type ActivityPosition struct {
 	ObservedAtMicros  int64
 	ProducerID, RunID string
@@ -254,6 +273,7 @@ type Facts struct {
 	Sanctions       *SanctionsAggregate
 	Compliance      *ComplianceAggregate
 	FinanceEvidence *FinanceEvidencePage
+	FinanceLive     *FinanceLivePage
 	End             bool
 	Next            *Position
 	Wallets         []WalletFact // ONE total<=4096 unioned snapshot; split query targets vs viewer by ActorID
@@ -389,6 +409,21 @@ type ComplianceEvidenceDTO struct {
 	RecordID        *string   `json:"recordId,omitempty"`        // Full only
 	Reason          *string   `json:"reason,omitempty"`          // Full only
 }
+type FinanceSummaryDTO struct {
+	MatchingRetainedCount Count                     `json:"matchingRetainedCount"`
+	ObservedAt            time.Time                 `json:"observedAt"`
+	Coverage              string                    `json:"coverage"`
+	DetailResource        disclosurepolicy.Resource `json:"detailResource"`
+	DetailView            View                      `json:"detailView"`
+}
+type ComplianceSummaryDTO struct {
+	Version   uint8             `json:"v"`
+	Activity  SummaryDTO        `json:"activity"`
+	Sanctions SanctionsDTO      `json:"sanctions"`
+	KYC       string            `json:"kyc"`
+	Finance   FinanceSummaryDTO `json:"finance"`
+}
+
 type ComplianceDTO struct {
 	Activity  SummaryDTO              `json:"activity"`
 	Sanctions SanctionsDTO            `json:"sanctions"`

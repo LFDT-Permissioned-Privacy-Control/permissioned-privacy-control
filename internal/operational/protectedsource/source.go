@@ -40,6 +40,7 @@ type snapshot struct {
 	node               *nodeRead
 	namespace          *namespaceRead
 	read, closed       bool
+	closeOperation     context.CancelFunc
 }
 
 func referenceMap(resource p.Resource, view d.View, refs []d.SourceRef) (map[d.SourceKind]*d.SourceRef, error) {
@@ -97,7 +98,14 @@ func (s *Sources) OpenRetained(ctx context.Context, scope d.ReadScope, refs []d.
 	if err != nil {
 		return nil, d.ErrUnavailable
 	}
-	read := &snapshot{owner: s, scope: scope, after: d.ClonePosition(after), fence: fence, descriptors: []d.SourceDescriptor{}}
+	// Readers retaining an owner context get the original operation lifetime,
+	// not a temporary acquisition child and not an unbounded caller. This
+	// context remains live across preparation/delivery until Close or expiry.
+	ctx, closeOperation, err := fence.Bind(ctx)
+	if err != nil {
+		return nil, d.ErrUnavailable
+	}
+	read := &snapshot{owner: s, scope: scope, after: d.ClonePosition(after), fence: fence, descriptors: []d.SourceDescriptor{}, closeOperation: closeOperation}
 	complete := false
 	defer func() {
 		if !complete {
@@ -125,7 +133,16 @@ func (s *Sources) OpenRetained(ctx context.Context, scope d.ReadScope, refs []d.
 		read.facts.Wallets = read.wallet.Wallets()
 	}
 	if slices.Contains(kinds, d.FinanceSource) {
-		if scope.Query.View() == d.List {
+		if d.NativeFinancePlan(s.plan) {
+			if scope.Query.View() == d.List {
+				read.finance, err = s.finance.OpenLivePage(ctx, scope, expected[d.FinanceSource], after)
+			} else {
+				if len(refs) != 0 {
+					return nil, d.ErrInvalid
+				}
+				read.finance, err = s.finance.OpenSummary(ctx, scope)
+			}
+		} else if scope.Query.View() == d.List {
 			read.finance, err = s.finance.OpenPage(ctx, scope, expected[d.FinanceSource], after)
 		} else {
 			read.finance, err = s.finance.Open(ctx, scope, expected[d.FinanceSource])
@@ -135,10 +152,25 @@ func (s *Sources) OpenRetained(ctx context.Context, scope d.ReadScope, refs []d.
 		}
 		read.descriptors = append(read.descriptors, read.finance.Descriptor())
 		if scope.Query.View() == d.List {
-			read.facts = d.Facts{FinanceEvidence: read.finance.Page(), End: read.finance.End()}
-			if !read.facts.End {
-				items := read.facts.FinanceEvidence.Items
-				read.facts.Next = &d.Position{Kind: d.FinanceSource, Finance: &d.FinancePosition{ID: items[len(items)-1].ID}}
+			if d.NativeFinancePlan(s.plan) {
+				read.facts = d.Facts{FinanceLive: read.finance.LivePage(), End: read.finance.End()}
+				if read.facts.FinanceLive == nil {
+					return nil, d.ErrUnavailable
+				}
+				if !read.facts.End {
+					items := read.facts.FinanceLive.Items
+					if len(items) == 0 {
+						return nil, d.ErrUnavailable
+					}
+					last := items[len(items)-1]
+					read.facts.Next = &d.Position{Kind: d.FinanceSource, FinanceLive: &d.FinanceLivePosition{ObservedAtMicros: last.DecisionAt.UnixMicro(), ID: last.ID}}
+				}
+			} else {
+				read.facts = d.Facts{FinanceEvidence: read.finance.Page(), End: read.finance.End()}
+				if !read.facts.End {
+					items := read.facts.FinanceEvidence.Items
+					read.facts.Next = &d.Position{Kind: d.FinanceSource, Finance: &d.FinancePosition{ID: items[len(items)-1].ID}}
+				}
 			}
 		}
 	}
@@ -167,7 +199,14 @@ func (s *Sources) OpenRetained(ctx context.Context, scope d.ReadScope, refs []d.
 	if err != nil {
 		return nil, err
 	}
-	if len(refs) > 0 && !slices.Equal(actual, refs) {
+	if d.LiveFinanceRead(s.plan, scope.Query) {
+		if len(refs) > 0 {
+			identity, e := d.FinanceLiveIdentity(s.plan, read.finance.Descriptor())
+			if e != nil || len(refs) != 1 || refs[0].Kind != d.FinanceSource || refs[0].ID != identity {
+				return nil, d.ErrConflict
+			}
+		}
+	} else if len(refs) > 0 && !slices.Equal(actual, refs) {
 		return nil, d.ErrConflict
 	}
 	if err = d.ValidateFactsRetained(s.plan, scope, read.descriptors, read.facts, after); err != nil {
@@ -191,6 +230,18 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 		return err
 	}
 	read.node = node
+	ownerContext := ctx
+	deadline, done := read.fence.Original()
+	if err = node.bind(deadline, done); err != nil {
+		return err
+	}
+	ctx, release, err := read.fence.Bind(ctx)
+	if err != nil {
+		return d.ErrUnavailable
+	}
+	defer release()
+	ctx, endAcquisition := context.WithDeadline(ctx, node.acquireDeadline)
+	defer endAcquisition()
 	var upper h.CanonicalBlock
 	if original != nil {
 		upper, err = node.upper(ctx, original)
@@ -225,7 +276,10 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 		floor := original.RunFloor
 		selection.RunFloor = &floor
 	}
-	index, err := s.index.BeginProtected(ctx, selection)
+	// The Indexer snapshot retains its caller's cancellation fence. A temporary
+	// acquisition child is canceled on return and must not become that owner.
+	// Core's original five-second fence still bounds every use of this snapshot.
+	index, err := s.index.BeginProtected(ownerContext, selection)
 	if err != nil {
 		return indexError(err)
 	}
@@ -293,12 +347,7 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 			}
 			witnessRows = append(witnessRows, witnesses[0].Row)
 		}
-		if read.scope.Query.View() == d.List {
-			// Whole-block qualification and all delivery checks spend the same
-			// finite node budget. Reserve the selected address's extra witness
-			// and return a real continuation before exhausting that budget.
-			query.Limit = min(query.Limit, uint16(2-len(witnessRows)))
-		}
+
 		rows, end, err := index.ReadTransactions(ctx, predicate, query)
 		if err != nil {
 			return indexError(err)
@@ -311,7 +360,16 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 		if err != nil {
 			return err
 		}
-		if err = namespace.qualify(ctx, qualified, read.scope.DataOrganizationID); err != nil {
+		if len(rows) > 0 && len(qualified) <= len(witnessRows) {
+			return d.ErrTooBroad
+		}
+		qualified, err = namespace.qualifyPrefix(ctx, qualified, len(witnessRows), read.scope.DataOrganizationID, !full)
+		if err != nil {
+			return err
+		}
+		returned := len(qualified) - len(witnessRows)
+		end, next, err := transactionPageBoundary(rows, returned, end)
+		if err != nil {
 			return err
 		}
 		if selectedAddress != nil {
@@ -322,16 +380,13 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 		}
 		read.facts.Transactions = []d.TransactionFact{}
 		read.facts.End = end
+		read.facts.Next = next
 		for _, root := range qualified[len(witnessRows):] {
 			fact, err := transactionFact(read.scope, ref, actors, root.fact)
 			if err != nil {
 				return err
 			}
 			read.facts.Transactions = append(read.facts.Transactions, fact)
-		}
-		if !end {
-			last := rows[len(rows)-1]
-			read.facts.Next = &d.Position{Kind: d.HistorySource, Transaction: &d.TransactionPosition{BlockNumber: d.Count(strconv.FormatUint(last.Position.Number, 10)), TransactionIndex: last.Position.Index, Hash: last.Position.Hash}}
 		}
 	} else {
 		witnesses, err := index.ReadWitnesses(ctx, predicate)
@@ -345,6 +400,9 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 		qualified, err := node.qualify(ctx, rows, false)
 		if err != nil {
 			return err
+		}
+		if len(qualified) != len(rows) {
+			return d.ErrTooBroad
 		}
 		if err = namespace.qualify(ctx, qualified, read.scope.DataOrganizationID); err != nil {
 			return err
@@ -385,6 +443,21 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 	return nil
 }
 
+// The producer can be exhausted while node capacity leaves an unconsumed
+// suffix. Only returned roots advance the public cursor, never a witness or
+// the last fetched candidate. No progress under capacity is an explicit error.
+func transactionPageBoundary(rows []x.ProtectedRow, returned int, indexEnd bool) (bool, *d.Position, error) {
+	if returned < 0 || returned > len(rows) || returned == 0 && (len(rows) > 0 || !indexEnd) {
+		return false, nil, d.ErrTooBroad
+	}
+	if indexEnd && returned == len(rows) {
+		return true, nil, nil
+	}
+	last := rows[returned-1]
+	next := &d.Position{Kind: d.HistorySource, Transaction: &d.TransactionPosition{BlockNumber: d.Count(strconv.FormatUint(last.Position.Number, 10)), TransactionIndex: last.Position.Index, Hash: last.Position.Hash}}
+	return false, next, nil
+}
+
 func (read *snapshot) projectSanctions(ctx context.Context) error {
 	addresses := make([][20]byte, len(read.qualifiedAddresses))
 	for i, fact := range read.qualifiedAddresses {
@@ -414,7 +487,11 @@ func (read *snapshot) projectSanctions(ctx context.Context) error {
 		if read.facts.ActivitySummary == nil || read.finance == nil {
 			return d.ErrUnavailable
 		}
-		read.facts.Compliance = &d.ComplianceAggregate{Activity: *read.facts.ActivitySummary, Sanctions: aggregate, Evidence: read.finance.Evidence(), KYC: "not_evaluated"}
+		if d.NativeFinancePlan(read.owner.plan) {
+			read.facts.Compliance = &d.ComplianceAggregate{Activity: *read.facts.ActivitySummary, Sanctions: aggregate, Finance: read.finance.Summary(), KYC: "not_evaluated"}
+		} else {
+			read.facts.Compliance = &d.ComplianceAggregate{Activity: *read.facts.ActivitySummary, Sanctions: aggregate, Evidence: read.finance.Evidence(), KYC: "not_evaluated"}
+		}
 		read.facts.ActivitySummary = nil
 	} else {
 		read.facts.Sanctions = &aggregate
@@ -447,6 +524,18 @@ func (read *snapshot) CheckCurrent(ctx context.Context) error {
 	defer read.mu.Unlock()
 	if read.closed || !read.read || read.fence.Check() != nil {
 		return d.ErrUnavailable
+	}
+	ctx, release, err := read.fence.Bind(ctx)
+	if err != nil {
+		return d.ErrUnavailable
+	}
+	defer release()
+	if read.node != nil {
+		if read.node.finalChecks >= 2 {
+			return d.ErrUnavailable
+		}
+		ctx, release = context.WithTimeout(ctx, read.node.finalWindow)
+		defer release()
 	}
 	if read.index != nil {
 		if err := read.index.Recheck(ctx); err != nil {
@@ -493,6 +582,7 @@ func (read *snapshot) Close() {
 		return
 	}
 	read.closed = true
+	defer read.closeOperation()
 	if read.index != nil {
 		read.index.Close()
 	}

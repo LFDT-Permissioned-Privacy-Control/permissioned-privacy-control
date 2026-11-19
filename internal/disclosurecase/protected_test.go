@@ -108,11 +108,15 @@ func TestFinanceListExposureRequiresOwnBoundedCount(t *testing.T) {
 		t.Fatal("finance list accepted no count")
 	}
 	e.Summary.Exposure.QualifiedTotal = &total
-	for _, bad := range []d.Count{"24", "16385", "01"} {
+	for _, bad := range []d.Count{"24", "01", "18446744073709551616"} {
 		total = bad
 		if c.ValidateExposureEvent(e) == nil {
 			t.Fatal("invalid finance count", bad)
 		}
+	}
+	total = "20001"
+	if c.ValidateExposureEvent(e) != nil {
+		t.Fatal("scalar total was confused with materialized row count")
 	}
 	total = "0"
 	e.Summary.Count = 0

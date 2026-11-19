@@ -46,14 +46,18 @@ type FinanceReader struct {
 // FinanceSnapshot is an immutable retained-row sample, not an execution ledger
 // or database-wide commit frontier. It owns no transaction or connection.
 type FinanceSnapshot struct {
-	reader     *FinanceReader
-	scope      d.ReadScope
-	descriptor d.SourceDescriptor
-	evidence   []d.ComplianceEvidence
-	page       *d.FinanceEvidencePage
-	after      *d.Position
-	pageEnd    bool
-	closed     atomic.Bool
+	reader      *FinanceReader
+	scope       d.ReadScope
+	descriptor  d.SourceDescriptor
+	evidence    []d.ComplianceEvidence
+	page        *d.FinanceEvidencePage
+	summary     *d.FinanceSummary
+	live        *d.FinanceLivePage
+	liveEvents  []a.Event
+	liveDigests []a.Digest
+	after       *d.Position
+	pageEnd     bool
+	closed      atomic.Bool
 }
 
 func financeTime(t time.Time) bool {
@@ -67,9 +71,10 @@ func NewFinanceReader(c FinanceReaderConfig) (*FinanceReader, error) {
 	return newFinanceReader(c, false)
 }
 
-// NewRetainedFinanceReader accepts only the separate retained assembly plan.
-// Complete reports remain capped at 100. List reads scan a bounded cohort and
-// retain one page; neither view is an execution or compliance ledger.
+// NewRetainedFinanceReader accepts the explicitly selected retained assembly.
+// Its native-finance profile uses an aggregate summary and live bounded pages;
+// the older profile retains its bounded complete-cohort semantics. Neither view
+// is an execution or compliance ledger.
 func NewRetainedFinanceReader(c FinanceReaderConfig) (*FinanceReader, error) {
 	return newFinanceReader(c, true)
 }
@@ -109,7 +114,7 @@ func (r *FinanceReader) validateScope(s d.ReadScope) (p.Scope, error) {
 	if !a.ValidUUID(s.CaseID) || s.CaseVersion < 1 || !a.ValidUUID(s.DataOrganizationID) || !identity.ValidActorID(s.RecipientActorID) || !financeTime(s.EffectiveUntil) || s.BundleDigest != r.plan.BundleDigest {
 		return p.Scope{}, d.ErrInvalid
 	}
-	if s.Query.Resource() != p.ComplianceReport || (s.Query.View() != d.Report && !(r.plan.Version == 2 && s.Query.View() == d.List)) || !slices.Contains(r.plan.Resources, p.ComplianceReport) {
+	if s.Query.Resource() != p.ComplianceReport || (s.Query.View() != d.Report && !(d.ValidRetainedPlan(r.plan) && s.Query.View() == d.List)) || !slices.Contains(r.plan.Resources, p.ComplianceReport) {
 		return p.Scope{}, d.ErrUnsupported
 	}
 	sc := s.Query.Scope()
@@ -202,6 +207,9 @@ func (s *FinanceSnapshot) Evidence() []d.ComplianceEvidence {
 func (s *FinanceSnapshot) CheckCurrent(ctx context.Context) error {
 	if s == nil || s.closed.Load() {
 		return d.ErrUnavailable
+	}
+	if s.summary != nil || s.live != nil {
+		return s.checkNativeCurrent(ctx)
 	}
 	sc, err := s.reader.validateScope(s.scope)
 	if err != nil {

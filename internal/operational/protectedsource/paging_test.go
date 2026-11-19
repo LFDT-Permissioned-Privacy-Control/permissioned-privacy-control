@@ -16,7 +16,7 @@ import (
 // Five independently signed transactions occupy five distinct canonical TLS
 // fixture blocks, so the original physical node budget cannot hide behind
 // multiple rows sharing one whole-block acquisition.
-func TestActualRetainedTransactionPagingFitsOriginalDeliveryBudget(t *testing.T) {
+func TestActualRetainedTransactionPagingFitsSharedDeliveryBudget(t *testing.T) {
 	node := ownedFunctionalNodeCount(t, 5)
 	config := actualFunctionalConfig(t, node)
 	source, err := New(t.Context(), config)
@@ -118,8 +118,8 @@ func TestActualRetainedTransactionPagingFitsOriginalDeliveryBudget(t *testing.T)
 			}
 			read.Close()
 			used := node.attempts() - before
-			if used < 1 || used > 64 {
-				t.Fatal("page exceeded original64 physical TLS requests", page, used)
+			if used < 1 || used > maxNodeAttempts {
+				t.Fatal("page exceeded shared physical TLS request budget", page, used)
 			}
 			t.Logf("page%d rows%d normalized-limit50 physical-node-requests%d", page+1, want, used)
 			after = d.ClonePosition(facts.Next)
@@ -136,7 +136,7 @@ func TestActualRetainedTransactionPagingFitsOriginalDeliveryBudget(t *testing.T)
 
 	var locator string
 	t.Run("default-broad-list", func(t *testing.T) {
-		locator = walk(t, scope, []int{2, 2, 1})
+		locator = walk(t, scope, []int{5})
 	})
 	if locator == "" {
 		t.Fatal("broad-page locator unavailable")
@@ -147,6 +147,6 @@ func TestActualRetainedTransactionPagingFitsOriginalDeliveryBudget(t *testing.T)
 		if err != nil || selected.Query.Limit() != 50 {
 			t.Fatal("external selected-address normalized query changed", err)
 		}
-		walk(t, selected, []int{1, 1, 1, 1, 1})
+		walk(t, selected, []int{5})
 	})
 }

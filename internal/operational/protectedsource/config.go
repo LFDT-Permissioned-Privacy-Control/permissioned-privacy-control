@@ -141,8 +141,8 @@ func New(ctx context.Context, c Config) (*Sources, error) {
 		return nil, err
 	}
 	// This is a selected assembly digest, not a database restoration marker.
-	plan := d.SourcePlan{Version: 2, Profile: d.RetainedSourceProfile, BundleDigest: d.Digest(meta.ManifestDigest), NetworkKey: digestArray(network), Resources: []p.Resource{p.ActivityLogs, p.ActivitySummary, p.AddressHistory, p.ComplianceReport, p.SanctionsReport, p.Transactions}}
-	plan.PlanDigest = digestParts("ops.disclosure.retained-assembly/v1", plan.BundleDigest, plan.NetworkKey, c.ExpectedIndex.Binding, namespace.Era, namespace.State.Generation, selected, c.Wallet.Binding, c.Wallet.ExpectedState, c.Finance.Network, c.Finance.ExpectedState, activity, m.ClassifierDigest(), m.RequestPredicateDigest(), renderGeneration, compliance.Digest())
+	plan := d.SourcePlan{Version: 3, Profile: d.NativeFinanceSourceProfile, BundleDigest: d.Digest(meta.ManifestDigest), NetworkKey: digestArray(network), Resources: []p.Resource{p.ActivityLogs, p.ActivitySummary, p.AddressHistory, p.ComplianceReport, p.SanctionsReport, p.Transactions}}
+	plan.PlanDigest = digestParts("ops.disclosure.retained-assembly/v2", plan.Profile, d.FinanceSummaryFormat(), d.FinanceLiveFormat(), plan.BundleDigest, plan.NetworkKey, c.ExpectedIndex.Binding, namespace.Era, namespace.State.Generation, selected, c.Wallet.Binding, c.Wallet.ExpectedState, c.Finance.Network, c.Finance.ExpectedState, activity, m.ClassifierDigest(), m.RequestPredicateDigest(), renderGeneration, compliance.Digest())
 	c.Wallet.Plan = plan
 	c.Finance.Plan = plan
 	c.Wallet.Clock = c.Clock

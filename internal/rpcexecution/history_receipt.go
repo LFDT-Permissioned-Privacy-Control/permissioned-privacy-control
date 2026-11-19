@@ -303,5 +303,6 @@ func decodeHistoryReceipts(raw []byte, b *HistoryBlockObservation, l HistoryBloc
 	if int(i) != len(b.transactions) || cumulative != b.header.GasUsed || bloom != b.header.Bloom || b.header.BlobGasUsed == nil && blobGas != 0 || b.header.BlobGasUsed != nil && blobGas != *b.header.BlobGasUsed {
 		return failure(InvalidEvidence)
 	}
+	b.ownedBytes = charge
 	return nil
 }

@@ -17,7 +17,7 @@ import (
 
 // Only the owned plaintext PostgreSQL fixture uses this proxy. It cuts the
 // actual frontend COMMIT frame after the complete read, without a product hook.
-func financeCommitProxy(t *testing.T, dsn string) (string, *atomic.Bool, <-chan struct{}) {
+func financeCommitProxy(t *testing.T, dsn string, skipCommits int32) (string, *atomic.Bool, <-chan struct{}) {
 	t.Helper()
 	u, err := url.Parse(dsn)
 	if err != nil {
@@ -30,6 +30,8 @@ func financeCommitProxy(t *testing.T, dsn string) (string, *atomic.Bool, <-chan 
 	}
 	u.Host = listener.Addr().String()
 	var armed atomic.Bool
+	var remaining atomic.Int32
+	remaining.Store(skipCommits)
 	hit := make(chan struct{}, 1)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -56,7 +58,14 @@ func financeCommitProxy(t *testing.T, dsn string) (string, *atomic.Bool, <-chan 
 				defer client.Close()
 				defer server.Close()
 				wg.Add(1)
-				go func() { defer wg.Done(); _, _ = io.Copy(client, server) }()
+				go func() {
+					defer wg.Done()
+					_, _ = io.Copy(client, server)
+					// PostgreSQL cancellation uses a short startup frame and
+					// waits for EOF, not a normal query reply. Propagate the
+					// server's close so pool cleanup cannot wait on this proxy.
+					_ = client.Close()
+				}()
 				var startup [4]byte
 				if _, err := io.ReadFull(client, startup[:]); err != nil {
 					return
@@ -84,7 +93,7 @@ func financeCommitProxy(t *testing.T, dsn string) (string, *atomic.Bool, <-chan 
 					if _, err := io.ReadFull(client, payload); err != nil {
 						return
 					}
-					if armed.Load() && head[0] == 'Q' && strings.EqualFold(strings.TrimSpace(strings.TrimSuffix(string(payload), "\x00")), "commit") {
+					if armed.Load() && head[0] == 'Q' && strings.EqualFold(strings.TrimSpace(strings.TrimSuffix(string(payload), "\x00")), "commit") && remaining.Add(-1) < 0 {
 						select {
 						case hit <- struct{}{}:
 						default:
@@ -113,9 +122,15 @@ func financeCommitProxy(t *testing.T, dsn string) (string, *atomic.Bool, <-chan 
 	return u.String(), &armed, hit
 }
 
-func financeReadCommitFailure(t *testing.T, cfg admissionsql.FinanceReaderConfig, dsn string, scope d.ReadScope) {
+func financeReadCommitFailure(t *testing.T, cfg admissionsql.FinanceReaderConfig, dsn string, scope d.ReadScope, finalCheck ...bool) {
 	t.Helper()
-	proxy, arm, hit := financeCommitProxy(t, dsn)
+	var skip int32
+	if d.NativeFinancePlan(cfg.Plan) {
+		// Native reads first commit the existing independent readiness check.
+		// Forward that COMMIT and cut the actual sampled RR transaction instead.
+		skip = 1
+	}
+	proxy, arm, hit := financeCommitProxy(t, dsn, skip)
 	store, err := admissionsql.OpenReader(t.Context(), proxy)
 	if err != nil {
 		t.Fatal(err)
@@ -131,15 +146,34 @@ func financeReadCommitFailure(t *testing.T, cfg admissionsql.FinanceReaderConfig
 	if err != nil {
 		t.Fatal(err)
 	}
-	arm.Store(true)
-	var snapshot *admissionsql.FinanceSnapshot
-	if scope.Query.View() == d.List {
-		snapshot, err = reader.OpenPage(t.Context(), scope, nil, nil)
-	} else {
-		snapshot, err = reader.Open(t.Context(), scope, nil)
+	open := func() (*admissionsql.FinanceSnapshot, error) {
+		if d.NativeFinancePlan(cfg.Plan) {
+			if scope.Query.View() == d.List {
+				return reader.OpenLivePage(t.Context(), scope, nil, nil)
+			}
+			return reader.OpenSummary(t.Context(), scope)
+		}
+		if scope.Query.View() == d.List {
+			return reader.OpenPage(t.Context(), scope, nil, nil)
+		}
+		return reader.Open(t.Context(), scope, nil)
 	}
-	if snapshot != nil || !errors.Is(err, d.ErrUnavailable) {
-		t.Fatal("unknown read commit published sample", snapshot, err)
+	if len(finalCheck) > 0 && finalCheck[0] {
+		snapshot, err := open()
+		if err != nil {
+			t.Fatal("control read", err)
+		}
+		defer snapshot.Close()
+		arm.Store(true)
+		if err = snapshot.CheckCurrent(t.Context()); !errors.Is(err, d.ErrUnavailable) {
+			t.Fatal("unknown final read commit accepted", err)
+		}
+	} else {
+		arm.Store(true)
+		snapshot, err := open()
+		if snapshot != nil || !errors.Is(err, d.ErrUnavailable) {
+			t.Fatal("unknown read commit published sample", snapshot, err)
+		}
 	}
 	select {
 	case <-hit:

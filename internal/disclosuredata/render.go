@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	p "privacy-proxy/internal/disclosurepolicy"
 )
@@ -24,6 +25,14 @@ type financeEvidencePageDTO struct {
 	Items                 []ComplianceEvidenceDTO `json:"items"`
 	NextCursor            *string                 `json:"nextCursor"`
 	MatchingRetainedCount Count                   `json:"matchingRetainedCount"`
+}
+type financeLivePageDTO struct {
+	Version               uint8                   `json:"v"`
+	Items                 []ComplianceEvidenceDTO `json:"items"`
+	NextCursor            *string                 `json:"nextCursor"`
+	MatchingRetainedCount Count                   `json:"matchingRetainedCount"`
+	ObservedAt            time.Time               `json:"observedAt"`
+	Pagination            string                  `json:"pagination"`
 }
 type singleton[T any] struct {
 	Item T `json:"item"`
@@ -54,6 +63,9 @@ func (r Result) WithCursor(raw string) (Result, error) {
 		return Result{}, ErrInvalid
 	}
 	switch body := r.body.(type) {
+	case financeLivePageDTO:
+		body.NextCursor = ptr(raw)
+		r.body = body
 	case financeEvidencePageDTO:
 		body.NextCursor = ptr(raw)
 		r.body = body
@@ -97,6 +109,14 @@ func (r Result) MarshalJSON() ([]byte, error) {
 		return nil, ErrInvalid
 	}
 	switch body := r.body.(type) {
+	case financeLivePageDTO:
+		if r.scope.Query.resource == p.ComplianceReport && r.scope.Query.view == List {
+			return envelope(r, body)
+		}
+	case ComplianceSummaryDTO:
+		if r.scope.Query.resource == p.ComplianceReport && r.scope.Query.view == Report {
+			return envelope(r, body)
+		}
 	case financeEvidencePageDTO:
 		if r.scope.Query.resource == p.ComplianceReport && r.scope.Query.view == List {
 			return envelope(r, body)
@@ -346,7 +366,7 @@ func renderProfile(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext,
 	if retained == nil {
 		fc, e = validateFacts(s, ds, f, nil)
 	} else {
-		fc, e = validateFactsForHistoryMode(s, ds, f, nil, RetainedHistoryPopulation, false)
+		fc, e = validateFactsForHistoryMode(s, ds, f, nil, RetainedHistoryPopulation, false, NativeFinancePlan(*retained))
 	}
 	if e != nil {
 		return result, e
@@ -456,6 +476,30 @@ func renderProfile(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext,
 		result.body = sanctionsDTO(c, fc, *f.Sanctions)
 		result.rows = 1
 	case p.ComplianceReport:
+		if retained != nil && NativeFinancePlan(*retained) {
+			if s.Query.view == List {
+				v := f.FinanceLive
+				if v.ObservedAt.After(c.PreparedAt) {
+					return Result{}, ErrUnavailable
+				}
+				body := financeLivePageDTO{Version: 2, Items: []ComplianceEvidenceDTO{}, MatchingRetainedCount: v.MatchingRetainedCount, ObservedAt: v.ObservedAt, Pagination: "live-keyset"}
+				for _, ev := range v.Items {
+					body.Items = append(body.Items, evidenceDTO(ev, s.Query.scope.Level))
+				}
+				result.body = body
+				result.rows = uint16(len(body.Items))
+				result.total = ptr(v.MatchingRetainedCount)
+			} else {
+				v := f.Compliance
+				if v.Finance.ObservedAt.After(c.PreparedAt) {
+					return Result{}, ErrUnavailable
+				}
+				result.body = ComplianceSummaryDTO{Version: 2, Activity: summaryDTO(v.Activity), Sanctions: sanctionsDTO(c, fc, v.Sanctions), KYC: "not_evaluated", Finance: FinanceSummaryDTO{MatchingRetainedCount: v.Finance.MatchingRetainedCount, ObservedAt: v.Finance.ObservedAt, Coverage: "RETAINED_AT_READ", DetailResource: p.ComplianceReport, DetailView: List}}
+				result.rows = 1
+				result.total = ptr(v.Activity.Total)
+			}
+			break
+		}
 		if s.Query.view == List {
 			v := f.FinanceEvidence
 			body := financeEvidencePageDTO{Items: []ComplianceEvidenceDTO{}, MatchingRetainedCount: v.MatchingRetainedCount}

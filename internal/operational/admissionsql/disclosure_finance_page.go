@@ -61,7 +61,7 @@ func (s *FinanceSnapshot) Page() *d.FinanceEvidencePage {
 	return &d.FinanceEvidencePage{Items: s.Evidence(), MatchingRetainedCount: s.page.MatchingRetainedCount, BeforeCount: s.page.BeforeCount}
 }
 func (s *FinanceSnapshot) End() bool {
-	return s != nil && !s.closed.Load() && s.page != nil && s.pageEnd
+	return s != nil && !s.closed.Load() && (s.page != nil || s.live != nil) && s.pageEnd
 }
 
 func (r *FinanceReader) readPage(ctx context.Context, org string, sc p.Scope, after *d.Position, limit uint16) (financePageObservation, error) {

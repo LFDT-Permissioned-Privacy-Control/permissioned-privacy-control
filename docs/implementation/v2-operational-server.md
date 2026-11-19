@@ -227,8 +227,10 @@ it does not grant the separate address-browsing resource.
 History-backed protected data is labelled `RETAINED_AT_READ` with a source-basis
 digest. It is not a promise that every historical record is retained. Sealed
 activity uses its separate `COMPLETE_AT_CUT` contract. Protected reports are
-bounded to 4,096 eligible target addresses and 100 retained finance decisions;
-an oversized scope fails instead of silently producing a complete report.
+bounded to 4,096 eligible target addresses. A finance summary counts the matching
+retained decisions without a total-row cutoff; individual decisions are browsed
+separately in pages of up to 100, with the count and observation time shown for
+each read. A scope exceeding the address limit fails explicitly.
 KYC is explicitly `not_evaluated`. Known-public, unknown and other-organization
 addresses do not become protected target data through a counterparty match.
 

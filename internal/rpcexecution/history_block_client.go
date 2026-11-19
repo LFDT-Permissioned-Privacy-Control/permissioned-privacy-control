@@ -83,11 +83,28 @@ func (c *HistoryBlockClient) acquireBlockWithin(ctx context.Context, selector Hi
 		return nil, failure(InvalidEvidence)
 	}
 	h := before.headers[0]
-	raw, e := headers.wire.rpcBounded(ctx, "eth_getBlockByHash", []any{h.Hash.Hex(), true}, c.limits.MaxBlockBytes)
+	b, e := c.readBody(ctx, headers, h, c.limits)
 	if e != nil {
 		return nil, namespaceBudgetError(budget, e)
 	}
-	b, charge, e := decodeHistoryBlock(raw, h, c.limits, c.source.Network.ChainID)
+	after, e := headers.Read(ctx, []HeaderQuery{{NumberOrTag: fmt.Sprintf("0x%x", h.Number)}})
+	if e != nil {
+		return nil, namespaceBudgetError(budget, e)
+	}
+	if !after.Synced() || len(after.headers) != 1 || after.headers[0] != h || ctx.Err() != nil {
+		return nil, failure(InvalidEvidence)
+	}
+	return c.finishBody(ctx, b, selector, callerDeadline, callerDone)
+}
+
+// Shared by the standalone and block-set paths. This decodes the complete
+// node-returned populations; it does not verify consensus or trie inclusion.
+func (c *HistoryBlockClient) readBody(ctx context.Context, headers *HeaderClient, h creationfacts.Header, limits HistoryBlockLimits) (*HistoryBlockObservation, error) {
+	raw, e := headers.wire.rpcBounded(ctx, "eth_getBlockByHash", []any{h.Hash.Hex(), true}, limits.MaxBlockBytes)
+	if e != nil {
+		return nil, e
+	}
+	b, charge, e := decodeHistoryBlock(raw, h, limits, c.source.Network.ChainID)
 	if e != nil {
 		return nil, e
 	}
@@ -97,27 +114,24 @@ func (c *HistoryBlockClient) acquireBlockWithin(ctx context.Context, selector Hi
 	if ctx.Err() != nil {
 		return nil, failure(NodeFailure)
 	}
-	raw, e = headers.wire.rpcBounded(ctx, "eth_getBlockReceipts", []any{h.Hash.Hex()}, c.limits.MaxReceiptSetBytes)
+	raw, e = headers.wire.rpcBounded(ctx, "eth_getBlockReceipts", []any{h.Hash.Hex()}, limits.MaxReceiptSetBytes)
 	if e != nil {
-		return nil, namespaceBudgetError(budget, e)
-	}
-	if e = decodeHistoryReceipts(raw, b, c.limits, charge); e != nil {
 		return nil, e
 	}
-	raw = nil
-	after, e := headers.Read(ctx, []HeaderQuery{{NumberOrTag: fmt.Sprintf("0x%x", h.Number)}})
-	if e != nil {
-		return nil, namespaceBudgetError(budget, e)
+	if e = decodeHistoryReceipts(raw, b, limits, charge); e != nil {
+		return nil, e
 	}
-	if !after.Synced() || len(after.headers) != 1 || after.headers[0] != h || ctx.Err() != nil {
-		return nil, failure(InvalidEvidence)
-	}
+	return b, nil
+}
+
+func (c *HistoryBlockClient) finishBody(ctx context.Context, b *HistoryBlockObservation, selector HistoryBlockSelector, callerDeadline time.Time, callerDone <-chan struct{}) (*HistoryBlockObservation, error) {
 	b.owner, b.source, b.selector = c, c.source, selector
 	b.originalDone, b.originalDeadline = callerDone, callerDeadline
-	b.digest, e = historyObservationDigest(b)
-	if e != nil || ctx.Err() != nil {
+	digest, e := historyObservationDigest(b)
+	if e != nil || ctx.Err() != nil || historyOriginalFence(b) != nil {
 		return nil, failure(InvalidEvidence)
 	}
+	b.digest = digest
 	return b, nil
 }
 

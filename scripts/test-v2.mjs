@@ -17,10 +17,16 @@ const suites = {
     required: ['TestNativeV2ServingExcludesLegacyServerAndEVMPolicyBackend', 'TestNativeIndexerConsumerUsesOnlyServiceAPI', 'TestPinnedArtifactRejectsMixedMissingAndUnexpectedFiles'],
   },
   indexer: {
-    packages: ['./internal/operational/explorerindex', './internal/operational/protectedsource', './internal/activitylog'],
+    packages: ['./internal/operational/explorerindex', './internal/operational/protectedsource', './internal/activitylog', './internal/rpcexecution'],
     required: ['TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP', 'TestActualRetainedSourcesComposeAllResources',
       'TestRetainedActualContinuationAndRecoveryFences', 'TestActualProtectedResultRowsShareOriginalLedger',
-      'TestExplorerActualPrunedNodePointsPrivacyAndFinalReorgHTTP', 'TestActualRetainedTransactionPagingFitsOriginalDeliveryBudget',
+      'TestExplorerActualPrunedNodePointsPrivacyAndFinalReorgHTTP', 'TestActualRetainedTransactionPagingFitsSharedDeliveryBudget',
+      'TestActualSharedTransactionPagesOne25And100AcrossBlockShapes', 'TestActualMixedNamespaceSupportReservesBeforeIO',
+      'TestNodeCapacityKeepsUnconsumedTransactionsReachable', 'TestPointPrefixPlansUnknownSupportWithoutFetchingRejectedSuffixes',
+      'TestHistoryBlockSetSharesNetworkChecksAndKeepsOriginalFence', 'TestHistoryBlockSetLoweredBudgetsRejectBeforeDispatch',
+      'TestHistoryBlockSetCountsIncompleteWorkAndRejectsBadTail', 'TestHistoryBlockSetChargesUnconsumedBeforeHeaders',
+      'TestHistoryBlockOwnershipIncludesReceiptLogsAndHonorsTightSetBudget', 'TestHistoryBlockFinishCannotOutliveAcquisitionChild',
+      'TestActualNativeFinanceLivePagingAndAsOfSummary', 'TestActualNativeComplianceAggregateAboveInlineLimit',
       'TestRetainedAddressTransactionsThroughActualHTTP'],
   },
   identity: {

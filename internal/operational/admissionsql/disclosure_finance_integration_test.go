@@ -345,6 +345,20 @@ func TestPostgresDisclosureFinance(t *testing.T) {
 		}
 		financeReadCommitFailure(t, pageCfg, db.readerDSN, pageScope)
 	})
+	for _, view := range []d.View{d.Report, d.List} {
+		t.Run("native "+string(view)+" COMMIT and final COMMIT loss", func(t *testing.T) {
+			native := cfg
+			native.Plan.Version = 3
+			native.Plan.Profile = d.NativeFinanceSourceProfile
+			nativeScope := scope
+			nativeScope.Query, err = d.NormalizeRetained(d.Query{Version: 1, Resource: p.ComplianceReport, View: view}, original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			financeReadCommitFailure(t, native, db.readerDSN, nativeScope)
+			financeReadCommitFailure(t, native, db.readerDSN, nativeScope, true)
+		})
+	}
 }
 
 func strconvInt(v int64) string { return strconv.FormatInt(v, 10) }

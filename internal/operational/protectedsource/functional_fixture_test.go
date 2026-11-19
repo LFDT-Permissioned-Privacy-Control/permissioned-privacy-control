@@ -124,15 +124,16 @@ func fixtureObject(t *testing.T, value any) map[string]any {
 }
 
 type functionalNode struct {
-	config        NodeConfig
-	network       networkidentity.Binding
-	genesis, head *types.Header
-	tx            *types.Transaction
-	signer        *ecdsa.PrivateKey
-	advanceHead   func(bool)
-	blocks        []*types.Header
-	transactions  []*types.Transaction
-	attempts      func() int64
+	config            NodeConfig
+	network           networkidentity.Binding
+	genesis, head     *types.Header
+	tx                *types.Transaction
+	signer            *ecdsa.PrivateKey
+	advanceHead       func(bool)
+	blocks            []*types.Header
+	transactions      []*types.Transaction
+	transactionGroups [][]*types.Transaction
+	attempts          func() int64
 }
 
 // This is a TLS protocol fixture, not a live-node qualification claim. Its
@@ -146,8 +147,13 @@ func ownedFunctionalNode(t *testing.T) *functionalNode {
 // whole-block qualification and the physical request budget visible to tests.
 func ownedFunctionalNodeCount(t *testing.T, count int) *functionalNode {
 	t.Helper()
-	if count < 1 || count > 8 {
-		t.Fatal("bounded functional block count required")
+	return ownedFunctionalNodeShape(t, count, 1)
+}
+
+func ownedFunctionalNodeShape(t *testing.T, count, perBlock int) *functionalNode {
+	t.Helper()
+	if count < 1 || count > 128 || perBlock < 1 || perBlock > 100 || count*perBlock > 128 {
+		t.Fatal("bounded functional block/transaction count required")
 	}
 	key, err := crypto.HexToECDSA(strings.Repeat("11", 32))
 	if err != nil {
@@ -166,29 +172,38 @@ func ownedFunctionalNodeCount(t *testing.T, count int) *functionalNode {
 	blocksByHash := map[string]map[string]any{genesis.Hash().Hex(): empty}
 	receiptsByHash := map[string][]any{genesis.Hash().Hex(): {}}
 	blocks := make([]*types.Header, 0, count)
-	transactions := make([]*types.Transaction, 0, count)
+	transactions := make([]*types.Transaction, 0, count*perBlock)
+	groups := make([][]*types.Transaction, 0, count)
 	parent := genesis
 	for i := 0; i < count; i++ {
-		tx, err := types.SignNewTx(key, types.LatestSignerForChainID(big.NewInt(1)), &types.LegacyTx{Nonce: uint64(i), To: &to, Gas: 21000, GasPrice: big.NewInt(3), Value: big.NewInt(0), Data: []byte{}})
-		if err != nil {
-			t.Fatal(err)
-		}
 		header := types.CopyHeader(genesis)
-		header.Number = big.NewInt(int64(i + 1))
-		header.Time = parent.Time + 1
-		header.ParentHash = parent.Hash()
-		header.GasUsed = 21000
-		headerReceipt := &types.Receipt{Type: 0, Status: 1, CumulativeGasUsed: 21000, Logs: []*types.Log{}}
-		header.TxHash = types.DeriveSha(types.Transactions{tx}, trie.NewStackTrie(nil))
-		header.ReceiptHash = types.DeriveSha(types.Receipts{headerReceipt}, trie.NewStackTrie(nil))
+		header.Number, header.Time, header.ParentHash = big.NewInt(int64(i+1)), parent.Time+1, parent.Hash()
+		header.GasUsed = 21000 * uint64(perBlock)
+		group := make([]*types.Transaction, perBlock)
+		ethReceipts := make(types.Receipts, perBlock)
+		for j := range group {
+			tx, err := types.SignNewTx(key, types.LatestSignerForChainID(big.NewInt(1)), &types.LegacyTx{Nonce: uint64(i*perBlock + j), To: &to, Gas: 21000, GasPrice: big.NewInt(3), Value: big.NewInt(0), Data: []byte{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			group[j] = tx
+			ethReceipts[j] = &types.Receipt{Type: 0, Status: 1, CumulativeGasUsed: 21000 * uint64(j+1), Logs: []*types.Log{}}
+		}
+		header.TxHash = types.DeriveSha(types.Transactions(group), trie.NewStackTrie(nil))
+		header.ReceiptHash = types.DeriveSha(ethReceipts, trie.NewStackTrie(nil))
 		number := "0x" + strconv.FormatUint(uint64(i+1), 16)
-		transaction := fixtureObject(t, tx)
-		transaction["from"], transaction["blockHash"], transaction["blockNumber"], transaction["transactionIndex"] = from.Hex(), header.Hash().Hex(), number, "0x0"
+		items, receipts := make([]any, perBlock), make([]any, perBlock)
+		for j, tx := range group {
+			position := "0x" + strconv.FormatUint(uint64(j), 16)
+			transaction := fixtureObject(t, tx)
+			transaction["from"], transaction["blockHash"], transaction["blockNumber"], transaction["transactionIndex"] = from.Hex(), header.Hash().Hex(), number, position
+			items[j] = transaction
+			receipts[j] = map[string]any{"transactionHash": tx.Hash().Hex(), "blockHash": header.Hash().Hex(), "blockNumber": number, "transactionIndex": position, "from": from.Hex(), "to": to.Hex(), "type": "0x0", "contractAddress": nil, "status": "0x1", "gasUsed": "0x5208", "cumulativeGasUsed": "0x" + strconv.FormatUint(21000*uint64(j+1), 16), "effectiveGasPrice": "0x3", "logsBloom": "0x" + strings.Repeat("00", 256), "logs": []any{}}
+		}
 		block := fixtureObject(t, header)
-		block["transactions"], block["uncles"], block["withdrawals"] = []any{transaction}, []any{}, []any{}
-		receipt := map[string]any{"transactionHash": tx.Hash().Hex(), "blockHash": header.Hash().Hex(), "blockNumber": number, "transactionIndex": "0x0", "from": from.Hex(), "to": to.Hex(), "type": "0x0", "contractAddress": nil, "status": "0x1", "gasUsed": "0x5208", "cumulativeGasUsed": "0x5208", "effectiveGasPrice": "0x3", "logsBloom": "0x" + strings.Repeat("00", 256), "logs": []any{}}
-		headers[uint64(i+1)], blocksByHash[header.Hash().Hex()], receiptsByHash[header.Hash().Hex()] = header, block, []any{receipt}
-		blocks, transactions = append(blocks, header), append(transactions, tx)
+		block["transactions"], block["uncles"], block["withdrawals"] = items, []any{}, []any{}
+		headers[uint64(i+1)], blocksByHash[header.Hash().Hex()], receiptsByHash[header.Hash().Hex()] = header, block, receipts
+		blocks, transactions, groups = append(blocks, header), append(transactions, group...), append(groups, group)
 		parent = header
 	}
 	head := blocks[len(blocks)-1]
@@ -275,7 +290,7 @@ func ownedFunctionalNodeCount(t *testing.T, count int) *functionalNode {
 			latest.ParentHash = head.Hash()
 			latest.Time++
 		}
-	}, blocks: blocks, transactions: transactions, attempts: attempts.Load}
+	}, blocks: blocks, transactions: transactions, transactionGroups: groups, attempts: attempts.Load}
 }
 
 type functionalControl struct {
@@ -329,7 +344,7 @@ func actualFunctionalConfig(t *testing.T, node *functionalNode, controls ...func
 	if err != nil {
 		t.Fatal(err)
 	}
-	statement := map[string]any{"kind": "prague-finite", "address": strings.ToLower(node.tx.To().Hex()), "runtimeHash": h.Hash{9}.String(), "runtimeLength": 1, "initial": map[string]any{"kind": "org", "organizationId": f.Org}, "physical": map[string]any{"kind": "preexisting"}, "start": h.Cut{Number: 0, Hash: h.Hash(node.genesis.Hash()), Index: 0}, "end": h.Cut{Number: node.head.Number.Uint64(), Hash: h.Hash(node.head.Hash()), Index: 1}}
+	statement := map[string]any{"kind": "prague-finite", "address": strings.ToLower(node.tx.To().Hex()), "runtimeHash": h.Hash{9}.String(), "runtimeLength": 1, "initial": map[string]any{"kind": "org", "organizationId": f.Org}, "physical": map[string]any{"kind": "preexisting"}, "start": h.Cut{Number: 0, Hash: h.Hash(node.genesis.Hash()), Index: 0}, "end": h.Cut{Number: node.head.Number.Uint64(), Hash: h.Hash(node.head.Hash()), Index: uint32(len(node.transactionGroups[len(node.transactionGroups)-1]))}}
 	artifact, _ := json.Marshal(map[string]any{"apiVersion": h.ArtifactAPIVersion, "modelId": h.ModelID, "network": node.network, "era": era, "cohortId": uuid.NewString(), "statements": []any{statement}})
 	path := filepath.Join(t.TempDir(), "namespace.json")
 	if err = os.WriteFile(path, artifact, 0600); err != nil {
@@ -358,9 +373,11 @@ func actualFunctionalConfig(t *testing.T, node *functionalNode, controls ...func
 	indexertest.Grant(t, indexOwner, "retained_index_reader")
 	functionalExec(t, indexOwner, `INSERT INTO public.blocks(number,hash,parent_hash,timestamp,gas_used,gas_limit,transaction_count)VALUES(0,$1,$2,$3,$4,$5,0)`, node.genesis.Hash().Hex(), node.genesis.ParentHash.Hex(), node.genesis.Time, node.genesis.GasUsed, node.genesis.GasLimit)
 	for i, header := range node.blocks {
-		tx := node.transactions[i]
-		functionalExec(t, indexOwner, `INSERT INTO public.blocks(number,hash,parent_hash,timestamp,gas_used,gas_limit,transaction_count)VALUES($1,$2,$3,$4,$5,$6,1)`, header.Number.Uint64(), header.Hash().Hex(), header.ParentHash.Hex(), header.Time, header.GasUsed, header.GasLimit)
-		functionalExec(t, indexOwner, `INSERT INTO public.transactions(hash,block_number,tx_index,from_address,to_address,value,gas_used,gas_price,status)VALUES($1,$2,0,$3,$4,0,21000,3,1)`, tx.Hash().Hex(), header.Number.Uint64(), strings.ToLower(crypto.PubkeyToAddress(node.signer.PublicKey).Hex()), strings.ToLower(tx.To().Hex()))
+		group := node.transactionGroups[i]
+		functionalExec(t, indexOwner, `INSERT INTO public.blocks(number,hash,parent_hash,timestamp,gas_used,gas_limit,transaction_count)VALUES($1,$2,$3,$4,$5,$6,$7)`, header.Number.Uint64(), header.Hash().Hex(), header.ParentHash.Hex(), header.Time, header.GasUsed, header.GasLimit, len(group))
+		for j, tx := range group {
+			functionalExec(t, indexOwner, `INSERT INTO public.transactions(hash,block_number,tx_index,from_address,to_address,value,gas_used,gas_price,status)VALUES($1,$2,$3,$4,$5,0,21000,3,1)`, tx.Hash().Hex(), header.Number.Uint64(), j, strings.ToLower(crypto.PubkeyToAddress(node.signer.PublicKey).Hex()), strings.ToLower(tx.To().Hex()))
+		}
 	}
 	readerDSN := functionalDSN(indexDSN, "retained_index_reader")
 	index, _ := indexertest.Open(t, readerDSN, node.network)
