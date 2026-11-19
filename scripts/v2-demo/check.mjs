@@ -333,6 +333,52 @@ async function checkUIPreview(user) {
   await screenshot('admin-groups');
   assert.equal(await page.getByRole('alert').count(), 0);
   passed('original Admin shell displays imported Demo Bank organizations and groups without SQL policy CRUD');
+  stage = 'ui-preview-selected-core';
+  const selectionResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v2/self/selection');
+  await page.getByRole('button', { name: 'Check this OPS instance', exact: true }).click();
+  const selection = await json(await selectionResponse);
+  assert.match(selection.manifestDigest, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(selection.chainId, runtime.chainId);
+  await page.getByText('Selected revision:', { exact: false }).waitFor();
+  await screenshot('admin-selected-core');
+  passed('Admin checks the actual selected Core artifact separately from local source');
+  stage = 'ui-preview-admin-access-logs';
+  const logsResponse = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/access-logs'));
+  await page.getByRole('tab', { name: 'Access Logs', exact: true }).click();
+  const logs = await logsResponse;
+  const logPage = await json(logs);
+  assert.match(logs.headers()['x-ops-request-reference'] ?? '', /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+  assert.ok(Array.isArray(logPage.items) && logPage.items.length <= 50);
+  assert.equal(logPage.source.coverage, 'committed-sealed-prefix');
+  await page.getByText('Sealed records only', { exact: false }).waitFor();
+  await screenshot('admin-access-logs');
+  passed('Admin reads organization Access Logs without a disclosure case, with a durable request reference');
+  stage = 'ui-preview-admin-finance';
+  await page.getByRole('tab', { name: 'Disclosure', exact: true }).click();
+  await page.getByRole('button', { name: 'Create case', exact: true }).click();
+  const form = page.getByRole('dialog');
+  for (const [label, value] of [
+    ['Standing rule ID', 'demo-auditor'],
+    ['Case reference', 'UI-FINANCE-' + Date.now()],
+    ['Purpose', 'Check native admission evidence'],
+    ['Legal basis', 'Isolated functional demo'],
+    ['Target OPS actor IDs', user.access.actorId],
+  ]) await form.getByLabel(label, { exact: true }).fill(value);
+  await form.getByRole('checkbox', { name: 'Compliance report', exact: true }).check();
+  const caseCreated = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/disclosure/cases' && response.request().method() === 'POST');
+  await form.getByRole('button', { name: 'Create case', exact: true }).click();
+  const created = await caseCreated;
+  assert.ok(created.status() >= 200 && created.status() < 300, 'Native case creation must accept the default expiry under the demo rule');
+  await page.getByLabel('Data resource', { exact: true }).selectOption('compliance_report');
+  const evidenceResponse = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/read') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Read permitted data', exact: true }).click();
+  const evidence = await json(await evidenceResponse);
+  assert.equal(evidence.view, 'list');
+  assert.equal(evidence.resource, 'compliance_report');
+  assert.match(evidence.result.matchingRetainedCount, /^(0|[1-9][0-9]*)$/);
+  await page.getByRole('button', { name: 'Download this page', exact: true }).waitFor();
+  await screenshot('admin-finance-evidence');
+  passed('Admin creates a case using the default expiry and reads a scoped admission-evidence page');
   stage = 'ui-preview-account';
   await page.getByTestId('account-dropdown-trigger').click();
   await page.getByRole('menuitem', { name: 'Account', exact: true }).click();

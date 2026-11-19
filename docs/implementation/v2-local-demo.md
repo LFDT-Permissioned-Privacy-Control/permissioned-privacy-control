@@ -42,7 +42,7 @@ The original Explorer layout and named data pages use native session/data
 adapters, including approved-ABI contract Read and wallet-backed Write controls.
 Admin reuses the original layout, organization forms, group cards and account
 presentation. Its source workspace edits and exports complete file proposals;
-compliance, disclosure, case-bound logs and diagnostics use their native APIs.
+compliance, disclosure, organization access logs and diagnostics use their native APIs.
 The walkthrough proves its listed API/privacy operations. File authoring and
 ordinary wallet setup have separate manual steps and qualification below.
 
@@ -308,7 +308,7 @@ separate environment check.
 
 ## 5. Open a disclosure without customer approval
 
-The walkthrough opens one case. To create another, sign in as Admin, choose
+The walkthrough opens one case. To create another in **Explorer**, sign in as Admin, choose
 **Disclosures**, expand **Open a disclosure case**, and enter:
 
 | Field | Value |
@@ -332,6 +332,23 @@ return later.
 
 The legal-basis field records supplied context. This test does not establish
 legal compliance, KYC or global completeness of retained history.
+
+For **OPS Admin → Disclosure**, the equivalent control is **Create case**.
+Use standing rule `demo-auditor`, keep your own recipient actor, enter Deployer's
+actor ID as the target, and supply a unique reference, purpose and test legal
+basis. Times here use **UTC**. The default expiry is 15 minutes; the demo rule
+allows at most 20 minutes. Select **Compliance report** under Resources for the
+finance view. After creating the case, select that data resource and choose
+**Admission decisions → Read permitted data**. You can narrow the target/time,
+page through evidence and **Download this page**. **Complete report** remains a
+separate view capped at 100 decisions; the page download is not a full export.
+
+In **OPS Admin → Access Logs**, Demo Admin can inspect its organization's sealed
+request records directly; no disclosure case is required. Start with the last
+24 hours, then search an exact method, actor or request reference. From/To use
+UTC with **To excluded**. Results show the selected sealed snapshot and retention
+floor; they are not a complete live traffic feed. Reading the logs is itself
+durably recorded. Detailed denial reasons absent from old records remain absent.
 
 ## 6. Change access through configuration
 

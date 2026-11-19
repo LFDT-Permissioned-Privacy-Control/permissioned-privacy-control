@@ -237,7 +237,7 @@ function CreateCase({
     [resources, setResources] = useState(['transactions']),
     [start, setStart] = useState(new Date(Date.now() - 86400000).toISOString().slice(0, 16)),
     [end, setEnd] = useState(new Date().toISOString().slice(0, 16)),
-    [until, setUntil] = useState(new Date(Date.now() + 3600000).toISOString().slice(0, 16)),
+    [until, setUntil] = useState(new Date(Date.now() + 900000).toISOString().slice(0, 16)),
     [submitted, setSubmitted] = useState(!!pending.current)
   const split = (value: string) => value.split(/[\s,]+/).filter(Boolean)
   async function submit(e: React.FormEvent) {
