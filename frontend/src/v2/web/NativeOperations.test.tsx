@@ -196,6 +196,21 @@ it('a disclosure recheck reuses the original whole scope and idempotency key wit
 function baseID() {
   return '/api/v1/disclosure/cases/' + id
 }
+it('shows expired stored-open cases honestly in both list and detail while retaining revoked status', async () => {
+  const s = scope(), expired = { ...currentCase, caseReference: 'EXPIRED-1', createdAt: now - 600, expiresAt: now - 1 }
+  const revoked = { ...expired, caseId: '33333333-3333-4333-8333-333333333333', caseReference: 'REVOKED-1', status: 'revoked' }
+  s.request.mockImplementation(async path => path === baseID() ? expired : { items: [expired, revoked], nextCursor: '', scanComplete: true })
+  render(<MemoryRouter><NativeDisclosures scope={s} /></MemoryRouter>)
+  const expiredRow = within((await screen.findByText('EXPIRED-1')).closest('tr')!)
+  expect(expiredRow.getByText('Expired')).toBeInTheDocument()
+  expect(expiredRow.queryByText('Open')).not.toBeInTheDocument()
+  expect(within(screen.getByText('REVOKED-1').closest('tr')!).getByText('Revoked')).toBeInTheDocument()
+  await userEvent.click(expiredRow.getByRole('button', { name: 'Open case' }))
+  await screen.findByRole('heading', { name: 'Case: EXPIRED-1' })
+  expect(screen.getAllByText('Expired')).toHaveLength(2)
+  expect(screen.getByRole('button', { name: 'Read permitted data' })).toBeDisabled()
+  expect(expired.status).toBe('open')
+})
 it('shows the recorded resource and view in the case audit without inventing missing legacy fields', async () => {
   const s = scope(), original = s.request.getMockImplementation()!
   s.request.mockImplementation(async (path, options) => path === baseID() + '/audit?limit=25'

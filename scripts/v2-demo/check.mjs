@@ -361,7 +361,11 @@ async function checkUIPreview(user) {
   await screenshot('admin-access-logs');
   passed('Admin reads organization Access Logs without a disclosure case, with a durable request reference');
   stage = 'ui-preview-admin-finance';
+  const casesResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/disclosure/cases' && response.request().method() === 'GET');
   await page.getByRole('tab', { name: 'Disclosure', exact: true }).click();
+  const existingCases = await json(await casesResponse);
+  const expiredOpen = existingCases.items.find(item => item.status === 'open' && item.expiresAt * 1000 <= Date.now() && item.caseReference.startsWith('UI-FINANCE-'));
+  if (expiredOpen) await page.getByRole('row').filter({ has: page.getByRole('cell', { name: expiredOpen.caseReference, exact: true }) }).first().getByText('Expired', { exact: true }).waitFor();
   await page.getByRole('button', { name: 'Create case', exact: true }).click();
   const form = page.getByRole('dialog');
   for (const [label, value] of [

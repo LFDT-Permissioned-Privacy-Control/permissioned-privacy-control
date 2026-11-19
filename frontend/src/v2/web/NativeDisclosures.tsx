@@ -5,6 +5,7 @@ import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import type { OperationScope } from './controller'
 import { readNarrowing } from './disclosureEvidence'
+import { caseDisplayStatus, useCaseDisplayClock } from './caseDisplay'
 import {
   actorID,
   address,
@@ -59,6 +60,7 @@ export function NativeDisclosures({
     [scanComplete, setScanComplete] = useState(true),
     [creating, setCreating] = useState(false),
     [selected, setSelected] = useState<NativeCase>()
+  const statusNow = useCaseDisplayClock(selected ? [...items, selected] : items, scope.identity.expires)
   const createBody = useRef<string>(),
     createInFlight = useRef(false)
   const list = async (next = '') => {
@@ -138,11 +140,10 @@ export function NativeDisclosures({
             {
               key: 'status',
               label: 'Status',
-              render: (r) => (
-                <Badge variant={r.status === 'open' ? 'success' : 'secondary'}>
-                  {text(r.status)}
-                </Badge>
-              ),
+              render: (r) => {
+                const display = caseDisplayStatus({ status: text(r.status), expiresAt: Number(r.expiresAt) }, statusNow)
+                return <Badge variant={display.variant}>{display.label}</Badge>
+              },
             },
             { key: 'expiresAt', label: 'Expires', render: (r) => instant(r.expiresAt) },
             { key: 'ruleId', label: 'Standing rule' },
@@ -179,6 +180,7 @@ export function NativeDisclosures({
           key={`${selected.caseId}:${selected.version}`}
           scope={scope}
           selected={selected}
+          statusNow={statusNow}
           logsOnly={logsOnly}
           onChanged={async () => {
             setSelected(undefined)
@@ -443,11 +445,13 @@ function SubmittedCaseReview({ body }: { body: string }) {
 function CaseDetail({
   scope,
   selected,
+  statusNow,
   logsOnly,
   onChanged,
 }: {
   scope: OperationScope
   selected: NativeCase
+  statusNow: number
   logsOnly: boolean
   onChanged: () => Promise<void>
 }) {
@@ -471,6 +475,7 @@ function CaseDetail({
     [history, setHistory] = useState<ProtectedData[]>([]),
     [historyIndex, setHistoryIndex] = useState(0),
     [historyTrimmed, setHistoryTrimmed] = useState(false)
+  const displayStatus = caseDisplayStatus(selected, statusNow)
   const queryRevision = useRef(0), alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false; queryRevision.current++ } }, [])
   const clearRead = () => {
@@ -553,8 +558,8 @@ function CaseDetail({
       <Panel
         title={`Case: ${selected.caseReference}`}
         actions={
-          <Badge variant={selected.status === 'open' ? 'success' : 'secondary'}>
-            {selected.status}
+          <Badge variant={displayStatus.variant}>
+            {displayStatus.label}
           </Badge>
         }
       >
