@@ -24,6 +24,10 @@ type Receipt struct {
 	sequence uint64
 }
 
+// RequestReferenceHeader identifies a local synced completion, never a caller
+// correlation value or proof that the protected response was delivered.
+const RequestReferenceHeader = "X-OPS-Request-Reference"
+
 // Receipt identifies a local synced append only; it is not a SQL-seal receipt.
 func (r *Receipt) RecordID() string {
 	if r == nil {

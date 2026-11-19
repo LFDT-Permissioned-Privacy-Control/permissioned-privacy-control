@@ -43,6 +43,7 @@ type MethodCount struct {
 type ReadSnapshot struct {
 	reader   *Reader
 	requests bool
+	admin    bool
 	tx       pgx.Tx
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -123,16 +124,16 @@ func resolveCut(ctx context.Context, tx pgx.Tx, s sourceState, reference string)
 // Open pins one committed SQL prefix. It never waits for local producers or
 // claims that the prefix contains unlogged or still buffered RPC requests.
 func (r *Reader) Open(ctx context.Context, reference string, fromMicros int64) (*ReadSnapshot, error) {
-	return r.openPopulation(ctx, reference, fromMicros, false)
+	return r.openPopulation(ctx, reference, fromMicros, false, false)
 }
 
-// OpenRequests selects only registered RPC and the closed compiled Explorer
+// OpenRequests selects only registered RPC and closed compiled reserved request
 // completion labels. The default Open remains RPC-only. Selection is immutable
 // for this snapshot, including every page, lookahead and summary query.
 func (r *Reader) OpenRequests(ctx context.Context, reference string, fromMicros int64) (*ReadSnapshot, error) {
-	return r.openPopulation(ctx, reference, fromMicros, true)
+	return r.openPopulation(ctx, reference, fromMicros, true, false)
 }
-func (r *Reader) openPopulation(ctx context.Context, reference string, fromMicros int64, requests bool) (*ReadSnapshot, error) {
+func (r *Reader) openPopulation(ctx context.Context, reference string, fromMicros int64, requests, admin bool) (*ReadSnapshot, error) {
 	if r == nil || r.store == nil || fromMicros < 0 || fromMicros > a.MaxObservedMicros {
 		return nil, a.ErrInvalid
 	}
@@ -151,6 +152,9 @@ func (r *Reader) openPopulation(ctx context.Context, reference string, fromMicro
 	if fromMicros < s.floor {
 		rollback(tx)
 		cancel()
+		if admin {
+			return nil, &RetentionFloorError{s.floor}
+		}
 		return nil, a.ErrUnavailable
 	}
 	id, hash, err := resolveCut(ctx, tx, s, reference)
@@ -159,7 +163,7 @@ func (r *Reader) openPopulation(ctx context.Context, reference string, fromMicro
 		cancel()
 		return nil, err
 	}
-	return &ReadSnapshot{reader: r, requests: requests, tx: tx, ctx: ctx, cancel: cancel, cut: makeCut(s, id, hash, time.Now()), from: fromMicros}, nil
+	return &ReadSnapshot{reader: r, requests: requests, admin: admin, tx: tx, ctx: ctx, cancel: cancel, cut: makeCut(s, id, hash, time.Now()), from: fromMicros}, nil
 }
 func (s *ReadSnapshot) Cut() Cut { return s.cut }
 func (s *ReadSnapshot) Population() string {
@@ -179,7 +183,7 @@ func (s *ReadSnapshot) populationPredicate(parameter int) (string, []any) {
 	if !s.requests {
 		return rpc, nil
 	}
-	return "(" + rpc + " OR method=ANY($" + strconv.Itoa(parameter) + "::text[]))", []any{activitymethoddata.ExplorerLabels()}
+	return "(" + rpc + " OR method=ANY($" + strconv.Itoa(parameter) + "::text[]))", []any{activitymethoddata.RequestReservedLabels()}
 }
 func (s *ReadSnapshot) Close() {
 	if s == nil {
@@ -314,6 +318,9 @@ func (s *ReadSnapshot) CheckCurrent(ctx context.Context) error {
 		return err
 	}
 	if s.from < state.floor {
+		if s.admin {
+			return &RetentionFloorError{state.floor}
+		}
 		return a.ErrUnavailable
 	}
 	id, hash, err := resolveCut(ctx, tx, state, s.cut.Reference)

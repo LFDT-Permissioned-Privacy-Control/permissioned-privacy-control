@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"privacy-proxy/internal/activitymethoddata"
 	"privacy-proxy/internal/audit/buffer"
 	"privacy-proxy/internal/audit/sealer"
 	"privacy-proxy/internal/networkidentity"
@@ -23,6 +24,59 @@ type testStore struct {
 	sealed   map[uint64]string
 	forced   *sealer.Verdict
 }
+
+func TestOperationalSpoolRecoveryWithPreviousWriterMethodConfiguration(t *testing.T) {
+	c, store := recorderFixture(t)
+	c.Methods = []string{"eth_call", activitymethoddata.AdminAccessLogs}
+	r, err := New(t.Context(), c, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot, err := r.Reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := slot.Complete(Completion{Method: activitymethoddata.AdminAccessLogs, HTTPStatus: 200, Outcome: Success})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// The old image's allowed writer methods do not include the operational
+	// label. Recovery still uses the unchanged exact v1 spool/envelope grammar.
+	c.Methods = []string{"eth_call"}
+	oldWriter, err := New(t.Context(), c, store)
+	if err != nil {
+		t.Fatal("previous configuration could not recover", err)
+	}
+	defer oldWriter.Close(t.Context())
+	if _, err = oldWriter.sealer.Tick(t.Context()); err != nil {
+		t.Fatal("previous configured writer could not seal", err)
+	}
+	store.mu.Lock()
+	raw := store.sealed[receipt.Sequence()]
+	store.mu.Unlock()
+	decoded, err := DecodeEnvelope([]byte(raw))
+	if err != nil || decoded.Method != activitymethoddata.AdminAccessLogs {
+		t.Fatal(decoded, err)
+	}
+	slot, err = oldWriter.Reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = slot.Complete(Completion{Method: activitymethoddata.AdminAccessLogs, HTTPStatus: 200, Outcome: Success}); !errors.Is(err, ErrInvalid) {
+		t.Fatal("previous writer created unregistered completion", err)
+	}
+	bad := c
+	bad.BufferDirectory = t.TempDir()
+	bad.Methods = []string{"explorer.admin_access_logs_unknown"}
+	if other, err := New(t.Context(), bad, store); err == nil {
+		other.Close(t.Context())
+		t.Fatal("unknown compiled label registered")
+	}
+}
+
 type testRun struct {
 	store   *testStore
 	binding RunBinding

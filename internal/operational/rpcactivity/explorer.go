@@ -47,6 +47,7 @@ func (s *Service) ExplorerHandler(selectedOrg string) (http.Handler, error) {
 var explorerBusy = []byte(`{"error":{"code":"unavailable"}}`)
 
 func (s *Service) serveExplorer(w http.ResponseWriter, r *http.Request, org string) {
+	w.Header().Del(RequestReferenceHeader)
 	deadline := time.Now().Add(20 * time.Second)
 	if d, ok := r.Context().Deadline(); ok && d.Before(deadline) {
 		deadline = d
@@ -71,7 +72,7 @@ func (s *Service) serveExplorer(w http.ResponseWriter, r *http.Request, org stri
 		return
 	}
 	if r.Method != http.MethodGet || r.URL.RawPath != "" || r.ContentLength != 0 || r.URL.Fragment != "" || len(r.URL.Path) > 1024 || len(r.URL.RawQuery) > 16<<10 {
-		_, err = slot.Complete(activitylog.Completion{Method: "explorer.invalid_transport", TrustedIP: peer(r.RemoteAddr), HTTPStatus: 400, Outcome: activitylog.Invalid})
+		_, err = completeReference(w, slot, activitylog.Completion{Method: "explorer.invalid_transport", TrustedIP: peer(r.RemoteAddr), HTTPStatus: 400, Outcome: activitylog.Invalid})
 		if err != nil {
 			write(w, 503, explorerBusy)
 		} else {
@@ -83,24 +84,24 @@ func (s *Service) serveExplorer(w http.ResponseWriter, r *http.Request, org stri
 	defer result.Close()
 	m, err := result.MetadataFor(s.explorer)
 	if err != nil {
-		_, _ = slot.Complete(activitylog.Completion{Method: "explorer.invalid_request", HTTPStatus: 503, Outcome: activitylog.Unavailable})
+		_, _ = completeReference(w, slot, activitylog.Completion{Method: "explorer.invalid_request", HTTPStatus: 503, Outcome: activitylog.Unavailable})
 		write(w, 503, explorerBusy)
 		return
 	}
 	c := activitylog.Completion{Method: m.Method, ActorID: m.ActorID, DataOrganizationID: m.OrganizationID, TrustedIP: peer(r.RemoteAddr), HTTPStatus: uint16(m.HTTPStatus), Outcome: category(m.Class)}
 	if activitymethoddata.Classify(c.Method) != activitymethoddata.Explorer || len(m.PolicyDigest) != 71 || !strings.HasPrefix(string(m.PolicyDigest), "sha256:") {
-		_, _ = slot.Complete(activitylog.Completion{Method: "explorer.invalid_request", HTTPStatus: 503, Outcome: activitylog.Unavailable})
+		_, _ = completeReference(w, slot, activitylog.Completion{Method: "explorer.invalid_request", HTTPStatus: 503, Outcome: activitylog.Unavailable})
 		write(w, 503, explorerBusy)
 		return
 	}
 	digest, err := hex.DecodeString(string(m.PolicyDigest)[7:])
 	if err != nil || len(digest) != 32 {
-		_, _ = slot.Complete(activitylog.Completion{Method: "explorer.invalid_request", HTTPStatus: 503, Outcome: activitylog.Unavailable})
+		_, _ = completeReference(w, slot, activitylog.Completion{Method: "explorer.invalid_request", HTTPStatus: 503, Outcome: activitylog.Unavailable})
 		write(w, 503, explorerBusy)
 		return
 	}
 	copy(c.PolicyDigest[:], digest)
-	if _, err = slot.Complete(c); err != nil {
+	if _, err = completeReference(w, slot, c); err != nil {
 		write(w, 503, explorerBusy)
 		return
 	}

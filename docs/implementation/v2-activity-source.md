@@ -6,7 +6,8 @@ audit database. `internal/operational/activitysource` supplies the protected-rea
 gate with activity pages and method/status summaries from that SQL population.
 These are libraries and an explicit owner CLI. The concrete native RPC recording
 wrapper is described in [v2-rpc-activity.md](v2-rpc-activity.md); these packages do
-not mount a production activity-data endpoint.
+not mount listeners. The assembled operational server exposes the scoped admin
+investigation endpoint described below.
 
 The population is `SEALED_RPC_COMPLETIONS_AS_OF_CHAIN_HEAD`: all matching retained
 SQL completion rows at one committed chain head. It excludes requests that were
@@ -59,7 +60,7 @@ observe the same worker's eventual result.
 
 Use a dedicated lean audit database with the existing exact audit001..004
 migrations already applied by their normal migration tool. B1's owner tool owns
-only additive005. It rejects a missing or unsupported baseline. All four old SQL
+additive005 and the additive006 organization/order index. It rejects a missing or unsupported baseline. All four old SQL
 files and the old sealer/Drain APIs remain unchanged.
 
 `ops-activity-admin migrate` needs `OPS_ACTIVITY_OWNER_DATABASE_URL`, explicit
@@ -67,7 +68,8 @@ files and the old sealer/Drain APIs remain unchanged.
 must already exist: disjoint LOGIN NOINHERIT, no membership/ownership or elevated
 role attributes. The command neither creates roles nor infers a global role set.
 Credentials are environment values, never command arguments or status output.
-Migration retry checks exact installed shape and effective privileges; it does
+Migration accepts the exact005 catalog for its explicit006 index upgrade, or
+checks the exact006 catalog on retry. It verifies effective privileges and does
 not silently repair changed grants.
 
 `initialize` additionally requires exact environment, chain ID, genesis hash,
@@ -211,3 +213,69 @@ run capacity separately; row pruning does not free immutable run registrations.
 
 History/events, finance and live Core collection are separate required
 source/assembly work; this activity library supplies none of their provenance.
+
+## Organization Access Logs
+
+`GET /api/v2/orgs/{orgId}/access-logs` requires a fresh verified access token and
+the selected organization's admin or read-only admin role from current policy.
+It reads only that exact sealed `DataOrg`; an actor filter never assigns anonymous
+or organization-free records to a tenant. It needs the selected activity reader
+and the shared healthy recorder, not a disclosure case, user directory, wallet
+lookup or live node/indexer query.
+The admin entitlement includes the recorded trusted peer IP, matching the admin
+log view. External disclosure IP redaction and level rules are unchanged.
+
+The required `from`/`to` interval is half-open. RFC3339 bounds normalize upward to
+UTC microseconds, preserving which stored instants match. Optional `actorId`,
+`method`, `outcome` and `requestReference` filters run before the page limit
+(default50, maximum100); unsupported or duplicate parameters are rejected. Pages
+are newest first with a strict observation/producer/run/ordinal/record key.
+Their encrypted cursors bind the caller, organization, current bundle/profile,
+all normalized filters, limit and original committed sealed cut, with a fixed
+five-minute lifetime. A separate cryptographic subkey/domain derives from the
+existing protected admin cursor ring; there is no new credential.
+
+Each investigation reserves shared recorder capacity before reading protected
+data. The pinned SQL transaction closes before one synchronous durable completion
+with the verified actor, authorized organization, current bundle digest and
+trusted direct-peer IP. The exact label is `explorer.admin_access_logs`; it is
+not a public Explorer route or business-operation binding. No query/filter,
+target-identity or cursor contents are added to the unchanged v1 envelope.
+Recorder failure releases no protected response. A separate bound of at most
+four investigation responses lasts through delivery; it is not another audit
+budget. Current source, access and original expiry are checked after append
+and immediately before protected output. Rejected overload can remain unaudited.
+
+Final delivery can still fail or change after durable completion is recorded.
+The HTTP field is the selected response status, not proof of final delivery.
+
+The response distinguishes recorded HTTP status, nullable RPC error, normalized
+outcome and recorded derived status. The request reference is the recorder's
+existing UUID. RPC, Explorer and investigation responses return their completion as
+`X-OPS-Request-Reference` after successful durable completion; it does not mean
+the row has already sealed, and never adopts a client correlation header. The
+page reports its sealed head, capture time and retained floor without a fleet
+total. Below-floor requests or continuations return `410 history_pruned`, not
+an empty or silently shortened history. Current access and activity source are
+checked again after closing the original read transaction and before output.
+Rich reasons were not recorded by sealedv1: `reason` remains `not_recorded`; no
+present policy evaluation or coarse outcome is substituted for historical cause.
+The compiled recognized-request population includes the investigation label;
+RPC-only lists and summaries exclude it. Adding this reserved label changes the
+population digests, so older population-bound cursors must restart. Legacy v1
+codec and spool recovery remain valid. Older recognized-request readers omit
+the new reserved label; this is not identical old/new population visibility.
+
+Deploy by draining every OPS reader/writer sharing the activity database,
+running the existing
+`ops-activity-admin migrate` with its owner-only environment, explicit existing
+roles and `--drained`, then starting the compatible image.006 adds one partial
+organization/order index, changes no grants, and rewrites no envelopes/history.
+005/006 identify pinned catalog shapes; no mutable activity version row is added.
+Old005-pinned binaries reject006. For an old-image rollback, keep all affected
+OPS instances drained and run `ops-activity-admin downgrade-to-005` with the same
+owner environment, explicit roles and `--drained` before restarting that image.
+It verifies exact006 and the ACL, drops only `activity_org_page`, then verifies
+exact005 and the same ACL in one transaction. It changes no log, anchor, run,
+source, generation, configuration, key or spool data. The index consumes extra
+disk and is built while drained; large-range/export capacity is not promised.

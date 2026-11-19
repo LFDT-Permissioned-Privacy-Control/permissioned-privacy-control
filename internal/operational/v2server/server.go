@@ -301,6 +301,9 @@ func Open(parent context.Context, c Config) (*Server, error) {
 	if e = s.mountRPC(s.data); e != nil {
 		return fail("RPC HTTP")
 	}
+	if e = s.mountAccessLogs(s.data); e != nil {
+		return fail("access logs")
+	}
 	if e = s.mountProtected(ctx, s.data, walletBinding, walletState); e != nil {
 		return fail("protected data")
 	}

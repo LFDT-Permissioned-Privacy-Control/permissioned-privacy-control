@@ -29,11 +29,11 @@ func main() {
 }
 func run(ctx context.Context, args []string, out, stderr io.Writer, getenv func(string) string) error {
 	if len(args) < 1 {
-		return errors.New("usage: ops-activity-admin migrate|initialize|status|begin-recovery|reconfigure|finalize-recovery|prune [flags]")
+		return errors.New("usage: ops-activity-admin migrate|downgrade-to-005|initialize|status|begin-recovery|reconfigure|finalize-recovery|prune [flags]")
 	}
 	command := args[0]
 	switch command {
-	case "migrate", "initialize", "status", "begin-recovery", "reconfigure", "finalize-recovery", "prune":
+	case "migrate", "downgrade-to-005", "initialize", "status", "begin-recovery", "reconfigure", "finalize-recovery", "prune":
 	default:
 		return errors.New("unknown activity admin operation")
 	}
@@ -78,16 +78,24 @@ func run(ctx context.Context, args []string, out, stderr io.Writer, getenv func(
 	if dsn == "" {
 		return errors.New("set the selected OPS_ACTIVITY_OWNER_DATABASE_URL or OPS_ACTIVITY_RETENTION_DATABASE_URL; credentials are never command arguments")
 	}
-	if command == "migrate" {
+	if command == "migrate" || command == "downgrade-to-005" {
 		if !drained {
-			return errors.New("migrate requires --drained and the already-applied exact lean audit001..004 baseline")
+			return errors.New("schema changes require --drained and the selected exact activity catalog or lean audit001..004 baseline")
 		}
-		if err := s.Migrate(ctx, dsn, roles.Writer, roles.Reader, roles.Retention, drained); err != nil {
+		schema := "ops_activity_v1/006"
+		var err error
+		if command == "downgrade-to-005" {
+			err = s.DowngradeTo005(ctx, dsn, roles.Writer, roles.Reader, roles.Retention, drained)
+			schema = "ops_activity_v1/005"
+		} else {
+			err = s.Migrate(ctx, dsn, roles.Writer, roles.Reader, roles.Retention, drained)
+		}
+		if err != nil {
 			return err
 		}
 		return json.NewEncoder(out).Encode(struct {
 			Schema string `json:"schema"`
-		}{"ops_activity_v1/005"})
+		}{schema})
 	}
 	key, err := network.Key()
 	if err != nil || !a.CanonicalUUID(sourceID) {

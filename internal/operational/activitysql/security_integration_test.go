@@ -32,7 +32,7 @@ func TestRestrictedCatalogACLRecoveryAndRetainedOriginalRun(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		expected, err := os.ReadFile("migrations/005-catalog.json")
+		expected, err := os.ReadFile("migrations/006-catalog.json")
 		if err != nil {
 			t.Fatal(err)
 		}

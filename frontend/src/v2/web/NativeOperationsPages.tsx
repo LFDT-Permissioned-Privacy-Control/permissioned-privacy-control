@@ -3,6 +3,7 @@ import { Controller, type OperationScope, type State } from './controller'
 import { NativeCompliance } from './NativeCompliance'
 import { NativeDisclosures } from './NativeDisclosures'
 import { NativeDiagnostics } from './NativeDiagnostics'
+import { NativeAccessLogs } from './NativeAccessLogs'
 
 export function NativeOperationsPage({
   controller,
@@ -13,7 +14,7 @@ export function NativeOperationsPage({
   state: State
   section: 'compliance' | 'disclosures' | 'logs' | 'diagnostics'
 }) {
-  const key = `${controller.scopeRevision}:${state.self?.actorId}:${state.self?.expiresAt}:${section}`
+  const key = `${controller.scopeRevision}:${state.self?.actorId}:${state.self?.expiresAt}:${state.self?.sourceProfileDigest}:${section}`
   return <OwnedOperations key={key} controller={controller} section={section} />
 }
 function OwnedOperations({
@@ -59,5 +60,6 @@ function OwnedOperations({
     )
   if (section === 'compliance') return <NativeCompliance scope={scope} />
   if (section === 'diagnostics') return <NativeDiagnostics scope={scope} />
-  return <NativeDisclosures scope={scope} logsOnly={section === 'logs'} />
+  if (section === 'logs') return <NativeAccessLogs scope={scope} />
+  return <NativeDisclosures scope={scope} />
 }

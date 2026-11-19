@@ -1,30 +1,40 @@
 import { closedJSON } from '../auth/protocol'
+import { accessLogError, validAccessLogQuery, type AccessLogErrorCode } from './accessLogsModels'
 
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 const canonicalUUID = (value: string) =>
   new RegExp('^' + uuid + '$').test(value) && value !== '00000000-0000-0000-0000-000000000000'
+interface OperationErrorDetail { code: AccessLogErrorCode; retainedFrom?: string }
+function operationErrorMessage(status: number, mutation: boolean, detail?: OperationErrorDetail): string {
+  if (detail?.code === 'history_pruned')
+    return 'Requested history has been pruned. Choose a later start time' + (detail.retainedFrom ? ' at or after ' + detail.retainedFrom : '') + '.'
+  if (detail?.code === 'cursor_expired' || detail?.code === 'cursor_mismatch')
+    return 'This page is no longer valid for the selected filters or source. Search again for a fresh snapshot.'
+  if (detail?.code === 'source_unavailable')
+    return 'The access-log source is unavailable. This is not an empty result; try again after the source recovers.'
+  switch (status) {
+    case 401: return 'Your session expired. Sign in again.'
+    case 403: return 'Your current organization role does not allow this operation.'
+    case 404: return 'The record is unavailable for this identity.'
+    case 409: return 'This operation conflicts with the current state. Reload before making another change.'
+    case 400: return 'Check the request fields and approved rule limits.'
+    case 422: return 'This scope cannot be qualified. Narrow the request or check the configured source.'
+    default: return mutation
+      ? 'The result is uncertain. Check the current records before submitting again.'
+      : 'The operational service is temporarily unavailable.'
+  }
+}
 export class OperationHTTPError extends Error {
+  readonly code?: AccessLogErrorCode
+  readonly retainedFrom?: string
   constructor(
     readonly status: number,
     readonly mutation: boolean,
+    detail?: OperationErrorDetail,
   ) {
-    super(
-      status === 401
-        ? 'Your session expired. Sign in again.'
-        : status === 403
-          ? 'Your current organization role does not allow this operation.'
-          : status === 404
-            ? 'The record is unavailable for this identity.'
-            : status === 409
-              ? 'This operation conflicts with the current state. Reload before making another change.'
-              : status === 400
-                ? 'Check the request fields and approved rule limits.'
-                : status === 422
-                  ? 'This scope cannot be qualified. Narrow the request or check the configured source.'
-                  : mutation
-                    ? 'The result is uncertain. Check the current records before submitting again.'
-                    : 'The operational service is temporarily unavailable.',
-    )
+    super(operationErrorMessage(status, mutation, detail))
+    this.code = detail?.code
+    this.retainedFrom = detail?.retainedFrom
   }
 }
 
@@ -51,7 +61,11 @@ export function operationEndpoint(endpoint: string, method: string): boolean {
   const disclosure = new RegExp(
     '^/api/v1/disclosure/cases(?:/(' + uuid + ')(?:/(audit|read|revoke))?)?$',
   ).exec(path)
-  if (compliance && canonicalUUID(compliance[1])) {
+  const accessLogs = new RegExp('^/api/v2/orgs/(' + uuid + ')/access-logs$').exec(path)
+  if (accessLogs && canonicalUUID(accessLogs[1])) {
+    valid = method === 'GET'
+    allowed = ['from', 'to', 'actorId', 'method', 'outcome', 'requestReference', 'limit', 'cursor']
+  } else if (compliance && canonicalUUID(compliance[1])) {
     const [, , section, id] = compliance
     if (id && !canonicalUUID(id)) return false
     if (id) valid = section === 'travel-rule-records' && (method === 'GET' || method === 'DELETE')
@@ -91,6 +105,7 @@ export function operationEndpoint(endpoint: string, method: string): boolean {
     (query.has('organizationId') && query.get('role') !== 'data-org-admin')
   )
     return false
+  if (accessLogs && !validAccessLogQuery(query)) return false
   return true
 }
 
@@ -183,8 +198,13 @@ export async function operationRequest(
     void reader.cancel().catch(() => undefined)
     reader.releaseLock()
   }
-  if (response.status < 200 || response.status >= 300)
-    throw new OperationHTTPError(response.status, method !== 'GET')
+  if (response.status < 200 || response.status >= 300) {
+    let detail
+    if (new RegExp('^/api/v2/orgs/' + uuid + '/access-logs(?:\\?|$)').test(endpoint)) {
+      try { detail = accessLogError(JSON.parse(raw), response.status) } catch { /* Keep the bounded generic HTTP error. */ }
+    }
+    throw new OperationHTTPError(response.status, method !== 'GET', detail)
+  }
   const value: unknown = JSON.parse(raw)
   check()
   return value

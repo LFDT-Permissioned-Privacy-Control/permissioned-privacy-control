@@ -87,3 +87,11 @@ func (w *deadlineWriter) Write(b []byte) (int, error) {
 	w.writes++
 	return len(b), nil
 }
+
+func TestFailedCompletionNeverReturnsARequestReference(t *testing.T) {
+	w := httptest.NewRecorder()
+	w.Header().Set(RequestReferenceHeader, "stale-or-reflected-client-value")
+	if _, err := completeReference(w, nil, activitylog.Completion{}); err == nil || w.Header().Get(RequestReferenceHeader) != "" {
+		t.Fatal("failed recording retained a reference", err, w.Header())
+	}
+}

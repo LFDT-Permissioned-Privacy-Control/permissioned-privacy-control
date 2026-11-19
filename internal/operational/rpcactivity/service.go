@@ -190,6 +190,7 @@ func completion(m rpcengine.OperationMetadata, remote string) (activitylog.Compl
 	return c, nil
 }
 func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
+	w.Header().Del(RequestReferenceHeader)
 	// Even a busy rejection may block on socket/HTTP2 flow control. Establish
 	// its original write deadline before the admission decision and first byte.
 	deadline := time.Now().Add(20 * time.Second)
@@ -223,7 +224,7 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 	// replacement can release its credit before the actual Append returns.
 	transport := func(status int) {
 		code := int32(-32600)
-		_, err := slot.Complete(activitylog.Completion{Method: "rpc.invalid_transport", TrustedIP: peer(r.RemoteAddr), HTTPStatus: uint16(status), RPCErrorCode: &code, Outcome: activitylog.Invalid})
+		_, err := completeReference(w, slot, activitylog.Completion{Method: "rpc.invalid_transport", TrustedIP: peer(r.RemoteAddr), HTTPStatus: uint16(status), RPCErrorCode: &code, Outcome: activitylog.Invalid})
 		if err != nil {
 			write(w, 503, busy)
 			return
@@ -290,11 +291,11 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 	if notificationErr != nil || completionErr != nil || preflightErr != nil {
 		// An internal invalid response still settles the reservation; it cannot
 		// publish data or be retried. Existing captured outcome is never rewritten.
-		_, _ = slot.Complete(c)
+		_, _ = completeReference(w, slot, c)
 		respond(503, busy)
 		return
 	}
-	if _, err := slot.Complete(c); err != nil {
+	if _, err := completeReference(w, slot, c); err != nil {
 		body, failureErr := result.recordingFailure(s)
 		if failureErr != nil {
 			respond(503, busy)
@@ -319,4 +320,17 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 		return
 	}
 	respond(200, body)
+}
+
+// RequestReferenceHeader identifies a recorder-generated durable completion.
+// It never adopts a caller correlation header and proves no unrecorded event.
+const RequestReferenceHeader = activitylog.RequestReferenceHeader
+
+func completeReference(w http.ResponseWriter, slot *activitylog.Slot, c activitylog.Completion) (*activitylog.Receipt, error) {
+	w.Header().Del(RequestReferenceHeader)
+	receipt, err := slot.Complete(c)
+	if err == nil && receipt != nil {
+		w.Header().Set(RequestReferenceHeader, receipt.RecordID())
+	}
+	return receipt, err
 }

@@ -14,8 +14,14 @@ import (
 // Expected objects and permissions are derived from the independently replayed
 // PostgreSQL16 catalog. Only explicit installed owner/role names are normalized.
 //
-//go:embed migrations/005-catalog.json
+//go:embed migrations/006-catalog.json
 var expectedCatalog []byte
+
+//go:embed migrations/005-catalog.json
+var previousCatalog []byte
+
+//go:embed migrations/006.sql
+var adminIndexSQL string
 
 //go:embed migrations/005-acl.json
 var expectedACL []byte
@@ -59,6 +65,9 @@ func schemaOwner(ctx context.Context, q queryer) (string, error) {
 	return owner, nil
 }
 func checkSchema(ctx context.Context, q queryer) error {
+	return checkSchemaAgainst(ctx, q, expectedCatalog)
+}
+func checkSchemaAgainst(ctx context.Context, q queryer, expected []byte) error {
 	owner, err := schemaOwner(ctx, q)
 	if err != nil {
 		return err
@@ -68,7 +77,7 @@ func checkSchema(ctx context.Context, q queryer) error {
 		return a.ErrUnavailable
 	}
 	var observed, wanted any
-	if json.Unmarshal(actual, &observed) != nil || json.Unmarshal(expectedCatalog, &wanted) != nil {
+	if json.Unmarshal(actual, &observed) != nil || json.Unmarshal(expected, &wanted) != nil {
 		return a.ErrUnavailable
 	}
 	normalizeOwner(observed, owner)

@@ -147,3 +147,23 @@ it('maps real empty health responses without fabricated component state', async 
   ).resolves.toEqual({ ready: true, status: 204 })
   expect(new OperationHTTPError(403, false).message).toContain('role')
 })
+
+it('admits only the direct read-only access-log route with explicit bounded server filters', () => {
+  const base = `/api/v2/orgs/${org}/access-logs`, range = 'from=2026-11-20T10%3A00%3A00Z&to=2026-11-20T12%3A00%3A00Z'
+  expect(operationEndpoint(base + '?' + range + '&method=eth_call&outcome=denied&limit=50&requestReference=' + id, 'GET')).toBe(true)
+  for (const [path, method] of [[base, 'GET'], [base + '?' + range, 'POST'], [base + '?' + range + '&offset=50', 'GET'], [base + '?' + range + '&method=eth_call&method=eth_getLogs', 'GET'], [base + '?' + range + '&actorId=untrusted-directory-name', 'GET'], [base + '?' + range + '&outcome=unknown', 'GET']]) expect(operationEndpoint(path, method)).toBe(false)
+})
+it('preserves typed retention/source/cursor errors without trusting arbitrary remote diagnostic text', async () => {
+  const endpoint = `/api/v2/orgs/${org}/access-logs?from=2026-11-20T10%3A00%3A00Z&to=2026-11-20T12%3A00%3A00Z`
+  for (const [code, status, message] of [['history_pruned', 410, 'pruned'], ['source_unavailable', 503, 'source is unavailable'], ['cursor_mismatch', 409, 'Search again']] as const) {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { code, message: 'untrusted raw SQL or credential data', ...(code === 'history_pruned' ? { retainedFrom: '2026-11-20T11:00:00Z' } : {}) } }), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } })))
+    try { await operationRequest('private', endpoint, {}, new AbortController().signal, () => {}); throw Error('Expected rejection') }
+    catch (error) {
+      expect(error).toBeInstanceOf(OperationHTTPError)
+      expect(error).toMatchObject({ status, mutation: false, code })
+      expect((error as Error).message).toContain(message)
+      expect((error as Error).message).not.toContain('untrusted raw')
+      if (code === 'history_pruned') expect(error).toMatchObject({ retainedFrom: '2026-11-20T11:00:00Z' })
+    }
+  }
+})

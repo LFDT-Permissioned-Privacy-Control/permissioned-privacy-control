@@ -66,12 +66,16 @@ func requestAsync(t *testing.T, client *http.Client, url, tok, body string, ctx 
 	go func() {
 		req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set(rpcactivity.RequestReferenceHeader, "caller-supplied-is-not-trusted")
 		resp, err := client.Do(req)
 		if err != nil {
 			done <- nil
 			return
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode == 200 && !a.CanonicalUUID(resp.Header.Get(rpcactivity.RequestReferenceHeader)) {
+			t.Error("durable RPC response lacks recorder reference")
+		}
 		b, _ := io.ReadAll(resp.Body)
 		done <- b
 	}()

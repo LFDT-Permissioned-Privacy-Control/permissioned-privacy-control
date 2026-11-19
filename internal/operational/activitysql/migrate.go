@@ -60,7 +60,7 @@ func ownerTx(ctx context.Context, dsn string, fn func(pgx.Tx) error) error {
 	return nil
 }
 
-// Migrate owns ONLY005. Existing lean audit001..004 must already have been
+// Migrate owns activity005 and additive006. Existing lean audit001..004 must already have been
 // applied by their normal owner migration tool; their SQL/version authority is
 // not duplicated here. Explicit caller roles must already exist.
 func Migrate(ctx context.Context, dsn, writerRole, readerRole, retentionRole string, drained bool) error {
@@ -76,10 +76,19 @@ func Migrate(ctx context.Context, dsn, writerRole, readerRole, retentionRole str
 			return a.ErrUnavailable
 		}
 		if exists {
-			if err := checkSchema(ctx, tx); err != nil {
+			if err := checkSchema(ctx, tx); err == nil {
+				return checkRole(ctx, tx, roles, "owner")
+			}
+			if err := checkSchemaAgainst(ctx, tx, previousCatalog); err != nil {
 				return err
 			}
-			return checkRole(ctx, tx, roles, "owner") // never silently rewrite existing grants
+			if err := checkRole(ctx, tx, roles, "owner"); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, adminIndexSQL); err != nil {
+				return a.ErrUnavailable
+			}
+			return checkSchema(ctx, tx) // never rewrite history or existing grants
 		}
 		if err := checkBaseline(ctx, tx); err != nil {
 			return err
@@ -87,7 +96,7 @@ func Migrate(ctx context.Context, dsn, writerRole, readerRole, retentionRole str
 		if tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.access_logs WHERE chain_name LIKE 'ops-activity-v1/%')`).Scan(&exists) != nil || exists {
 			return a.ErrConflict
 		}
-		if _, err := tx.Exec(ctx, schemaSQL); err != nil {
+		if _, err := tx.Exec(ctx, schemaSQL+"\n"+adminIndexSQL); err != nil {
 			return fmt.Errorf("%w: activity005 DDL: %v", a.ErrUnavailable, err)
 		}
 		if err := grantRoles(ctx, tx, roles); err != nil {
@@ -118,7 +127,7 @@ func checkBaseline(ctx context.Context, q queryer) error {
 		return a.ErrUnavailable
 	}
 	newConstraints := map[string]bool{"activity_run_fk": true, "activity_variant": true}
-	newIndexes := map[string]bool{"activity_completion_ordinal": true, "activity_record_uuid": true, "activity_page": true, "activity_head_ref": true}
+	newIndexes := map[string]bool{"activity_completion_ordinal": true, "activity_record_uuid": true, "activity_page": true, "activity_head_ref": true, "activity_org_page": true}
 	for category, items := range wanted {
 		array, ok := items.([]any)
 		if !ok {

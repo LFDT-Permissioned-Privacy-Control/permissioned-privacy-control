@@ -29,7 +29,7 @@ func TestActualReaderRPCAndRecognizedRequestPopulations(t *testing.T) {
 	}
 	// The owner fixture deliberately includes historical ambiguous labels. New
 	// Recorder registrations reject those; neither selected population admits them.
-	methods := []string{"explorer.stats", "Explorer.stats", "explorer.unknown", "method0", "eth_call", "explorer.invalid_transport", "explorer.blocks"}
+	methods := []string{"explorer.stats", "Explorer.stats", "explorer.unknown", "method0", "eth_call", "explorer.invalid_transport", "explorer.blocks", activitymethoddata.AdminAccessLogs}
 	const at = int64(1700000000000000)
 	entries := make([]buffer.Entry, 0, len(methods))
 	for i, method := range methods {
@@ -74,7 +74,7 @@ func TestActualReaderRPCAndRecognizedRequestPopulations(t *testing.T) {
 		t.Fatal("request selection lost")
 	}
 	page, end, err = requests.ReadPage(ctx, readQuery(at, at+10, 100), nil)
-	expected := []string{"explorer.stats", "method0", "eth_call", "explorer.invalid_transport", "explorer.blocks"}
+	expected := []string{"explorer.stats", "method0", "eth_call", "explorer.invalid_transport", "explorer.blocks", activitymethoddata.AdminAccessLogs}
 	if err != nil || !end || len(page) != len(expected) {
 		t.Fatal("recognized requests", page, end, err)
 	}
@@ -84,7 +84,7 @@ func TestActualReaderRPCAndRecognizedRequestPopulations(t *testing.T) {
 		}
 	}
 	summary, err = requests.Summary(ctx, readQuery(at, at+10, 0))
-	if err != nil || len(summary) != 5 {
+	if err != nil || len(summary) != 6 {
 		t.Fatal("request summary population", summary, err)
 	}
 }

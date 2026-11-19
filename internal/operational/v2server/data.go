@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"privacy-proxy/internal/activitylog"
+	"privacy-proxy/internal/activitymethoddata"
 	"privacy-proxy/internal/admission"
 	"privacy-proxy/internal/creationcapture"
 	"privacy-proxy/internal/creationfacts"
@@ -463,6 +464,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 		labels = append(labels, b...)
 	}
 	labels = append(labels, "eth_call", "eth_sendRawTransaction")
+	labels = append(labels, activitymethoddata.OperationalLabels()...)
 	slices.Sort(labels)
 	labels = slices.Compact(labels)
 	p.recorder, e = activitylog.New(ctx, activitylog.Config{Network: p.network, SourceID: c.Activity.SourceID, ProducerID: c.Activity.ProducerID, ExpectedGeneration: c.Activity.Generation, Configuration: activitylog.Digest(configDigest), Methods: labels, Clock: time.Now, BufferDirectory: c.Activity.BufferDirectory, Limits: activitylog.DefaultLimits()}, activityWriter)

@@ -71,11 +71,25 @@ var operations = [...]Operation{
 
 func Operations() []Operation { return append([]Operation{}, operations[:]...) }
 
+// AdminAccessLogs is an operational completion, not a public Explorer route.
+// The reserved prefix keeps it outside both current and legacy RPC populations.
+const AdminAccessLogs = "explorer.admin_access_logs"
+
+// OperationalLabels are closed administrative completions. They have no entry
+// in Operations and cannot acquire a public Explorer route or RPC gate.
+func OperationalLabels() []string { return []string{AdminAccessLogs} }
+
 var explorerLabels = func() []string {
 	labels := []string{"explorer.invalid_request", "explorer.invalid_transport"}
 	for _, op := range operations {
 		labels = append(labels, op.Label)
 	}
+	sort.Strings(labels)
+	return labels
+}()
+
+var requestReservedLabels = func() []string {
+	labels := append(ExplorerLabels(), OperationalLabels()...)
 	sort.Strings(labels)
 	return labels
 }()
@@ -106,13 +120,17 @@ func Classify(method string) Class {
 	if !Reserved(method) {
 		return RPC
 	}
-	n := sort.SearchStrings(explorerLabels[:], method)
-	if n < len(explorerLabels) && explorerLabels[n] == method {
+	n := sort.SearchStrings(requestReservedLabels, method)
+	if n < len(requestReservedLabels) && requestReservedLabels[n] == method {
 		return Explorer
 	}
 	return Unknown
 }
 func ExplorerLabels() []string { return append([]string{}, explorerLabels[:]...) }
+
+// RequestReservedLabels is the closed non-RPC completion population. It must
+// not be used as an Explorer route or business-operation capability list.
+func RequestReservedLabels() []string { return append([]string{}, requestReservedLabels...) }
 
 func framed(domain string, parts ...[]byte) [32]byte {
 	h := sha256.New()
@@ -134,7 +152,7 @@ var classifierDigest = func() [32]byte {
 		[]byte("RPC=valid and nonreserved"),
 		[]byte("Explorer=valid and exact lower-case compiled label"),
 	}
-	for _, label := range explorerLabels {
+	for _, label := range requestReservedLabels {
 		parts = append(parts, []byte(label))
 	}
 	return framed(Version, parts...)

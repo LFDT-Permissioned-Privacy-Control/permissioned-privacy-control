@@ -38,8 +38,10 @@ revision labels do not establish equal file contents, broker selection,
 operational readiness or agreement across the fleet.
 
 Separate native pages provide selected compliance settings, travel records,
-disclosure cases and authorized data/audit reads, case-bound access logs and
-read-only diagnostics. Configuration changes still require the approved Git
+disclosure cases and authorized data/audit reads, organization-admin Access Logs
+and read-only diagnostics. Access Logs uses the shared durable activity recorder
+before protected output; external disclosure remains case-authorized.
+Configuration changes still require the approved Git
 and deployment process. These pages do not introduce a mutable policy API or
 an unrestricted user/log directory. The account page supports operational
 wallet linking and an explicit short-lived own-token download for the optional
@@ -120,10 +122,15 @@ not initialized as empty to bypass lost revocations or admission facts.
 | Wallet | Proof-backed links, challenges and permanent revocations. | `ops-v2-wallet-migrate`; [wallet](v2-wallet.md). |
 | Admission/creation | Used approvals, declarations, decisions and creation observations. | `ops-v2-admission-migrate` and creation-observer tooling; [admission](v2-admission.md), [current wallet source](v2-current-wallet-source.md). |
 | Historical namespace | Qualified historical ownership/cohort facts and permanent denies. | `ops-v2-namespace`; [history](v2-history-reads.md). |
-| Activity | Sealed request completions and their local durable spool. | Apply the repository's exact lean audit migrations 001–004 offline first, then `ops-activity-admin migrate` applies 005; [recording](v2-rpc-activity.md). |
+| Activity | Sealed request completions and their local durable spool. | Apply the repository's exact lean audit migrations 001–004 offline first, then `ops-activity-admin migrate` applies 005+006; [recording](v2-rpc-activity.md). |
 | Disclosures | Operational cases, revocations and exposure audit records. | `ops-v2-disclosure-migrate`; [protected data](v2-protected-data.md). |
 | SSO | Bounded one-use application handoffs. | `ops-v2-sso-migrate`; [SSO storage](v2-enterprise-sso-storage.md), [runtime](v2-enterprise-sso-runtime.md). |
 | Explorer index | Retained indexed candidates, never policy authority. | A separately managed indexer, accessed only through its bounded gRPC read service. Its database credentials stay inside the indexer. |
+
+The activity006 organization/order index requires draining every OPS reader/writer
+sharing that database before the owner migration. The explicit owner-only
+`downgrade-to-005 --drained` operation supports an old-image rollback without
+rewriting history or changing grants; see [activity source](v2-activity-source.md).
 
 The server runs its activity sealing and health loop. The deployment separately
 runs the required indexer, creation observer and selected retention workers.

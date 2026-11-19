@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"privacy-proxy/internal/activitymethoddata"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,32 @@ func normalEnvelope(t *testing.T) (Envelope, []byte) {
 		t.Fatal(err)
 	}
 	return e, raw
+}
+
+func TestOperationalCompletionRetainsExactV1WireAndLegacyCodec(t *testing.T) {
+	e, _ := normalEnvelope(t)
+	e.Method = activitymethoddata.AdminAccessLogs
+	raw, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeEnvelope(raw)
+	if err != nil || decoded.Version != 1 || decoded.Kind != 1 {
+		t.Fatal("legacy envelope decode", err)
+	}
+	decoded.BufferSeq = ""
+	spool, err := EncodeSpool(toRecord(decoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := DecodeSpool(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := SealEnvelope(restored, 1099511627777)
+	if err != nil || !bytes.Equal(raw, sealed) {
+		t.Fatal("legacy spool/seal rewrote new completion", err)
+	}
 }
 func TestExactSpoolAndSealedCodecVector(t *testing.T) {
 	e, raw := normalEnvelope(t)

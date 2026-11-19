@@ -228,12 +228,16 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool) {
 		go func() {
 			req, _ := http.NewRequestWithContext(t.Context(), "GET", server.URL+path, nil)
 			req.Header.Set("Authorization", "Bearer "+tok)
+			req.Header.Set(rpcactivity.RequestReferenceHeader, "caller-supplied-is-not-trusted")
 			response, err := server.Client().Do(req)
 			if err != nil {
 				done <- result{err: err}
 				return
 			}
 			defer response.Body.Close()
+			if response.StatusCode != 503 && !a.ValidUUID(response.Header.Get(rpcactivity.RequestReferenceHeader)) {
+				t.Error("durable Explorer response lacks recorder reference")
+			}
 			raw, err := io.ReadAll(response.Body)
 			done <- result{response.StatusCode, raw, err}
 		}()

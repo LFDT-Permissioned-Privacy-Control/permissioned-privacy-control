@@ -50,3 +50,13 @@ func TestActivityChainLockStandardLibraryOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestAccessLogInvestigationDoesNotAcquireOperationalStorage(t *testing.T) {
+	for dep := range transitiveDeps(t, moduleRoot(t), "privacy-proxy/internal/accesslog") {
+		for _, prefix := range []string{"privacy-proxy/internal/operational/", "privacy-proxy/internal/db", "privacy-proxy/internal/server", "privacy-proxy/internal/rbac", "github.com/jackc/", "github.com/redis/"} {
+			if dep == prefix || strings.HasPrefix(dep, prefix+"/") || strings.HasSuffix(prefix, "/") && strings.HasPrefix(dep, prefix) {
+				t.Errorf("access-log service acquired storage/legacy authority: %s", dep)
+			}
+		}
+	}
+}
