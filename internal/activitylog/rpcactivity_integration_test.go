@@ -114,7 +114,7 @@ func TestRPCActivityActualTLSAppendExpiryEffectsAndSharedCap(t *testing.T) {
 			instant.Store(now)
 			f.clock = &instant
 			n := &node{}
-			e, tok, financial, _ := mountedRawEngine(t, f, n, d, false)
+			e, tok, financial, snapshot := mountedRawEngine(t, f, n, d, false)
 			net := financial.Metadata().Network
 			network := networkidentity.Binding{Environment: net.Environment, ChainID: net.ChainID, GenesisHash: net.GenesisHash, DeploymentID: net.DeploymentID}
 			x := setupActivityDatabase(t, network)
@@ -145,7 +145,7 @@ func TestRPCActivityActualTLSAppendExpiryEffectsAndSharedCap(t *testing.T) {
 						return nil
 					}
 					recorder := rpcRecorder(t, x, func() time.Time { return time.Unix(instant.Load(), 0) }, hook)
-					service, err := rpcactivity.New(rpcactivity.Config{Engine: e, Recorder: recorder, Network: network})
+					service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: fixtureServingClock(f), Engine: e, Recorder: recorder, Network: network})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -159,7 +159,7 @@ func TestRPCActivityActualTLSAppendExpiryEffectsAndSharedCap(t *testing.T) {
 						} else {
 							badNetwork.DeploymentID += "-other"
 						}
-						if _, err := rpcactivity.New(rpcactivity.Config{Engine: e, Recorder: recorder, Network: badNetwork}); err == nil {
+						if _, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: fixtureServingClock(f), Engine: e, Recorder: recorder, Network: badNetwork}); err == nil {
 							t.Fatal("same chain different strong network mixed", part)
 						}
 					}
@@ -322,12 +322,12 @@ func TestRPCActivityActualSlowBodyDeadlineReleasesHTTPGate(t *testing.T) {
 	f := creationIntentRuntimeFixture()
 	f.creationObserved = true
 	n := &node{}
-	e, _, financial, _ := mountedRawEngine(t, f, n, d, false)
+	e, _, financial, snapshot := mountedRawEngine(t, f, n, d, false)
 	net := financial.Metadata().Network
 	network := networkidentity.Binding{Environment: net.Environment, ChainID: net.ChainID, GenesisHash: net.GenesisHash, DeploymentID: net.DeploymentID}
 	x := setupActivityDatabase(t, network)
 	recorder := rpcRecorder(t, x, func() time.Time { return time.Unix(now, 0) }, nil)
-	service, err := rpcactivity.New(rpcactivity.Config{Engine: e, Recorder: recorder, Network: network})
+	service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: fixtureServingClock(f), Engine: e, Recorder: recorder, Network: network})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestRPCActivityActualBroadcastCancelExpirySelectedOutcome(t *testing.T) {
 			instant.Store(now)
 			f.clock = &instant
 			n := &node{}
-			engine, tok, financial, _ := mountedRawEngine(t, f, n, d, false)
+			engine, tok, financial, snapshot := mountedRawEngine(t, f, n, d, false)
 			binding := financial.Metadata().Network
 			network := networkidentity.Binding{Environment: binding.Environment, ChainID: binding.ChainID, GenesisHash: binding.GenesisHash, DeploymentID: binding.DeploymentID}
 			x := setupActivityDatabase(t, network)
@@ -407,7 +407,7 @@ func TestRPCActivityActualBroadcastCancelExpirySelectedOutcome(t *testing.T) {
 						t.Fatal(err)
 					}
 					recorder := rpcRecorder(t, x, func() time.Time { return time.Unix(instant.Load(), 0) }, nil)
-					service, err := rpcactivity.New(rpcactivity.Config{Engine: engine, Recorder: recorder, Network: network})
+					service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: fixtureServingClock(f), Engine: engine, Recorder: recorder, Network: network})
 					if err != nil {
 						t.Fatal(err)
 					}

@@ -140,10 +140,10 @@ func TestHistoryRPCActualPGWalletSharesRecorderAndFinalGates(t *testing.T) {
 				return nil
 			}
 			recorder := rpcRecorder(t, activity, clock, hook, methods...)
-			if _, err := rpcactivity.New(rpcactivity.Config{Metadata: metadata, Recorder: recorder, Network: network}); err == nil {
+			if _, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: clock, Metadata: metadata, Recorder: recorder, Network: network}); err == nil {
 				t.Fatal("history-required snapshot served by sibling alone")
 			}
-			service, err := rpcactivity.New(rpcactivity.Config{History: history, Metadata: metadata, Recorder: recorder, Network: network})
+			service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: clock, History: history, Metadata: metadata, Recorder: recorder, Network: network})
 			if err != nil {
 				t.Fatal(err)
 			}

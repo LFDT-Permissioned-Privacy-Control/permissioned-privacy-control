@@ -110,7 +110,7 @@ func currentAddressCanonicalDelivery(t *testing.T, d *observerDatabase, reader *
 		t.Fatal(err)
 	}
 	recorder, scope, activityOwner := currentAddressActualRecorder(t, d, network, &clock, engine.OperationBinding().Methods)
-	service, err := rpcactivity.New(rpcactivity.Config{State: engine, Recorder: recorder, Network: network})
+	service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: func() time.Time { return time.Unix(clock.Load(), 0) }, State: engine, Recorder: recorder, Network: network})
 	if err != nil {
 		t.Fatal(err)
 	}

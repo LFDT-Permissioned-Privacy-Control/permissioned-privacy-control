@@ -197,13 +197,13 @@ func TestMinedTraceActualWalletSQLRecorderAndProfileRules(t *testing.T) {
 			case "root-revert":
 				n.mined.rootChange = func(r map[string]any) { r["error"] = "execution reverted"; r["output"] = "0xbabe" }
 			}
-			engine, tok, financial, _ := mountedMinedActivityEngine(t, f, n, d, listed, nil)
+			engine, tok, financial, snapshot := mountedMinedActivityEngine(t, f, n, d, listed, nil)
 			defer engine.Close()
 			net := financial.Metadata().Network
 			network := networkidentity.Binding{Environment: net.Environment, ChainID: net.ChainID, GenesisHash: net.GenesisHash, DeploymentID: net.DeploymentID}
 			x := setupActivityDatabase(t, network)
 			rec := rpcRecorder(t, x, func() time.Time { return time.Unix(now, 0) }, nil, "debug_traceTransaction", "bank_mined")
-			service, err := rpcactivity.New(rpcactivity.Config{Engine: engine, Recorder: rec, Network: network})
+			service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: fixtureServingClock(f), Engine: engine, Recorder: rec, Network: network})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -339,7 +339,7 @@ func TestMinedTraceActualAppendRevocationAndOriginalNodeFence(t *testing.T) {
 			}
 			n := &node{mined: newMinedActivityNode(t)}
 			var wallets *walletops.Service
-			engine, tok, financial, _ := mountedMinedActivityEngine(t, f, n, d, listed, func(s *walletops.Service) { wallets = s })
+			engine, tok, financial, snapshot := mountedMinedActivityEngine(t, f, n, d, listed, func(s *walletops.Service) { wallets = s })
 			defer engine.Close()
 			net := financial.Metadata().Network
 			network := networkidentity.Binding{Environment: net.Environment, ChainID: net.ChainID, GenesisHash: net.GenesisHash, DeploymentID: net.DeploymentID}
@@ -355,7 +355,7 @@ func TestMinedTraceActualAppendRevocationAndOriginalNodeFence(t *testing.T) {
 				}
 				return nil
 			}, "debug_traceTransaction", "bank_mined")
-			service, err := rpcactivity.New(rpcactivity.Config{Engine: engine, Recorder: rec, Network: network})
+			service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: fixtureServingClock(f), Engine: engine, Recorder: rec, Network: network})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -99,7 +99,7 @@ func TestMetadataActivityAllWireGoldensActualAppend(t *testing.T) {
 				}
 				return nil
 			}, e.OperationBinding().Methods...)
-			service, err := rpcactivity.New(rpcactivity.Config{Metadata: e, Recorder: recorder, Network: n.network()})
+			service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: func() time.Time { return time.Unix(clock.Load(), 0) }, Metadata: e, Recorder: recorder, Network: n.network()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -199,7 +199,7 @@ func TestMetadataActivityActualAppendAndOutputLifetimeCap(t *testing.T) {
 			var once sync.Once
 			t.Cleanup(func() { once.Do(func() { close(release) }) })
 			recorder := rpcRecorder(t, x, func() time.Time { return time.Unix(clock.Load(), 0) }, func(uint64) error { close(entered); <-release; return nil }, e.OperationBinding().Methods...)
-			service, err := rpcactivity.New(rpcactivity.Config{Metadata: e, Recorder: recorder, Network: n.network()})
+			service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: func() time.Time { return time.Unix(clock.Load(), 0) }, Metadata: e, Recorder: recorder, Network: n.network()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -301,7 +301,7 @@ func TestMetadataActivityCombinedSnapshotAndSharedNativeGate(t *testing.T) {
 		}
 		return nil
 	}, metadata.OperationBinding().Methods...)
-	service, err := rpcactivity.New(rpcactivity.Config{Engine: native, Metadata: metadata, Recorder: recorder, Network: network})
+	service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: func() time.Time { return time.Unix(clock.Load(), 0) }, Engine: native, Metadata: metadata, Recorder: recorder, Network: network})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestMetadataActivityCombinedSnapshotAndSharedNativeGate(t *testing.T) {
 	if foreignMetadata.OperationBinding().PolicyDigest == metadata.OperationBinding().PolicyDigest {
 		t.Fatal("actual same-version method change lost from digest")
 	}
-	if _, err := rpcactivity.New(rpcactivity.Config{Engine: native, Metadata: foreignMetadata, Recorder: recorder, Network: network}); err == nil {
+	if _, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: func() time.Time { return time.Unix(clock.Load(), 0) }, Engine: native, Metadata: foreignMetadata, Recorder: recorder, Network: network}); err == nil {
 		t.Fatal("equal-looking separate snapshot accepted")
 	}
 	handler, _ := service.Handler(orgA)

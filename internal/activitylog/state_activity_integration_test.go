@@ -111,7 +111,7 @@ func TestStateActivityPreservesNativeTwoMiBBodyAndExactID(t *testing.T) {
 	for _, withState := range []bool{false, true} {
 		before := metadataRows(t, x)
 		recorder := rpcRecorder(t, x, func() time.Time { return time.Unix(clock.Load(), 0) }, nil, state.OperationBinding().Methods...)
-		c := rpcactivity.Config{Engine: native, Recorder: recorder, Network: network}
+		c := rpcactivity.Config{Snapshot: snapshot, Clock: func() time.Time { return time.Unix(clock.Load(), 0) }, Engine: native, Recorder: recorder, Network: network}
 		if withState {
 			c.State = state
 		}
@@ -612,7 +612,7 @@ func TestStateActivitySharedMetadataGateThroughSocketAndNotification(t *testing.
 	x := setupActivityDatabase(t, n.network())
 	methods := append(e.OperationBinding().Methods, metadata.OperationBinding().Methods...)
 	recorder := rpcRecorder(t, x, func() time.Time { return time.Unix(clock.Load(), 0) }, nil, methods...)
-	service, err := rpcactivity.New(rpcactivity.Config{State: e, Metadata: metadata, Recorder: recorder, Network: n.network()})
+	service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: func() time.Time { return time.Unix(clock.Load(), 0) }, State: e, Metadata: metadata, Recorder: recorder, Network: n.network()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +622,7 @@ func TestStateActivitySharedMetadataGateThroughSocketAndNotification(t *testing.
 		t.Fatal("fixture changed selected bytes")
 	}
 	foreignState := stateEngine(t, stateConfig(t, n, copySnapshot, &clock))
-	if _, err := rpcactivity.New(rpcactivity.Config{State: foreignState, Metadata: metadata, Recorder: recorder, Network: n.network()}); err == nil {
+	if _, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: func() time.Time { return time.Unix(clock.Load(), 0) }, State: foreignState, Metadata: metadata, Recorder: recorder, Network: n.network()}); err == nil {
 		t.Fatal("foreign state snapshot accepted with metadata")
 	}
 	root, _ := service.Handler(d.Org)
@@ -691,7 +691,7 @@ func TestStateActivityActualAppendAndFinalViewAfterRecheck(t *testing.T) {
 		}
 	}
 	recorder := rpcRecorder(t, x, func() time.Time { return time.Unix(clock.Load(), 0) }, func(uint64) error { close(appendEntered); <-appendRelease; return nil }, e.OperationBinding().Methods...)
-	service, err := rpcactivity.New(rpcactivity.Config{State: e, Recorder: recorder, Network: n.network()})
+	service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: func() time.Time { return time.Unix(clock.Load(), 0) }, State: e, Recorder: recorder, Network: n.network()})
 	if err != nil {
 		t.Fatal(err)
 	}

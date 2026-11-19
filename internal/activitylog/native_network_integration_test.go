@@ -26,7 +26,7 @@ func TestNativeCallBoundNetworkAcquisitionAndAfterActualAppend(t *testing.T) {
 	f := metadataFixture()
 	f.clock = &clock
 	n := &node{}
-	engine, token, financial, _ := mountedRawEngine(t, f, n, db, false)
+	engine, token, financial, snapshot := mountedRawEngine(t, f, n, db, false)
 	net := financial.Metadata().Network
 	network := networkidentity.Binding{Environment: net.Environment, ChainID: net.ChainID, GenesisHash: net.GenesisHash, DeploymentID: net.DeploymentID}
 	originalGenesis, originalHead := types.CopyHeader(n.genesisHeader), types.CopyHeader(n.anchorHeader)
@@ -49,7 +49,7 @@ func TestNativeCallBoundNetworkAcquisitionAndAfterActualAppend(t *testing.T) {
 		}
 		return nil
 	})
-	service, err := rpcactivity.New(rpcactivity.Config{Engine: engine, Recorder: recorder, Network: network})
+	service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: fixtureServingClock(f), Engine: engine, Recorder: recorder, Network: network})
 	if err != nil {
 		t.Fatal(err)
 	}

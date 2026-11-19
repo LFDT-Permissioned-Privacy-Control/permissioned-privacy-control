@@ -135,13 +135,13 @@ func TestUtilityActualCheckedEstimateAccessListAndSignedRawPipeline(t *testing.T
 			f := utilityFixture()
 			u := &utilityActivityNode{t: t, wrongSigner: method == "wrong-signer", denyIntermediate: method == "gas-dependent-denial"}
 			n := &node{utility: u}
-			engine, tok, financial, _ := mountedRawEngine(t, f, n, d, false, creationMountOptions{configure: func(o *rpcengine.RawOptions) { o.Utilities = &rpcengine.ExecutionUtilityOptions{NodeSigning: true} }})
+			engine, tok, financial, snapshot := mountedRawEngine(t, f, n, d, false, creationMountOptions{configure: func(o *rpcengine.RawOptions) { o.Utilities = &rpcengine.ExecutionUtilityOptions{NodeSigning: true} }})
 			defer engine.Close()
 			net := financial.Metadata().Network
 			network := networkidentity.Binding{Environment: net.Environment, ChainID: net.ChainID, GenesisHash: net.GenesisHash, DeploymentID: net.DeploymentID}
 			x := setupActivityDatabase(t, network)
 			rec := rpcRecorder(t, x, func() time.Time { return time.Unix(now, 0) }, nil, "eth_estimateGas", "eth_createAccessList", "eth_sendTransaction")
-			service, err := rpcactivity.New(rpcactivity.Config{Engine: engine, Recorder: rec, Network: network})
+			service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: fixtureServingClock(f), Engine: engine, Recorder: rec, Network: network})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -3,6 +3,7 @@ package v2server
 import (
 	"net/http"
 	"privacy-proxy/internal/operational/rpcactivity"
+	"time"
 )
 
 func (s *Server) mountRPC(p *dataPlane) error {
@@ -11,7 +12,7 @@ func (s *Server) mountRPC(p *dataPlane) error {
 	if p.recorder.CheckHealth() != nil {
 		return ErrInvalid
 	}
-	service, e := rpcactivity.New(rpcactivity.Config{Engine: p.native, Metadata: p.metadata, State: p.state, History: p.history, Explorer: p.explorer, Recorder: p.recorder, Network: p.network})
+	service, e := rpcactivity.New(rpcactivity.Config{Snapshot: s.core, Clock: time.Now, Engine: p.native, Metadata: p.metadata, State: p.state, History: p.history, Explorer: p.explorer, Recorder: p.recorder, Network: p.network})
 	if e != nil {
 		return e
 	}

@@ -608,10 +608,7 @@ func mountedRawEngine(t *testing.T, f fixture, n *node, d rawDatabase, multiOrg 
 		}
 	}
 	snapshot := f.load(t)
-	clock := func() time.Time { return time.Unix(now, 0) }
-	if f.clock != nil {
-		clock = func() time.Time { return time.Unix(f.clock.Load(), 0) }
-	}
+	clock := fixtureServingClock(f)
 	if _, err := nativeadmission.NewRaw(snapshot, clock); multiOrg && err == nil {
 		t.Fatal("old native constructor accepted v3")
 	}
@@ -965,4 +962,12 @@ func setupActivityDatabase(t *testing.T, network networkidentity.Binding) *datab
 	}
 	x.scope = s.Scope{NetworkKey: key, SourceID: x.registration.SourceID, ExpectedGeneration: status.Metadata.Generation}
 	return x
+}
+
+// One trusted test assembly clock is supplied to both engines and transport.
+func fixtureServingClock(f fixture) func() time.Time {
+	if f.clock != nil {
+		return func() time.Time { return time.Unix(f.clock.Load(), 0) }
+	}
+	return func() time.Time { return time.Unix(now, 0) }
 }

@@ -65,6 +65,7 @@ func TestBusySupportedWriterGetsOriginalWriteDeadlineBeforeResponse(t *testing.T
 }
 
 type deadlineWriter struct {
+	body                      []byte
 	t                         *testing.T
 	header                    http.Header
 	expected, writeDeadline   time.Time
@@ -85,6 +86,7 @@ func (w *deadlineWriter) Write(b []byte) (int, error) {
 		w.t.Error("unbounded overloaded write")
 	}
 	w.writes++
+	w.body = append(w.body, b...)
 	return len(b), nil
 }
 

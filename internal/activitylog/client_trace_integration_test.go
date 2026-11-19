@@ -121,7 +121,7 @@ func TestClientTraceActualHTTPPostgresRecorderAndMasking(t *testing.T) {
 			case "original-id":
 				body = strings.Replace(body, `"id":"trace"`, `"id":1.2500e+03`, 1)
 			}
-			engine, tok, financial, _ := mountedRawEngine(t, f, n, d, false)
+			engine, tok, financial, snapshot := mountedRawEngine(t, f, n, d, false)
 			defer engine.Close()
 			if scenario == "ungranted-nested" || scenario == "foreign-nested" {
 				out := engine.Call(t.Context(), tok, orgA, []byte(strings.Replace(traceBody("debug_traceCall"), "debug_traceCall", "eth_call", 1)))
@@ -133,7 +133,7 @@ func TestClientTraceActualHTTPPostgresRecorderAndMasking(t *testing.T) {
 			network := networkidentity.Binding{Environment: net.Environment, ChainID: net.ChainID, GenesisHash: net.GenesisHash, DeploymentID: net.DeploymentID}
 			x := setupActivityDatabase(t, network)
 			rec := rpcRecorder(t, x, func() time.Time { return time.Unix(now, 0) }, nil, "debug_traceCall", "bank_trace")
-			service, err := rpcactivity.New(rpcactivity.Config{Engine: engine, Recorder: rec, Network: network})
+			service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: fixtureServingClock(f), Engine: engine, Recorder: rec, Network: network})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -216,7 +216,7 @@ func TestClientTraceActualAppendOriginalSourceAndLifetime(t *testing.T) {
 			if scenario == "wallet-revoke" {
 				f.linkSigner = true
 			}
-			engine, tok, financial, _ := mountedRawEngine(t, f, n, d, false, creationMountOptions{walletService: func(s *walletops.Service) { wallets = s }})
+			engine, tok, financial, snapshot := mountedRawEngine(t, f, n, d, false, creationMountOptions{walletService: func(s *walletops.Service) { wallets = s }})
 			defer engine.Close()
 			net := financial.Metadata().Network
 			network := networkidentity.Binding{Environment: net.Environment, ChainID: net.ChainID, GenesisHash: net.GenesisHash, DeploymentID: net.DeploymentID}
@@ -232,7 +232,7 @@ func TestClientTraceActualAppendOriginalSourceAndLifetime(t *testing.T) {
 				}
 				return nil
 			}, "debug_traceCall", "bank_trace")
-			service, err := rpcactivity.New(rpcactivity.Config{Engine: engine, Recorder: rec, Network: network})
+			service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: fixtureServingClock(f), Engine: engine, Recorder: rec, Network: network})
 			if err != nil {
 				t.Fatal(err)
 			}

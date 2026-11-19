@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"privacy-proxy/internal/activitylog"
+	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/networkidentity"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/rpcengine"
@@ -23,6 +24,12 @@ import (
 )
 
 type Config struct {
+	// Snapshot must be the actual object used by every configured engine. Clock
+	// is trusted assembly: use the same clock supplied to those engines. The
+	// extra verification only selects a local limiter key; engines still verify
+	// independently and retain all original authorization/live checks.
+	Snapshot *policybundle.CatalogSnapshot
+	Clock    identity.Clock
 	Engine   *rpcengine.Engine
 	Metadata *rpcengine.MetadataEngine
 	State    *rpcengine.StateEngine
@@ -45,6 +52,8 @@ type Service struct {
 	recorder       *activitylog.Recorder
 	organizations  []string
 	slots          chan struct{}
+	fairness       *localConcurrency
+	verifier       *identity.Verifier
 }
 
 var ErrInvalid = errors.New("invalid audited RPC service")
@@ -215,6 +224,12 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 	}
 	ctx, cancel := context.WithDeadline(r.Context(), deadline)
 	defer cancel()
+	release, admitted := s.acquireFairness(r.Header.Values("Authorization"))
+	if !admitted {
+		write(w, http.StatusTooManyRequests, busy)
+		return
+	}
+	defer release()
 	slot, err := s.recorder.Reserve()
 	if err != nil {
 		write(w, 503, busy)

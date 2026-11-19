@@ -208,7 +208,7 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool) {
 		}
 		return nil
 	}, methods...)
-	service, err := rpcactivity.New(rpcactivity.Config{History: history, State: stateEngine, Metadata: metadata, Explorer: explorer, Recorder: recorder, Network: network})
+	service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: clock, History: history, State: stateEngine, Metadata: metadata, Explorer: explorer, Recorder: recorder, Network: network})
 	if err != nil {
 		t.Fatal(err)
 	}

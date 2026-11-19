@@ -237,7 +237,7 @@ func TestNativeCurrentActualPublishedA2ReadonlyAndPostAppendSQL(t *testing.T) {
 		node.mu.Unlock()
 	})
 	recorder, scope, activityOwner := currentAddressActualRecorder(t, d, network, &clock, []string{"eth_call", "eth_sendRawTransaction"})
-	service, err := rpcactivity.New(rpcactivity.Config{Engine: engine, Recorder: recorder, Network: network})
+	service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: wall, Engine: engine, Recorder: recorder, Network: network})
 	if err != nil {
 		t.Fatal(err)
 	}

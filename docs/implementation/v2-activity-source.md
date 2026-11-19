@@ -56,6 +56,33 @@ A context timeout reports unavailable while the worker retains ownership; it
 does not close the buffer under an append or claim SQL drain. Retry Close to
 observe the same worker's eventual result.
 
+## Local request concurrency
+
+One operational service shares a local concurrency limiter across RPC aliases,
+organization routes and Explorer. It permits at most 50 concurrent requests per
+verified actor and 50 across all missing or invalid identities. JWT rotation or
+changing the selected organization does not create another actor bucket. Only
+active actors occupy memory; their entries are removed after the last release.
+
+The transport performs an extra bounded token verification against the exact
+immutable snapshot used by every configured engine, with the same explicitly
+supplied assembly clock. This selects a limiter key only. Engines still verify
+the original request independently and retain every permission and expiry check.
+Raw headers, JWT text, claimed IDs and IP addresses never become bucket keys.
+
+The limiter runs after the original IO deadlines and global service slot, before
+body reading and recorder reservation. A local capacity rejection returns HTTP
+429 with a finite error response and no request reference. Like the existing
+global-cap rejection, it is not a durable access-log event: it does no recorder,
+node or source work. Accepted requests keep their local credit through body
+reading, durable append and actual output return, including failure and expiry.
+
+These are per-process concurrency limits, not requests-per-second or daily
+quotas. The existing global ceiling of 256 and original 20-second IO/operation
+bound remain. Replicas and restarts do not share the counters; no Redis or fleet
+rate-limiter choice is implied. Invalid-token verification and slow rejection
+output remain globally bounded, rather than constituting a network DoS defense.
+
 ## SQL roles and initialization
 
 Use a dedicated lean audit database with the existing exact audit001..004

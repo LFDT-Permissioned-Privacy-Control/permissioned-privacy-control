@@ -20,6 +20,9 @@ func New(c Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err = s.bindFairness(c); err != nil {
+		return nil, err
+	}
 	if c.Explorer == nil {
 		return s, nil
 	}
@@ -66,6 +69,12 @@ func (s *Service) serveExplorer(w http.ResponseWriter, r *http.Request, org stri
 	}
 	ctx, cancel := context.WithDeadline(r.Context(), deadline)
 	defer cancel()
+	release, admitted := s.acquireFairness(r.Header.Values("Authorization"))
+	if !admitted {
+		write(w, http.StatusTooManyRequests, explorerBusy)
+		return
+	}
+	defer release()
 	slot, err := s.recorder.Reserve()
 	if err != nil {
 		write(w, 503, explorerBusy)

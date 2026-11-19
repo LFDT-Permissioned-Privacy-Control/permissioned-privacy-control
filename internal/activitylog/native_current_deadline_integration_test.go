@@ -24,7 +24,7 @@ func TestNativeCurrentOriginalDeadlineThroughActualAppend(t *testing.T) {
 	f := metadataFixture()
 	f.clock = &clock
 	n := &node{}
-	engine, token, financial, _ := mountedRawEngine(t, f, n, d, false, creationMountOptions{configure: func(o *rpcengine.RawOptions) {
+	engine, token, financial, snapshot := mountedRawEngine(t, f, n, d, false, creationMountOptions{configure: func(o *rpcengine.RawOptions) {
 		o.CurrentAddressLimits = rpcengine.DefaultNativeAddressLimits()
 		o.CurrentAddressLimits.Timeout = 200 * time.Millisecond
 	}})
@@ -80,7 +80,7 @@ func TestNativeCurrentOriginalDeadlineThroughActualAppend(t *testing.T) {
 	var once sync.Once
 	t.Cleanup(func() { once.Do(func() { close(release) }) })
 	recorder := rpcRecorder(t, x, func() time.Time { return time.Unix(clock.Load(), 0) }, func(uint64) error { close(entered); <-release; return nil })
-	service, err := rpcactivity.New(rpcactivity.Config{Engine: engine, Recorder: recorder, Network: network})
+	service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: fixtureServingClock(f), Engine: engine, Recorder: recorder, Network: network})
 	if err != nil {
 		t.Fatal(err)
 	}

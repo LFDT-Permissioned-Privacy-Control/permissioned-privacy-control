@@ -149,7 +149,7 @@ func TestClientTraceActualPublishedRuntimeAndRecorder(t *testing.T) {
 	}
 	defer engine.Close()
 	recorder, _, _ := currentAddressActualRecorder(t, d, network, &clock, []string{"eth_call", "eth_sendRawTransaction", "debug_traceCall"})
-	service, err := rpcactivity.New(rpcactivity.Config{Engine: engine, Recorder: recorder, Network: network})
+	service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: wall, Engine: engine, Recorder: recorder, Network: network})
 	if err != nil {
 		t.Fatal(err)
 	}

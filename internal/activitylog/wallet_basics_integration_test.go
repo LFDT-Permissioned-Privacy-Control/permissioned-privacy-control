@@ -168,7 +168,7 @@ func TestWalletBasicsActualRevokeWhilePebbleAppendHeld(t *testing.T) {
 	var once sync.Once
 	t.Cleanup(func() { once.Do(func() { close(release) }) })
 	recorder := rpcRecorder(t, x, func() time.Time { return time.Unix(clock.Load(), 0) }, func(uint64) error { close(entered); <-release; return nil }, engine.OperationBinding().Methods...)
-	service, err := rpcactivity.New(rpcactivity.Config{State: engine, Recorder: recorder, Network: n.network()})
+	service, err := rpcactivity.New(rpcactivity.Config{Snapshot: snapshot, Clock: func() time.Time { return time.Unix(clock.Load(), 0) }, State: engine, Recorder: recorder, Network: n.network()})
 	if err != nil {
 		t.Fatal(err)
 	}
