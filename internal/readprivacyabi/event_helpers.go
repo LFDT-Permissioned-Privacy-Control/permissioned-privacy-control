@@ -1,16 +1,18 @@
 package readprivacyabi
 
 import (
+	"bytes"
 	"encoding/hex"
-	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/common"
 	"math/big"
 	"strings"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // isHexValue returns true if s is a 0x-prefixed hex string of non-zero length.
 func isHexValue(s string) bool {
-	if len(s) < 4 || !strings.HasPrefix(s, "0x") {
+	if len(s) < 4 || len(s) > 66 || !strings.HasPrefix(s, "0x") {
 		return false
 	}
 	_, err := hex.DecodeString(s[2:])
@@ -25,7 +27,13 @@ func matchesParamSelf(
 	addrSet map[string]bool,
 	parsedEvent *abi.Event,
 ) bool {
+	if paramIndex < 0 {
+		return false
+	}
 	if parsedEvent == nil {
+		if paramIndex >= len(entry.Topics)-1 {
+			return false
+		}
 		// No ABI: fall back to checking topics for address-like values.
 		// Indexed param at ABI index i goes to topics[1+indexedOffset].
 		// Without ABI we can only check if the index maps to a topic position.
@@ -41,6 +49,9 @@ func matchesParamSelf(
 	}
 
 	input := parsedEvent.Inputs[paramIndex]
+	if input.Type.T != abi.AddressTy {
+		return false
+	}
 	if input.Indexed {
 		// Find which topic slot this indexed param occupies.
 		// topics[0] = event signature. topics[1..3] = indexed params in order.
@@ -61,23 +72,24 @@ func matchesParamSelf(
 	return dataParamMatchesAddr(entry.Data, parsedEvent, paramIndex, addrSet)
 }
 
-// matchesParamCustom checks if the event parameter at the given ABI index
-// matches the literal hex value specified in mustBe. The comparison is
-// type-aware based on the ABI:
-//   - address: 20-byte hex comparison (case-insensitive)
-//   - uint256: numeric comparison of hex-encoded big integers
-//   - bytes32: direct 32-byte hex comparison
-//   - bool:    "0x01" for true, "0x00" for false
-//
-// For indexed params the raw 32-byte topic is compared directly.
-// For non-indexed params the data field is ABI-decoded.
+// matchesParamCustom compares only supported static scalar ABI values. Numeric
+// literals use the canonical 32-byte ABI word (short positive legacy literals
+// may be left-padded). Negative intN values require sign-extended two's-complement
+// words; a short 0xff is not silently reinterpreted as int8(-1). Fixed bytes use
+// their declared width and right padding, including when indexed.
 func matchesParamCustom(
 	entry logEntry,
 	paramIndex int,
 	mustBe string,
 	parsedEvent *abi.Event,
 ) bool {
+	if paramIndex < 0 {
+		return false
+	}
 	if parsedEvent == nil {
+		if paramIndex >= len(entry.Topics)-1 {
+			return false
+		}
 		// No ABI: fall back to direct topic comparison for indexed params.
 		topicIdx := paramIndex + 1
 		if topicIdx < len(entry.Topics) {
@@ -115,151 +127,179 @@ func indexedTopicSlot(parsedEvent *abi.Event, paramIndex int) int {
 	return indexedPos + 1
 }
 
-// topicMatchesHex compares a 32-byte topic to a hex value with no type info.
-// Performs a case-insensitive comparison after zero-padding the mustBe value
-// to 32 bytes.
+// topicMatchesHex retains the documented empty-ABI legacy fallback: an exact
+// raw topic comparison after left padding a positive hex literal. It does not
+// claim to identify a parameter type or interpret hashed dynamic values.
 func topicMatchesHex(topic string, mustBe string) bool {
 	return topicMatchesHexTyped(topic, mustBe, "")
 }
 
-// topicMatchesHexTyped compares a 32-byte topic to a hex value with type awareness.
-// For address types, extracts the last 20 bytes and compares. For uint256,
-// compares as big integers. For all others, does a direct padded comparison.
-func topicMatchesHexTyped(topic string, mustBe string, abiType string) bool {
-	t := strings.ToLower(strings.TrimPrefix(topic, "0x"))
-	m := strings.ToLower(strings.TrimPrefix(mustBe, "0x"))
-
-	if len(t) != 64 {
+func topicMatchesHexTyped(topic, mustBe, abiType string) bool {
+	if len(topic) != 66 || !strings.HasPrefix(topic, "0x") {
 		return false
 	}
+	actual, err := hex.DecodeString(topic[2:])
+	if err != nil {
+		return false
+	}
+	if abiType == "" {
+		literal, ok := scalarLiteralBytes(mustBe)
+		if !ok {
+			return false
+		}
+		var expected [32]byte
+		copy(expected[32-len(literal):], literal)
+		return bytes.Equal(actual, expected[:])
+	}
+	typ, err := abi.NewType(abiType, "", nil)
+	if err != nil || !canonicalScalarWord(actual, typ) {
+		return false
+	}
+	expected, ok := scalarLiteralWord(mustBe, typ)
+	return ok && bytes.Equal(actual, expected[:])
+}
 
-	switch {
-	case abiType == "address":
-		// Address comparison: compare last 40 hex chars (20 bytes).
-		// mustBe can be either a 20-byte address or a 32-byte padded value.
-		if len(m) == 40 {
-			// Verify topic has zero padding in the first 12 bytes.
-			if strings.Trim(t[:24], "0") != "" {
+func scalarLiteralBytes(value string) ([]byte, bool) {
+	if len(value) < 4 || len(value) > 66 || !strings.HasPrefix(value, "0x") {
+		return nil, false
+	}
+	decoded, err := hex.DecodeString(value[2:])
+	return decoded, err == nil
+}
+
+// scalarLiteralWord does no truncation or floating-point conversion. Accept
+// existing legacy 32-byte address/fixed-bytes words only with canonical padding.
+func scalarLiteralWord(value string, typ abi.Type) ([32]byte, bool) {
+	var word [32]byte
+	literal, ok := scalarLiteralBytes(value)
+	if !ok {
+		return word, false
+	}
+	switch typ.T {
+	case abi.FixedBytesTy:
+		if typ.Size < 1 || typ.Size > 32 || len(literal) != typ.Size && len(literal) != 32 {
+			return word, false
+		}
+		copy(word[:], literal)
+	case abi.AddressTy:
+		if len(literal) != 20 && len(literal) != 32 {
+			return word, false
+		}
+		copy(word[32-len(literal):], literal)
+	case abi.IntTy, abi.UintTy, abi.BoolTy:
+		copy(word[32-len(literal):], literal)
+	default:
+		return word, false
+	}
+	return word, canonicalScalarWord(word[:], typ)
+}
+
+// go-ethereum represents some int widths as native Go integers and others as
+// *big.Int. Enforce every ABI width explicitly, including uint24/int24 etc.
+func canonicalScalarWord(word []byte, typ abi.Type) bool {
+	if len(word) != 32 {
+		return false
+	}
+	prefixIs := func(end int, value byte) bool {
+		for _, b := range word[:end] {
+			if b != value {
 				return false
 			}
-			return t[24:] == m
 		}
-		if len(m) == 64 {
-			return t == m
-		}
-		return false
-
-	case strings.HasPrefix(abiType, "uint"):
-		// Numeric comparison as big.Int.
-		topicInt, ok1 := new(big.Int).SetString(t, 16)
-		mustBeInt, ok2 := new(big.Int).SetString(m, 16)
-		if !ok1 || !ok2 {
+		return true
+	}
+	switch typ.T {
+	case abi.AddressTy:
+		return prefixIs(12, 0)
+	case abi.BoolTy:
+		return prefixIs(31, 0) && word[31] <= 1
+	case abi.FixedBytesTy:
+		if typ.Size < 1 || typ.Size > 32 {
 			return false
 		}
-		return topicInt.Cmp(mustBeInt) == 0
-
-	case abiType == "bool":
-		// Normalize: strip leading zeros, then compare.
-		topicStripped := strings.TrimLeft(t, "0")
-		mustStripped := strings.TrimLeft(m, "0")
-		topicBool := topicStripped == "1"
-		mustBool := mustStripped == "1"
-		topicFalse := topicStripped == ""
-		mustFalse := mustStripped == ""
-		return (topicBool && mustBool) || (topicFalse && mustFalse)
-
+		for _, b := range word[typ.Size:] {
+			if b != 0 {
+				return false
+			}
+		}
+		return true
+	case abi.UintTy, abi.IntTy:
+		if typ.Size < 8 || typ.Size > 256 || typ.Size%8 != 0 {
+			return false
+		}
+		padding := 32 - typ.Size/8
+		var sign byte
+		if typ.T == abi.IntTy && word[padding]&0x80 != 0 {
+			sign = 0xff
+		}
+		return prefixIs(padding, sign)
 	default:
-		// bytes32, bytes, or unknown: pad mustBe to 64 hex chars (right-pad for
-		// bytesN, but indexed topics are always left-padded to 32 bytes).
-		// Direct comparison after padding mustBe to 64 chars on the left with zeros.
-		if len(m) > 64 {
-			return false
-		}
-		padded := strings.Repeat("0", 64-len(m)) + m
-		return t == padded
+		return false
 	}
 }
 
 // dataParamMatchesCustom decodes the non-indexed parameters from the log data
 // field and checks if the parameter at paramIndex matches the custom mustBe value.
-func dataParamMatchesCustom(
-	data string,
-	parsedEvent *abi.Event,
-	paramIndex int,
-	mustBe string,
-) bool {
-	if data == "" || data == "0x" {
-		return false
-	}
-
-	dataHex := strings.TrimPrefix(data, "0x")
-	dataBytes, err := hex.DecodeString(dataHex)
-	if err != nil {
-		return false
-	}
-
-	// Collect non-indexed inputs to determine ABI decode ordering.
-	var nonIndexed abi.Arguments
-	nonIndexedABIIdx := -1
-	niCount := 0
-	for i, inp := range parsedEvent.Inputs {
-		if !inp.Indexed {
-			nonIndexed = append(nonIndexed, inp)
-			if i == paramIndex {
-				nonIndexedABIIdx = niCount
-			}
-			niCount++
-		}
-	}
-	if nonIndexedABIIdx < 0 {
-		return false
-	}
-
-	values, err := nonIndexed.Unpack(dataBytes)
-	if err != nil {
-		return false
-	}
-	if nonIndexedABIIdx >= len(values) {
-		return false
-	}
-
-	return compareDecodedValue(values[nonIndexedABIIdx], mustBe, parsedEvent.Inputs[paramIndex].Type.String())
+func dataParamMatchesCustom(data string, parsedEvent *abi.Event, paramIndex int, mustBe string) bool {
+	value, ok := decodedEventParameter(data, parsedEvent, paramIndex)
+	return ok && compareDecodedValue(value, mustBe, parsedEvent.Inputs[paramIndex].Type.String())
 }
 
-// compareDecodedValue compares an ABI-decoded Go value against a hex mustBe string.
+// Reuse the ABI encoder for the exact decoded Go type; this covers native
+// integers and every [N]byte without widening, signed casts or reflect coercion.
 func compareDecodedValue(decoded interface{}, mustBe string, abiType string) bool {
-	m := strings.ToLower(strings.TrimPrefix(mustBe, "0x"))
-
-	switch v := decoded.(type) {
-	case common.Address:
-		return strings.ToLower(v.Hex()[2:]) == m || (len(m) == 64 && m[24:] == strings.ToLower(v.Hex()[2:]))
-
-	case *big.Int:
-		mustBeInt, ok := new(big.Int).SetString(m, 16)
-		if !ok {
-			return false
-		}
-		return v.Cmp(mustBeInt) == 0
-
-	case bool:
-		// Normalize: strip leading zeros, then compare.
-		// "1", "01", "000...001" all mean true. "0", "00", "000...000" all mean false.
-		stripped := strings.TrimLeft(m, "0")
-		if stripped == "1" {
-			return v
-		}
-		if stripped == "" { // all zeros
-			return !v
-		}
-		return false
-
-	case [32]byte:
-		return hex.EncodeToString(v[:]) == m
-
-	default:
-		// For other types, encode to hex and compare.
+	if decoded == nil {
 		return false
 	}
+	if integer, ok := decoded.(*big.Int); ok && integer == nil {
+		return false
+	}
+	typ, err := abi.NewType(abiType, "", nil)
+	if err != nil {
+		return false
+	}
+	expected, ok := scalarLiteralWord(mustBe, typ)
+	if !ok {
+		return false
+	}
+	actual, err := (abi.Arguments{{Type: typ}}).Pack(decoded)
+	return err == nil && canonicalScalarWord(actual, typ) && bytes.Equal(actual, expected[:])
+}
+
+// decodedEventParameter requires the original canonical ABI payload. A
+// decoded address with nonzero padding or a payload with trailing bytes must
+// not satisfy a predicate merely because the decoder ignored those bytes.
+func decodedEventParameter(data string, event *abi.Event, paramIndex int) (interface{}, bool) {
+	if event == nil || paramIndex < 0 || paramIndex >= len(event.Inputs) || event.Inputs[paramIndex].Indexed {
+		return nil, false
+	}
+	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimPrefix(data, "0x"), "0X"))
+	if err != nil {
+		return nil, false
+	}
+	arguments := event.Inputs.NonIndexed()
+	values, err := arguments.Unpack(raw)
+	if err != nil {
+		return nil, false
+	}
+	canonical, err := arguments.Pack(values...)
+	if err != nil || !bytes.Equal(canonical, raw) {
+		return nil, false
+	}
+	position := 0
+	for i, input := range event.Inputs {
+		if input.Indexed {
+			continue
+		}
+		if i == paramIndex {
+			if position >= len(values) {
+				return nil, false
+			}
+			return values[position], true
+		}
+		position++
+	}
+	return nil, false
 }
 
 // topicMatchesAddr checks if a 32-byte topic hex string encodes one of the
@@ -267,6 +307,9 @@ func compareDecodedValue(decoded interface{}, mustBe string, abiType string) boo
 func topicMatchesAddr(topic string, addrSet map[string]bool) bool {
 	t := strings.ToLower(topic)
 	if len(t) != 66 || !strings.HasPrefix(t, "0x") {
+		return false
+	}
+	if _, err := hex.DecodeString(t[2:]); err != nil {
 		return false
 	}
 	// Address is last 40 chars, first 24 chars must be zero padding.
@@ -281,56 +324,16 @@ func topicMatchesAddr(topic string, addrSet map[string]bool) bool {
 // dataParamMatchesAddr decodes the non-indexed parameters from the log data
 // field and checks if the parameter at paramIndex is an address matching one
 // of the user's addresses.
-func dataParamMatchesAddr(
-	data string,
-	parsedEvent *abi.Event,
-	paramIndex int,
-	addrSet map[string]bool,
-) bool {
-	if data == "" || data == "0x" {
+func dataParamMatchesAddr(data string, event *abi.Event, paramIndex int, addrSet map[string]bool) bool {
+	if event == nil || paramIndex < 0 || paramIndex >= len(event.Inputs) || event.Inputs[paramIndex].Type.T != abi.AddressTy {
 		return false
 	}
-
-	dataHex := strings.TrimPrefix(data, "0x")
-	dataBytes, err := hex.DecodeString(dataHex)
-	if err != nil {
-		return false
-	}
-
-	// Collect non-indexed inputs to determine ABI decode ordering.
-	var nonIndexed abi.Arguments
-	nonIndexedABIIdx := -1
-	niCount := 0
-	for i, inp := range parsedEvent.Inputs {
-		if !inp.Indexed {
-			nonIndexed = append(nonIndexed, inp)
-			if i == paramIndex {
-				nonIndexedABIIdx = niCount
-			}
-			niCount++
-		}
-	}
-
-	if nonIndexedABIIdx < 0 {
-		return false // param is not non-indexed (shouldn't happen, handled above)
-	}
-
-	// Attempt ABI unpack.
-	values, err := nonIndexed.Unpack(dataBytes)
-	if err != nil {
-		return false
-	}
-
-	if nonIndexedABIIdx >= len(values) {
-		return false
-	}
-
-	addr, ok := values[nonIndexedABIIdx].(common.Address)
+	value, ok := decodedEventParameter(data, event, paramIndex)
 	if !ok {
 		return false
 	}
-
-	return addrSet[strings.ToLower(addr.Hex())]
+	address, ok := value.(common.Address)
+	return ok && addrSet[strings.ToLower(address.Hex())]
 }
 
 // eventHasDynamicNonIndexedParam reports whether the event matching

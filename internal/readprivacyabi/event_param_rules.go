@@ -61,6 +61,9 @@ func MatchesEventParamRules(
 	var parsedEvent *abi.Event
 	if abiJSON != "" {
 		parsedEvent = findEventByTopic0(abiJSON, log.Topics[0])
+		if parsedEvent == nil {
+			return false // an invalid/supplied ABI must not become the empty-ABI fallback
+		}
 	}
 	for _, pr := range paramRules {
 		switch {
