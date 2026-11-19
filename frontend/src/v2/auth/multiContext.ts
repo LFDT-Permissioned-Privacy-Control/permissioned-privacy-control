@@ -68,6 +68,16 @@ export function writeMultiMarker(next: MultiMarker): void {
 export function unchangedMulti(expected: MultiMarker): void {
   if (JSON.stringify(readMultiMarker()) !== JSON.stringify(expected)) throw new AuthError('session_changed')
 }
+// Noncredential ownership of an explicit login gesture. Keep even malformed
+// marker bytes distinguishable: an explicit fresh login may replace them,
+// but an old queued gesture must not replace a newer document's context.
+export type LoginContext = string | null
+export function readLoginContext(): LoginContext {
+  try { return localStorage.getItem(CONTEXT_KEY) } catch { throw new AuthError('login_required') }
+}
+export function unchangedLoginContext(expected: LoginContext): void {
+  if (readLoginContext() !== expected) throw new AuthError('session_changed')
+}
 export function requireMultiPair(marker: MultiMarker | null, expected: MultiSession): MultiMarker {
   if (!marker) throw new AuthError('login_required')
   if (!sameSession(multiPair(marker), expected)) throw new AuthError('session_changed')

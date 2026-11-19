@@ -83,3 +83,31 @@ func TestClosedCatalogVariantsCrossReferencesAndSourceLimits(t *testing.T) {
 		t.Fatal("null/inapplicable variant accepted")
 	}
 }
+
+func TestOptionalRolePredicatesAreExplicitAndKeepRequiredEncoding(t *testing.T) {
+	s := fixture()
+	required := raw(t, s)
+	if strings.Contains(string(required), `"optional"`) {
+		t.Fatal("required predicates changed canonical encoding")
+	}
+	before := compile(t, s, identity.DefaultLimits()).Digest()
+	s.Profiles[3].Predicates[0].Optional = true
+	encoded := raw(t, s)
+	decoded, err := identity.Decode(encoded, identity.DefaultLimits())
+	if err != nil || !decoded.Profiles[3].Predicates[0].Optional {
+		t.Fatal("explicit optional predicate", err)
+	}
+	if compile(t, decoded, identity.DefaultLimits()).Digest() == before {
+		t.Fatal("optional proof semantics missing from catalog digest")
+	}
+	for _, bad := range []string{`"optional":null`, `"optional":"true"`, `"optional":1`} {
+		invalid := strings.Replace(string(encoded), `"optional":true`, bad, 1)
+		if _, err := identity.Decode([]byte(invalid), identity.DefaultLimits()); err == nil {
+			t.Fatal("non-boolean optional accepted", bad)
+		}
+	}
+	s.Profiles[3].Predicates[0].Optional = false
+	if string(raw(t, s)) != string(required) {
+		t.Fatal("restoring required changed original encoding")
+	}
+}

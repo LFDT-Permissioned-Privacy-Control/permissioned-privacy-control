@@ -174,6 +174,24 @@ func TestActualPrivadoWalletSession(t *testing.T) {
 	if status != 409 || len(h.Values("Set-Cookie")) != 0 || x.familyReads.Load() != reads {
 		t.Fatal("wrong expected pair reached family", status)
 	}
+	// A still-fresh session restores from server-authenticated original evidence.
+	// It rotates the handle but neither contacts the provider nor extends expiry.
+	hits = rpc.hits.Load()
+	rpc.fail.Store(true)
+	status, h, raw = x.request(t, x.client, "POST", identityhttp.Prefix+"renew", renewal(first), nil)
+	rpc.fail.Store(false)
+	var restored identityhttp.AccessDTO
+	if status != 200 || len(h.Values("Set-Cookie")) != 2 || json.Unmarshal(raw, &restored) != nil || restored.BrowserSessionID != first.BrowserSessionID || rpc.hits.Load() != hits {
+		t.Fatal("fresh evidence required another proof", status, string(raw))
+	}
+	restoredClaims := accessClaims(t, restored)
+	if restoredClaims.ClaimsAsOf != claims.ClaimsAsOf || restoredClaims.SourceVerifiedAt != claims.SourceVerifiedAt || restoredClaims.Expires != claims.Expires || !reflect.DeepEqual(restoredClaims.Facts, claims.Facts) {
+		t.Fatal("session restore changed original evidence")
+	}
+	// At the original cutoff a new proof really is required; clock movement is
+	// local to this fixture and the next real witness uses the new request time.
+	expiryOffset := claims.Expires - time.Now().Unix() + 1
+	x.db.wallOffset.Store(expiryOffset)
 	status, h, raw = x.request(t, x.client, "POST", identityhttp.Prefix+"renew", renewal(first), nil)
 	var pending b.ProofRequired
 	if status != 200 || len(h.Values("Set-Cookie")) != 0 || json.Unmarshal(raw, &pending) != nil || pending.Status != "proof_required" || pending.ActorID != first.ActorID || pending.BrowserSessionID != first.BrowserSessionID || pending.SourceProfile != first.SourceProfile {
@@ -194,7 +212,7 @@ func TestActualPrivadoWalletSession(t *testing.T) {
 		t.Fatal("renewal replaced family")
 	}
 	current, e := x.db.one.ReadPrivadoFamily(t.Context(), x.db.scope, first.BrowserSessionID)
-	if e != nil || current.Generation != 1 || current.RevokedAt != nil || current.RequestID != originalFamily.RequestID || !current.AbsoluteExpiresAt.Equal(originalFamily.AbsoluteExpiresAt) {
+	if e != nil || current.Generation != 2 || current.RevokedAt != nil || current.RequestID != originalFamily.RequestID || !current.AbsoluteExpiresAt.Equal(originalFamily.AbsoluteExpiresAt) {
 		t.Fatal("family continuity/absolute cutoff changed", e)
 	}
 	secondClaims := accessClaims(t, second)
@@ -223,11 +241,11 @@ func TestActualPrivadoWalletSession(t *testing.T) {
 	// Intentional actual SDK cache reuse changes ONLY a newly generated outer
 	// proof. Advance the test clock, keep the cached SigV2 timestamp untouched,
 	// and demonstrate the production challenge/source-age rejection.
-	x.db.wallOffset.Store(31)
+	x.db.wallOffset.Store(expiryOffset + 31)
 	cachedStart := x.startPrivado(t, nil)
 	cached := x.walletProof(t, wallet, cachedStart, "a", "use")
 	status, h, _ = x.postWalletProof(t, cachedStart.RequestID, cached)
-	x.db.wallOffset.Store(0)
+	x.db.wallOffset.Store(expiryOffset)
 	if !cached.Diagnostics.HadCache || cached.Diagnostics.RoleGenerations != 0 || cached.Diagnostics.OuterGenerations != 1 || cached.Diagnostics.BypassProofsCache || status != 401 || len(h.Values("Set-Cookie")) != 0 {
 		t.Fatal("cached inner role evidence freshened", status)
 	}

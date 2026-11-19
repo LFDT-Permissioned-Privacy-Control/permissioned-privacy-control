@@ -24,6 +24,9 @@ import (
 // This is an ordinary application contract ABI, not policy EVM bytecode.
 const ContractABI = `[{"type":"function","name":"value","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},{"type":"function","name":"set","inputs":[{"name":"subject","type":"address"},{"name":"next","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"},{"type":"event","name":"Changed","inputs":[{"name":"subject","type":"address","indexed":true},{"name":"value","type":"uint256","indexed":false}],"anonymous":false}]`
 
+// CommonPrivadoProfile is the one approved request template for all demo holders.
+const CommonPrivadoProfile = "demo-privado"
+
 type Persona struct {
 	ID        string `json:"id"`
 	HolderDID string `json:"holderDid"`
@@ -69,7 +72,7 @@ func walletMetadata(s State) (WalletMetadata, []byte, error) {
 	}
 	ids := []string{"admin", "deployer", "reader", "outsider"}
 	for i, p := range m.Personas {
-		if p.ID != ids[i] || p.ProfileID != "demo-"+p.ID || (i < 3 && (p.RoleValue == nil || *p.RoleValue != i+1)) || (i == 3 && p.RoleValue != nil) {
+		if p.ID != ids[i] || p.ProfileID != CommonPrivadoProfile || (i < 3 && (p.RoleValue == nil || *p.RoleValue != i+1)) || (i == 3 && p.RoleValue != nil) {
 			return m, nil, ErrInvalid
 		}
 	}
@@ -97,21 +100,18 @@ func baseIdentitySource(s State, m WalletMetadata) (identity.SourceCatalog, erro
 	}
 	private := ed25519.PrivateKey(raw)
 	source := identity.SourceCatalog{APIVersion: identity.APIVersion, Kind: identity.CatalogKind, Issuers: []identity.Issuer{{ID: "demo-ops", Issuer: s.OPSOrigin(), Audience: "core", Keys: []identity.PublicKey{{Kid: "demo-access", Alg: "EdDSA", Kty: "OKP", Crv: "Ed25519", X: base64.RawURLEncoding.EncodeToString(private.Public().(ed25519.PublicKey))}}, AllowedProfiles: []string{}}}, Profiles: []identity.Profile{}, Mappings: []identity.Mapping{}}
+	// Every holder receives the same request template. Optional proofs grant
+	// only their independently verified positive facts. Omitting all role proofs
+	// still requires holder authentication and grants no mapped group.
+	profile := identity.Profile{ID: CommonPrivadoProfile, Kind: identity.PrivadoRole, VerifierID: m.VerifierDID, Network: m.Network, IdentityStateContract: m.StateContract, AllowedCredentialIssuers: []string{m.IssuerDID}, Context: m.ContextURL, ContextDigest: m.ContextSHA256, Type: m.CredentialType, CircuitID: m.CircuitID}
 	for i, who := range m.Personas {
-		profile := identity.Profile{ID: who.ProfileID, Kind: identity.PrivadoIdentity, VerifierID: m.VerifierDID, Network: m.Network, IdentityStateContract: m.StateContract}
 		if i < 3 {
-			profile.Kind = identity.PrivadoRole
-			profile.AllowedCredentialIssuers = []string{m.IssuerDID}
-			profile.Context = m.ContextURL
-			profile.ContextDigest = m.ContextSHA256
-			profile.Type = m.CredentialType
-			profile.CircuitID = m.CircuitID
-			profile.Predicates = []identity.Predicate{{ID: who.ID, Field: "role", Operator: "eq", Value: fmt.Sprint(*who.RoleValue)}}
-			source.Mappings = append(source.Mappings, identity.Mapping{ID: "demo-" + who.ID, ProfileID: who.ProfileID, OrganizationID: Organization, PrincipalKind: identity.Human, Fact: identity.Fact{Kind: "privado.predicate", Value: who.ID}, GroupIDs: []string{[]string{Admin, Deployer, Reader}[i]}})
+			profile.Predicates = append(profile.Predicates, identity.Predicate{ID: who.ID, Field: "role", Operator: "eq", Value: fmt.Sprint(*who.RoleValue), Optional: true})
+			source.Mappings = append(source.Mappings, identity.Mapping{ID: "demo-" + who.ID, ProfileID: CommonPrivadoProfile, OrganizationID: Organization, PrincipalKind: identity.Human, Fact: identity.Fact{Kind: "privado.predicate", Value: who.ID}, GroupIDs: []string{[]string{Admin, Deployer, Reader}[i]}})
 		}
-		source.Profiles = append(source.Profiles, profile)
-		source.Issuers[0].AllowedProfiles = append(source.Issuers[0].AllowedProfiles, profile.ID)
 	}
+	source.Profiles = append(source.Profiles, profile)
+	source.Issuers[0].AllowedProfiles = append(source.Issuers[0].AllowedProfiles, profile.ID)
 	return source, nil
 }
 func prepare(ctx context.Context, s State, name string, draft policybundle.Draft, docs map[string]any, extra map[string][]byte, options policybundle.Options) (*policybundle.CatalogSnapshot, vs.Selection, error) {
@@ -190,9 +190,7 @@ func bundles(ctx context.Context, s State) (*policybundle.CatalogSnapshot, *poli
 	brokerDraft := baseDraft(policybundle.BrokerMultiProfileID, brokerDescription.EvaluatorVersion)
 	brokerDraft.AuthCatalog = &policybundle.DraftIdentity{Path: "auth.json"}
 	auth := brokerpolicy.SourceV2{APIVersion: brokerpolicy.MultiAPIVersion, Kind: brokerpolicy.Kind, IssuerID: "demo-ops", AccessKeyID: "demo-access", WebOrigin: s.OPSOrigin(), CompletionURI: s.OPSOrigin() + "/auth/complete", AzureProfiles: []brokerpolicy.AzureBinding{}, PrivadoProfiles: []brokerpolicy.PrivadoBinding{}, PrivadoNetworks: []brokerpolicy.PrivadoNetwork{{Network: m.Network, ChainID: m.ChainID, StateContract: m.StateContract, RPCURL: m.StateRPCURL, AllowPrivate: true}}, PinnedDocuments: []brokerpolicy.PinnedDocumentRef{{URL: m.ContextURL, Path: "role-context.json", SHA256: m.ContextSHA256}}, RenewalKeys: []brokerpolicy.KeyRef{{ID: "demo-mac", FromEnv: "OPS_BROKER_REFRESH_DEMO", Active: true}}, EncryptionKeys: []brokerpolicy.KeyRef{{ID: "demo-aes", FromEnv: "OPS_BROKER_ENCRYPTION_DEMO", Active: true}}}
-	for _, p := range m.Personas {
-		auth.PrivadoProfiles = append(auth.PrivadoProfiles, brokerpolicy.PrivadoBinding{ProfileID: p.ProfileID})
-	}
+	auth.PrivadoProfiles = append(auth.PrivadoProfiles, brokerpolicy.PrivadoBinding{ProfileID: CommonPrivadoProfile})
 	brokerDocs := map[string]any{"identity.json": ids, "auth.json": auth}
 	brokerGroups := []policybundle.Group{}
 	for i, id := range []string{Admin, Deployer, Reader} {

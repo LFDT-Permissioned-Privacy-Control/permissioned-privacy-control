@@ -9,6 +9,7 @@ import { WalletProvider } from './wallet'
 import { Controller } from './controller'
 import { FLOW_KEY } from './protocol'
 import { AuthError } from '../auth/protocol'
+import { LocalDemoDriver } from './localDemoDriver'
 
 const mocks = vi.hoisted(() => ({ next: null as unknown, own: vi.fn(), inspect: vi.fn(), complete: vi.fn(), wallet: vi.fn(), operation: vi.fn() }))
 vi.mock('../auth/multiClient', () => ({ NewMultiClient: () => mocks.next }))
@@ -101,8 +102,27 @@ describe('document context and flow ownership', () => {
     mocks.next = client
     controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
     await controller.login('bank', 'privado', expected)
-    expect(client.startPrivadoLogin).toHaveBeenCalledWith('bank', expected)
+    expect(client.startPrivadoLogin).toHaveBeenCalledWith('bank', expected, expect.any(Function))
     expect(client.confirmPrivado).not.toHaveBeenCalled()
+  })
+  it('retires an anonymous demo attempt when another tab chooses an account', async () => {
+    const client = fake(); client.restore.mockRejectedValue(new AuthError('login_required'))
+    client.providers.mockResolvedValue({ profiles: [{ id: 'demo-privado', provider: 'privado', principalKind: 'human' }], completionPath: '/auth/complete' } as never)
+    mocks.next = client; controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    let receive!: (event: MessageEvent) => void
+    const popup = { closed: false, close: vi.fn(), postMessage: vi.fn() }
+    const driver = new LocalDemoDriver(controller, { origin: location.origin, walletOrigin: 'https://localhost:9444', nonce: () => 'a'.repeat(64), open: () => popup, listen: fn => { receive = fn; return () => {} }, navigate: vi.fn() })
+    try {
+      driver.start('admin'); const originalRevision = controller.scopeRevision
+      writeMultiMarker(activeMulti(b)); window.dispatchEvent(new StorageEvent('storage', { key: 'ops-v2.browser-context' })); await flush()
+      expect(controller.scopeRevision).not.toBe(originalRevision)
+      expect(controller.snapshot().phase).toBe('context-changed')
+      receive({ origin: 'https://localhost:9444', source: popup, data: { v: 1, type: 'ready', nonce: 'a'.repeat(64), config: { v: 1, testOnly: true, opsOrigin: location.origin, network: 'polygon:mumbai', issuerDid: 'did:iden3:polygon:mumbai:x11111', verifierDid: 'did:iden3:polygon:mumbai:x22222', personas: ['admin', 'deployer', 'reader', 'outsider'].map((id, n) => ({ id, profileId: 'demo-privado', holderDid: 'did:iden3:polygon:mumbai:x' + String(n + 3).repeat(10) })) } } } as unknown as MessageEvent)
+      await flush()
+      expect(client.startPrivadoLogin).not.toHaveBeenCalled(); expect(client.confirmPrivado).not.toHaveBeenCalled()
+      expect(localStorage.getItem('ops-v2.browser-context')).toBe(JSON.stringify(activeMulti(b)))
+      expect(popup.close).toHaveBeenCalled()
+    } finally { driver.dispose() }
   })
   it.each(['absent', 'empty'] as const)('presents an %s prior identity as ordinary signed out on bootstrap denial', async prior => {
     if (prior === 'empty') writeMultiMarker(deniedMulti())

@@ -70,6 +70,7 @@ type Predicate struct {
 	Field    string `json:"field"`
 	Operator string `json:"operator"`
 	Value    string `json:"value"`
+	Optional bool   `json:"optional,omitempty"`
 }
 type Fact struct {
 	Kind  string `json:"kind"`

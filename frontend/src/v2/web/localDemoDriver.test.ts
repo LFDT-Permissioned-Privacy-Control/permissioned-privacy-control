@@ -4,14 +4,16 @@ import { demoPersonas, demoReady, type DemoConfig, type DemoPersona } from './lo
 import type { Controller, State } from './controller'
 import type { Candidate } from '../auth/multiProtocol'
 import type { Flow, Self } from './protocol'
+import { writeMultiMarker } from '../auth/multiContext'
+import type { ProofRequired } from '../auth/multiProtocol'
 const origin = 'https://localhost:8443', wallet = 'https://localhost:9444'
-const config: DemoConfig = { v: 1, testOnly: true, opsOrigin: origin, network: 'polygon:mumbai', issuerDid: 'did:iden3:polygon:mumbai:x11111', verifierDid: 'did:iden3:polygon:mumbai:x22222', personas: demoPersonas.map((id, n) => ({ id, profileId: 'demo-' + id, holderDid: 'did:iden3:polygon:mumbai:x' + String(n + 3).repeat(10) })) }
+const config: DemoConfig = { v: 1, testOnly: true, opsOrigin: origin, network: 'polygon:mumbai', issuerDid: 'did:iden3:polygon:mumbai:x11111', verifierDid: 'did:iden3:polygon:mumbai:x22222', personas: demoPersonas.map((id, n) => ({ id, profileId: 'demo-privado', holderDid: 'did:iden3:polygon:mumbai:x' + String(n + 3).repeat(10) })) }
 const future = () => Date.now() / 1000 + 300
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r }); return { promise, resolve } }
 const flush = async () => { for (let n = 0; n < 20; n++) await Promise.resolve() }
 interface Controls { flow?: Flow; holdLogin?: Promise<void>; holdConfirm?: Promise<void>; holdContinue?: Promise<void>; admin?: boolean; automatic?: boolean }
 function fixture(options: Controls = {}) {
-  let state: State = { phase: 'anonymous', profiles: demoPersonas.map(id => ({ id: 'demo-' + id, provider: 'privado', principalKind: 'human' })), self: null, flow: options.flow ?? null, pending: null, candidate: null, busy: false, error: null }
+  let state: State = { phase: 'anonymous', profiles: [{ id: 'demo-privado', provider: 'privado', principalKind: 'human' }], self: null, flow: options.flow ?? null, pending: null, candidate: null, busy: false, error: null }
   let revision = 0, serial = 0, message: ((e: MessageEvent) => void) | null = null
   const listeners = new Set<() => void>(), events: string[] = [], popups: (DemoPopup & { sent: unknown[] })[] = []
   const set = (next: Partial<State>) => { state = { ...state, ...next }; listeners.forEach(f => f()) }
@@ -49,15 +51,116 @@ function fixture(options: Controls = {}) {
   return { driver, env, native, navigate, popups, events, receive, ready, candidate, state: () => state, set, replace: (next: Partial<State>) => { revision++; set(next) } }
 }
 let f: ReturnType<typeof fixture>
-beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-19T12:00:00Z')) })
+beforeEach(() => { localStorage.clear(); vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-19T12:00:00Z')) })
 afterEach(() => { f?.driver.dispose(); vi.useRealTimers() })
+
+function renewing(persona: DemoPersona = 'admin', options: Controls = {}) {
+  f = fixture(options)
+  const actorId = 'ops:p1:' + persona[0].toUpperCase().repeat(43)
+  const pending: ProofRequired = { status: 'proof_required', provider: 'privado', principalKind: 'human', mode: 'renew', sourceProfile: 'demo-privado', actorId,
+    browserSessionId: '22222222-2222-4222-8222-222222222222', requestId: '11111111-2222-4333-8444-555555555555', requestUri: origin + '/api/v2/auth/privado/requests/11111111-2222-4333-8444-555555555555', expiresAt: future() }
+  f.set({ phase: 'proof-pending', pending })
+  writeMultiMarker({ version: 2, phase: 'require-login', actorId, browserSessionId: pending.browserSessionId, sourceProfile: pending.sourceProfile, provider: 'privado',
+    pendingFlow: { kind: 'privado', mode: 'renew', requestId: pending.requestId, sourceProfile: pending.sourceProfile, expiresAt: pending.expiresAt, expectedActorId: actorId, expectedSessionId: pending.browserSessionId } })
+  return pending
+}
+
+describe('explicit demo assistance owns only the popup for the original renewal', () => {
+  it.each(['absent', 'actor', 'family', 'request', 'profile'] as const)('refuses %s marker ownership at the click without opening or changing authentication', async kind => {
+    const pending = renewing(), key = 'ops-v2.browser-context', marker = JSON.parse(localStorage.getItem(key)!)
+    if (kind === 'absent') localStorage.removeItem(key)
+    if (kind === 'actor') marker.actorId = marker.pendingFlow.expectedActorId = 'ops:p1:' + 'X'.repeat(43)
+    if (kind === 'family') marker.browserSessionId = marker.pendingFlow.expectedSessionId = '33333333-3333-4333-8333-333333333333'
+    if (kind === 'request') marker.pendingFlow.requestId = '44444444-4444-4444-4444-444444444444'
+    if (kind === 'profile') marker.sourceProfile = marker.pendingFlow.sourceProfile = 'other-profile'
+    if (kind !== 'absent') localStorage.setItem(key, JSON.stringify(marker))
+    const raw = localStorage.getItem(key); f.driver.start('admin'); await flush()
+    expect(f.popups).toHaveLength(0); expect(f.native.login).not.toHaveBeenCalled(); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.native.confirm).not.toHaveBeenCalled()
+    expect(f.state().pending).toBe(pending); expect(localStorage.getItem(key)).toBe(raw)
+  })
+  it('verifies the existing family without login, navigation or an automatic gesture', async () => {
+    const pending = renewing(); await flush()
+    expect(f.native.login).not.toHaveBeenCalled(); expect(f.native.confirm).not.toHaveBeenCalled(); expect(f.popups).toHaveLength(0)
+    f.driver.start('admin'); await f.ready()
+    expect(f.state().pending).toBe(pending); expect(f.native.login).not.toHaveBeenCalled()
+    expect(f.popups[0].sent).toEqual([{ v: 1, type: 'prove', nonce: '1'.repeat(64), persona: 'admin', requestUri: pending.requestUri }])
+    f.candidate('admin'); await flush()
+    expect(f.native.confirm).toHaveBeenCalledTimes(1); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.navigate).not.toHaveBeenCalled()
+    expect(f.driver.snapshot().active).toBe(false)
+  })
+  it('does not publish helper navigation or retry after a changed owner during confirmation', async () => {
+    const held = deferred(); renewing('admin', { holdConfirm: held.promise }); f.driver.start('admin'); await f.ready(); f.candidate('admin'); await flush()
+    expect(f.native.confirm).toHaveBeenCalledTimes(1); expect(f.driver.snapshot().cancellable).toBe(false)
+    f.replace({ pending: null, candidate: null, phase: 'anonymous' }); held.resolve(); await flush()
+    expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.navigate).not.toHaveBeenCalled(); expect(f.native.continue).not.toHaveBeenCalled(); expect(f.native.confirm).toHaveBeenCalledTimes(1)
+  })
+  it.each(['cancel', 'closed', 'blocked', 'failed', 'transport-throw', 'navigation'] as const)('%s retires helper work while leaving the existing pending and marker intact', async reason => {
+    const pending = renewing(), raw = localStorage.getItem('ops-v2.browser-context')
+    if (reason === 'blocked') f.env.open = () => null
+    f.driver.start('admin')
+    if (reason === 'transport-throw') f.popups[0].postMessage = () => { throw Error('closed') }
+    if (reason !== 'blocked') await f.ready()
+    if (reason === 'cancel') f.driver.cancel()
+    if (reason === 'closed') { f.popups[0].closed = true; await vi.advanceTimersByTimeAsync(201) }
+    if (reason === 'failed') f.receive({ v: 1, type: 'status', nonce: '1'.repeat(64), status: 'failed' })
+    if (reason === 'navigation') f.driver.navigation()
+    await flush()
+    expect(f.driver.snapshot().active).toBe(false); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.native.login).not.toHaveBeenCalled(); expect(f.native.confirm).not.toHaveBeenCalled()
+    expect(f.state().pending).toBe(pending); expect(localStorage.getItem('ops-v2.browser-context')).toBe(raw)
+  })
+  it.each(['holder', 'actor', 'profile', 'network', 'request', 'expiry'] as const)('rejects a mismatched candidate %s without canceling the family', async field => {
+    const pending = renewing(); f.driver.start('reader'); await f.ready()
+    // Even the correct pending actor cannot substitute a different holder.
+    const changes: Partial<Candidate> = { actorId: pending.actorId }
+    if (field === 'holder') changes.holderDid = config.personas[0].holderDid
+    if (field === 'actor') changes.actorId = 'ops:p1:' + 'X'.repeat(43)
+    if (field === 'profile') changes.sourceProfile = 'other-profile'
+    if (field === 'network') changes.network = 'polygon:amoy'
+    if (field === 'request') changes.requestId = '33333333-3333-4333-8333-333333333333'
+    if (field === 'expiry') changes.expiresAt = pending.expiresAt + 1
+    f.candidate('reader', changes); await flush()
+    // The holder case deliberately mismatches the selected reader; the other
+    // cases also cannot turn a renewal into an account switch.
+    expect(f.native.confirm).not.toHaveBeenCalled(); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.state().pending).toBe(pending)
+  })
+  it('a wrong persona may generate proof but cannot renew another actor or discard its draft', async () => {
+    const pending = renewing(); f.driver.start('reader'); await f.ready(); f.candidate('reader'); await flush()
+    expect(f.native.confirm).not.toHaveBeenCalled(); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.state().pending).toBe(pending)
+    f.set({ candidate: null }); f.driver.start('admin'); await f.ready(); f.candidate('admin'); await flush()
+    expect(f.native.confirm).toHaveBeenCalledTimes(1); expect(f.native.login).not.toHaveBeenCalled()
+  })
+  it.each(['ready', 'proof'] as const)('does not adopt changed raw marker bytes during %s, including a same-pair change', async phase => {
+    const pending = renewing(); f.driver.start('admin'); if (phase === 'proof') await f.ready()
+    const raw = localStorage.getItem('ops-v2.browser-context')!; localStorage.setItem('ops-v2.browser-context', raw + ' ')
+    if (phase === 'ready') await f.ready(); else { f.candidate('admin'); await flush() }
+    expect(f.native.confirm).not.toHaveBeenCalled(); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.state().pending).toBe(pending)
+    expect(localStorage.getItem('ops-v2.browser-context')).toBe(raw + ' ')
+  })
+  it.each(['reference', 'revision', 'expiry', 'flow'] as const)('rejects changed %s ownership without canceling a replacement request', async kind => {
+    const flow = { id: '33333333-3333-4333-8333-333333333333', clientId: 'explorer', displayName: 'Explorer', expiresAt: future() }
+    const pending = renewing('admin', { flow }); f.driver.start('admin'); await f.ready()
+    if (kind === 'reference') f.set({ pending: { ...pending } })
+    if (kind === 'revision') f.replace({ pending })
+    if (kind === 'expiry') pending.expiresAt++
+    if (kind === 'flow') flow.expiresAt++
+    f.candidate('admin'); await flush()
+    expect(f.native.confirm).not.toHaveBeenCalled(); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.native.login).not.toHaveBeenCalled()
+  })
+  it('never extends the original pending expiry while waiting for wallet setup', async () => {
+    const pending = renewing(); pending.expiresAt = Date.now() / 1000 + 1
+    // Re-pin the matching server-style marker for the short original request.
+    const marker = JSON.parse(localStorage.getItem('ops-v2.browser-context')!); marker.pendingFlow.expiresAt = pending.expiresAt; localStorage.setItem('ops-v2.browser-context', JSON.stringify(marker))
+    f.driver.start('admin'); await vi.advanceTimersByTimeAsync(1001); await f.ready()
+    expect(f.popups[0].closed).toBe(true); expect(f.native.confirm).not.toHaveBeenCalled(); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.state().pending).toBe(pending)
+  })
+})
 
 describe('one explicit public demo identity owns the normal native login', () => {
   it.each(demoPersonas)('completes %s from verified candidate and current roles, not its label', async persona => {
     f = fixture({ admin: persona === 'reader' }); f.driver.start(persona)
     expect(f.events).toEqual(['listen', 'open']); expect(f.native.login).not.toHaveBeenCalled(); await f.ready()
     const p = config.personas.find(p => p.id === persona)!
-    expect(f.native.login).toHaveBeenCalledWith(p.profileId, 'privado', p.holderDid)
+    expect(f.native.login).toHaveBeenCalledWith(p.profileId, 'privado', p.holderDid, null)
     expect(f.popups[0].sent).toEqual([{ v: 1, type: 'prove', nonce: '1'.repeat(64), persona, requestUri: f.state().pending!.requestUri }])
     f.receive({ v: 1, type: 'status', nonce: '1'.repeat(64), status: 'submitted' }); await flush(); expect(f.native.confirm).not.toHaveBeenCalled()
     f.candidate(persona); await flush()
@@ -72,6 +175,14 @@ describe('one explicit public demo identity owns the normal native login', () =>
     f.receive({ ...ready, config: { ...config, network: 'polygon:amoy' } }); await flush()
     expect(f.native.login).not.toHaveBeenCalled(); expect(f.popups[0].closed).toBe(true)
   })
+  it('does not let a delayed ready replace a changed shared account even before a storage event arrives', async () => {
+    f = fixture(); f.driver.start('admin')
+    localStorage.setItem('ops-v2.browser-context', 'another explicit login now owns this marker')
+    await f.ready()
+    expect(f.native.login).not.toHaveBeenCalled(); expect(f.popups[0].closed).toBe(true)
+    expect(f.driver.snapshot().error).toMatch(/account changed/)
+    expect(localStorage.getItem('ops-v2.browser-context')).toBe('another explicit login now owns this marker')
+  })
   it('rejects wrong expected holder and does not adopt a matching-looking replacement pending object', async () => {
     f = fixture(); f.driver.start('admin'); await f.ready(); f.candidate('reader'); await flush()
     expect(f.native.confirm).not.toHaveBeenCalled(); expect(f.native.cancel).toHaveBeenCalledTimes(1)
@@ -83,7 +194,7 @@ describe('one explicit public demo identity owns the normal native login', () =>
     const old = f.popups[0]; f.driver.cancel(); await flush(); expect(f.native.cancel).toHaveBeenCalledTimes(1)
     f.driver.start('reader'); await f.ready(); held.resolve(); await flush()
     f.receive({ v: 1, type: 'status', nonce: '1'.repeat(64), status: 'submitted' }, old); f.candidate('reader'); await flush()
-    expect(f.native.confirm).toHaveBeenCalledTimes(1); expect(f.state().self?.sourceProfile).toBe('demo-reader'); expect(f.popups.every(p => p.closed)).toBe(true)
+    expect(f.native.confirm).toHaveBeenCalledTimes(1); expect(f.state().self?.sourceProfile).toBe('demo-privado'); expect(f.popups.every(p => p.closed)).toBe(true)
   })
   it('cancels only its original pending, never a newer account or request', async () => {
     f = fixture(); f.driver.start('admin'); await f.ready(); f.replace({ pending: { ...f.state().pending!, requestId: '22222222-2222-4222-8222-222222222222' } }); await flush()
@@ -129,6 +240,22 @@ describe('one explicit public demo identity owns the normal native login', () =>
     expect(f.native.login).not.toHaveBeenCalled(); expect(f.driver.snapshot().error).toMatch(/could not open/)
     f.driver.dispose(); f = fixture(); f.driver.start('admin'); await f.ready(); await vi.advanceTimersByTimeAsync(150001)
     expect(f.native.confirm).not.toHaveBeenCalled(); expect(f.native.cancel).toHaveBeenCalledTimes(1); expect(f.popups[0].closed).toBe(true)
+  })
+  it('allows first-use certificate setup beyond 15 seconds without starting authentication early', async () => {
+    f = fixture(); f.driver.start('admin'); await vi.advanceTimersByTimeAsync(20000)
+    expect(f.driver.snapshot().active).toBe(true); expect(f.popups[0].closed).toBe(false)
+    expect(f.native.login).not.toHaveBeenCalled(); expect(f.native.confirm).not.toHaveBeenCalled()
+    await f.ready(); f.candidate('admin'); await flush()
+    expect(f.native.login).toHaveBeenCalledTimes(1); expect(f.native.confirm).toHaveBeenCalledTimes(1)
+  })
+  it('bounds certificate setup by its own wait and the original application expiry', async () => {
+    f = fixture(); f.driver.start('admin'); await vi.advanceTimersByTimeAsync(120001)
+    expect(f.popups[0].closed).toBe(true); expect(f.native.login).not.toHaveBeenCalled()
+    f.driver.dispose()
+    f = fixture({ flow: { id: '33333333-3333-4333-8333-333333333333', clientId: 'explorer', displayName: 'Explorer', expiresAt: Date.now() / 1000 + 5 } })
+    f.driver.start('admin'); await vi.advanceTimersByTimeAsync(5001); await f.ready()
+    expect(f.popups[0].closed).toBe(true); expect(f.native.login).not.toHaveBeenCalled()
+    expect(f.native.confirm).not.toHaveBeenCalled(); expect(f.native.continue).not.toHaveBeenCalled()
   })
 })
 

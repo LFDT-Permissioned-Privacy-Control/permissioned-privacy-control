@@ -4,12 +4,13 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthenticationPage } from './AuthenticationPage'
 import { Controller, State } from './controller'
+import type { ReactNode } from 'react'
 
 const profile = { id: 'configured-connection', provider: 'privado' as const, principalKind: 'human' as const }
 const anonymous: State = { phase: 'anonymous', profiles: [profile], self: null, flow: null, pending: null, candidate: null, busy: false, error: null }
-function page(state = anonymous) {
+function page(state = anonymous, demoSlot?: ReactNode, demoBusy = false) {
   const controller = { snapshot: () => state, subscribe: () => () => {}, login: vi.fn(), confirm: vi.fn(), cancel: vi.fn(), logout: vi.fn(), continue: vi.fn() }
-  render(<MemoryRouter><AuthenticationPage controller={controller as unknown as Controller} /></MemoryRouter>)
+  render(<MemoryRouter><AuthenticationPage controller={controller as unknown as Controller} demoSlot={demoSlot} demoBusy={demoBusy} /></MemoryRouter>)
   return controller
 }
 afterEach(cleanup)
@@ -71,5 +72,31 @@ describe('native sign-in with the V1 presentation', () => {
     expect(screen.getByLabelText('Choose account')).toHaveTextContent(profile.id)
     expect(controller.confirm).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Use this identity' })); expect(controller.confirm).toHaveBeenCalledTimes(1)
+  })
+  it('prioritizes demo renewal while keeping manual wallet verification and whole-flow cancellation explicit', () => {
+    const id = '44444444-4444-4444-4444-444444444444'
+    const controller = page({ ...anonymous, phase: 'proof-pending', pending: { status: 'proof_required', provider: 'privado', sourceProfile: profile.id,
+      actorId: 'ops:p1:' + 'A'.repeat(43), browserSessionId: '11111111-1111-1111-1111-111111111111', principalKind: 'human', mode: 'renew', requestId: id,
+      requestUri: location.origin + '/api/v2/auth/privado/requests/' + id, expiresAt: Math.floor(Date.now() / 1000) + 300 } }, <button>Demo Admin</button>)
+    expect(screen.getByRole('button', { name: 'Demo Admin' })).toBeVisible()
+    expect(screen.getByTestId('manual-wallet-login')).not.toHaveAttribute('open')
+    expect(screen.getByTestId('qr-code')).not.toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Continue with Privado ID' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel sign in', exact: true }))
+    expect(controller.cancel).toHaveBeenCalledTimes(1)
+  })
+  it('keeps manual confirmation available for a candidate the demo helper does not own', () => {
+    const id = '44444444-4444-4444-4444-444444444444', actorId = 'ops:p1:' + 'A'.repeat(43), expiresAt = Math.floor(Date.now() / 1000) + 300
+    const state: State = { ...anonymous, phase: 'proof-pending', pending: { status: 'proof_required', provider: 'privado', sourceProfile: profile.id, actorId,
+      browserSessionId: '11111111-1111-1111-1111-111111111111', principalKind: 'human', mode: 'renew', requestId: id,
+      requestUri: location.origin + '/api/v2/auth/privado/requests/' + id, expiresAt }, candidate: { status: 'candidate', requestId: id, holderDid: 'did:iden3:polygon:mumbai:x11111', network: 'polygon:mumbai', actorId, sourceProfile: profile.id, proofDigest: 'sha256:' + 'a'.repeat(64), verifiedAt: expiresAt - 300, expiresAt } }
+    const controller = page(state, <p>Demo helper</p>)
+    expect(controller.confirm).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Use this identity' }))
+    expect(controller.confirm).toHaveBeenCalledTimes(1)
+    cleanup(); page(state, <p>Demo helper progress</p>, true)
+    expect(screen.queryByRole('button', { name: 'Use this identity' })).not.toBeInTheDocument()
+    expect(screen.getByText('Demo helper progress')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Cancel sign in', exact: true })).toBeVisible()
   })
 })

@@ -30,6 +30,7 @@ import (
 
 type walletReady struct {
 	Type, TestOnly, SDKVersion, HolderA, HolderB, IssuerDID, VerifierDID, ContextURL, Network, ChainID, StateContract, RPCURL string
+	HolderMulti, HolderZero                                                                                                   string
 	Context                                                                                                                   json.RawMessage
 }
 type walletProof struct {
@@ -238,6 +239,9 @@ func (t walletRPCTransport) RoundTrip(request *http.Request) (*http.Response, er
 	return t.rpc.server.Client().Transport.RoundTrip(copy)
 }
 func configureWalletFixture(t *testing.T, x *multiHTTPFixture, w *walletProcess, rpc *walletRPC) {
+	configureWalletFixtureSources(t, x, w, rpc, nil)
+}
+func configureWalletFixtureSources(t *testing.T, x *multiHTTPFixture, w *walletProcess, rpc *walletRPC, edit func(*identity.SourceCatalog)) {
 	t.Helper()
 	x.db.wallClock.Store(true)
 	ids := f.MultiIdentitySource(t)
@@ -264,6 +268,9 @@ func configureWalletFixture(t *testing.T, x *multiHTTPFixture, w *walletProcess,
 		}
 	}
 	ids.Mappings = append(ids.Mappings, identity.Mapping{ID: "privado-reader", ProfileID: f.PrivadoRoleProfile, OrganizationID: d.Org, PrincipalKind: identity.Human, Fact: identity.Fact{Kind: "privado.predicate", Value: "reader"}, GroupIDs: []string{d.AuditorGroup}})
+	if edit != nil {
+		edit(&ids)
+	}
 	x.db.snapshot = f.MultiSnapshotSources(t, ids, broker, map[string][]byte{"role-context.json": w.ready.Context})
 	x.privadoTransport = walletRPCTransport{rpc}
 }

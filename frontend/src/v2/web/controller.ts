@@ -1,6 +1,6 @@
 import { NewMultiClient, MultiBrowserAuthClient } from '../auth/multiClient'
 import { CONTEXT_KEY } from '../auth/context'
-import { multiPair, readMultiMarker } from '../auth/multiContext'
+import { multiPair, readMultiMarker, readLoginContext, unchangedLoginContext, type LoginContext } from '../auth/multiContext'
 import { AccessOutcome, Candidate, MultiAccess, MultiSession, Pending, sameSession } from '../auth/multiProtocol'
 import { AuthError, session } from '../auth/protocol'
 import { completeFlow, Flow, FLOW_KEY, inspectFlow, ownSelf, readContinuation, saveContinuation, Self } from './protocol'
@@ -270,15 +270,19 @@ export class Controller {
       const result = await this.client.restore(); this.check(op); await this.outcome(op, result)
     })
   }
-  login = async (profile: string, kind: 'azure' | 'privado', expectedHolderDid?: string): Promise<void> => {
+  login = async (profile: string, kind: 'azure' | 'privado', expectedHolderDid?: string, clickedContext?: LoginContext): Promise<void> => {
     if (!this.state.profiles.some(p => p.id === profile && p.provider === kind)) return
     if (!this.replace()) return
     await this.work('login', async op => {
+      const expectedContext = clickedContext === undefined ? readLoginContext() : clickedContext
+      // Recheck inside the existing browser lock, immediately before any
+      // marker write or provider request. A queued old click owns neither.
+      const requireCurrent = () => { this.check(op); unchangedLoginContext(expectedContext) }
       if (kind === 'azure') {
-        const result = await this.client.startAzureLogin(profile); this.check(op)
+        const result = await this.client.startAzureLogin(profile, requireCurrent); this.check(op)
         location.replace(result.authorizationUrl)
       } else {
-        const result = await (expectedHolderDid === undefined ? this.client.startPrivadoLogin(profile) : this.client.startPrivadoLogin(profile, expectedHolderDid)); this.check(op)
+        const result = await this.client.startPrivadoLogin(profile, expectedHolderDid, requireCurrent); this.check(op)
         this.set({ phase: 'proof-pending', busy: false, pending: { status: 'login_in_progress', provider: 'privado', sourceProfile: profile,
           expiresAt: result.expiresAt, requestId: result.requestId, requestUri: result.requestUri } })
         this.schedulePoll()
@@ -405,7 +409,7 @@ export class Controller {
     // A completed same-pair renewal may restore byte-identical marker bytes.
     // Every relevant foreign event still retires wallet work, never adopts it.
     this.flushSuspension(() => this.retireWallet())
-    if (!this.selected) return
+    if (!this.selected) { this.changed(); return }
     try { const m = readMultiMarker(); if (!m || !sameSession(this.selected, multiPair(m))) this.changed() }
     catch { this.changed() }
   }

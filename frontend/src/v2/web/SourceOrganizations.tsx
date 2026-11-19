@@ -8,6 +8,8 @@ import { Input } from '../../components/ui/input'
 import { Textarea } from '../../components/ui/textarea'
 import { Badge } from '../../components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
+import { SourceAuthoringScope } from './SourceAuthoringScope'
+import { useAuthoringState, useClearAuthoring } from './sourceAuthoring'
 import { METHOD_SECTIONS } from '../../types/rbac'
 import type { DraftGroup } from './workspace'
 import { createGroup, createOrganization, documentFor, groupsOf, referenceFiles, removeGroup, removeOrganization, rootOf, updateGroup, updateOrganization, type SourceProject } from './sourceProject'
@@ -16,9 +18,12 @@ interface Props { project: SourceProject; root: string; organization: string; gr
 type Modal = { kind: 'org'; id?: string } | { kind: 'group'; id?: string } | { kind: 'inspect'; group: DraftGroup } | { kind: 'delete-org' | 'delete-group'; id: string }
 export function SourceOrganizations({ project, root, organization, groupsPage, editing, onChange, onOrganization }: Props) {
   const selected = rootOf(project, root), org = selected.draft.organizations.find(o => o.id === organization)
-  const [modal, setModal] = useState<Modal | null>(null), [search, setSearch] = useState(''), [error, setError] = useState<string | null>(null)
+  const clear = useClearAuthoring()
+  const [pendingModal, setModal] = useAuthoringState<Exclude<Modal, { kind: 'inspect' }> | null>('modal', null), [search, setSearch] = useAuthoringState('search', ''), [error, setError] = useState<string | null>(null)
+  const [inspection, setInspection] = useState<Extract<Modal, { kind: 'inspect' }> | null>(null)
+  const modal = inspection ?? (editing ? pendingModal : null)
   const groups = org ? groupsOf(project, root, org.id).filter(g => !search || `${g.name} ${g.slug}`.toLowerCase().includes(search.toLowerCase())) : []
-  const close = () => { setModal(null); setError(null) }
+  const close = () => { if (inspection) setInspection(null); else { clear('form'); setModal(null) } setError(null) }
   function remove() {
     try {
       if (modal?.kind === 'delete-org') { onChange(removeOrganization(project, root, modal.id)); onOrganization('') }
@@ -35,7 +40,7 @@ export function SourceOrganizations({ project, root, organization, groupsPage, e
     {groupsPage ? !org ? <p className="py-12 text-center text-neutral-500">Select an organization from the imported source</p>
       : <><Input aria-label="Search groups" placeholder="Search by name or slug..." className="max-w-sm" value={search} onChange={e => setSearch(e.target.value)} />
         {groups.length ? <GroupCards groups={groups.map(g => ({ ...g, methodCount: g.allowedMethods.length }))} renderActions={id => <>
-          <Button variant="ghost" size="sm" title="View declared permissions" onClick={() => setModal({ kind: 'inspect', group: groups.find(g => g.id === id)! })}><Settings className="w-4 h-4" /></Button>
+          <Button variant="ghost" size="sm" title="View declared permissions" onClick={() => setInspection({ kind: 'inspect', group: groups.find(g => g.id === id)! })}><Settings className="w-4 h-4" /></Button>
           {editing && <><Button variant="ghost" size="sm" title="Edit group draft" onClick={() => setModal({ kind: 'group', id })}><Pencil className="w-4 h-4" /></Button><Button variant="ghost" size="sm" title="Remove group from draft" onClick={() => setModal({ kind: 'delete-group', id })}><Trash2 className="w-4 h-4" /></Button></>}
         </>} /> : <p className="py-8 text-center text-neutral-500">No groups match this source selection.</p>}</>
       : <><OrganizationTable organizations={selected.draft.organizations} onSelect={id => onOrganization(id, true)} canEdit={() => editing} onEdit={id => setModal({ kind: 'org', id })} />
@@ -43,15 +48,15 @@ export function SourceOrganizations({ project, root, organization, groupsPage, e
     <Dialog open={!!modal} onOpenChange={open => { if (!open) close() }}><DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>
       {modal?.kind === 'org' ? `${modal.id ? 'Edit' : 'New'} organization draft` : modal?.kind === 'group' ? `${modal.id ? 'Edit' : 'New'} group draft` : modal?.kind === 'inspect' ? `${modal.group.name} — declared permissions` : 'Remove from local draft'}
     </DialogTitle></DialogHeader>
-      {modal?.kind === 'org' && <OrganizationDraftForm key={modal.id ?? 'new'} value={selected.draft.organizations.find(o => o.id === modal.id)} onClose={close} onSave={value => {
+      {modal?.kind === 'org' && <SourceAuthoringScope id="form"><SourceAuthoringScope id={'org:' + (modal.id ?? 'new')}><OrganizationDraftForm key={modal.id ?? 'new'} value={selected.draft.organizations.find(o => o.id === modal.id)} onClose={close} onSave={value => {
         const next = modal.id ? updateOrganization(project, root, modal.id, value) : createOrganization(project, root, { ...value, id: crypto.randomUUID() })
         onChange(next); close()
-      }} />}
-      {modal?.kind === 'group' && org && <GroupDraftForm key={modal.id ?? 'new'} value={groupsOf(project, root, org.id).find(g => g.id === modal.id)} onClose={close} onSave={value => {
+      }} /></SourceAuthoringScope></SourceAuthoringScope>}
+      {modal?.kind === 'group' && org && <SourceAuthoringScope id="form"><SourceAuthoringScope id={'group:' + (modal.id ?? 'new')}><GroupDraftForm key={modal.id ?? 'new'} value={groupsOf(project, root, org.id).find(g => g.id === modal.id)} onClose={close} onSave={value => {
         let next = project, id = modal.id
         if (!id) { id = crypto.randomUUID(); next = createGroup(next, root, org.id, { id, name: value.name, slug: value.slug }) }
         onChange(updateGroup(next, root, org.id, id, value)); close()
-      }} />}
+      }} /></SourceAuthoringScope></SourceAuthoringScope>}
       {modal?.kind === 'inspect' && <div className="space-y-4"><p className="text-sm text-neutral-500">Declared source permissions; effective access also depends on verified current claims and contract/execution rules.</p><p>{modal.group.description}</p>
         <div><h4 className="text-sm font-medium mb-2">RPC methods</h4><div className="flex flex-wrap gap-2">{modal.group.allowedMethods.map(m => <Badge key={m} variant="outline" className="font-mono">{m}</Badge>)}</div></div>
         <div><h4 className="text-sm font-medium mb-2">Claims</h4><div className="flex flex-wrap gap-2">{modal.group.claims.map(c => <Badge key={c} variant="outline">{c}</Badge>)}</div></div>
@@ -65,16 +70,16 @@ export function SourceOrganizations({ project, root, organization, groupsPage, e
 }
 
 function OrganizationDraftForm({ value, onSave, onClose }: { value?: { name: string; slug: string }; onSave(v: { name: string; slug: string }): void; onClose(): void }) {
-  const [name, setName] = useState(value?.name ?? ''), [slug, setSlug] = useState(value?.slug ?? ''), [error, setError] = useState<string | null>(null)
+  const [name, setName] = useAuthoringState('name', value?.name ?? '', { draft: true, base: value }), [slug, setSlug] = useAuthoringState('slug', value?.slug ?? '', { draft: true, base: value }), [error, setError] = useState<string | null>(null)
   return <OrganizationFormView name={name} slug={slug} editing={!!value} busy={false} error={error} onClose={onClose}
     onNameChange={v => { setName(v); if (!value) setSlug(v.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')) }} onSlugChange={setSlug} submitLabel="Save organization draft"
     onSubmit={event => { event.preventDefault(); try { onSave({ name: name.trim(), slug: slug.trim() }) } catch (e) { setError(e instanceof Error ? e.message : 'Could not update this draft.') } }} />
 }
 function GroupDraftForm({ value, onSave, onClose }: { value?: DraftGroup; onSave(v: Omit<DraftGroup, 'id'>): void; onClose(): void }) {
-  const [name, setName] = useState(value?.name ?? ''), [slug, setSlug] = useState(value?.slug ?? ''), [description, setDescription] = useState(value?.description ?? '')
-  const [role, setRole] = useState(value?.isOrgAdmin ? 'admin' : value?.isOrgReadonlyAdmin ? 'readonly' : 'member')
-  const [methods, setMethods] = useState<string[]>(value?.allowedMethods ?? []), [extra, setExtra] = useState(''), [claims, setClaims] = useState<string[]>(value?.claims ?? [])
-  const [verboseErrors, setVerbose] = useState(value?.verboseErrors ?? false), [credential, setCredential] = useState(value?.rpcCredential?.fromEnv ?? ''), [error, setError] = useState<string | null>(null)
+  const [name, setName] = useAuthoringState('name', value?.name ?? '', { draft: true, base: value }), [slug, setSlug] = useAuthoringState('slug', value?.slug ?? '', { draft: true, base: value }), [description, setDescription] = useAuthoringState('description', value?.description ?? '', { draft: true, base: value })
+  const [role, setRole] = useAuthoringState('role', value?.isOrgAdmin ? 'admin' : value?.isOrgReadonlyAdmin ? 'readonly' : 'member', { draft: true, base: value })
+  const [methods, setMethods] = useAuthoringState<string[]>('methods', value?.allowedMethods ?? [], { draft: true, base: value }), [extra, setExtra] = useAuthoringState('extra-methods', '', { draft: true, base: value }), [claims, setClaims] = useAuthoringState<string[]>('claims', value?.claims ?? [], { draft: true, base: value })
+  const [verboseErrors, setVerbose] = useAuthoringState('verbose', value?.verboseErrors ?? false, { draft: true, base: value }), [credential, setCredential] = useAuthoringState('credential-reference', value?.rpcCredential?.fromEnv ?? '', { draft: true, base: value }), [error, setError] = useState<string | null>(null)
   const toggle = (items: string[], item: string) => items.includes(item) ? items.filter(i => i !== item) : [...items, item]
   function submit(event: FormEvent) {
     event.preventDefault()

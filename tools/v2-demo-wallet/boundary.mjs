@@ -5,6 +5,7 @@ const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 const requestPath = new RegExp('^/api/v2/auth/privado/requests/(' + uuid + ')$')
 const challengeType = 'https://iden3-communication.io/authorization/1.0/request'
 export const personas = Object.freeze(['admin', 'deployer', 'reader', 'outsider'])
+export const commonProfile = 'demo-privado'
 export function exactOrigin(value) {
   const url = new URL(value)
   assert.equal(url.protocol, 'https:')
@@ -24,6 +25,7 @@ export function requestLocation(value, origin) {
   return { path: url.pathname, id: matched[1] }
 }
 export function checkedChallenge(request, location, persona, metadata, origin, now = Math.floor(Date.now() / 1000)) {
+  assert.ok(personas.includes(persona))
   assert.ok(request && typeof request === 'object' && !Array.isArray(request))
   assert.equal(request.id, location.id)
   assert.equal(request.type, challengeType)
@@ -33,17 +35,16 @@ export function checkedChallenge(request, location, persona, metadata, origin, n
   const callback = origin + '/api/v2/auth/privado/proofs/' + location.id
   assert.equal(request.body?.callbackUrl, callback)
   const scope = request.body.scope
-  assert.ok(Array.isArray(scope))
-  if (persona === 'outsider') assert.equal(scope.length, 0)
-  else {
-    assert.equal(scope.length, 1)
-    const proof = scope[0], role = String(personas.indexOf(persona) + 1)
-    assert.equal(proof.id, 1)
+  assert.ok(Array.isArray(scope) && scope.length === 3)
+  // The persona chooses only which public test wallet answers. Every holder
+  // gets the same approved request; the SDK returns its held optional roles.
+  for (const [index, proof] of scope.entries()) {
+    assert.equal(proof.id, index + 1)
     assert.equal(proof.circuitId, metadata.circuitId)
-    assert.equal(proof.optional, false)
+    assert.equal(proof.optional, true)
     assert.deepEqual(proof.query, { allowedIssuers: [metadata.issuerDid], context: metadata.contextUrl,
       type: metadata.credentialType, proofType: 'BJJSignature2021', skipClaimRevocationCheck: false,
-      credentialSubject: { role: { $eq: Number(role) } } })
+      credentialSubject: { role: { $eq: index + 1 } } })
   }
   return callback
 }

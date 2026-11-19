@@ -3,6 +3,7 @@ import { Download, FileCheck } from 'lucide-react'
 import { Button } from '../../components/ui/button'
 import { Textarea } from '../../components/ui/textarea'
 import { Badge } from '../../components/ui/badge'
+import { useAuthoringState } from './sourceAuthoring'
 import { closedJSON } from '../auth/protocol'
 import { documentText, importReferencedDocument, object, rootOf, sourcePackage, sourceText, updateSourceText, type SourceProject } from './sourceProject'
 
@@ -14,8 +15,8 @@ export function download(name: string, text: string, type = 'application/json') 
   setTimeout(() => URL.revokeObjectURL(url), 30000)
 }
 const shell = (v: string) => "'" + v.replace(/'/g, "'\"'\"'") + "'"
-export function SourceReview({ project, root, editing, onChange, check, initialPath = 'draft.json' }: { project: SourceProject; root: string; editing: boolean; onChange(p: SourceProject): void; check(): void; initialPath?: string }) {
-  const selected = rootOf(project, root), [path, setPath] = useState(initialPath), [report, setReport] = useState<{ generation: number; digest: string; text: string } | null>(null)
+export function SourceReview({ project, root, editing, onChange, check, initialPath = 'draft.json', unfinished = false }: { project: SourceProject; root: string; editing: boolean; onChange(p: SourceProject): void; check(): void; initialPath?: string; unfinished?: boolean }) {
+  const selected = rootOf(project, root), [path, setPath] = useAuthoringState('selected-file', initialPath, { source: false }), [report, setReport] = useState<{ generation: number; digest: string; text: string } | null>(null)
   const reportPicker = useRef<HTMLInputElement>(null), sourcePicker = useRef<HTMLInputElement>(null), alive = useRef(true), latest = useRef(project.generation); latest.current = project.generation
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   const [error, setError] = useState<string | null>(null)
@@ -46,7 +47,7 @@ export function SourceReview({ project, root, editing, onChange, check, initialP
   }
   return <div className="space-y-5">
     <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-medium text-neutral-700">Configuration source and review</h3><p className="text-xs text-neutral-500">Complete files, dependencies, local checks and deployment handoff</p></div>
-      <Button onClick={() => { check(); download('ops-source-package.json', JSON.stringify(sourcePackage(project))) }}><Download className="w-4 h-4 mr-2" />Export complete source package</Button></div>
+      <Button disabled={unfinished} onClick={() => { check(); if (!unfinished) download('ops-source-package.json', JSON.stringify(sourcePackage(project))) }}><Download className="w-4 h-4 mr-2" />Export complete source package</Button></div>{unfinished && <p className="text-sm text-warning-dark">Save or cancel unfinished form fields before exporting source. They are not included in a source package.</p>}
     <div className="rounded-lg border border-warning/30 bg-warning-light p-4 text-sm text-warning-dark"><strong>Go validation has not run in this browser.</strong><p className="mt-1">Export and run the matching release's Go tool. Browser syntax hints and imported reports do not approve a change or establish the serving configuration.</p></div>
     {editing && <div className="space-y-2"><Button variant="outline" size="sm" onClick={() => sourcePicker.current?.click()}>Import missing referenced document</Button><input ref={sourcePicker} type="file" accept=".json" className="sr-only" aria-label="Missing referenced source document" onChange={e => { const file = e.currentTarget.files?.[0]; e.currentTarget.value = ''; if (file) void importSource(file) }} /><p className="text-xs text-neutral-500">Add a reference in the draft or broker public-document pins first, then select that exact flat filename. Adjacent files and credentials are never added automatically.</p></div>}
     <div className="grid gap-4 lg:grid-cols-[15rem_1fr]">
@@ -65,7 +66,7 @@ export function SourceReview({ project, root, editing, onChange, check, initialP
 }
 function SourceTextEditor({ text, editing, onEdit }: { text: string; editing: boolean; onEdit(raw: string): void }) {
   const [error, setError] = useState<string | null>(null)
-  return <div className="space-y-2"><Textarea aria-label="Proposed source" variant="code" className="min-h-64" value={text} readOnly={!editing} onChange={e => { try { onEdit(e.target.value); setError(null) } catch (e) { setError(e instanceof Error ? e.message : 'Could not retain this draft text.') } }} spellCheck={false} />
+  return <div className="space-y-2"><Textarea aria-label="Proposed source" variant="code" className="min-h-64" value={text} readOnly={!editing} onChange={e => { if (!editing) return; try { onEdit(e.target.value); setError(null) } catch (e) { setError(e instanceof Error ? e.message : 'Could not retain this draft text.') } }} spellCheck={false} />
     {error && <p role="alert" className="text-sm text-error-dark">{error}</p>}
     <p className="text-xs text-neutral-500">Text changes immediately join this local proposal and its export, including unfinished JSON. Repair draft syntax before Go preparation or semantic editing. The matching Go tool checks schemas, references, capabilities and native execution semantics.</p>
   </div>

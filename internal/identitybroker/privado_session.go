@@ -38,33 +38,49 @@ func (r *CommittedPrivado) SessionInfo() (BrowserSession, error) {
 	return r.result.SessionInfo()
 }
 
-func (s *Service) privadoFamilyContinuity(f Family) error {
+func (s *Service) openPrivadoFamily(f Family) (privadoFamilyPayload, error) {
 	if !f.Valid() || f.Provider != FamilyPrivado || f.Scope != s.scope {
-		return ErrUnauthorized
+		return privadoFamilyPayload{}, ErrUnauthorized
 	}
 	_, digest, ok := s.privadoProfile(f.ProfileID)
 	if !ok || digest != f.ProfileDigest {
-		return ErrRelogin
+		return privadoFamilyPayload{}, ErrRelogin
 	}
 	plain, e := s.aes.open(f.EncryptionKeyID, f.Ciphertext, privadoFamilyAAD(f), 2048)
 	if e != nil {
-		return e
+		return privadoFamilyPayload{}, e
 	}
 	payload, e := decodePrivadoFamily(plain)
 	if e != nil {
-		return e
+		return privadoFamilyPayload{}, e
 	}
 	if payload.SourceAuthDigest != s.broker.Digest() || payload.Provider.metadata() != s.privado.Metadata() {
-		return ErrRelogin
+		return privadoFamilyPayload{}, ErrRelogin
 	}
-	return nil
+	return payload, nil
 }
-func (s *Service) privadoFamilyMaterial(f *Family, now time.Time) (string, error) {
+func (s *Service) privadoFamilyContinuity(f Family) error {
+	payload, err := s.openPrivadoFamily(f)
+	if err != nil || payload.Evidence == nil {
+		return err
+	}
+	now, err := s.now()
+	if err != nil {
+		return err
+	}
+	_, err = s.privadoEvidenceFacts(f, *payload.Evidence, now)
+	return err
+}
+func (s *Service) privadoFamilyMaterial(f *Family, now time.Time, evidence *privadoSessionEvidence) (string, error) {
 	handle, e := s.familyHandle(f, now)
 	if e != nil {
 		return "", e
 	}
-	raw, e := json.Marshal(privadoFamilyPayload{1, s.broker.Digest(), plan(s.privado.Metadata())})
+	payload := privadoFamilyPayload{Version: 1, SourceAuthDigest: s.broker.Digest(), Provider: plan(s.privado.Metadata()), Evidence: evidence}
+	if evidence != nil {
+		payload.Version = 2
+	}
+	raw, e := json.Marshal(payload)
 	if e != nil || len(raw) > 2020 {
 		return "", ErrInvalid
 	}
@@ -150,8 +166,25 @@ func (s *Service) renewMulti(ctx context.Context, handle string, recipient Recip
 	if family.Provider != FamilyPrivado || s.familyContext(family, claims, recipient, now) != nil {
 		return nil, ErrUnauthorized
 	}
-	if e = s.privadoFamilyContinuity(family); e != nil {
+	payload, e := s.openPrivadoFamily(family)
+	if e != nil {
 		return nil, e
+	}
+	if payload.Evidence != nil {
+		// Malformed or mismatched evidence is never a cache miss. Even expired
+		// snapshots must pass their structural and current-plan checks first.
+		if _, e = s.privadoEvidenceFacts(family, *payload.Evidence, now); e != nil {
+			return nil, e
+		}
+		if now.Unix() < payload.Evidence.NotAfter {
+			access, needsProof, e := s.renewPrivadoEvidence(ctx, claims, recipient, handle)
+			if e != nil {
+				return nil, e
+			}
+			if !needsProof {
+				return &MultiRenewal{access: access}, nil
+			}
+		}
 	}
 	p, e := s.preparePrivadoChallenge(family.ProfileID, recipient, privado.Renew, family.Actor, &capture)
 	if e != nil {
@@ -311,11 +344,15 @@ func (s *Service) CompletePrivado(ctx context.Context, id string, recipient Reci
 		family.Generation++
 		family.LastRotatedAt = now
 	}
-	handle, e := s.privadoFamilyMaterial(&family, now)
+	access, e := s.buildPrivadoAccess(proof, offer.NotAfter, p.ExpiresAt.Unix(), family.AbsoluteExpiresAt.Unix())
 	if e != nil {
 		return nil, e
 	}
-	access, e := s.buildPrivadoAccess(proof, offer.NotAfter, p.ExpiresAt.Unix(), family.AbsoluteExpiresAt.Unix())
+	evidence, e := s.newPrivadoSessionEvidence(proof, access.Metadata().ExpiresAt.Unix())
+	if e != nil {
+		return nil, e
+	}
+	handle, e := s.privadoFamilyMaterial(&family, now, &evidence)
 	if e != nil {
 		return nil, e
 	}

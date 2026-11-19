@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { exactOrigin, personas } from './boundary.mjs'
+import { commonProfile, exactOrigin, personas } from './boundary.mjs'
 
 // Public fixture metadata only. This selects the expected test identity; Core
 // still verifies its real proof and derives permissions from approved rules.
@@ -18,7 +18,7 @@ export function bridgeConfig(metadata, opsOrigin) {
     const found = metadata.personas.filter(p => p.id === id)
     assert.equal(found.length, 1)
     const p = found[0]
-    assert.equal(p.profileId, 'demo-' + id)
+    assert.equal(p.profileId, commonProfile)
     return { id, profileId: p.profileId, holderDid: did(p.holderDid) }
   })
   assert.equal(new Set(selected.map(p => p.holderDid)).size, 4)

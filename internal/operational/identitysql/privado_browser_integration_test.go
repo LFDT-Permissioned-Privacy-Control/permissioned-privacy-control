@@ -108,6 +108,12 @@ func TestActualPrivadoTwoTabBrowser(t *testing.T) {
 				case "stats":
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(map[string]int64{"proofs": proofs.Load(), "protected": protected.Load(), "lostComplete": lost.Load(), "providerRPC": rpc.hits.Load()})
+				case "expire-evidence":
+					// Owned integration clock only: exercise real expired evidence
+					// without waiting five minutes or forging a fresh witness.
+					x.db.wallOffset.Add(301)
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]int64{"now": x.db.clock().UnixMilli()})
 				default:
 					w.WriteHeader(400)
 				}

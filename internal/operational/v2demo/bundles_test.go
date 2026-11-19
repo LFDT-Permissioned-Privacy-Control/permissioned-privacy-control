@@ -91,7 +91,7 @@ func TestInitPersistsIdentityAuthorityAndNativeRevision(t *testing.T) {
 	sum := sha256.Sum256(contextBytes)
 	m := WalletMetadata{Version: 1, TestOnly: true, Network: "polygon:mumbai", ChainID: "80001", StateContract: "0x1111111111111111111111111111111111111111", StateRPCURL: s.WalletOrigin() + "/rpc", IssuerDID: publicDID(t, 10), VerifierDID: publicDID(t, 11), ContextURL: "https://schemas.test/role.jsonld", ContextPath: "role-context.json", ContextSHA256: "sha256:" + hex.EncodeToString(sum[:]), CredentialType: "BankRole", CircuitID: "credentialAtomicQuerySigV2", Personas: []Persona{}}
 	for i, id := range []string{"admin", "deployer", "reader", "outsider"} {
-		who := Persona{ID: id, HolderDID: publicDID(t, int64(20+i)), ProfileID: "demo-" + id}
+		who := Persona{ID: id, HolderDID: publicDID(t, int64(20+i)), ProfileID: CommonPrivadoProfile}
 		if i < 3 {
 			value := i + 1
 			who.RoleValue = &value
@@ -113,9 +113,23 @@ func TestInitPersistsIdentityAuthorityAndNativeRevision(t *testing.T) {
 	if ids.Digest() != brokerIDs.Digest() {
 		t.Fatal("Core/broker identities diverged")
 	}
+	identitySource := ids.Source()
+	if len(identitySource.Profiles) != 1 || identitySource.Profiles[0].ID != CommonPrivadoProfile || identitySource.Profiles[0].Kind != identity.PrivadoRole || len(identitySource.Profiles[0].Predicates) != 3 || len(identitySource.Mappings) != 3 || !slices.Equal(identitySource.Issuers[0].AllowedProfiles, []string{CommonPrivadoProfile}) {
+		t.Fatal("demo must publish one shared role-proof profile")
+	}
+	for index, predicate := range identitySource.Profiles[0].Predicates {
+		if !predicate.Optional || predicate.ID != []string{"admin", "deployer", "reader"}[index] || predicate.Field != "role" || predicate.Operator != "eq" || predicate.Value != []string{"1", "2", "3"}[index] {
+			t.Fatal("shared request lost an approved optional role equality", predicate)
+		}
+	}
+	for _, mapping := range identitySource.Mappings {
+		if mapping.ProfileID != CommonPrivadoProfile || mapping.Fact.Kind != "privado.predicate" || mapping.Fact.Value == "outsider" {
+			t.Fatal("persona metadata must not grant authority", mapping)
+		}
+	}
 	auth, _ := broker.AuthBroker()
 	source, _ := auth.MultiSource()
-	if len(source.AzureProfiles) != 0 || len(source.PrivadoProfiles) != 4 {
+	if len(source.AzureProfiles) != 0 || len(source.PrivadoProfiles) != 1 {
 		t.Fatal("demo requested hosted auth or omitted identities")
 	}
 	for _, id := range []string{Admin, Deployer} {
@@ -179,7 +193,7 @@ func TestInitPersistsIdentityAuthorityAndNativeRevision(t *testing.T) {
 		t.Fatal(e)
 	}
 	for i := range proposed.Mappings {
-		if proposed.Mappings[i].ProfileID == "demo-reader" {
+		if proposed.Mappings[i].ID == "demo-reader" {
 			proposed.Mappings[i].GroupIDs = []string{Admin}
 		}
 	}
@@ -243,8 +257,8 @@ func TestInitPersistsIdentityAuthorityAndNativeRevision(t *testing.T) {
 	}
 	promotedIDs, _ := promoted.Identity()
 	promotedBrokerIDs, _ := promotedBroker.Identity()
-	pd, _ := ids.ProfileDigest("demo-reader")
-	newPD, _ := promotedIDs.ProfileDigest("demo-reader")
+	pd, _ := ids.ProfileDigest(CommonPrivadoProfile)
+	newPD, _ := promotedIDs.ProfileDigest(CommonPrivadoProfile)
 	if promotedIDs.Digest() != promotedBrokerIDs.Digest() || promotedIDs.Digest() == ids.Digest() || pd != newPD || promotedSelection.ManifestDigest == selection.ManifestDigest || promotedBS.ManifestDigest == bs.ManifestDigest {
 		t.Fatal("mapping changed proof requirements or failed to rebind both bundles")
 	}

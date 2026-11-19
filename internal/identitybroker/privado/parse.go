@@ -24,6 +24,7 @@ type parsed struct {
 	holderID            core.ID
 	holderNetwork, gist string
 	roles               map[stateKey]bool // true means a required nonrevocation lookup
+	provenPredicates    map[uint32]bool   // untrusted request IDs until FullVerify succeeds
 	claimsAsOf          int64
 }
 
@@ -114,7 +115,7 @@ func parseCompact(compact string, req protocol.AuthorizationRequestMessage, prof
 	}
 	result = parsed{holderID: holderID, holderNetwork: holderNetwork, gist: auth.GISTRoot.BigInt().String(), roles: map[stateKey]bool{}, claimsAsOf: min(*req.CreatedTime, now)}
 	scope, ok := body["scope"].([]any)
-	if !ok || len(scope) != len(req.Body.Scope) || len(scope) > MaxPredicates {
+	if !ok || len(scope) > len(req.Body.Scope) || len(scope) > MaxPredicates {
 		return parsed{}, ErrEvidence
 	}
 	seen := map[uint32]bool{}
@@ -124,7 +125,13 @@ func parseCompact(compact string, req protocol.AuthorizationRequestMessage, prof
 			return parsed{}, ErrEvidence
 		}
 		proofID, ok := integer(proof["id"], 1<<32-1)
-		if !ok || proofID < 1 || proofID > int64(len(scope)) || seen[uint32(proofID)] {
+		if !ok || proofID < 1 || proofID > int64(len(req.Body.Scope)) || seen[uint32(proofID)] {
+			return parsed{}, ErrEvidence
+		}
+		// CreateRequest assigns stable IDs in approved predicate order. A sparse
+		// response still names that ORIGINAL request, not its response position.
+		requested := req.Body.Scope[proofID-1]
+		if requested.ID != uint32(proofID) || requested.CircuitID != "credentialAtomicQuerySigV2" {
 			return parsed{}, ErrEvidence
 		}
 		seen[uint32(proofID)] = true
@@ -157,6 +164,12 @@ func parseCompact(compact string, req protocol.AuthorizationRequestMessage, prof
 		result.roles[stateKey{network, sig.IssuerID.BigInt().String(), sig.IssuerClaimNonRevState.BigInt().String()}] = true
 		result.claimsAsOf = min(result.claimsAsOf, sig.Timestamp)
 	}
+	for _, requested := range req.Body.Scope {
+		if !seen[requested.ID] && (requested.Optional == nil || !*requested.Optional) {
+			return parsed{}, ErrEvidence
+		}
+	}
+	result.provenPredicates = seen
 	raw, _ := json.Marshal(payload)
 	if json.Unmarshal(raw, &result.response) != nil {
 		return parsed{}, ErrEvidence

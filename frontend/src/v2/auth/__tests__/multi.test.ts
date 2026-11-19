@@ -36,6 +36,20 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('explicit multi-provider closed protocol and marker', () => {
+  it.each(['azure', 'privado'] as const)('does not start a queued %s login over a newer account', async kind => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    const client = NewMultiClient()
+    const pendingStart = kind === 'azure' ? client.startAzureLogin('azure') : client.startPrivadoLogin('role')
+    const other = { ...pair, browserSessionId: 'cccccccc-cccc-cccc-cccc-cccccccccccc' }
+    writeMultiMarker(activeMulti(other))
+    await expect(pendingStart).rejects.toThrow('session_changed')
+    expect(fetch).not.toHaveBeenCalled(); expect(readMultiMarker()).toEqual(activeMulti(other))
+  })
+  it('checks the original UI owner inside the lock before writing a login marker', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    await expect(NewMultiClient().startPrivadoLogin('role', undefined, () => { throw Error('old login intent') })).rejects.toThrow('old login intent')
+    expect(fetch).not.toHaveBeenCalled(); expect(readMultiMarker()).toBeNull()
+  })
   it('keeps the Azure-only parser closed and rejects extended/mismatched pending identity', () => {
     expect(multiAccess(credential()).provider).toBe('privado')
     expect(() => access(credential())).toThrow('invalid_response')

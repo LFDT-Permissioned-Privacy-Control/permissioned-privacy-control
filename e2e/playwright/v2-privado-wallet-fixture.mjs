@@ -141,17 +141,23 @@ const makeIdentity = async byte => wallet.createIdentity({ method: core.DidMetho
 
 try {
   const demo = process.env.OPS_PRIVADO_WALLET_DEMO === '1'
+  const subsets = process.env.OPS_PRIVADO_WALLET_ROLE_SUBSETS === '1'
+  assert.ok(!subsets || !demo, 'Role-subset fixtures are isolated from the demo')
   const a = await makeIdentity(0x42), b = await makeIdentity(0x44), issuer = await makeIdentity(0x43), verifier = await makeIdentity(0x45)
   const holders = demo ? Object.fromEntries(await Promise.all(['admin', 'deployer', 'reader', 'outsider']
-    .map(async (id, index) => [id, await makeIdentity(0x50 + index)]))) : { a, b }
+    .map(async (id, index) => [id, await makeIdentity(0x50 + index)]))) : { a, b, ...(subsets ? { multi: await makeIdentity(0x46), zero: await makeIdentity(0x47) } : {}) }
   const roles = demo ? { admin: 1, deployer: 2, reader: 3 } : { a: 7, b: 7 }
-  const credentials = {}
+  const credentials = {}, credentialLists = {}
+  const roleSets = Object.fromEntries(Object.keys(holders).map(name => [name, subsets && name === 'multi' ? [7, 8] : Object.hasOwn(roles, name) ? [roles[name]] : []]))
   for (const [name, holder] of Object.entries(holders)) {
-    if (!Object.hasOwn(roles, name)) continue // Outsider proves identity without a role grant.
-    const credential = await wallet.issueCredential(issuer.did, { credentialSchema: schemaUrl, type: 'BankRole',
-      credentialSubject: { id: holder.did.string(), role: roles[name] }, expiration: 4102444800,
-      revocationOpts: { type: sdk.CredentialStatusType.Iden3ReverseSparseMerkleTreeProof, id: 'https://fixture.invalid/rhs', nonce: 7 } }, { documentLoader: loader })
-    await credentialWallet.save(credential); credentials[name] = credential
+    credentialLists[name] = []
+    for (const role of roleSets[name]) {
+      const credential = await wallet.issueCredential(issuer.did, { credentialSchema: schemaUrl, type: 'BankRole',
+        credentialSubject: { id: holder.did.string(), role }, expiration: 4102444800,
+        revocationOpts: { type: sdk.CredentialStatusType.Iden3ReverseSparseMerkleTreeProof, id: 'https://fixture.invalid/rhs', nonce: subsets ? role : 7 } }, { documentLoader: loader })
+      await credentialWallet.save(credential); credentialLists[name].push(credential)
+      credentials[name] ??= credential
+    }
   }
   for (const who of [...Object.values(holders), issuer, verifier]) {
     const model = await wallet.getDIDTreeModel(who.did)
@@ -168,9 +174,9 @@ try {
   packers.registerPackers([new sdk.DefaultZKPPacker(circuits, proofService), new sdk.PlainPacker()])
   const handler = new sdk.AuthHandler(packers, proofService)
   output({ type: 'ready', testOnly: 'NEW PUBLIC fixture seeds42/44/43/45;demo50-53;not user material', sdkVersion: '1.43.0',
-    holderA: a.did.string(), holderB: b.did.string(), issuerDid: issuer.did.string(), verifierDid: verifier.did.string(),
+    holderA: a.did.string(), holderB: b.did.string(), ...(subsets ? { holderMulti: holders.multi.did.string(), holderZero: holders.zero.did.string() } : {}), issuerDid: issuer.did.string(), verifierDid: verifier.did.string(),
     ...(demo ? { personas: Object.entries(holders).map(([id, holder]) => ({ id, holderDid: holder.did.string(),
-      roleValue: roles[id] ?? null, profileId: `demo-${id}` })) } : {}),
+      roleValue: roles[id] ?? null, profileId: 'demo-privado' })) } : {}),
     contextUrl, context: roleContext, network, chainId, stateContract, rpcUrl,
     states: [...known].map(([id, state]) => ({ id, state: state.toString() })) })
   const RealDate = globalThis.Date
@@ -208,8 +214,8 @@ try {
       }
       const holder = holders[input.holder], prior = { ...generation }, scope = request.body.scope
       assert.ok(Array.isArray(scope) && scope.length <= 16 && scope.every((s, i) => s.id === i + 1 && s.circuitId === 'credentialAtomicQuerySigV2'))
-      assert.ok(credentials[input.holder] || scope.length === 0, 'This demo identity has no role credential')
-      const hadCache = scope.length ? !!await proofCache.getProof(holder.did, credentials[input.holder].id, scope[0]) : false
+      assert.ok(credentials[input.holder] || scope.every(p => p.optional === true), 'This identity cannot satisfy a required role proof')
+      const hadCache = scope.length && credentials[input.holder] ? !!await proofCache.getProof(holder.did, credentials[input.holder].id, scope[0]) : false
       const bypass = input.cacheMode !== 'use'
       const response = await handler.handleAuthorizationRequest(holder.did, sdk.byteEncoder.encode(JSON.stringify(request)),
         { mediaType: sdk.PROTOCOL_CONSTANTS.MediaType.ZKPMessage, bypassProofsCache: bypass })
@@ -218,7 +224,14 @@ try {
       assert.ok(await token.verify((await circuits.loadCircuitData('authV2')).verificationKey), 'generated AuthV2 envelope verification failed')
       // Deliberately retain a REAL generated proof to test the next bypass,
       // rather than using an empty cache that could mask accidental reuse.
-      for (let i = 0; i < scope.length; i++) await proofCache.storeProof(holder.did, credentials[input.holder].id, scope[i], response.authResponse.body.scope[i])
+      for (const returned of response.authResponse.body.scope) {
+        const requested = scope.find(p => p.id === returned.id)
+        assert.ok(requested, 'Response must name an original request')
+        const role = requested.query.credentialSubject.role.$eq
+        const credential = credentialLists[input.holder].find(c => c.credentialSubject.role === role)
+        assert.ok(credential, 'Response must use a credential held by this identity')
+        await proofCache.storeProof(holder.did, credential.id, requested, returned)
+      }
       const signals = response.authResponse.body.scope.map(p => p.pub_signals)
       output({ id, compact: response.token, claimsAsOf: signals.length ? Number(signals[0][7]) : request.created_time,
         diagnostics: { bypassProofsCache: bypass, stateCacheDisabled: true, hadCache, roleGenerations: generation.role - prior.role,

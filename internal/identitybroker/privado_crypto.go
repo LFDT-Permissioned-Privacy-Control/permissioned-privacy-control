@@ -12,9 +12,9 @@ import (
 	"privacy-proxy/internal/strictjson"
 )
 
-// These small canonical payloads authenticate continuity, never role facts or a
-// serialized verifier result. Every omitted row field is in the corresponding
-// ordered AEAD additional data below.
+// Challenge payloads authenticate continuity. A v2 family can also retain
+// already-verified facts for their original remaining lifetime, never a
+// serialized provider result. Omitted row fields are bound by the AEAD AAD.
 type providerPlan struct {
 	IdentityDigest     string `json:"identityDigest"`
 	ProfilePlanDigest  string `json:"profilePlanDigest"`
@@ -37,9 +37,10 @@ type privadoChallengePayload struct {
 	CallbackDigest   string       `json:"callbackDigest"`
 }
 type privadoFamilyPayload struct {
-	Version          uint8        `json:"version"`
-	SourceAuthDigest string       `json:"sourceAuthDigest"`
-	Provider         providerPlan `json:"provider"`
+	Version          uint8                   `json:"version"`
+	SourceAuthDigest string                  `json:"sourceAuthDigest"`
+	Provider         providerPlan            `json:"provider"`
+	Evidence         *privadoSessionEvidence `json:"evidence,omitempty" optional:"true"`
 }
 
 func canonicalPrivadoDecode(raw []byte, out any) error {
@@ -103,7 +104,7 @@ func decodePrivadoChallenge(raw []byte) (privadoChallengePayload, [32]byte, erro
 }
 func decodePrivadoFamily(raw []byte) (privadoFamilyPayload, error) {
 	var p privadoFamilyPayload
-	if canonicalPrivadoDecode(raw, &p) != nil || p.Version != 1 || !validProviderMetadata(p.Provider.metadata()) {
+	if canonicalPrivadoDecode(raw, &p) != nil || (p.Version != 1 && p.Version != 2) || p.Version == 1 && p.Evidence != nil || p.Version == 2 && p.Evidence == nil || !validProviderMetadata(p.Provider.metadata()) {
 		return p, ErrUnauthorized
 	}
 	if _, e := ParseDigest(p.SourceAuthDigest); e != nil {

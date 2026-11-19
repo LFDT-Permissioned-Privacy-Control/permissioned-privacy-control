@@ -97,8 +97,10 @@ func (p *Provider) Verify(ctx context.Context, request Request, compact string) 
 		return nil, ErrEvidence
 	}
 	facts := make([]identity.Fact, 0, len(profile.source.Predicates))
-	for _, predicate := range profile.source.Predicates {
-		facts = append(facts, identity.Fact{Kind: "privado.predicate", Value: predicate.ID})
+	for i, predicate := range profile.source.Predicates {
+		if parsed.provenPredicates[uint32(i+1)] {
+			facts = append(facts, identity.Fact{Kind: "privado.predicate", Value: predicate.ID})
+		}
 	}
 	result := &VerifiedProof{provider: p, metadata: ProofMetadata{Provider: p.metadata, ProfileID: profile.source.ID, ProfileDigest: profile.digest, HolderDID: response.From, ActorID: actor, ClaimsAsOf: parsed.claimsAsOf, SourceVerifiedAt: now, NotAfter: notAfter}, facts: facts, valid: true}
 	if err := result.RequireCurrent(); err != nil {

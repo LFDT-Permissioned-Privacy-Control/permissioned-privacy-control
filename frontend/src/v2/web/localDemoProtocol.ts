@@ -1,6 +1,7 @@
 import { holderDid } from '../auth/multiProtocol'
 
 export const demoPersonas = ['admin', 'deployer', 'reader', 'outsider'] as const
+export const demoPrivadoProfile = 'demo-privado'
 export type DemoPersona = typeof demoPersonas[number]
 export interface DemoIdentity { readonly id: DemoPersona; readonly profileId: string; readonly holderDid: string }
 export interface DemoConfig {
@@ -34,7 +35,7 @@ export function demoReady(value: unknown, nonce: string, opsOrigin: string): Dem
     const found = c.personas.filter(p => closed(p, ['id', 'profileId', 'holderDid']) && p.id === id)
     if (found.length !== 1) return null
     const p = found[0] as Record<string, unknown>
-    if (p.profileId !== 'demo-' + id || !networkDid(p.holderDid, c.network)) return null
+    if (p.profileId !== demoPrivadoProfile || !networkDid(p.holderDid, c.network)) return null
     rows.push(Object.freeze({ id, profileId: p.profileId, holderDid: p.holderDid }))
   }
   if (new Set(rows.map(p => p.holderDid)).size !== 4) return null

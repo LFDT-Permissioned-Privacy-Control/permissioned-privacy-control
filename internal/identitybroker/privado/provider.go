@@ -234,7 +234,7 @@ func (p *Provider) CreateRequest(c RequestContext) (Request, error) {
 func profileScopes(profile identity.Profile) []protocol.ZeroKnowledgeProofRequest {
 	scopes := []protocol.ZeroKnowledgeProofRequest{}
 	for i, predicate := range profile.Predicates {
-		optional := false
+		optional := predicate.Optional
 		value, _ := strconv.ParseUint(predicate.Value, 10, 32)
 		query := map[string]any{"allowedIssuers": slices.Clone(profile.AllowedCredentialIssuers), "context": profile.Context, "type": profile.Type, "proofType": "BJJSignature2021", "skipClaimRevocationCheck": false, "credentialSubject": map[string]any{predicate.Field: map[string]any{"$eq": value}}}
 		scopes = append(scopes, protocol.ZeroKnowledgeProofRequest{ID: uint32(i + 1), CircuitID: "credentialAtomicQuerySigV2", Optional: &optional, Query: query})

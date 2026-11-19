@@ -9,6 +9,7 @@ import path from 'node:path'
 import { startWallet } from './wallet.mjs'
 import { demoAccounts } from './accounts.mjs'
 import { bridgeConfig } from './bridge-config.mjs'
+import { assertCompatibleIdentityState } from './identity-state.mjs'
 import { callerAllowed, checkedChallenge, exactOrigin, personas, requestLocation } from './boundary.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -145,7 +146,7 @@ async function main() {
   const state = { version: 1, testOnly: true, network: ready.network, chainId: ready.chainId, stateContract: ready.stateContract,
     issuerDid: ready.issuerDid, verifierDid: ready.verifierDid, personas: ready.personas, states: ready.states }
   const stateFile = path.join(config.outputDirectory, 'identity-state.json')
-  try { assert.deepEqual(JSON.parse(await readFile(stateFile, 'utf8')), state) }
+  try { assertCompatibleIdentityState(JSON.parse(await readFile(stateFile, 'utf8')), state) }
   catch (error) { if (error.code !== 'ENOENT') { wallet.close(); throw Error('demo identity state changed; use explicit demo reset') }; await atomicJSON(stateFile, state) }
   const context = Buffer.from(JSON.stringify(ready.context))
   const contextFile = path.join(config.outputDirectory, 'role-context.json')

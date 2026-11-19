@@ -4,7 +4,7 @@ import { bridgeConfig } from './bridge-config.mjs'
 import { runBridge } from './public/bridge.js'
 
 const ops = 'https://localhost:8443', nonce = 'a'.repeat(64)
-const metadata = { testOnly: true, network: 'polygon:mumbai', issuerDid: 'did:iden3:polygon:mumbai:issuer', verifierDid: 'did:iden3:polygon:mumbai:verifier', personas: ['admin', 'deployer', 'reader', 'outsider'].map(id => ({ id, profileId: 'demo-' + id, holderDid: 'did:iden3:polygon:mumbai:holder-' + id, roleValue: 99 })) }
+const metadata = { testOnly: true, network: 'polygon:mumbai', issuerDid: 'did:iden3:polygon:mumbai:issuer', verifierDid: 'did:iden3:polygon:mumbai:verifier', personas: ['admin', 'deployer', 'reader', 'outsider'].map(id => ({ id, profileId: 'demo-privado', holderDid: 'did:iden3:polygon:mumbai:holder-' + id, roleValue: 99 })) }
 const config = bridgeConfig(metadata, ops)
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
 function windowFixture(fragment = '#' + nonce) {

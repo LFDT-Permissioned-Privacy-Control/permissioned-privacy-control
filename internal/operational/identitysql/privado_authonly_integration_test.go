@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 
 	"privacy-proxy/internal/brokerpolicy"
 	f "privacy-proxy/internal/brokertest"
@@ -63,6 +64,19 @@ func TestActualPrivadoWalletAuthOnlySession(t *testing.T) {
 	}
 	first := x.confirm(t, x.candidate(t, start.RequestID), nil)
 	verify(first)
+	original := accessClaims(t, first)
+	hits := rpc.hits.Load()
+	status, headers, raw := x.request(t, x.client, "POST", identityhttp.Prefix+"renew", map[string]string{"mode": "bootstrap"}, nil)
+	var restored identityhttp.AccessDTO
+	if status != 200 || len(headers.Values("Set-Cookie")) != 2 || json.Unmarshal(raw, &restored) != nil || restored.BrowserSessionID != first.BrowserSessionID || rpc.hits.Load() != hits {
+		t.Fatal("auth-only fresh session restore", status, string(raw))
+	}
+	verify(restored)
+	copy := accessClaims(t, restored)
+	if copy.Expires != original.Expires || copy.ClaimsAsOf != original.ClaimsAsOf || copy.SourceVerifiedAt != original.SourceVerifiedAt {
+		t.Fatal("auth-only restore extended original evidence")
+	}
+	x.db.wallOffset.Store(original.Expires - time.Now().Unix() + 1)
 	status, _, raw = x.request(t, x.client, "POST", identityhttp.Prefix+"renew", renewal(first), nil)
 	var pending b.ProofRequired
 	if status != 200 || json.Unmarshal(raw, &pending) != nil || pending.Status != "proof_required" || pending.BrowserSessionID != first.BrowserSessionID {
@@ -77,7 +91,7 @@ func TestActualPrivadoWalletAuthOnlySession(t *testing.T) {
 	second := x.confirm(t, x.candidate(t, fresh.RequestID), &first.BrowserSessionID)
 	verify(second)
 	family, err := x.db.one.ReadPrivadoFamily(t.Context(), x.db.scope, first.BrowserSessionID)
-	if err != nil || family.Generation != 1 || second.ActorID != first.ActorID || familyCount(t, x) != 1 {
+	if err != nil || family.Generation != 2 || second.ActorID != first.ActorID || familyCount(t, x) != 1 {
 		t.Fatal("auth-only family continuity", err)
 	}
 }

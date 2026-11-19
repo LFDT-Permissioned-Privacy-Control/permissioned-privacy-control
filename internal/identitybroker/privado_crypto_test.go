@@ -31,7 +31,7 @@ func TestPrivadoCanonicalMetadataCannotRestoreFactsOrExtendAge(t *testing.T) {
 			t.Fatal("noncanonical/authority-bearing payload accepted")
 		}
 	}
-	familyRaw, e := json.Marshal(privadoFamilyPayload{1, d, m})
+	familyRaw, e := json.Marshal(privadoFamilyPayload{Version: 1, SourceAuthDigest: d, Provider: m})
 	if e != nil || len(familyRaw) != 493 {
 		t.Fatal("family envelope contract", len(familyRaw), e)
 	}

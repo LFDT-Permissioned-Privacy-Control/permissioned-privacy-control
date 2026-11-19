@@ -5,6 +5,7 @@ import { Textarea } from '../../components/ui/textarea'
 import { Badge } from '../../components/ui/badge'
 import { download } from './SourceReview'
 import { groupsOf, object, rootOf, type SourceProject } from './sourceProject'
+import { useAuthoringState } from './sourceAuthoring'
 import { closedJSON } from '../auth/protocol'
 
 export async function scenarioDigest(raw: string): Promise<string> {
@@ -13,8 +14,8 @@ export async function scenarioDigest(raw: string): Promise<string> {
 }
 export function SourceScenario({ project, root, organization, check }: { project: SourceProject; root: string; organization: string; check(): void }) {
   const selected = rootOf(project, root), groups = groupsOf(project, root, organization)
-  const [signer, setSigner] = useState(''), [memberships, setMemberships] = useState<string[]>([]), [frames, setFrames] = useState('[\n  {"callType":"call","storageAddress":"0x0000000000000000000000000000000000000000","codeAddress":"0x0000000000000000000000000000000000000000","calldata":"0x","value":"0","depth":0,"facts":{}}\n]')
-  const [context, setContext] = useState('{"LinkedAddresses":[],"Claims":0,"GroupSourceClaims":{}}'), [error, setError] = useState<string | null>(null), [expectedManifest, setExpectedManifest] = useState('')
+  const [signer, setSigner] = useAuthoringState('signer', ''), [memberships, setMemberships] = useAuthoringState<string[]>('memberships', []), [frames, setFrames] = useAuthoringState('frames', '[\n  {"callType":"call","storageAddress":"0x0000000000000000000000000000000000000000","codeAddress":"0x0000000000000000000000000000000000000000","calldata":"0x","value":"0","depth":0,"facts":{}}\n]')
+  const [context, setContext] = useAuthoringState('context', '{"LinkedAddresses":[],"Claims":0,"GroupSourceClaims":{}}'), [error, setError] = useState<string | null>(null), [expectedManifest, setExpectedManifest] = useAuthoringState('manifest', '')
   const [exported, setExported] = useState<{ raw: string; digest: string; generation: number } | null>(null), [result, setResult] = useState<{ raw: string; manifest: string; generation: number; allowed: boolean; code: string; reason: string } | null>(null)
   const picker = useRef<HTMLInputElement>(null), alive = useRef(true), latest = useRef({ raw: '', generation: project.generation, manifest: expectedManifest })
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])

@@ -8,20 +8,18 @@ import { handler } from './server.mjs'
 const ops = 'https://localhost:8443', origin = 'https://localhost:9444'
 const id = '11111111-2222-4333-8444-555555555555'
 const requestUri = ops + '/api/v2/auth/privado/requests/' + id
-const metadata = { testOnly: true, network: 'polygon:mumbai', personas: ['admin', 'deployer', 'reader', 'outsider'].map(id => ({ id, profileId: 'demo-' + id, holderDid: 'did:example:holder-' + id })), issuerDid: 'did:example:issuer', verifierDid: 'did:example:verifier', contextUrl: 'https://schemas.test/role.jsonld', credentialType: 'BankRole', circuitId: 'credentialAtomicQuerySigV2', stateContract: '0x1111111111111111111111111111111111111111' }
-function challenge() { return { id, type: 'https://iden3-communication.io/authorization/1.0/request', from: metadata.verifierDid, created_time: 1000, expires_time: 1300, body: { callbackUrl: ops + '/api/v2/auth/privado/proofs/' + id, scope: [{ id: 1, circuitId: metadata.circuitId, optional: false, query: { allowedIssuers: [metadata.issuerDid], context: metadata.contextUrl, type: metadata.credentialType, proofType: 'BJJSignature2021', skipClaimRevocationCheck: false, credentialSubject: { role: { $eq: 3 } } } }] } } }
+const metadata = { testOnly: true, network: 'polygon:mumbai', personas: ['admin', 'deployer', 'reader', 'outsider'].map(id => ({ id, profileId: 'demo-privado', holderDid: 'did:example:holder-' + id })), issuerDid: 'did:example:issuer', verifierDid: 'did:example:verifier', contextUrl: 'https://schemas.test/role.jsonld', credentialType: 'BankRole', circuitId: 'credentialAtomicQuerySigV2', stateContract: '0x1111111111111111111111111111111111111111' }
+function challenge() { return { id, type: 'https://iden3-communication.io/authorization/1.0/request', from: metadata.verifierDid, created_time: 1000, expires_time: 1300, body: { callbackUrl: ops + '/api/v2/auth/privado/proofs/' + id, scope: [1, 2, 3].map(role => ({ id: role, circuitId: metadata.circuitId, optional: true, query: { allowedIssuers: [metadata.issuerDid], context: metadata.contextUrl, type: metadata.credentialType, proofType: 'BJJSignature2021', skipClaimRevocationCheck: false, credentialSubject: { role: { $eq: role } } } })) } } }
 
 test('only the exact saved public request can select a source or callback', () => {
   assert.deepEqual(requestLocation(requestUri, ops), { path: '/api/v2/auth/privado/requests/' + id, id })
   for (const uri of [requestUri + '?other=1', requestUri + '#x', requestUri.replace('localhost', 'evil.test'), requestUri.replace('https:', 'http:'), requestUri.replace('/requests/', '/proofs/'), requestUri.replace('/requests/', '/requests/%2f'), requestUri.replace('localhost', 'user@localhost'), ' ' + requestUri]) assert.throws(() => requestLocation(uri, ops))
-  assert.equal(checkedChallenge(challenge(), { id }, 'reader', metadata, ops, 1100), ops + '/api/v2/auth/privado/proofs/' + id)
-  for (const mutate of [x => { x.body.callbackUrl = 'https://evil.test/proofs/' + id }, x => { x.id = 'other' }, x => { x.from = 'another-verifier' }, x => { x.body.scope[0].query.credentialSubject.role.$eq = 1 }, x => { x.body.scope[0].query.skipClaimRevocationCheck = true }, x => { x.expires_time = 1099 }]) {
+  for (const persona of ['admin', 'deployer', 'reader', 'outsider']) assert.equal(checkedChallenge(challenge(), { id }, persona, metadata, ops, 1100), ops + '/api/v2/auth/privado/proofs/' + id)
+  for (const mutate of [x => { x.body.callbackUrl = 'https://evil.test/proofs/' + id }, x => { x.id = 'other' }, x => { x.from = 'another-verifier' }, x => { x.body.scope[0].query.credentialSubject.role.$eq = 3 }, x => { x.body.scope[0].query.skipClaimRevocationCheck = true }, x => { x.body.scope[0].optional = false }, x => { x.body.scope[1].id = 1 }, x => { x.body.scope[0].circuitId = 'authV2' }, x => { x.body.scope.pop() }, x => { x.body.scope = [] }, x => { x.expires_time = 1099 }]) {
     const value = challenge(); mutate(value)
     assert.throws(() => checkedChallenge(value, { id }, 'reader', metadata, ops, 1100))
   }
-  assert.throws(() => checkedChallenge(challenge(), { id }, 'outsider', metadata, ops, 1100))
-  const outsider = challenge(); outsider.body.scope = []
-  assert.doesNotThrow(() => checkedChallenge(outsider, { id }, 'outsider', metadata, ops, 1100))
+  assert.throws(() => checkedChallenge(challenge(), { id }, 'unknown-persona', metadata, ops, 1100))
 })
 
 async function fixture(t, fetcher) {

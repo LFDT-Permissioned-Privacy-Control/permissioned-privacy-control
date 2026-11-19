@@ -38,6 +38,12 @@ const control = (page, body) => page.evaluate(async body => {
 }, body)
 const apiCount = async (page, path) => (await call(page, 'requests')).filter(r => r.path === '/api/v2/auth/' + path).length
 const cookies = async () => (await context.cookies(origin)).map(c => ({ name: c.name, value: c.value })).sort((a, b) => a.name.localeCompare(b.name))
+const expireEvidence = async page => {
+  const { now } = await control(page, { action: 'expire-evidence' })
+  // Keep client response-age checks on the same owned clock as the broker.
+  // Time keeps advancing normally after the shift, with no five-minute sleep.
+  await page.clock.setSystemTime(new Date(now))
+}
 const confirm = async page => {
   await page.locator('#confirm-privado').click()
   await page.waitForFunction(() => ['complete', 'error'].includes(window.multiAuthHarness.confirmationResult().status))
@@ -124,6 +130,16 @@ try {
   for (const c of await context.cookies(origin)) { assert.equal(c.httpOnly, true); assert.equal(c.secure, true); assert.equal(c.sameSite, 'Lax'); assert.equal(c.path, '/') }
   note('reload before and after proof resumes one PUBLIC UUID; full holder identity requires explicit confirmation before access')
 
+  const beforeRestore = await control(a, { action: 'stats' })
+  const cookieBeforeRestore = await cookies()
+  assert.deepEqual(await call(a, 'restore'), { status: 'access', session: first })
+  assert.notDeepEqual(await cookies(), cookieBeforeRestore)
+  const afterRestore = await control(a, { action: 'stats' })
+  assert.equal(afterRestore.proofs, beforeRestore.proofs)
+  assert.equal(afterRestore.providerRPC, beforeRestore.providerRPC)
+  note('still-fresh session restores the same account without a new proof or provider RPC')
+
+  await expireEvidence(a)
   const cookieBeforeRenew = await cookies()
   const renews = await apiCount(a, 'renew')
   const pending = await call(a, 'restore')
@@ -176,6 +192,7 @@ try {
   assert.deepEqual(await cookies(), beforeWrongCookie)
   assert.equal((await marker(a)).phase, 'require-login')
   await b.evaluate(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: markerKey, value: replacementMarker })
+  await expireEvidence(b)
   const stillCurrent = await call(b, 'restore')
   assert.equal(stillCurrent.status, 'proof_required')
   assert.equal(stillCurrent.browserSessionId, replacement.browserSessionId)
@@ -193,6 +210,7 @@ try {
   note('logout during renewal invalidates continuation; no old callback/UUID or reload can bootstrap it back')
 
   const current = await login(b)
+  await expireEvidence(b)
   flow = await call(b, 'restore'); await offer(b, flow); await preview(b, flow, holderA)
   await control(b, { action: 'fault', kind: 'lost-complete' })
   await b.locator('#confirm-privado').click()

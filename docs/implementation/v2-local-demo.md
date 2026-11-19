@@ -143,13 +143,18 @@ Open the Explorer URL printed by `make demo-v2-info`, then:
 
 1. Choose **Sign in**.
 2. In OPS choose **Demo Deployer**, **Demo Admin**, **Demo Reader** or
-   **Demo Outsider**. Allow the local wallet popup when the browser asks.
+   **Demo Outsider** under **Development Only**. Allow the local wallet popup
+   when the browser asks. If the wallet window shows its local certificate
+   warning, accept it; OPS allows up to two minutes for this setup, bounded by
+   the original application login's expiry.
 3. Wait while the wallet generates a fresh proof. OPS verifies the exact selected
    holder, finishes that login and continues to the original application.
 
-If an existing Privado session has already opened a fresh verification request,
-use **Cancel sign in** to return to the identity choices, then choose the desired
-demo button. Real customer wallets complete that fresh proof themselves.
+If an existing Privado session needs a fresh proof, choose the same demo identity
+under **Development Only**. It completes that existing verification request and
+keeps the same session. **Cancel demo verification** closes only the helper;
+**Cancel sign in** abandons the verification request. Ordinary wallets use the
+QR code or wallet link under **Use a wallet manually**.
 
 For a direct visit to OPS, the same buttons open the configuration workspace for
 an administrator and Account for other identities. **Cancel demo sign in**
@@ -158,10 +163,17 @@ is retried automatically after an uncertain confirmation.
 
 These buttons are compiled only into the local demo image. A normal V2 build
 keeps the ordinary Privado and Azure login. To inspect the ordinary Privado
-flow in the demo, choose **Continue with Privado ID**, expand **Verification
+flow in the demo, expand **Use a wallet manually**, choose
+**Continue with Privado ID**, expand **Verification
 request details**, and copy its URL to the printed demo wallet page. Select the
 matching persona there and choose **Generate and submit proof**; then inspect
 the verified holder in OPS and confirm it.
+
+All four personas use one `demo-privado` connection and the same verification
+request. The wallet proves whichever approved roles that holder can prove; OPS
+maps only those verified facts to groups. The outsider proves its identity with
+no role facts and receives no groups. An omitted role means “not proved”; it is
+not evidence that the holder cannot have that role.
 
 `make demo-v2-check-login` checks the actual buttons, holder matching,
 cancellation, blocked popups and untrusted certificates in temporary browser
@@ -171,7 +183,9 @@ profiles. It uses real proofs and saves results under
 Use separate browser profiles/private windows for simultaneous identities.
 For a switch within one context, use **Sign out** and start a new login; another
 tab shares its browser identity context. Short access lifetimes can require a
-fresh proof after several minutes. Use the same identity/profile when refreshing.
+fresh proof after several minutes. A reload can reuse a still-valid server
+session, preserving the original evidence age and expiry. It never extends old
+permissions. Use the same identity/profile when a fresh proof is required.
 
 Accept the local demo certificate warning for the printed URLs. The launcher
 uses P-256 TLS certificates and does not install a system-wide CA. Process trust
@@ -344,8 +358,8 @@ node --input-type=module - .tmp/demo-policy/core/identity.json <<'JS'
 import fs from 'node:fs';
 const file = process.argv[2];
 const source = JSON.parse(fs.readFileSync(file, 'utf8'));
-const admin = source.mappings.find(m => m.profileId === 'demo-admin');
-const reader = source.mappings.find(m => m.profileId === 'demo-reader');
+const admin = source.mappings.find(m => m.id === 'demo-admin');
+const reader = source.mappings.find(m => m.id === 'demo-reader');
 reader.groupIds = [...admin.groupIds];
 fs.writeFileSync(file, JSON.stringify(source, null, 2) + '\n');
 JS

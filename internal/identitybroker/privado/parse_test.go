@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"privacy-proxy/internal/identity"
+
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 )
 
@@ -115,5 +117,66 @@ func TestRoleSignalsOnlyRestrictLookupsAndPreserveOriginalAge(t *testing.T) {
 		if _, e := parseCompact(marshalCompact(t, parts), sdkRequest(t, r), p.profiles["role"], time.Now().Unix()); e == nil {
 			t.Fatal("stale or future role timestamp")
 		}
+	}
+}
+
+func TestOptionalProofSubsetsKeepOriginalIDsAndRequiredChecks(t *testing.T) {
+	source := fixtureSource(t)
+	for i := range source.Profiles {
+		if source.Profiles[i].ID == "role" {
+			original := source.Profiles[i].Predicates[0]
+			first, last := original, original
+			first.ID, last.ID = "alpha", "zulu"
+			first.Optional, original.Optional, last.Optional = true, true, true
+			source.Profiles[i].Predicates = []identity.Predicate{first, original, last}
+		}
+	}
+	p := fixtureProvider(t, func(o *Options) { o.Catalog = compileFixture(t, source) })
+	r := fixtureRequest(t, p, "role")
+	req := sdkRequest(t, r)
+	for _, proof := range req.Body.Scope {
+		if proof.Optional == nil || !*proof.Optional {
+			t.Fatal("explicit optional proof became required")
+		}
+	}
+	_, holder := fixtureDID(t, "polygon:mumbai", 13)
+	issuer, _ := fixtureDID(t, "polygon:mumbai", 12)
+	user, _ := fixtureDID(t, "polygon:mumbai", 13)
+	compact := func(ids ...int) string {
+		parts := compactParts(t, unprovedCompact(t, r, holder))
+		values := []any{}
+		for _, id := range ids {
+			signals := []string{"0", user.BigInt().String(), "100", strconv.Itoa(id), issuer.BigInt().String(), "1", "200", strconv.FormatInt(r.Context.CreatedAt.Unix(), 10), "0", "0", "0", "0", "1", "7"}
+			for len(signals) < 77 {
+				signals = append(signals, "0")
+			}
+			values = append(values, map[string]any{"id": id, "circuitId": "credentialAtomicQuerySigV2", "proof": parts[2]["proof"], "pub_signals": signals})
+		}
+		parts[1]["body"].(map[string]any)["scope"] = values
+		return marshalCompact(t, parts)
+	}
+	for _, ids := range [][]int{{}, {3}, {2}, {1, 3}} {
+		parsed, err := parseCompact(compact(ids...), req, p.profiles["role"], time.Now().Unix())
+		if err != nil || len(parsed.provenPredicates) != len(ids) {
+			t.Fatal("valid structural subset rejected", ids, err)
+		}
+		for _, id := range ids {
+			if !parsed.provenPredicates[uint32(id)] {
+				t.Fatal("original predicate ID lost", id)
+			}
+		}
+	}
+	for _, ids := range [][]int{{0}, {4}, {3, 3}} {
+		if _, err := parseCompact(compact(ids...), req, p.profiles["role"], time.Now().Unix()); err == nil {
+			t.Fatal("unknown or duplicate proof accepted", ids)
+		}
+	}
+	mandatory := false
+	req.Body.Scope[0].Optional = &mandatory
+	if _, err := parseCompact(compact(3), req, p.profiles["role"], time.Now().Unix()); err == nil {
+		t.Fatal("missing required proof accepted")
+	}
+	if _, err := parseCompact(compact(1, 3), req, p.profiles["role"], time.Now().Unix()); err != nil {
+		t.Fatal("required proof with optional subset rejected", err)
 	}
 }

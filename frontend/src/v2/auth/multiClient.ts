@@ -3,7 +3,7 @@ import { hashState, locked } from './context'
 import { takeCallback } from './callback'
 import { requestAuth } from './transport'
 import { activeMulti, AzureFlow, deniedMulti, MultiMarker, multiPair, PrivadoFlow,
-  readMultiMarker, requireMultiPair, unchangedMulti, writeMultiMarker } from './multiContext'
+  readMultiMarker, readLoginContext, requireMultiPair, unchangedLoginContext, unchangedMulti, writeMultiMarker } from './multiContext'
 import { AccessOutcome, Candidate, holderDid, LoginPending, MultiAccess, multiAccess, multiProviders,
   MultiSession, OperationOutcome, Pending, Preview, preview, privadoStart, PrivadoStart,
   proofRequired, requestUri, sameSession, validSession } from './multiProtocol'
@@ -20,8 +20,11 @@ export class MultiBrowserAuthClient {
 
   async providers() { return locked(async () => multiProviders(await requestAuth('providers'))) }
 
-  async startAzureLogin(profileId: string): Promise<{ authorizationUrl: string; expiresAt: number }> {
+  async startAzureLogin(profileId: string, requireCurrent?: () => void): Promise<{ authorizationUrl: string; expiresAt: number }> {
+    const clickedContext = readLoginContext()
     return locked(async () => {
+      requireCurrent?.()
+      unchangedLoginContext(clickedContext)
       if (!text(profileId, 128)) throw new AuthError('invalid_response')
       const initial = this.startMarker()
       try {
@@ -62,8 +65,11 @@ export class MultiBrowserAuthClient {
     })
   }
 
-  async startPrivadoLogin(profileId: string, expectedHolderDid?: string): Promise<PrivadoStart> {
+  async startPrivadoLogin(profileId: string, expectedHolderDid?: string, requireCurrent?: () => void): Promise<PrivadoStart> {
+    const clickedContext = readLoginContext()
     return locked(async () => {
+      requireCurrent?.()
+      unchangedLoginContext(clickedContext)
       if (!text(profileId, 128) || expectedHolderDid !== undefined && !holderDid(expectedHolderDid)) throw new AuthError('invalid_response')
       const initial = this.startMarker()
       try {

@@ -3,7 +3,7 @@
   "dependencies": {
     "explorer": {
       "repository": "https://github.com/gateway-fm/ops-explorer.git",
-      "commit": "35e29f1bd42543049f01fe0519e7d60d9d664c80",
+      "commit": "a52e7139d85f25314c4d29a68d82958f9d6ba761",
       "overrideEnvironment": "OPS_V2_DEMO_EXPLORER_SOURCE"
     },
     "indexer": {
