@@ -629,9 +629,11 @@ func TestPrivacyModeBypassClosure(t *testing.T) {
 	t.Run("block-explorer privacy API returns exact Open Privacy Suite response", func(t *testing.T) {
 		// This is a controlled OPS-specific oracle, not merely "not 502".
 		// The privacy BFF requires a display identity, then forwards this grant
-		// request to OPS and passes its status/body through byte-for-byte. The
-		// fixed UUID is deliberately absent, so OPS's getGrantTransactions
-		// handler returns its exact JSON 404. Local BFF/static fallbacks use
+		// request to OPS and passes its status/body through byte-for-byte. OPS
+		// authenticates the viewer before it looks up a grant, so a grant's
+		// existence is never shown to a non-holder. This display-only identity
+		// carries no token OPS can verify, so OPS returns its exact JSON 401.
+		// The BFF's own 401 is plain text, and local BFF/static fallbacks use
 		// different status, content type, or body shapes.
 		const (
 			missingGrantID = "00000000-0000-0000-0000-000000000000"
@@ -654,9 +656,9 @@ func TestPrivacyModeBypassClosure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read controlled OPS oracle response: %v", err)
 		}
-		const wantBody = `{"error":"grant not found"}`
-		if resp.StatusCode != http.StatusNotFound || resp.Header.Get("Content-Type") != "application/json" || string(body) != wantBody {
-			t.Fatalf("controlled OPS oracle mismatch: status=%d content-type=%q body=%q; want status=404 content-type=application/json body=%s", resp.StatusCode, resp.Header.Get("Content-Type"), string(body), wantBody)
+		const wantBody = `{"error":"authentication required"}`
+		if resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("Content-Type") != "application/json" || string(body) != wantBody {
+			t.Fatalf("controlled OPS oracle mismatch: status=%d content-type=%q body=%q; want status=401 content-type=application/json body=%s", resp.StatusCode, resp.Header.Get("Content-Type"), string(body), wantBody)
 		}
 		var payload map[string]json.RawMessage
 		if err := json.Unmarshal(body, &payload); err != nil {
