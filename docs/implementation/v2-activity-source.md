@@ -29,10 +29,20 @@ UTC truncated to microseconds, rather than sealing time or proof of delivery.
 The closed canonical JSON spool contains version/kind, network, original source
 generation/configuration, producer/run/record UUIDs, run ordinal, observation
 time, actor/org/policy, approved method label, trusted IP, actual selected HTTP
-status, optional numeric JSON-RPC error, and normalized outcome/status. The sealed
+status, optional numeric JSON-RPC error, normalized outcome/status and a bounded
+reason code in new v2 records. The sealed
 variant adds the actual buffer sequence. Both are at most 2,048 bytes. Raw RPC
 parameters, payloads, URLs, JWTs and proofs are absent. Only the JSON-RPC error
 field can be null. HTTP200 plus a JSON-RPC error is not success.
+
+The writer emits v2 with exactly one closed `c` reason code; an unclassified
+trusted completion records `not_recorded`. Unknown codes and incompatible
+reason/outcome pairs are rejected before append. Examples include method not
+allowed, wallet not linked, and the specific Go policy denial. Reasons come from
+the actual decision branch, never free-text errors, raw claims, a new evaluation
+or a later guess from HTTP status. Successful and unclassified operations need
+no invented explanation. Existing v1 bytes omit `c` and remain unchanged; both
+versions retain the same 2,048-byte cap and chain-hash algorithm.
 
 Reserve is immediate and performs no SQL or per-request filesystem-stat call.
 Defaults and ceilings are 256 outstanding slots, 65,536 recovered/pending/held
@@ -86,18 +96,22 @@ output remain globally bounded, rather than constituting a network DoS defense.
 ## SQL roles and initialization
 
 Use a dedicated lean audit database with the existing exact audit001..004
-migrations already applied by their normal migration tool. B1's owner tool owns
-additive005 and the additive006 organization/order index. It rejects a missing or unsupported baseline. All four old SQL
-files and the old sealer/Drain APIs remain unchanged.
+migrations already applied by their normal migration tool. The owner tool
+installs the005 storage objects and007 closed v1/v2 guard; fresh installations
+also get the006 organization/order performance index. It rejects a missing or
+unsupported baseline. The four old SQL migrations and sealer/Drain APIs remain
+unchanged.
 
 `ops-activity-admin migrate` needs `OPS_ACTIVITY_OWNER_DATABASE_URL`, explicit
 `--writer-role`, `--reader-role`, `--retention-role`, and `--drained`. The roles
 must already exist: disjoint LOGIN NOINHERIT, no membership/ownership or elevated
 role attributes. The command neither creates roles nor infers a global role set.
 Credentials are environment values, never command arguments or status output.
-Migration accepts the exact005 catalog for its explicit006 index upgrade, or
-checks the exact006 catalog on retry. It verifies effective privileges and does
-not silently repair changed grants.
+The format transition accepts exact005 or006 prototype catalogs and changes
+only their guard to007. A retry validates007. It verifies effective privileges,
+keeps existing index presence unchanged, and does not repair changed grants or
+rewrite history. The explicit drain belongs to this prototype format transition;
+it is not a requirement for every future compatible update.
 
 `initialize` additionally requires exact environment, chain ID, genesis hash,
 deployment ID, source UUID, configuration digest and capacities. Initialization
@@ -110,8 +124,11 @@ counters. The reader gets an owner-backed security-barrier qualified projection,
 registry/source metadata and anchors, without raw legacy `request_params` access.
 Retention gets only the prunable projection and bounded floor/count/anchor
 updates. It cannot update payloads, toggle readiness/generation, or delete runs.
-Runtime Open and operations compare the exact PG16 catalog and effective ACL,
-including ordinary/permanent/non-RLS relations, view definitions and guards.
+Runtime Open and operations compare the qualified PG16 catalog and exact
+effective ACL, including ordinary/permanent/non-RLS relations, views and007
+guards. Only the exact nonunique `public.activity_org_page` performance index is
+optional. Its known absent/building/valid states are accepted; a different
+definition, unique index, extra index or changed mandatory object is rejected.
 Inspection uses role-independent pg_catalog expressions; it requires no extra
 catalog/view grant. The database owner and trusted source assembly remain TCB.
 
@@ -285,24 +302,48 @@ page reports its sealed head, capture time and retained floor without a fleet
 total. Below-floor requests or continuations return `410 history_pruned`, not
 an empty or silently shortened history. Current access and activity source are
 checked again after closing the original read transaction and before output.
-Rich reasons were not recorded by sealedv1: `reason` remains `not_recorded`; no
+Sealedv1 has no recorded reason and projects `not_recorded`. New sealedv2
+projects its validated closed reason code with a fixed friendly UI label. No
 present policy evaluation or coarse outcome is substituted for historical cause.
+This adds no raw error text, claims or request parameters to the page.
 The compiled recognized-request population includes the investigation label;
 RPC-only lists and summaries exclude it. Adding this reserved label changes the
 population digests, so older population-bound cursors must restart. Legacy v1
 codec and spool recovery remain valid. Older recognized-request readers omit
 the new reserved label; this is not identical old/new population visibility.
 
-Deploy by draining every OPS reader/writer sharing the activity database,
-running the existing
-`ops-activity-admin migrate` with its owner-only environment, explicit existing
-roles and `--drained`, then starting the compatible image.006 adds one partial
-organization/order index, changes no grants, and rewrites no envelopes/history.
-005/006 identify pinned catalog shapes; no mutable activity version row is added.
-Old005-pinned binaries reject006. For an old-image rollback, keep all affected
-OPS instances drained and run `ops-activity-admin downgrade-to-005` with the same
-owner environment, explicit roles and `--drained` before restarting that image.
-It verifies exact006 and the ACL, drops only `activity_org_page`, then verifies
-exact005 and the same ACL in one transaction. It changes no log, anchor, run,
-source, generation, configuration, key or spool data. The index consumes extra
-disk and is built while drained; large-range/export capacity is not promised.
+Fresh first-V2 deployments start with007 and the fixed v2 writer. Moving an
+existing unreleased005/006 prototype to this format requires stopping its old
+readers/writers, running `ops-activity-admin migrate` with the owner environment,
+explicit existing roles and `--drained`, then starting a compatible dual-reader
+image. No history, source identity, generation, run, key or spool is reset.
+005/006/007 name qualified catalog profiles, not a mutable version row.
+
+**Rollback floor:** after the first durable v2 append to a local spool, rollback
+must use a dual v1/v2 reader image with007. Waiting for SQL sealing does not delay
+that requirement. V1-only native prototypes cannot read that spool/history.
+`downgrade-to-005` remains restricted to exact006 and rejects007; dropping an
+index cannot undo a metadata-format change. The stream format digest changes to
+`ops.activity.sealed-metadata/v1-v2`, so older format-bound continuations restart;
+original payload and chain-hash bytes remain intact. A real mixed fleet requiring
+old binaries would need an explicit compatibility-first rollout; the first V2
+release does not add a write-version knob or a bridge release by default.
+
+Within the007 compatibility profile, the database owner can maintain the known
+performance index while OPS readers/writers stay active:
+
+```sql
+CREATE INDEX CONCURRENTLY activity_org_page ON public.access_logs
+ (chain_name,org_id,activity_observed_us DESC,activity_producer_id DESC,
+  activity_run_id DESC,activity_ordinal DESC,activity_record_id DESC)
+ WHERE activity_kind=1;
+-- Or, to remove/rebuild that optional index:
+DROP INDEX CONCURRENTLY public.activity_org_page;
+```
+
+Run each as a separate owner statement outside a transaction. A cancelled build
+may leave that exact index invalid; owner removal/rebuild is still needed for
+performance, but it does not make the security schema unqualified. No runtime
+process receives DDL privileges or creates indexes. Queries retain their existing
+bounded page and time limits when the index is absent/building; latency may rise.
+Large-range/export capacity is not promised.

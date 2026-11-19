@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"privacy-proxy/internal/activityreasondata"
 	share "privacy-proxy/internal/admissionsharedata"
 	"privacy-proxy/internal/executionfacts"
 	"privacy-proxy/internal/policybundle"
@@ -149,12 +150,12 @@ func (e *Engine) TraceTransactionObserved(parent context.Context, assertion, sel
 	q, code := e.parseMinedTrace(raw)
 	r.id, r.notification = q.id, q.notification
 	if code != 0 {
-		return r.fail(InvalidCompletion, code)
+		return r.fail(InvalidCompletion, code, activityreasondata.InvalidRequestShape)
 	}
 	r.metadata.Method = q.method
 	view, err := e.factory.Build(assertion)
 	if err != nil {
-		return r.fail(UnauthenticatedCompletion, -32001)
+		return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.AuthRequired)
 	}
 	r.view = view
 	r.metadata.ActorID = view.ActorID()
@@ -166,13 +167,16 @@ func (e *Engine) TraceTransactionObserved(parent context.Context, assertion, sel
 		}
 	}
 	org, ok := view.Org(selectedOrg)
-	if !ok || !e.minedMethodAuthorized(org, q.method) {
-		return r.fail(DeniedCompletion, -32001)
+	if !ok {
+		return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 	}
 	r.metadata.OrganizationID = selectedOrg
+	if !e.minedMethodAuthorized(org, q.method) {
+		return r.fail(DeniedCompletion, -32001, activityreasondata.MethodNotAllowed)
+	}
 	ref, err := org.SelectCredentialRef(q.method)
 	if err != nil {
-		return r.fail(DeniedCompletion, -32001)
+		return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 	}
 	client, err := e.clients[selectedOrg].WithCredential(ref)
 	if err != nil {

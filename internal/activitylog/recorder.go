@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 	"privacy-proxy/internal/activitymethoddata"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/audit/buffer"
 	"privacy-proxy/internal/audit/sealer"
 )
@@ -281,11 +282,15 @@ func (s *Slot) Complete(c Completion) (*Receipt, error) {
 	ordinal := r.ordinal
 	r.mu.Unlock()
 	b := r.run.Binding()
+	reason := c.Reason
+	if reason == "" {
+		reason = activityreasondata.NotRecorded
+	}
 	policy := ""
 	if c.PolicyDigest != (Digest{}) {
 		policy = hex.EncodeToString(c.PolicyDigest[:])
 	}
-	e := Envelope{Version: 1, Kind: 1, Network: hex.EncodeToString(b.Metadata.NetworkKey[:]), Generation: b.Metadata.Generation, Configuration: hex.EncodeToString(b.Metadata.Configuration[:]), ProducerID: b.ProducerID, RunID: b.RunID, RecordID: uuid.NewString(), Ordinal: strconv.FormatUint(ordinal, 10), ObservedMicros: r.cfg.Clock().UTC().Truncate(time.Microsecond).UnixMicro(), ActorID: c.ActorID, DataOrg: c.DataOrganizationID, Policy: policy, Method: c.Method, IP: c.TrustedIP, HTTP: c.HTTPStatus, RPCError: detachError(c.RPCErrorCode), Outcome: string(c.Outcome), Status: status(string(c.Outcome))}
+	e := Envelope{Version: 2, Kind: 1, Network: hex.EncodeToString(b.Metadata.NetworkKey[:]), Generation: b.Metadata.Generation, Configuration: hex.EncodeToString(b.Metadata.Configuration[:]), ProducerID: b.ProducerID, RunID: b.RunID, RecordID: uuid.NewString(), Ordinal: strconv.FormatUint(ordinal, 10), ObservedMicros: r.cfg.Clock().UTC().Truncate(time.Microsecond).UnixMicro(), ActorID: c.ActorID, DataOrg: c.DataOrganizationID, Policy: policy, Method: c.Method, IP: c.TrustedIP, HTTP: c.HTTPStatus, RPCError: detachError(c.RPCErrorCode), Outcome: string(c.Outcome), Status: status(string(c.Outcome)), Reason: reason}
 	if !slices.Contains(r.cfg.Methods, c.Method) || !validEnvelope(e, false) {
 		r.releaseUnused()
 		return nil, ErrInvalid

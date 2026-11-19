@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"privacy-proxy/internal/activitylog"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/networkidentity"
 	"privacy-proxy/internal/policybundle"
@@ -178,7 +179,7 @@ func category(c rpcengine.CompletionClass) activitylog.Outcome {
 	}
 }
 func completion(m rpcengine.OperationMetadata, remote string) (activitylog.Completion, error) {
-	c := activitylog.Completion{ActorID: m.ActorID, DataOrganizationID: m.OrganizationID, HTTPStatus: 200, RPCErrorCode: m.RPCErrorCode, Outcome: category(m.Class), TrustedIP: peer(remote), Method: "rpc.invalid_request"}
+	c := activitylog.Completion{ActorID: m.ActorID, DataOrganizationID: m.OrganizationID, HTTPStatus: 200, RPCErrorCode: m.RPCErrorCode, Outcome: category(m.Class), Reason: m.Reason, TrustedIP: peer(remote), Method: "rpc.invalid_request"}
 	switch m.Method {
 	case rpcengine.EthCall:
 		c.Method = "eth_call"
@@ -239,7 +240,7 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, org string) {
 	// replacement can release its credit before the actual Append returns.
 	transport := func(status int) {
 		code := int32(-32600)
-		_, err := completeReference(w, slot, activitylog.Completion{Method: "rpc.invalid_transport", TrustedIP: peer(r.RemoteAddr), HTTPStatus: uint16(status), RPCErrorCode: &code, Outcome: activitylog.Invalid})
+		_, err := completeReference(w, slot, activitylog.Completion{Method: "rpc.invalid_transport", TrustedIP: peer(r.RemoteAddr), HTTPStatus: uint16(status), RPCErrorCode: &code, Outcome: activitylog.Invalid, Reason: activityreasondata.InvalidRequestShape})
 		if err != nil {
 			write(w, 503, busy)
 			return

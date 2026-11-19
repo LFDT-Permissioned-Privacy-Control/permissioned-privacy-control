@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/policycore"
 	"privacy-proxy/internal/rpcenvelope"
@@ -203,12 +204,12 @@ func (e *Engine) UtilityObserved(parent context.Context, assertion, selected str
 	q, code := e.parseUtility(raw)
 	r.id, r.notification = q.id, q.notification
 	if code != 0 {
-		return r.fail(InvalidCompletion, code)
+		return r.fail(InvalidCompletion, code, activityreasondata.InvalidRequestShape)
 	}
 	r.metadata.Method = q.method
 	view, err := e.factory.Build(assertion)
 	if err != nil {
-		return r.fail(UnauthenticatedCompletion, -32001)
+		return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.AuthRequired)
 	}
 	r.view = view
 	r.metadata.ActorID = view.ActorID()
@@ -233,10 +234,13 @@ func (e *Engine) UtilityObserved(parent context.Context, assertion, selected str
 		return r.fail(UnavailableCompletion, -32002)
 	}
 	o, mapped := view.Org(org)
-	if !ok || !mapped || !e.utilityAllowed(o, q.method) {
-		return r.fail(DeniedCompletion, -32001)
+	if !ok || !mapped {
+		return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 	}
 	r.metadata.OrganizationID = org
+	if !e.utilityAllowed(o, q.method) {
+		return r.fail(DeniedCompletion, -32001, activityreasondata.MethodNotAllowed)
+	}
 	if q.block.Historical() {
 		admin := false
 		for _, id := range view.OrgIDs() {
@@ -244,12 +248,12 @@ func (e *Engine) UtilityObserved(parent context.Context, assertion, selected str
 			admin = admin || v.IsOrgAdmin()
 		}
 		if !admin {
-			return r.fail(DeniedCompletion, -32001)
+			return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 		}
 	}
 	ref, err := o.SelectCredentialRef(q.method)
 	if err != nil {
-		return r.fail(DeniedCompletion, -32001)
+		return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 	}
 	client, err := e.clients[org].WithCredential(ref)
 	if err != nil {
@@ -261,7 +265,7 @@ func (e *Engine) UtilityObserved(parent context.Context, assertion, selected str
 	}
 	r.walletVersion = wallet.Version()
 	if q.call.FromSupplied() && !wallet.Contains(q.call.From()) {
-		return r.fail(DeniedCompletion, -32001)
+		return r.fail(DeniedCompletion, -32001, activityreasondata.SenderNotLinked)
 	}
 	if q.canonical == "eth_sendTransaction" {
 		return e.nodeOwnedObserved(ctx, q, view, org, ref, wallet, r)
@@ -298,7 +302,7 @@ func (e *Engine) UtilityObserved(parent context.Context, assertion, selected str
 		gas, err := estimateChecked(session.GasCap(), func(gas uint64) (*rpcexecution.CallExecution, error) { return qualify(gas, nil, false) })
 		if err != nil {
 			if err == errUtilityDenied {
-				return r.fail(DeniedCompletion, -32001)
+				return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 			}
 			return r.fail(EvaluationFailedCompletion, -32000)
 		}
@@ -378,7 +382,7 @@ var errUtilityDenied = errors.New("utility policy denied")
 
 func utilityError(r *TraceOperationResult, err error) *TraceOperationResult {
 	if err == errUtilityDenied {
-		return r.fail(DeniedCompletion, -32001)
+		return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 	}
 	return r.fail(UnavailableCompletion, -32002)
 }

@@ -1,4 +1,5 @@
 import { actorID, record } from './operationsModels'
+import { validReasonOutcome, type AccessLogReason } from './accessLogReasons'
 
 export const accessLogOutcomes = ['success', 'invalid', 'unauthenticated', 'denied', 'evaluation-failed', 'unavailable', 'unconfirmed'] as const
 export type AccessLogOutcome = typeof accessLogOutcomes[number]
@@ -44,7 +45,7 @@ export function accessLogsEndpoint(org: string, query: AccessLogQuery, cursor?: 
   if (!logUUID(org) || !validAccessLogQuery(params)) throw Error('Check the actor ID, method, outcome, time range and request reference.')
   return `/api/v2/orgs/${org}/access-logs?` + params
 }
-export interface AccessLogItem { requestReference: string; observedAt: string; actorId: string; organizationId: string; method: string; outcome: AccessLogOutcome; httpStatus: number; rpcErrorCode: number | null; recordedStatus: number; trustedIP: string | null; policyDigest: string | null; configurationDigest: string; reason: 'not_recorded' }
+export interface AccessLogItem { requestReference: string; observedAt: string; actorId: string; organizationId: string; method: string; outcome: AccessLogOutcome; httpStatus: number; rpcErrorCode: number | null; recordedStatus: number; trustedIP: string | null; policyDigest: string | null; configurationDigest: string; reason: AccessLogReason }
 export interface AccessLogSource { sourceId: string; generation: string; networkDigest: string; configurationDigest: string; headReference: string; sourceAsOf: string; retainedFrom: string; population: 'SEALED_REQUEST_COMPLETIONS_AS_OF_CHAIN_HEAD'; coverage: 'committed-sealed-prefix' }
 export interface AccessLogPage { items: AccessLogItem[]; next: string | null; source: AccessLogSource }
 export function sameLogSource(a: AccessLogSource, b: AccessLogSource): boolean {
@@ -100,7 +101,7 @@ export function accessLogPage(value: unknown, org: string, query: AccessLogQuery
       )) ||
       (row.policyDigest !== null && !digest(row.policyDigest)) ||
       !digest(row.configurationDigest) ||
-      row.reason !== 'not_recorded' ||
+      !validReasonOutcome(row.reason, outcome) ||
       (row.trustedIP !== null && (
         typeof row.trustedIP !== 'string' || row.trustedIP.length < 1 || row.trustedIP.length > 45
       )) ||

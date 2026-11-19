@@ -31,18 +31,32 @@ func (e *ExplorerEngine) delegateExplorer(ctx context.Context, assertion Metadat
 	if strings.HasPrefix(label, "explorer.address_") {
 		r.state = e.config.State.QueryObserved(ctx, assertion, org, raw)
 		m, err := r.state.MetadataFor(e.config.State)
-		if err != nil || m.Class != SuccessfulCompletion {
+		if err != nil {
 			return r.fail(403, "denied", DeniedCompletion)
 		}
 		r.captured.ActorID, r.captured.OrganizationID = m.ActorID, m.OrganizationID
+		if m.Class != SuccessfulCompletion {
+			why := m.Reason
+			if !validCapturedReason(DeniedCompletion, why) {
+				why = ""
+			}
+			return r.fail(403, "denied", DeniedCompletion, why)
+		}
 		result = r.state.observation.ResultJSON()
 	} else {
 		r.metadata = e.config.Metadata.QueryObserved(ctx, assertion, org, raw)
 		m, err := r.metadata.MetadataFor(e.config.Metadata)
-		if err != nil || m.Class != SuccessfulCompletion {
+		if err != nil {
 			return r.fail(403, "denied", DeniedCompletion)
 		}
 		r.captured.ActorID, r.captured.OrganizationID = m.ActorID, m.OrganizationID
+		if m.Class != SuccessfulCompletion {
+			why := m.Reason
+			if !validCapturedReason(DeniedCompletion, why) {
+				why = ""
+			}
+			return r.fail(403, "denied", DeniedCompletion, why)
+		}
 		result = r.metadata.observation.ResultJSON()
 	}
 	var value any

@@ -60,7 +60,10 @@ func ownerTx(ctx context.Context, dsn string, fn func(pgx.Tx) error) error {
 	return nil
 }
 
-// Migrate owns activity005 and additive006. Existing lean audit001..004 must already have been
+// Migrate installs the dual-read007 guard and accepts exact005/006 prototype
+// predecessors. Its explicit drain is for that format transition, not for
+// compatible online maintenance of the optional organization index.
+// Existing lean audit001..004 must already have been
 // applied by their normal owner migration tool; their SQL/version authority is
 // not duplicated here. Explicit caller roles must already exist.
 func Migrate(ctx context.Context, dsn, writerRole, readerRole, retentionRole string, drained bool) error {
@@ -79,13 +82,15 @@ func Migrate(ctx context.Context, dsn, writerRole, readerRole, retentionRole str
 			if err := checkSchema(ctx, tx); err == nil {
 				return checkRole(ctx, tx, roles, "owner")
 			}
-			if err := checkSchemaAgainst(ctx, tx, previousCatalog); err != nil {
-				return err
+			if err := checkSchemaAgainst(ctx, tx, prototype006Catalog); err != nil {
+				if err := checkSchemaAgainst(ctx, tx, previousCatalog); err != nil {
+					return err
+				}
 			}
 			if err := checkRole(ctx, tx, roles, "owner"); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, adminIndexSQL); err != nil {
+			if _, err := tx.Exec(ctx, reasonSQL); err != nil {
 				return a.ErrUnavailable
 			}
 			return checkSchema(ctx, tx) // never rewrite history or existing grants
@@ -96,8 +101,8 @@ func Migrate(ctx context.Context, dsn, writerRole, readerRole, retentionRole str
 		if tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.access_logs WHERE chain_name LIKE 'ops-activity-v1/%')`).Scan(&exists) != nil || exists {
 			return a.ErrConflict
 		}
-		if _, err := tx.Exec(ctx, schemaSQL+"\n"+adminIndexSQL); err != nil {
-			return fmt.Errorf("%w: activity005 DDL: %v", a.ErrUnavailable, err)
+		if _, err := tx.Exec(ctx, schemaSQL+"\n"+adminIndexSQL+"\n"+reasonSQL); err != nil {
+			return fmt.Errorf("%w: activity007 DDL: %v", a.ErrUnavailable, err)
 		}
 		if err := grantRoles(ctx, tx, roles); err != nil {
 			return err

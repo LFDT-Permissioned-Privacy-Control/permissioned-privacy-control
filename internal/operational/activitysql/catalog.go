@@ -14,14 +14,20 @@ import (
 // Expected objects and permissions are derived from the independently replayed
 // PostgreSQL16 catalog. Only explicit installed owner/role names are normalized.
 //
-//go:embed migrations/006-catalog.json
+//go:embed migrations/007-catalog.json
 var expectedCatalog []byte
+
+//go:embed migrations/006-catalog.json
+var prototype006Catalog []byte
 
 //go:embed migrations/005-catalog.json
 var previousCatalog []byte
 
 //go:embed migrations/006.sql
 var adminIndexSQL string
+
+//go:embed migrations/007.sql
+var reasonSQL string
 
 //go:embed migrations/005-acl.json
 var expectedACL []byte
@@ -65,9 +71,13 @@ func schemaOwner(ctx context.Context, q queryer) (string, error) {
 	return owner, nil
 }
 func checkSchema(ctx context.Context, q queryer) error {
-	return checkSchemaAgainst(ctx, q, expectedCatalog)
+	return checkCatalog(ctx, q, expectedCatalog, true)
 }
 func checkSchemaAgainst(ctx context.Context, q queryer, expected []byte) error {
+	return checkCatalog(ctx, q, expected, false)
+}
+
+func checkCatalog(ctx context.Context, q queryer, expected []byte, optionalOrgIndex bool) error {
 	owner, err := schemaOwner(ctx, q)
 	if err != nil {
 		return err
@@ -80,6 +90,9 @@ func checkSchemaAgainst(ctx context.Context, q queryer, expected []byte) error {
 	if json.Unmarshal(actual, &observed) != nil || json.Unmarshal(expected, &wanted) != nil {
 		return a.ErrUnavailable
 	}
+	if optionalOrgIndex && !stripQualifiedOrgIndex(observed, wanted) {
+		return fmt.Errorf("%w: unqualified activity organization index", a.ErrUnavailable)
+	}
 	normalizeOwner(observed, owner)
 	normalizeOwner(wanted, "postgres")
 	x, _ := json.Marshal(observed)
@@ -88,6 +101,80 @@ func checkSchemaAgainst(ctx context.Context, q queryer, expected []byte) error {
 		return fmt.Errorf("%w: activity schema differs from qualified catalog", a.ErrUnavailable)
 	}
 	return nil
+}
+
+// stripQualifiedOrgIndex permits maintenance of only the exact, nonunique
+// performance index. Every other catalog fact and all privileges remain exact.
+// PostgreSQL concurrent builds/drops can expose false/false or false/true;
+// true/false is not a qualified lifecycle state. Legacy005/006 stay exact.
+func stripQualifiedOrgIndex(observed, wanted any) bool {
+	o, ok := observed.(map[string]any)
+	w, wantOK := wanted.(map[string]any)
+	if !ok || !wantOK {
+		return false
+	}
+	wi, ok := w["indexes"].([]any)
+	if !ok {
+		return false
+	}
+	var reference map[string]any
+	var keepWanted []any
+	for _, item := range wi {
+		row, ok := item.(map[string]any)
+		if !ok {
+			return false
+		}
+		if row["name"] == "activity_org_page" {
+			if reference != nil {
+				return false
+			}
+			reference = row
+		} else {
+			keepWanted = append(keepWanted, row)
+		}
+	}
+	if reference == nil {
+		return false
+	}
+	oi, ok := o["indexes"].([]any)
+	if !ok {
+		return false
+	}
+	var keepObserved []any
+	found := false
+	for _, item := range oi {
+		row, ok := item.(map[string]any)
+		if !ok {
+			return false
+		}
+		if row["name"] != "activity_org_page" {
+			keepObserved = append(keepObserved, row)
+			continue
+		}
+		valid, validOK := row["valid"].(bool)
+		ready, readyOK := row["ready"].(bool)
+		if found || !validOK || !readyOK || valid && !ready {
+			return false
+		}
+		found = true
+		// Copy neither map: removal is local to this decoded comparison only.
+		delete(row, "valid")
+		delete(row, "ready")
+		ref := make(map[string]any, len(reference))
+		for key, value := range reference {
+			if key != "valid" && key != "ready" {
+				ref[key] = value
+			}
+		}
+		x, _ := json.Marshal(row)
+		y, _ := json.Marshal(ref)
+		if !bytes.Equal(x, y) {
+			return false
+		}
+	}
+	o["indexes"] = keepObserved
+	w["indexes"] = keepWanted
+	return true
 }
 
 func roleArgs(r RoleNames) []any { return []any{r.Writer, r.Reader, r.Retention} }

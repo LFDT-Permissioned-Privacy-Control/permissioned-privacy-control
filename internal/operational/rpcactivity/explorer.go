@@ -10,6 +10,7 @@ import (
 
 	"privacy-proxy/internal/activitylog"
 	"privacy-proxy/internal/activitymethoddata"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/rpcengine"
 )
 
@@ -81,7 +82,7 @@ func (s *Service) serveExplorer(w http.ResponseWriter, r *http.Request, org stri
 		return
 	}
 	if r.Method != http.MethodGet || r.URL.RawPath != "" || r.ContentLength != 0 || r.URL.Fragment != "" || len(r.URL.Path) > 1024 || len(r.URL.RawQuery) > 16<<10 {
-		_, err = completeReference(w, slot, activitylog.Completion{Method: "explorer.invalid_transport", TrustedIP: peer(r.RemoteAddr), HTTPStatus: 400, Outcome: activitylog.Invalid})
+		_, err = completeReference(w, slot, activitylog.Completion{Method: "explorer.invalid_transport", TrustedIP: peer(r.RemoteAddr), HTTPStatus: 400, Outcome: activitylog.Invalid, Reason: activityreasondata.InvalidRequestShape})
 		if err != nil {
 			write(w, 503, explorerBusy)
 		} else {
@@ -97,7 +98,7 @@ func (s *Service) serveExplorer(w http.ResponseWriter, r *http.Request, org stri
 		write(w, 503, explorerBusy)
 		return
 	}
-	c := activitylog.Completion{Method: m.Method, ActorID: m.ActorID, DataOrganizationID: m.OrganizationID, TrustedIP: peer(r.RemoteAddr), HTTPStatus: uint16(m.HTTPStatus), Outcome: category(m.Class)}
+	c := activitylog.Completion{Method: m.Method, ActorID: m.ActorID, DataOrganizationID: m.OrganizationID, TrustedIP: peer(r.RemoteAddr), HTTPStatus: uint16(m.HTTPStatus), Outcome: category(m.Class), Reason: m.Reason}
 	if activitymethoddata.Classify(c.Method) != activitymethoddata.Explorer || len(m.PolicyDigest) != 71 || !strings.HasPrefix(string(m.PolicyDigest), "sha256:") {
 		_, _ = completeReference(w, slot, activitylog.Completion{Method: "explorer.invalid_request", HTTPStatus: 503, Outcome: activitylog.Unavailable})
 		write(w, 503, explorerBusy)

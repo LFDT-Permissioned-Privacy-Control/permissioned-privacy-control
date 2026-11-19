@@ -3,6 +3,7 @@ package rpcengine
 import (
 	"context"
 	"encoding/json"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/runtimepolicy"
@@ -11,6 +12,7 @@ import (
 type TraceOperationMetadata struct {
 	Method                  string
 	Class                   CompletionClass
+	Reason                  activityreasondata.Code
 	ActorID, OrganizationID string
 	PolicyDigest            policybundle.Digest
 	RPCErrorCode            *int32
@@ -34,8 +36,9 @@ type TraceOperationResult struct {
 	walletVersion string
 }
 
-func (r *TraceOperationResult) fail(class CompletionClass, code int) *TraceOperationResult {
+func (r *TraceOperationResult) fail(class CompletionClass, code int, why ...activityreasondata.Code) *TraceOperationResult {
 	r.metadata.Class = class
+	r.metadata.Reason = capturedReason(why)
 	r.code = code
 	r.projection = nil
 	c := int32(code)
@@ -44,6 +47,9 @@ func (r *TraceOperationResult) fail(class CompletionClass, code int) *TraceOpera
 }
 func (r *TraceOperationResult) MetadataFor(e *Engine) (TraceOperationMetadata, error) {
 	if r == nil || e == nil || r.owner != e {
+		return TraceOperationMetadata{}, errOperation
+	}
+	if !validCapturedReason(r.metadata.Class, r.metadata.Reason) {
 		return TraceOperationMetadata{}, errOperation
 	}
 	m := r.metadata

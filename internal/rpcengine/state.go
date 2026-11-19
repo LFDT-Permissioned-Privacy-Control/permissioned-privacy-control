@@ -11,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/creationfacts"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/networkidentity"
@@ -307,13 +308,13 @@ func (e *StateEngine) QueryObserved(ctx context.Context, assertion MetadataAsser
 	r.metadata.PolicyDigest = metadataDigestText(e.policy.Digest())
 	env, err := rpcenvelope.ParseRaw(body, rpcenvelope.DefaultLimits())
 	if err != nil || env.Method() == "" {
-		return r.fail(InvalidCompletion, -32600)
+		return r.fail(InvalidCompletion, -32600, activityreasondata.InvalidRequestShape)
 	}
 	version := bytes.TrimSpace(env.VersionJSON())
 	if len(version) > 0 && !bytes.Equal(version, []byte("null")) {
 		var v string
 		if json.Unmarshal(version, &v) != nil || v != "2.0" {
-			return r.fail(InvalidCompletion, -32600)
+			return r.fail(InvalidCompletion, -32600, activityreasondata.InvalidRequestShape)
 		}
 	}
 	if id, present := env.IDJSON(); present {
@@ -332,37 +333,37 @@ func (e *StateEngine) QueryObserved(ctx context.Context, assertion MetadataAsser
 	r.metadata.Method, r.metadata.Canonical = name, d.method
 	q, err := rpcexecution.ParseStateQuery(d.method, env.ParamsJSON(), e.limits)
 	if err != nil {
-		return r.fail(InvalidCompletion, -32602)
+		return r.fail(InvalidCompletion, -32602, activityreasondata.InvalidRequestShape)
 	}
 	r.query = q
 	client := e.defaultClient
 	if assertion.kind == 1 {
 		if !d.builtin || !e.policy.AllowsAnonymous(name) || q.Block().HistoricalInput() || d.method == rpcexecution.StateStorage || d.method == rpcexecution.StateProof {
-			return r.fail(UnauthenticatedCompletion, -32001)
+			return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.AuthRequired)
 		}
 		r.anonymous = true
 	} else {
 		if assertion.kind != 2 {
-			return r.fail(UnauthenticatedCompletion, -32001)
+			return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.AuthRequired)
 		}
 		view, err := e.factory.Build(assertion.token)
 		if err != nil {
-			return r.fail(UnauthenticatedCompletion, -32001)
+			return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.AuthRequired)
 		}
 		r.view = view
 		r.metadata.ActorID = view.ActorID()
 		ids := view.OrgIDs()
 		if len(ids) == 0 {
-			return r.fail(DeniedCompletion, -32001)
+			return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 		}
 		if q.Block().HistoricalInput() && !anyStateOrgAdmin(view) {
-			return r.fail(DeniedCompletion, -32001)
+			return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 		}
 		contract, registered := view.Contract(q.Target())
 		owner := e.owners[q.Target()]
 		if owner != "" {
 			if _, member := view.Org(owner); !member {
-				return r.fail(DeniedCompletion, -32001)
+				return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 			}
 		}
 		orgID := selected
@@ -377,10 +378,13 @@ func (e *StateEngine) QueryObserved(ctx context.Context, assertion MetadataAsser
 		if orgID != "" {
 			var mapped bool
 			org, mapped = view.Org(orgID)
-			if !mapped || !stateMethodGranted(org, name, d) {
-				return r.fail(DeniedCompletion, -32001)
+			if !mapped {
+				return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 			}
 			r.metadata.OrganizationID = orgID
+			if !stateMethodGranted(org, name, d) {
+				return r.fail(DeniedCompletion, -32001, activityreasondata.MethodNotAllowed)
+			}
 		} else {
 			possible := false
 			for _, id := range ids {
@@ -388,7 +392,7 @@ func (e *StateEngine) QueryObserved(ctx context.Context, assertion MetadataAsser
 				possible = possible || stateMethodGranted(o, name, d)
 			}
 			if !possible {
-				return r.fail(DeniedCompletion, -32001)
+				return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 			}
 		}
 		authorized, admin := false, false
@@ -418,27 +422,27 @@ func (e *StateEngine) QueryObserved(ctx context.Context, assertion MetadataAsser
 				births[candidate.Inclusion.Hash.Hex()+candidate.TransactionHash.Hex()+":"+strconv.Itoa(candidate.Record)] = true
 			}
 			if len(births) > 1 || len(actors) > 1 {
-				return r.fail(DeniedCompletion, -32001)
+				return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 			}
 			if owner == "" {
 				if len(namespaces) > 1 || len(namespaces) == 0 && !walletEligible {
-					return r.fail(DeniedCompletion, -32001)
+					return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 				}
 				for namespace := range namespaces {
 					owner = namespace
 				}
 				if _, member := view.Org(owner); owner != "" && !member {
-					return r.fail(DeniedCompletion, -32001)
+					return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 				}
 			}
 			if orgID == "" {
 				if owner == "" {
-					return r.fail(DeniedCompletion, -32001)
+					return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 				}
 				orgID = owner
 				org, _ = view.Org(orgID)
 				if !stateMethodGranted(org, name, d) {
-					return r.fail(DeniedCompletion, -32001)
+					return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 				}
 				r.metadata.OrganizationID = orgID
 			}
@@ -449,7 +453,7 @@ func (e *StateEngine) QueryObserved(ctx context.Context, assertion MetadataAsser
 				authorized = true
 			}
 			if !authorized && walletEligible && len(namespaces) > 1 {
-				return r.fail(DeniedCompletion, -32001)
+				return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 			}
 		}
 		if !authorized && walletEligible && org != nil && (owner == "" || owner == orgID) {
@@ -458,34 +462,34 @@ func (e *StateEngine) QueryObserved(ctx context.Context, assertion MetadataAsser
 				return r.fail(UnavailableCompletion, -32002)
 			}
 			if wallet.ActorID() != view.ActorID() || !wallet.Contains(q.Target()) {
-				return r.fail(DeniedCompletion, -32001)
+				return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 			}
 			r.wallet = &wallet
 			authorized = true
 		}
 		if !authorized || org == nil {
-			return r.fail(DeniedCompletion, -32001)
+			return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 		}
 		if d.method == rpcexecution.StateProof && !admin {
-			return r.fail(DeniedCompletion, -32001)
+			return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 		}
 		if d.method == rpcexecution.StateStorage && !admin {
 			for _, key := range q.StorageKeys() {
 				if !stateInfraKey(key) {
-					return r.fail(DeniedCompletion, -32001)
+					return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 				}
 			}
 		}
 		ref, err := org.SelectCredentialRef(name)
 		if err != nil {
-			return r.fail(DeniedCompletion, -32001)
+			return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 		}
 		client = e.clients[StateBindingKey{orgID, ref}]
 		if client == nil {
 			return r.fail(UnavailableCompletion, -32002)
 		}
 		if view.RequireLive() != nil {
-			return r.fail(UnauthenticatedCompletion, -32001)
+			return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.CredentialsExpired)
 		}
 	}
 	r.source = client.Source()

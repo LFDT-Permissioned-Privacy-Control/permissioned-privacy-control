@@ -11,6 +11,7 @@ import (
 
 	a "privacy-proxy/internal/activitylog"
 	"privacy-proxy/internal/activitymethoddata"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/runtimepolicy"
 )
@@ -176,7 +177,21 @@ func (s *Service) read(ctx context.Context, token, org string, q Query, cursor s
 			value := row.IP
 			ip = &value
 		}
-		page.Items = append(page.Items, Item{row.RecordID, asTime(row.ObservedMicros), row.ActorID, row.DataOrg, row.Method, row.Outcome, row.HTTP, row.RPCError, row.Status, policy, "sha256:" + row.Configuration, "not_recorded", ip})
+		reason := activityreasondata.NotRecorded
+		switch row.Version {
+		case 1:
+			if row.Reason != "" {
+				return nil, ErrUnavailable
+			}
+		case 2:
+			if !activityreasondata.AllowedOutcome(row.Reason, row.Outcome) {
+				return nil, ErrUnavailable
+			}
+			reason = row.Reason
+		default:
+			return nil, ErrUnavailable
+		}
+		page.Items = append(page.Items, Item{row.RecordID, asTime(row.ObservedMicros), row.ActorID, row.DataOrg, row.Method, row.Outcome, row.HTTP, row.RPCError, row.Status, policy, "sha256:" + row.Configuration, string(reason), ip})
 	}
 	if !end {
 		if len(rows) == 0 {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"privacy-proxy/internal/activitymethoddata"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/explorerquery"
 	"privacy-proxy/internal/historyfacts"
 	"privacy-proxy/internal/policybundle"
@@ -102,6 +103,7 @@ type ExplorerOperationMetadata struct {
 	PolicyDigest                    policybundle.Digest
 	HTTPStatus                      int
 	Class                           CompletionClass
+	Reason                          activityreasondata.Code
 }
 type ExplorerOperationResult struct {
 	owner    *ExplorerEngine
@@ -115,9 +117,10 @@ type ExplorerOperationResult struct {
 	body     []byte
 }
 
-func (r *ExplorerOperationResult) fail(status int, code string, class CompletionClass) *ExplorerOperationResult {
+func (r *ExplorerOperationResult) fail(status int, code string, class CompletionClass, why ...activityreasondata.Code) *ExplorerOperationResult {
 	r.captured.HTTPStatus = status
 	r.captured.Class = class
+	r.captured.Reason = capturedReason(why)
 	r.body, _ = json.Marshal(struct {
 		Error struct {
 			Code string `json:"code"`
@@ -135,19 +138,20 @@ func (e *ExplorerEngine) QueryHTTPObserved(ctx context.Context, assertion Metada
 	r.captured.PolicyDigest = e.policy
 	request, err := parseExplorerRequest(path, rawQuery)
 	if err != nil {
-		return r.fail(400, "invalid_request", InvalidCompletion)
+		return r.fail(400, "invalid_request", InvalidCompletion, activityreasondata.InvalidRequestShape)
 	}
 	r.request = request
 	r.captured.Method = request.operation.Label
 	if assertion.kind != 2 {
-		return r.fail(401, "unauthenticated", UnauthenticatedCompletion)
+		return r.fail(401, "unauthenticated", UnauthenticatedCompletion, activityreasondata.AuthRequired)
 	}
 	if explorerScalar(request.operation.Label) {
 		return e.delegateExplorer(ctx, assertion, org, r)
 	}
-	current, err := e.config.History.facts.Begin(ctx, assertion.token, org, request.operation.Gate)
+	current, observed, err := e.config.History.facts.BeginObserved(ctx, assertion.token, org, request.operation.Gate)
 	if err != nil {
-		return r.fail(403, "denied", DeniedCompletion)
+		r.captured.ActorID, r.captured.OrganizationID = observed.ActorID, observed.OrganizationID
+		return r.fail(403, "denied", DeniedCompletion, observed.Reason)
 	}
 	r.current = current
 	r.captured.ActorID = current.OriginalView().ActorID()
@@ -325,6 +329,9 @@ func explorerPrefix(data explorerquery.Data, l rpcexecution.HistoryReadLimits) (
 }
 func (r *ExplorerOperationResult) MetadataFor(e *ExplorerEngine) (ExplorerOperationMetadata, error) {
 	if r == nil || r.owner != e || e == nil {
+		return ExplorerOperationMetadata{}, errExplorer
+	}
+	if !validCapturedReason(r.captured.Class, r.captured.Reason) {
 		return ExplorerOperationMetadata{}, errExplorer
 	}
 	return r.captured, nil

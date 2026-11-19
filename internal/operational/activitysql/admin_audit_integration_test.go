@@ -23,7 +23,7 @@ import (
 	s "privacy-proxy/internal/operational/activitysql"
 )
 
-func TestAdminActualHTTPAuditAppendPreservesCutAndLegacyRollback(t *testing.T) {
+func TestAdminActualHTTPAuditAppendPreservesCutAndCompatibleRollbackFloor(t *testing.T) {
 	x := setupDatabase(t)
 	ctx := t.Context()
 	writer, err := s.OpenWriter(ctx, x.writer, x.scope)
@@ -194,16 +194,16 @@ func TestAdminActualHTTPAuditAppendPreservesCutAndLegacyRollback(t *testing.T) {
 	if err != nil || !end || len(requestRows) != 7 {
 		t.Fatal("recognized population missing audits", requestRows, end, err)
 	}
-	// Stop all read traffic and the actual writer before the owner-only drained
-	// index rollback. Sealed v1 rows/hash bytes remain readable in exact005.
+	// Stop traffic;007 must refuse the old prototype index-only rollback.
+	// Reason-bearing v2 records require the dual-reader rollback image and007.
 	server.Close()
 	closeRecorder()
 	var before, after string
 	if err = x.owner.QueryRow(ctx, `SELECT request_params FROM ops_activity_v1.qualified_logs WHERE correlation_id=$1`, lastReference).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.DowngradeTo005(ctx, x.dsn, "b1_writer", "b1_reader", "b1_retention", true); err != nil {
-		t.Fatal(err)
+	if err = s.DowngradeTo005(ctx, x.dsn, "b1_writer", "b1_reader", "b1_retention", true); err == nil {
+		t.Fatal("007 downgraded to v1-only prototype")
 	}
 	oldReader, err := pgx.Connect(ctx, x.reader)
 	if err != nil {
@@ -213,8 +213,8 @@ func TestAdminActualHTTPAuditAppendPreservesCutAndLegacyRollback(t *testing.T) {
 	if err = oldReader.QueryRow(ctx, `SELECT request_params FROM ops_activity_v1.qualified_logs WHERE correlation_id=$1`, lastReference).Scan(&after); err != nil || before != after {
 		t.Fatal("rollback rewrote completion", err)
 	}
-	if decoded, err := a.DecodeEnvelope([]byte(after)); err != nil || decoded.Method != activitymethoddata.AdminAccessLogs || decoded.Version != 1 {
-		t.Fatal("legacy v1 decode", decoded, err)
+	if decoded, err := a.DecodeEnvelope([]byte(after)); err != nil || decoded.Method != activitymethoddata.AdminAccessLogs || decoded.Version != 2 || decoded.Reason != "not_recorded" {
+		t.Fatal("compatible v2 decode", decoded, err)
 	}
 	var oldRPC, oldRequests int
 	if err = oldReader.QueryRow(ctx, `SELECT count(*) FROM ops_activity_v1.qualified_logs WHERE correlation_id=$1 AND lower(left(method,9))<>'explorer.'`, lastReference).Scan(&oldRPC); err != nil {
@@ -224,12 +224,12 @@ func TestAdminActualHTTPAuditAppendPreservesCutAndLegacyRollback(t *testing.T) {
 		t.Fatal("old population accidentally admitted new reserved completion", oldRPC, oldRequests, err)
 	}
 	if strings.Contains(after, "cursor") || strings.Contains(after, "from=") {
-		t.Fatal("query provenance leaked into v1 envelope")
+		t.Fatal("query provenance leaked into completion envelope")
 	}
 	if err = s.Migrate(ctx, x.dsn, "b1_writer", "b1_reader", "b1_retention", true); err != nil {
 		t.Fatal(err)
 	}
 	if err = reader.CheckReady(ctx); err != nil {
-		t.Fatal("upgrade after rollback", err)
+		t.Fatal("compatible007 retry", err)
 	}
 }

@@ -67,22 +67,22 @@ func TestAdminActualPGHTTPStableCutFiltersAndPrivacy(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer reader.Close()
-	// Additive owner upgrade accepts the exact previous catalog only, preserves
-	// rows/ACLs, and is idempotent. A missing index makes runtime reads fail shut.
+	// The qualified performance index is optional in007. Its absence does not
+	// change security, completeness, cursor scope or the mandatory guard.
 	if _, e = x.owner.Exec(ctx, `DROP INDEX public.activity_org_page`); e != nil {
 		t.Fatal(e)
 	}
-	if e = reader.CheckReady(ctx); e == nil {
-		t.Fatal("runtime accepted old catalog")
+	if e = reader.CheckReady(ctx); e != nil {
+		t.Fatal("optional index absence rejected", e)
 	}
 	if e = s.Migrate(ctx, x.dsn, "b1_writer", "b1_reader", "b1_retention", false); e == nil {
 		t.Fatal("undrained upgrade")
 	}
 	if e = s.Migrate(ctx, x.dsn, "b1_writer", "b1_reader", "b1_retention", true); e != nil {
-		t.Fatal("005->006", e)
+		t.Fatal("current007 retry", e)
 	}
 	if e = s.Migrate(ctx, x.dsn, "b1_writer", "b1_reader", "b1_retention", true); e != nil {
-		t.Fatal("idempotent006", e)
+		t.Fatal("idempotent007", e)
 	}
 	snapshot := f.Snapshot(t, nil)
 	now := time.Unix(f.Now, 0)
@@ -232,20 +232,14 @@ func TestAdminActualPGHTTPStableCutFiltersAndPrivacy(t *testing.T) {
 	if e = x.owner.QueryRow(ctx, `SELECT count(*) FROM public.access_logs`).Scan(&beforeRows); e != nil {
 		t.Fatal(e)
 	}
-	if e = s.DowngradeTo005(ctx, x.dsn, "b1_writer", "b1_reader", "b1_retention", true); e != nil {
-		t.Fatal("006->005 with history", e)
+	if e = s.DowngradeTo005(ctx, x.dsn, "b1_writer", "b1_reader", "b1_retention", true); e == nil {
+		t.Fatal("007 accepted prototype-only downgrade")
 	}
 	if e = x.owner.QueryRow(ctx, `SELECT count(*) FROM public.access_logs`).Scan(&afterRows); e != nil || beforeRows != afterRows {
-		t.Fatal("downgrade changed rows", e, beforeRows, afterRows)
-	}
-	if e = reader.CheckReady(ctx); e == nil {
-		t.Fatal("006 reader silently accepted005")
-	}
-	if e = s.Migrate(ctx, x.dsn, "b1_writer", "b1_reader", "b1_retention", true); e != nil {
-		t.Fatal("005->006 with history", e)
+		t.Fatal("rejected downgrade changed history", e, beforeRows, afterRows)
 	}
 	if check := parse(query); check.Source.HeadReference != first.Source.HeadReference || check.Items[0].RequestReference != first.Items[0].RequestReference {
-		t.Fatal("006 rewrote history")
+		t.Fatal("007 retry changed history")
 	}
 
 	// Append after first cut, including an older timestamp, cannot leak into it.
@@ -349,7 +343,7 @@ func TestAdminActualPGHTTPStableCutFiltersAndPrivacy(t *testing.T) {
 		t.Fatal(e)
 	}
 	code := int32(-32001)
-	receipt, e := slot.Complete(a.Completion{ActorID: f.Actor(f.Subject), DataOrganizationID: f.Org, Method: "eth_call", PolicyDigest: a.Digest{7}, HTTPStatus: 200, RPCErrorCode: &code, Outcome: a.Denied, TrustedIP: "2001:db8::5"})
+	receipt, e := slot.Complete(a.Completion{ActorID: f.Actor(f.Subject), DataOrganizationID: f.Org, Method: "eth_call", PolicyDigest: a.Digest{7}, HTTPStatus: 200, RPCErrorCode: &code, Outcome: a.Denied, Reason: "sender_not_linked", TrustedIP: "2001:db8::5"})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -370,7 +364,7 @@ func TestAdminActualPGHTTPStableCutFiltersAndPrivacy(t *testing.T) {
 	rq := cloneQuery(query)
 	rq.Set("requestReference", receipt.RecordID())
 	item := parse(rq).Items
-	if len(item) != 1 || item[0].RequestReference != receipt.RecordID() || item[0].TrustedIP == nil || *item[0].TrustedIP != "2001:db8::5" {
+	if len(item) != 1 || item[0].RequestReference != receipt.RecordID() || item[0].Reason != "sender_not_linked" || item[0].TrustedIP == nil || *item[0].TrustedIP != "2001:db8::5" {
 		t.Fatal("durable receipt roundtrip", item)
 	}
 	restricted, e := pgx.Connect(ctx, x.reader)

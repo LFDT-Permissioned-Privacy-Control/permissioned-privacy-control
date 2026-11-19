@@ -188,3 +188,16 @@ it('the logs route uses the direct organization reader while disclosure remains 
   render(<MemoryRouter><NativeOperationsPage controller={controller} state={state} section="logs" /></MemoryRouter>)
   await screen.findByText(ref); expect(screen.getByRole('heading', { name: 'Access Logs' })).toBeInTheDocument(); expect(s.request.mock.calls.every(([path]) => !path.includes('/disclosure/'))).toBe(true)
 })
+
+it('shows curated recorded reasons without inventing diagnostics for older records', async () => {
+  const s = scope(); s.request.mockResolvedValueOnce(page([
+    row({ reason: 'sender_not_linked' }),
+    row({ requestReference: otherOrg, reason: 'method_not_allowed' }),
+    row({ requestReference: '55555555-5555-4555-8555-555555555555' }),
+  ]))
+  show(s.value)
+  expect(await screen.findByText('Wallet not linked')).toHaveAttribute('title', 'sender_not_linked')
+  expect(screen.getByText('Method not allowed')).toHaveAttribute('title', 'method_not_allowed')
+  expect(screen.getByText('Not recorded')).toHaveAttribute('title', 'not_recorded')
+  expect(screen.getByText(/Older or unclassified/)).toBeInTheDocument()
+})

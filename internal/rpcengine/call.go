@@ -11,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/networkidentity"
@@ -209,7 +210,7 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 	req, requestError := parse(rawRequest)
 	if requestError != nil {
 		out := responseError(req.id, requestError.Code, requestError.Message)
-		return observation.failure(InvalidCompletion, out)
+		return observation.failure(InvalidCompletion, out, activityreasondata.InvalidRequestShape)
 	}
 	observation.method(EthCall)
 	if e == nil || e.snapshot == nil || ctx.Err() != nil || (e.raw != nil && e.raw.closed.Load()) {
@@ -217,11 +218,11 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 	}
 	view, err := e.factory.Build(assertion)
 	if err != nil {
-		return observation.failure(UnauthenticatedCompletion, denied(req.id))
+		return observation.failure(UnauthenticatedCompletion, denied(req.id), activityreasondata.AuthRequired)
 	}
 	observation.accept(view)
 	if len(view.OrgIDs()) == 0 {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	current := e.currentPass(view)
 	var orgID string
@@ -246,19 +247,19 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 		}
 	}
 	if !ok {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	observation.selectOrg(orgID)
 	org, _ := view.Org(orgID)
 	if req.block.Historical() && !org.IsOrgAdmin() {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	if !methodAuthorized(e.snapshot, org, "eth_call") {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.MethodNotAllowed)
 	}
 	ref, err := org.SelectCredentialRef("eth_call")
 	if err != nil {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	client, err := e.clients[orgID].WithCredential(ref)
 	if err != nil {
@@ -267,18 +268,18 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 	var wallet nativeadmission.WalletSnapshot
 	if req.call.FromSupplied() || e.needsWallets {
 		if e.wallets == nil {
-			return observation.failure(DeniedCompletion, denied(req.id))
+			return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 		}
 		wallet, err = e.wallets.Load(ctx, view.ActorID())
 		if err != nil || wallet.ActorID() != view.ActorID() {
 			return observation.failure(UnavailableCompletion, denied(req.id))
 		}
 		if req.call.FromSupplied() && !wallet.Contains(req.call.From()) {
-			return observation.failure(DeniedCompletion, denied(req.id))
+			return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.SenderNotLinked)
 		}
 	}
 	if ctx.Err() != nil || view.RequireLive() != nil {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	var execution *rpcexecution.CallExecution
 	var scopeSourceErr error
@@ -303,7 +304,7 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 	if err != nil {
 		var category *rpcexecution.Error
 		if scopeSourceErr == nil && errors.As(err, &category) && category.Code == rpcexecution.RootScopeDenied {
-			return observation.failure(DeniedCompletion, denied(req.id))
+			return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 		}
 		return responseError(req.id, -32002, "execution unavailable")
 	}
@@ -323,11 +324,11 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 			actual, matched = selectedAddressOrganization(view, explicitOrg, creation.Address.Value)
 		}
 		if !matched || actual != orgID {
-			return observation.failure(DeniedCompletion, denied(req.id))
+			return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 		}
 	}
 	if view.RequireLive() != nil {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	native := e.native
 	if current != nil {
@@ -339,12 +340,12 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 		}
 		native, err = current.engine()
 		if err != nil {
-			return observation.failure(DeniedCompletion, denied(req.id))
+			return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 		}
 	}
 	decision := native.Check(ctx, view, orgID, execution, wallet)
 	if !decision.Allowed {
-		return observation.failure(nativeClass(decision), denied(req.id))
+		return observation.failure(nativeClass(decision), denied(req.id), policyReason(decision))
 	}
 	if _, bound := client.BoundNetwork(); bound {
 		if observation != nil {
@@ -357,7 +358,7 @@ func (e *Engine) call(ctx context.Context, assertion, explicitOrg string, rawReq
 		}
 	}
 	if ctx.Err() != nil || view.RequireLive() != nil {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	outcome, ok := execution.Tree().Outcome()
 	if !ok {

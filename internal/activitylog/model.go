@@ -39,8 +39,12 @@ var (
 	ErrQuarantined = errors.New("activity spool requires offline recovery")
 )
 
-// Format is a raw domain SHA256, matching the pinned sealed-metadata format.
-func Format() Digest { return Digest(sha256.Sum256([]byte("ops.activity.sealed-metadata/v1"))) }
+// LegacyFormat pins the unchanged original v1 wire family.
+func LegacyFormat() Digest { return Digest(sha256.Sum256([]byte("ops.activity.sealed-metadata/v1"))) }
+
+// Format identifies the closed dual-read v1/v2 stream profile. Individual
+// payloads retain their original version and canonical bytes; new writes use v2.
+func Format() Digest { return Digest(sha256.Sum256([]byte("ops.activity.sealed-metadata/v1-v2"))) }
 
 // Completion is trusted operational input from the same accepted Core request.
 // It is not an HTTP DTO, principal proof or permission capability.
@@ -54,29 +58,32 @@ type Completion struct {
 	Reason                      activityreasondata.Code
 }
 
-// Envelope has exact field order and no optional fields. Only e is nullable.
+// Envelope is the normalized closed v1/v2 shape. The codec requires c in v2
+// and forbids it in v1; omitempty preserves v1 serialization byte-for-byte.
+// Only e is nullable.
 // b is supplied by the actual buffer sequence at seal time, never the caller.
 type Envelope struct {
-	Version        uint8  `json:"v"`
-	Kind           uint8  `json:"k"`
-	Network        string `json:"n"`
-	Generation     string `json:"g"`
-	Configuration  string `json:"x"`
-	ProducerID     string `json:"p"`
-	RunID          string `json:"r"`
-	RecordID       string `json:"q"`
-	Ordinal        string `json:"o"`
-	ObservedMicros int64  `json:"t"`
-	ActorID        string `json:"a"`
-	DataOrg        string `json:"d"`
-	Policy         string `json:"z"`
-	Method         string `json:"m"`
-	IP             string `json:"i"`
-	HTTP           uint16 `json:"h"`
-	RPCError       *int32 `json:"e"`
-	Outcome        string `json:"u"`
-	Status         uint16 `json:"s"`
-	BufferSeq      string `json:"b"`
+	Version        uint8                   `json:"v"`
+	Kind           uint8                   `json:"k"`
+	Network        string                  `json:"n"`
+	Generation     string                  `json:"g"`
+	Configuration  string                  `json:"x"`
+	ProducerID     string                  `json:"p"`
+	RunID          string                  `json:"r"`
+	RecordID       string                  `json:"q"`
+	Ordinal        string                  `json:"o"`
+	ObservedMicros int64                   `json:"t"`
+	ActorID        string                  `json:"a"`
+	DataOrg        string                  `json:"d"`
+	Policy         string                  `json:"z"`
+	Method         string                  `json:"m"`
+	IP             string                  `json:"i"`
+	HTTP           uint16                  `json:"h"`
+	RPCError       *int32                  `json:"e"`
+	Outcome        string                  `json:"u"`
+	Status         uint16                  `json:"s"`
+	Reason         activityreasondata.Code `json:"c,omitempty"`
+	BufferSeq      string                  `json:"b"`
 }
 
 type Limits struct {

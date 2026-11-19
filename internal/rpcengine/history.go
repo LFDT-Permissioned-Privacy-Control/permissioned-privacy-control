@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/historyfacts"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/networkidentity"
@@ -185,13 +186,13 @@ func (e *HistoryEngine) QueryObserved(ctx context.Context, assertion MetadataAss
 	r.metadata.PolicyDigest = historyDigestText(e.policy.Digest())
 	env, err := rpcenvelope.ParseRaw(body, rpcenvelope.DefaultLimits())
 	if err != nil || env.Method() == "" {
-		return r.fail(InvalidCompletion, -32600)
+		return r.fail(InvalidCompletion, -32600, activityreasondata.InvalidRequestShape)
 	}
 	version := bytes.TrimSpace(env.VersionJSON())
 	if len(version) > 0 && !bytes.Equal(version, []byte("null")) && !bytes.Equal(version, []byte(`"2.0"`)) {
 		var v string
 		if json.Unmarshal(version, &v) != nil || v != "2.0" {
-			return r.fail(InvalidCompletion, -32600)
+			return r.fail(InvalidCompletion, -32600, activityreasondata.InvalidRequestShape)
 		}
 	}
 	id, present := env.IDJSON()
@@ -211,21 +212,22 @@ func (e *HistoryEngine) QueryObserved(ctx context.Context, assertion MetadataAss
 	r.metadata.Method, r.metadata.Canonical = name, declaration.method
 	q, err := rpcexecution.ParseHistoryReadQuery(declaration.method, env.ParamsJSON(), e.limits)
 	if err != nil {
-		return r.fail(InvalidCompletion, -32602)
+		return r.fail(InvalidCompletion, -32602, activityreasondata.InvalidRequestShape)
 	}
 	client := e.defaultClient
 	if assertion.kind == 1 {
 		if !declaration.builtin || len(declaration.info.RequiredClaims) > 0 || !e.policy.AllowsAnonymous(name) {
-			return r.fail(UnauthenticatedCompletion, -32001)
+			return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.AuthRequired)
 		}
 		r.anonymous = true
 	} else {
 		if assertion.kind != 2 {
-			return r.fail(UnauthenticatedCompletion, -32001)
+			return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.AuthRequired)
 		}
-		current, err := e.facts.Begin(ctx, assertion.token, selectedOrg, name)
+		current, observed, err := e.facts.BeginObserved(ctx, assertion.token, selectedOrg, name)
 		if err != nil {
-			return r.fail(DeniedCompletion, -32001)
+			r.metadata.ActorID, r.metadata.OrganizationID = observed.ActorID, observed.OrganizationID
+			return r.fail(DeniedCompletion, -32001, observed.Reason)
 		}
 		r.current = current
 		r.metadata.ActorID, r.metadata.OrganizationID = current.OriginalView().ActorID(), current.Organization()

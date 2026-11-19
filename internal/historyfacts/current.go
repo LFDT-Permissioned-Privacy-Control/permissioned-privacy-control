@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/explorerdata"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/nativeadmission"
@@ -115,11 +116,26 @@ type Current struct {
 	charged                 int
 }
 
+// BeginObservation is detached diagnostic metadata, never a Current or authority.
+// Only successfully verified actor/organization facts are populated.
+type BeginObservation struct {
+	ActorID, OrganizationID string
+	Reason                  activityreasondata.Code
+}
+
 // Begin verifies the original JWT once and checks the exact selected method
 // scope before loading operational wallets. It neither chooses a default bank
 // nor accepts a caller-constructed principal. Anonymous reads are a separate
 // serving-engine decision; this constructor requires a verified bearer.
 func (f *Factory) Begin(ctx context.Context, rawJWT, selectedOrg, method string) (*Current, error) {
+	return f.begin(ctx, rawJWT, selectedOrg, method, nil)
+}
+func (f *Factory) BeginObserved(ctx context.Context, rawJWT, selectedOrg, method string) (*Current, BeginObservation, error) {
+	var observed BeginObservation
+	current, err := f.begin(ctx, rawJWT, selectedOrg, method, &observed)
+	return current, observed, err
+}
+func (f *Factory) begin(ctx context.Context, rawJWT, selectedOrg, method string, observed *BeginObservation) (*Current, error) {
 	if f == nil {
 		return nil, ErrInvalid
 	}
@@ -131,6 +147,9 @@ func (f *Factory) Begin(ctx context.Context, rawJWT, selectedOrg, method string)
 	if err != nil {
 		return nil, ErrUnavailable
 	}
+	if observed != nil {
+		observed.ActorID = view.ActorID()
+	}
 	if selectedOrg == "" {
 		ids := view.OrgIDs()
 		if len(ids) != 1 {
@@ -139,7 +158,16 @@ func (f *Factory) Begin(ctx context.Context, rawJWT, selectedOrg, method string)
 		selectedOrg = ids[0]
 	}
 	org, ok := view.Org(selectedOrg)
-	if !ok || !org.GroupAllowsMethod(method) {
+	if !ok {
+		return nil, ErrUnavailable
+	}
+	if observed != nil {
+		observed.OrganizationID = selectedOrg
+	}
+	if !org.GroupAllowsMethod(method) {
+		if observed != nil {
+			observed.Reason = activityreasondata.MethodNotAllowed
+		}
 		return nil, ErrUnavailable
 	}
 	declaration, ok := f.config.Snapshot.Method(method)

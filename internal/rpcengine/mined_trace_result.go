@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"privacy-proxy/internal/activityreasondata"
 	share "privacy-proxy/internal/admissionsharedata"
 	"privacy-proxy/internal/rpcexecution"
 	"privacy-proxy/internal/runtimepolicy"
@@ -27,8 +28,9 @@ type MinedTraceOperationResult struct {
 	walletVersion               string
 }
 
-func (r *MinedTraceOperationResult) fail(class CompletionClass, code int) *MinedTraceOperationResult {
+func (r *MinedTraceOperationResult) fail(class CompletionClass, code int, why ...activityreasondata.Code) *MinedTraceOperationResult {
 	r.metadata.Class = class
+	r.metadata.Reason = capturedReason(why)
 	r.code = code
 	r.projection = nil
 	c := int32(code)
@@ -41,6 +43,9 @@ func (r *MinedTraceOperationResult) hidden(class CompletionClass) *MinedTraceOpe
 }
 func (r *MinedTraceOperationResult) MetadataFor(e *Engine) (TraceOperationMetadata, error) {
 	if r == nil || e == nil || r.owner != e {
+		return TraceOperationMetadata{}, errOperation
+	}
+	if !validCapturedReason(r.metadata.Class, r.metadata.Reason) {
 		return TraceOperationMetadata{}, errOperation
 	}
 	m := r.metadata

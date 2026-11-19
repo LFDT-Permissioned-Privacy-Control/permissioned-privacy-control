@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/networkidentity"
 	"privacy-proxy/internal/policybundle"
@@ -220,13 +221,13 @@ func (e *MetadataEngine) QueryObserved(ctx context.Context, assertion MetadataAs
 	r.metadata.PolicyDigest = metadataDigestText(e.policy.Digest())
 	env, err := rpcenvelope.ParseRaw(body, rpcenvelope.DefaultLimits())
 	if err != nil || env.Method() == "" {
-		return r.fail(InvalidCompletion, -32600)
+		return r.fail(InvalidCompletion, -32600, activityreasondata.InvalidRequestShape)
 	}
 	version := bytes.TrimSpace(env.VersionJSON())
 	if len(version) > 0 && !bytes.Equal(version, []byte("null")) && !bytes.Equal(version, []byte(`"2.0"`)) {
 		var v string
 		if json.Unmarshal(version, &v) != nil || v != "2.0" {
-			return r.fail(InvalidCompletion, -32600)
+			return r.fail(InvalidCompletion, -32600, activityreasondata.InvalidRequestShape)
 		}
 	}
 	id, present := env.IDJSON()
@@ -246,21 +247,21 @@ func (e *MetadataEngine) QueryObserved(ctx context.Context, assertion MetadataAs
 	r.metadata.Method, r.metadata.Canonical = name, declaration.method
 	q, err := rpcexecution.ParseMetadataQuery(declaration.method, env.ParamsJSON(), e.limits)
 	if err != nil {
-		return r.fail(InvalidCompletion, -32602)
+		return r.fail(InvalidCompletion, -32602, activityreasondata.InvalidRequestShape)
 	}
 	client := e.defaultClient
 	if assertion.kind == 1 {
 		if !declaration.builtin || !e.policy.AllowsAnonymous(name) {
-			return r.fail(UnauthenticatedCompletion, -32001)
+			return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.AuthRequired)
 		}
 		r.anonymous = true
 	} else {
 		if assertion.kind != 2 {
-			return r.fail(UnauthenticatedCompletion, -32001)
+			return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.AuthRequired)
 		}
 		view, err := e.factory.Build(assertion.token)
 		if err != nil {
-			return r.fail(UnauthenticatedCompletion, -32001)
+			return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.AuthRequired)
 		}
 		r.view, r.metadata.ActorID = view, view.ActorID()
 		if !declaration.orgFree {
@@ -268,17 +269,17 @@ func (e *MetadataEngine) QueryObserved(ctx context.Context, assertion MetadataAs
 			if org == "" {
 				ids := view.OrgIDs()
 				if len(ids) != 1 {
-					return r.fail(DeniedCompletion, -32001)
+					return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 				}
 				org = ids[0]
 			}
 			ov, ok := view.Org(org)
 			if !ok {
-				return r.fail(DeniedCompletion, -32001)
+				return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 			}
 			r.metadata.OrganizationID = org
 			if !ov.GroupAllowsMethod(name) {
-				return r.fail(DeniedCompletion, -32001)
+				return r.fail(DeniedCompletion, -32001, activityreasondata.MethodNotAllowed)
 			}
 			for _, claim := range declaration.info.RequiredClaims {
 				var mask uint8
@@ -290,15 +291,15 @@ func (e *MetadataEngine) QueryObserved(ctx context.Context, assertion MetadataAs
 				case "upgrade":
 					mask = policycore.ClaimUpgrade
 				default:
-					return r.fail(DeniedCompletion, -32001)
+					return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 				}
 				if ov.UnionClaims()&mask == 0 {
-					return r.fail(DeniedCompletion, -32001)
+					return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 				}
 			}
 			ref, err := ov.SelectCredentialRef(name)
 			if err != nil {
-				return r.fail(DeniedCompletion, -32001)
+				return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 			}
 			client = e.clients[MetadataBindingKey{org, ref}]
 			if client == nil {
@@ -306,7 +307,7 @@ func (e *MetadataEngine) QueryObserved(ctx context.Context, assertion MetadataAs
 			}
 		}
 		if view.RequireLive() != nil {
-			return r.fail(UnauthenticatedCompletion, -32001)
+			return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.CredentialsExpired)
 		}
 	}
 	r.source = client.Source()

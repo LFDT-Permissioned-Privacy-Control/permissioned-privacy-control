@@ -92,7 +92,7 @@ func TestExactSpoolAndSealedCodecVector(t *testing.T) {
 	if err := json.Unmarshal(b, &vectors); err != nil {
 		t.Fatal(err)
 	}
-	d := Format()
+	d := LegacyFormat()
 	if vectors.Format != "sha256:"+hex.EncodeToString(d[:]) {
 		t.Fatal("format digest changed", vectors.Format)
 	}

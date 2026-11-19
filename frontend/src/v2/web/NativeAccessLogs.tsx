@@ -9,6 +9,7 @@ import type { OperationScope } from './controller'
 import { accessLogOutcomes, accessLogPage, accessLogsEndpoint, logTime, outcomeLabels, sameLogSource, type AccessLogPage, type AccessLogQuery, type AccessLogSource } from './accessLogsModels'
 import { DataTable, Field, Panel, SelectField, TaskError } from './operationsUI'
 import type { ObjectValue } from './operationsModels'
+import { logReasonLabel, type AccessLogReason } from './accessLogReasons'
 
 interface Filters { actorId: string; method: string; outcome: string; requestReference: string; from: string; to: string }
 const pageSize = 50
@@ -142,10 +143,10 @@ function AccessLogSearch({ scope, org }: { scope: OperationScope; org: string })
           { key: 'rpcErrorCode', label: 'RPC error', render: row => row.rpcErrorCode === null ? 'None recorded' : String(row.rpcErrorCode) },
           { key: 'recordedStatus', label: 'Recorded status', render: row => String(row.recordedStatus) },
           { key: 'trustedIP', label: 'Recorded IP', render: row => row.trustedIP === null ? 'Not recorded' : String(row.trustedIP) },
-          { key: 'reason', label: 'Reason', render: () => 'Not recorded' },
+          { key: 'reason', label: 'Reason', render: row => <span title={String(row.reason)}>{logReasonLabel(row.reason as AccessLogReason)}</span> },
           { key: 'policyDigest', label: 'Policy details', render: row => <details className="text-xs"><summary className="cursor-pointer text-primary">Digests</summary><p className="mt-2">Policy: <code className="break-all">{row.policyDigest === null ? 'Not recorded' : String(row.policyDigest)}</code></p><p className="mt-2">Recorded configuration: <code className="break-all">{String(row.configurationDigest)}</code></p></details> },
         ]} />
-        <p className="mt-3 text-xs text-neutral-500">Recorded status summarizes the outcome; Recorded HTTP is the selected response status. Final delivery may still fail or change. Detailed reasons were not recorded. IP identifies the recorded direct peer.</p>
+        <p className="mt-3 text-xs text-neutral-500">Recorded status summarizes the outcome; Recorded HTTP is the selected response status. Final delivery may still fail or change. Older or unclassified operations show Not recorded for their reason. IP identifies the recorded direct peer.</p>
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-neutral-500">Page {page} · {result.items.length} records on this page{result.next ? ' · More records available' : ' · End of this snapshot'}</p><div className="flex gap-2"><Button variant="outline" disabled={busy || !history.current.some(value => value.number === page - 1)} onClick={() => visit(page - 1)}>Previous page</Button>{result.next && active && <Button variant="outline" disabled={busy} onClick={nextPage}>Next page</Button>}</div></div>
         {history.current[0]?.number > 1 && <p className="mt-3 text-xs text-neutral-500">Up to {historySize} visited pages are kept in this tab. Pages before {history.current[0].number} are no longer available here. Search starts a new snapshot.</p>}
         <details className="mt-4 text-xs text-neutral-500"><summary className="cursor-pointer">Recorded source details</summary><dl className="mt-2 space-y-2 break-all">{Object.entries(result.source).map(([key, value]) => <div key={key}><dt className="font-medium">{key}</dt><dd><code>{value}</code></dd></div>)}</dl></details>

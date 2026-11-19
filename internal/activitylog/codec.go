@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"privacy-proxy/internal/activitymethoddata"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/strictjson"
 )
@@ -22,27 +23,29 @@ type Record struct {
 	valid  bool
 }
 
-// spool deliberately lists nineteen fields rather than making b optional.
+// Spool has nineteen exact v1 fields, or twenty v2 fields including c.
+// The buffer sequence b exists only in the sealed variant.
 type spool struct {
-	Version        uint8  `json:"v"`
-	Kind           uint8  `json:"k"`
-	Network        string `json:"n"`
-	Generation     string `json:"g"`
-	Configuration  string `json:"x"`
-	ProducerID     string `json:"p"`
-	RunID          string `json:"r"`
-	RecordID       string `json:"q"`
-	Ordinal        string `json:"o"`
-	ObservedMicros int64  `json:"t"`
-	ActorID        string `json:"a"`
-	DataOrg        string `json:"d"`
-	Policy         string `json:"z"`
-	Method         string `json:"m"`
-	IP             string `json:"i"`
-	HTTP           uint16 `json:"h"`
-	RPCError       *int32 `json:"e"`
-	Outcome        string `json:"u"`
-	Status         uint16 `json:"s"`
+	Version        uint8                   `json:"v"`
+	Kind           uint8                   `json:"k"`
+	Network        string                  `json:"n"`
+	Generation     string                  `json:"g"`
+	Configuration  string                  `json:"x"`
+	ProducerID     string                  `json:"p"`
+	RunID          string                  `json:"r"`
+	RecordID       string                  `json:"q"`
+	Ordinal        string                  `json:"o"`
+	ObservedMicros int64                   `json:"t"`
+	ActorID        string                  `json:"a"`
+	DataOrg        string                  `json:"d"`
+	Policy         string                  `json:"z"`
+	Method         string                  `json:"m"`
+	IP             string                  `json:"i"`
+	HTTP           uint16                  `json:"h"`
+	RPCError       *int32                  `json:"e"`
+	Outcome        string                  `json:"u"`
+	Status         uint16                  `json:"s"`
+	Reason         activityreasondata.Code `json:"c,omitempty"`
 }
 
 func CanonicalUUID(v string) bool {
@@ -90,7 +93,7 @@ func status(o string) uint16 {
 	return 0
 }
 func validEnvelope(e Envelope, sealed bool) bool {
-	if e.Version != 1 || e.Kind != 1 || !CanonicalUUID(e.Generation) || !CanonicalUUID(e.ProducerID) || !CanonicalUUID(e.RunID) || !CanonicalUUID(e.RecordID) || e.ObservedMicros < 0 || e.ObservedMicros > MaxObservedMicros || !ValidMethod(e.Method) || e.HTTP < 100 || e.HTTP > 599 || status(e.Outcome) == 0 || status(e.Outcome) != e.Status {
+	if e.Version != 1 && e.Version != 2 || e.Version == 1 && e.Reason != "" || e.Version == 2 && !activityreasondata.AllowedOutcome(e.Reason, e.Outcome) || e.Kind != 1 || !CanonicalUUID(e.Generation) || !CanonicalUUID(e.ProducerID) || !CanonicalUUID(e.RunID) || !CanonicalUUID(e.RecordID) || e.ObservedMicros < 0 || e.ObservedMicros > MaxObservedMicros || !ValidMethod(e.Method) || e.HTTP < 100 || e.HTTP > 599 || status(e.Outcome) == 0 || status(e.Outcome) != e.Status {
 		return false
 	}
 	if _, err := ParseDigestHex(e.Network); err != nil {
@@ -144,10 +147,10 @@ func detachError(e *int32) *int32 {
 }
 func (r Record) Fields() Envelope {
 	s := r.fields
-	return Envelope{s.Version, s.Kind, s.Network, s.Generation, s.Configuration, s.ProducerID, s.RunID, s.RecordID, s.Ordinal, s.ObservedMicros, s.ActorID, s.DataOrg, s.Policy, s.Method, s.IP, s.HTTP, detachError(s.RPCError), s.Outcome, s.Status, ""}
+	return Envelope{s.Version, s.Kind, s.Network, s.Generation, s.Configuration, s.ProducerID, s.RunID, s.RecordID, s.Ordinal, s.ObservedMicros, s.ActorID, s.DataOrg, s.Policy, s.Method, s.IP, s.HTTP, detachError(s.RPCError), s.Outcome, s.Status, s.Reason, ""}
 }
 func toRecord(e Envelope) Record {
-	return Record{fields: spool{e.Version, e.Kind, e.Network, e.Generation, e.Configuration, e.ProducerID, e.RunID, e.RecordID, e.Ordinal, e.ObservedMicros, e.ActorID, e.DataOrg, e.Policy, e.Method, e.IP, e.HTTP, detachError(e.RPCError), e.Outcome, e.Status}, valid: true}
+	return Record{fields: spool{e.Version, e.Kind, e.Network, e.Generation, e.Configuration, e.ProducerID, e.RunID, e.RecordID, e.Ordinal, e.ObservedMicros, e.ActorID, e.DataOrg, e.Policy, e.Method, e.IP, e.HTTP, detachError(e.RPCError), e.Outcome, e.Status, e.Reason}, valid: true}
 }
 func EncodeSpool(r Record) ([]byte, error) {
 	if !r.valid || !validEnvelope(r.Fields(), false) {
@@ -177,6 +180,26 @@ func exact(raw []byte, out any) error {
 	// presence/type using a numeric placeholder, then restore ONLY that field.
 	m, ok := v.(map[string]any)
 	if !ok {
+		return ErrInvalid
+	}
+	version, ok := m["v"].(json.Number)
+	if !ok {
+		return ErrInvalid
+	}
+	switch version.String() {
+	case "1":
+		if _, present := m["c"]; present {
+			return ErrInvalid
+		}
+		// Supply only the normalized zero field for the exact Go shape. Its
+		// omission on marshal is required by the final canonical-byte check.
+		m["c"] = ""
+	case "2":
+		code, present := m["c"].(string)
+		if !present || len(code) > 64 || !activityreasondata.Known(activityreasondata.Code(code)) {
+			return ErrInvalid
+		}
+	default:
 		return ErrInvalid
 	}
 	errorValue, present := m["e"]

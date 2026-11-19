@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/admission"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/policycore"
@@ -39,6 +40,7 @@ const (
 type OperationMetadata struct {
 	Method                  CapturedMethod
 	Class                   CompletionClass
+	Reason                  activityreasondata.Code
 	ActorID, OrganizationID string
 	PolicyDigest            policybundle.Digest
 	RPCErrorCode            *int32
@@ -91,6 +93,7 @@ const MaxObservedResponseBytes = 16 << 20
 func (r *OperationResult) class(c CompletionClass) {
 	if r != nil {
 		r.metadata.Class = c
+		r.metadata.Reason = ""
 	}
 }
 func (r *OperationResult) method(m CapturedMethod) {
@@ -115,7 +118,13 @@ func (r *OperationResult) effect(phase uint8) {
 		r.phase = phase
 	}
 }
-func (r *OperationResult) failure(c CompletionClass, out Response) Response { r.class(c); return out }
+func (r *OperationResult) failure(c CompletionClass, out Response, why ...activityreasondata.Code) Response {
+	r.class(c)
+	if r != nil {
+		r.metadata.Reason = capturedReason(why)
+	}
+	return out
+}
 func (r *OperationResult) finish(ctx context.Context, out Response) *OperationResult {
 	r.response = out
 	if out.Error != nil {
@@ -129,12 +138,21 @@ func (r *OperationResult) finish(ctx context.Context, out Response) *OperationRe
 		return r
 	}
 	if ctx.Err() != nil {
-		r.metadata.Class = UnavailableCompletion
+		r.class(UnavailableCompletion)
+		r.metadata.Reason = activityreasondata.ExecutionUnavailable
+		if errors.Is(ctx.Err(), context.Canceled) {
+			r.metadata.Reason = activityreasondata.RequestCancelled
+		}
 	} else if r.view != nil && r.view.RequireLive() != nil {
-		r.metadata.Class = UnauthenticatedCompletion
+		r.class(UnauthenticatedCompletion)
+		r.metadata.Reason = activityreasondata.CredentialsExpired
 	}
 	if r.fence != nil && !r.fence.live() {
-		r.metadata.Class = UnavailableCompletion
+		r.class(UnavailableCompletion)
+		r.metadata.Reason = activityreasondata.ExecutionUnavailable
+		if errors.Is(ctx.Err(), context.Canceled) {
+			r.metadata.Reason = activityreasondata.RequestCancelled
+		}
 	}
 	return r
 }
@@ -149,6 +167,9 @@ func (e *Engine) SubmitRawObserved(ctx context.Context, assertion, org string, r
 func (r *OperationResult) owned(e *Engine) bool { return r != nil && e != nil && r.owner == e }
 func (r *OperationResult) MetadataFor(e *Engine) (OperationMetadata, error) {
 	if !r.owned(e) {
+		return OperationMetadata{}, errOperation
+	}
+	if !validCapturedReason(r.metadata.Class, r.metadata.Reason) {
 		return OperationMetadata{}, errOperation
 	}
 	m := r.metadata
@@ -345,5 +366,12 @@ func (r *OperationResult) rawFailure(id json.RawMessage, err error) Response {
 	} else if errors.Is(err, admission.ErrForbidden) || errors.Is(err, admission.ErrConflict) {
 		c = DeniedCompletion
 	}
-	return r.failure(c, rawFailure(id, err))
+	why := activityreasondata.ExecutionUnavailable
+	if c == UnauthenticatedCompletion {
+		why = activityreasondata.AuthRequired
+	}
+	if c == DeniedCompletion {
+		why = activityreasondata.AccessDenied
+	}
+	return r.failure(c, rawFailure(id, err), why)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/creationfacts"
 	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/policybundle"
@@ -15,6 +16,7 @@ type StateOperationMetadata struct {
 	Method                  string
 	Canonical               rpcexecution.StateMethod
 	Class                   CompletionClass
+	Reason                  activityreasondata.Code
 	ActorID, OrganizationID string
 	PolicyDigest            policybundle.Digest
 	RPCErrorCode            *int32
@@ -39,13 +41,14 @@ type StateOperationResult struct {
 	metadata              StateOperationMetadata
 }
 
-func (r *StateOperationResult) fail(class CompletionClass, code int32) *StateOperationResult {
+func (r *StateOperationResult) fail(class CompletionClass, code int32, why ...activityreasondata.Code) *StateOperationResult {
 	r.observation = nil
 	r.association = nil
 	r.wallet = nil
 	r.completedNotification = false
 	r.code = code
 	r.metadata.Class = class
+	r.metadata.Reason = capturedReason(why)
 	r.metadata.RPCErrorCode = &code
 	return r
 }
@@ -54,6 +57,9 @@ func (r *StateOperationResult) owned(e *StateEngine) bool {
 }
 func (r *StateOperationResult) MetadataFor(e *StateEngine) (StateOperationMetadata, error) {
 	if !r.owned(e) {
+		return StateOperationMetadata{}, errMetadata
+	}
+	if !validCapturedReason(r.metadata.Class, r.metadata.Reason) {
 		return StateOperationMetadata{}, errMetadata
 	}
 	m := r.metadata

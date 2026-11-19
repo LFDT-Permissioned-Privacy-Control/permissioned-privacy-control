@@ -80,9 +80,9 @@ func run(ctx context.Context, args []string, out, stderr io.Writer, getenv func(
 	}
 	if command == "migrate" || command == "downgrade-to-005" {
 		if !drained {
-			return errors.New("schema changes require --drained and the selected exact activity catalog or lean audit001..004 baseline")
+			return errors.New("bootstrap, prototype format migration and legacy downgrade require --drained and the selected exact activity catalog or lean audit001..004 baseline")
 		}
-		schema := "ops_activity_v1/006"
+		schema := "ops_activity_v1/007"
 		var err error
 		if command == "downgrade-to-005" {
 			err = s.DowngradeTo005(ctx, dsn, roles.Writer, roles.Reader, roles.Retention, drained)

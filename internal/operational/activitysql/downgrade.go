@@ -8,7 +8,9 @@ import (
 )
 
 // DowngradeTo005 is an explicit offline owner operation. 005/006 are exact
-// catalog versions, not a mutable version row. No history or authority changes.
+// catalog versions, not a mutable version row. This prototype-only operation
+// rejects007: its reason-bearing records need compatible readers. No history or
+// authority changes.
 func DowngradeTo005(ctx context.Context, dsn, writerRole, readerRole, retentionRole string, drained bool) error {
 	roles := RoleNames{writerRole, readerRole, retentionRole}
 	if !drained || !roles.Valid() {
@@ -17,7 +19,7 @@ func DowngradeTo005(ctx context.Context, dsn, writerRole, readerRole, retentionR
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 	return ownerTx(ctx, dsn, func(tx pgx.Tx) error {
-		if e := checkSchema(ctx, tx); e != nil {
+		if e := checkSchemaAgainst(ctx, tx, prototype006Catalog); e != nil {
 			return e
 		}
 		if e := checkRole(ctx, tx, roles, "owner"); e != nil {

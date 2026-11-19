@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/ethereum/go-ethereum/common"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/executionfacts"
 	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/policybundle"
@@ -115,18 +116,18 @@ func (e *Engine) TraceCallObserved(ctx context.Context, assertion, selectedOrg s
 	r.id = q.id
 	r.notification = q.notification
 	if code != 0 {
-		return r.fail(InvalidCompletion, code)
+		return r.fail(InvalidCompletion, code, activityreasondata.InvalidRequestShape)
 	}
 	r.metadata.Method = q.method
 	if clientTraceMulticall(q.call.To(), q.call.Input()) {
-		return r.fail(DeniedCompletion, -32001)
+		return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 	}
 	if e == nil || e.current == nil || e.raw == nil || e.raw.closed.Load() {
 		return r.fail(UnavailableCompletion, -32002)
 	}
 	view, err := e.factory.Build(assertion)
 	if err != nil {
-		return r.fail(UnauthenticatedCompletion, -32001)
+		return r.fail(UnauthenticatedCompletion, -32001, activityreasondata.AuthRequired)
 	}
 	r.view = view
 	r.metadata.ActorID = view.ActorID()
@@ -147,7 +148,7 @@ func (e *Engine) TraceCallObserved(ctx context.Context, assertion, selectedOrg s
 		}
 	}
 	if !ok {
-		return r.fail(DeniedCompletion, -32001)
+		return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 	}
 	org, _ := view.Org(orgID)
 	r.metadata.OrganizationID = orgID
@@ -159,15 +160,15 @@ func (e *Engine) TraceCallObserved(ctx context.Context, assertion, selectedOrg s
 			admin = admin || o.IsOrgAdmin()
 		}
 		if !admin {
-			return r.fail(DeniedCompletion, -32001)
+			return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 		}
 	}
 	if !e.traceMethodAuthorized(org, q.method) {
-		return r.fail(DeniedCompletion, -32001)
+		return r.fail(DeniedCompletion, -32001, activityreasondata.MethodNotAllowed)
 	}
 	ref, err := org.SelectCredentialRef(q.method)
 	if err != nil {
-		return r.fail(DeniedCompletion, -32001)
+		return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 	}
 	client, err := e.clients[orgID].WithCredential(ref)
 	if err != nil {
@@ -183,7 +184,7 @@ func (e *Engine) TraceCallObserved(ctx context.Context, assertion, selectedOrg s
 			return r.fail(UnavailableCompletion, -32002)
 		}
 		if q.call.FromSupplied() && !wallets.Contains(q.call.From()) {
-			return r.fail(DeniedCompletion, -32001)
+			return r.fail(DeniedCompletion, -32001, activityreasondata.SenderNotLinked)
 		}
 	}
 	execution, err := client.AcquireSimulationCall(ctx, q.call, q.block, func(a common.Address) bool {
@@ -203,7 +204,7 @@ func (e *Engine) TraceCallObserved(ctx context.Context, assertion, selectedOrg s
 			return r.fail(UnavailableCompletion, -32002)
 		}
 		if !matched || actual != orgID {
-			return r.fail(DeniedCompletion, -32001)
+			return r.fail(DeniedCompletion, -32001, activityreasondata.AccessDenied)
 		}
 	}
 	if current.collect(ctx, execution) != nil {
@@ -230,8 +231,8 @@ func (e *Engine) TraceCallObserved(ctx context.Context, assertion, selectedOrg s
 	if err != nil {
 		return r.fail(UnavailableCompletion, -32002)
 	}
-	if !native.CheckClientTrace(ctx, view, orgID, execution, wallets).Allowed {
-		return r.fail(DeniedCompletion, -32001)
+	if decision := native.CheckClientTrace(ctx, view, orgID, execution, wallets); !decision.Allowed {
+		return r.fail(DeniedCompletion, -32001, compatiblePolicyReason(decision, DeniedCompletion))
 	}
 	readable := map[string]bool{}
 	if methodAuthorized(e.snapshot, org, "eth_getStorageAt") {

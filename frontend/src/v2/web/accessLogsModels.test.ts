@@ -36,3 +36,14 @@ it('rejects foreign-organization or malformed private records and unclaimed sour
   ]) { const value = page(); mutate(value); expect(() => accessLogPage(value, org, query)).toThrow() }
   expect(() => accessLogPage(page(), org, { ...query, method: 'eth_getLogs' })).toThrow('requested scope')
 })
+
+it('accepts only the closed recorded reason and outcome combinations', () => {
+  for (const reason of ['sender_not_linked', 'method_not_allowed', 'policy_argument_constraint']) {
+    const value = page(); value.items[0].reason = reason
+    expect(accessLogPage(value, org, query).items[0].reason).toBe(reason)
+  }
+  for (const [reason, outcome] of [['sender_not_linked', 'success'], ['policy_invalid_context', 'denied'], ['policy_invented', 'denied'], ['', 'denied'], ['request_cancelled', 'denied']]) {
+    const value = page(); value.items[0].reason = reason; value.items[0].outcome = outcome
+    expect(() => accessLogPage(value, org, query)).toThrow()
+  }
+})

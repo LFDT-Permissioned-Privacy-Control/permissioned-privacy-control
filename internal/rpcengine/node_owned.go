@@ -108,6 +108,7 @@ func (e *Engine) nodeOwnedObserved(ctx context.Context, q utilityRequest, view *
 	base.finish(ctx, response)
 	r.rawResult = base
 	r.metadata.Class = base.metadata.Class
+	r.metadata.Reason = base.metadata.Reason
 	r.metadata.RPCErrorCode = base.metadata.RPCErrorCode
 	return r
 }

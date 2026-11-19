@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ethereum/go-ethereum/common"
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/admission"
 	"privacy-proxy/internal/creationcapture"
 	"privacy-proxy/internal/creationfacts"
@@ -446,7 +447,7 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 	defer cancel()
 	req, parseError := parseRawRequest(raw)
 	if parseError != nil {
-		return observation.failure(InvalidCompletion, responseError(req.id, parseError.Code, parseError.Message))
+		return observation.failure(InvalidCompletion, responseError(req.id, parseError.Code, parseError.Message), activityreasondata.InvalidRequestShape)
 	}
 	observation.method(EthSendRawTransaction)
 	if e == nil || e.raw == nil {
@@ -455,14 +456,14 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 	// An explicitly empty owned ingress set is read/simulation-only. Reject
 	// every send independently of whether its trace would contain creation.
 	if e.raw.captureGate != nil && !e.raw.sendEnabled {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	if e.raw.readProfile == "strict" && req.present {
-		return observation.failure(InvalidCompletion, responseError(req.id, -32602, "visibleTo is not supported on this network"))
+		return observation.failure(InvalidCompletion, responseError(req.id, -32602, "visibleTo is not supported on this network"), activityreasondata.InvalidRequestShape)
 	}
 	entries, valid := req.entries()
 	if !valid {
-		return observation.failure(InvalidCompletion, responseError(req.id, -32602, "invalid params"))
+		return observation.failure(InvalidCompletion, responseError(req.id, -32602, "invalid params"), activityreasondata.InvalidRequestShape)
 	}
 	if ctx.Err() != nil || e.raw.closed.Load() {
 		return responseError(req.id, -32002, "unavailable")
@@ -478,16 +479,16 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 		view, err = e.factory.Build(assertion)
 	}
 	if err != nil {
-		return observation.failure(UnauthenticatedCompletion, denied(req.id))
+		return observation.failure(UnauthenticatedCompletion, denied(req.id), activityreasondata.AuthRequired)
 	}
 	observation.accept(view)
 	if len(view.OrgIDs()) == 0 {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	current := e.currentPass(view)
 	tx, err := transactioninput.DecodeRaw(req.rawHex, e.snapshot.Metadata().ChainID, transactioninput.ProtectedEVMProfile(), transactioninput.DefaultLimits())
 	if err != nil {
-		return observation.failure(InvalidCompletion, responseError(req.id, -32602, "invalid params"))
+		return observation.failure(InvalidCompletion, responseError(req.id, -32602, "invalid params"), activityreasondata.InvalidRequestShape)
 	}
 	to, hasTo := tx.Destination()
 	if tx.Creation() || !hasTo {
@@ -498,7 +499,7 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 		// Deployment has no installed root contract to share. Reject before
 		// recipient resolution or any node work, irrespective of wallet proof.
 		if len(entries) > 0 {
-			return observation.failure(DeniedCompletion, denied(req.id))
+			return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 		}
 	}
 	var orgID string
@@ -512,7 +513,7 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 		orgID, ok = selectedAddressOrganization(view, explicitOrg, to)
 	}
 	if !ok {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	observation.selectOrg(orgID)
 	org, _ := view.Org(orgID)
@@ -525,11 +526,11 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 		allowed = e.utilityAllowed(org, name)
 	}
 	if !allowed {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.MethodNotAllowed)
 	}
 	ref, err := org.SelectCredentialRef(name)
 	if err != nil {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	binding, ok := e.raw.bindings[orgID][ref]
 	if !ok {
@@ -543,19 +544,27 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 		return responseError(req.id, -32002, "unavailable")
 	}
 	if authorized != nil && (authorized.wallet.ActorID() != view.ActorID() || wallet.Version() != authorized.wallet.Version() || !wallet.Contains(tx.Signer())) {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		why := activityreasondata.AccessDenied
+		if authorized.wallet.ActorID() == view.ActorID() && wallet.Version() == authorized.wallet.Version() && !wallet.Contains(tx.Signer()) {
+			why = activityreasondata.SenderNotLinked
+		}
+		return observation.failure(DeniedCompletion, denied(req.id), why)
 	}
 	if len(entries) > 0 && (!wallet.Contains(tx.Signer()) || len(tx.Input()) == 0) {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		why := activityreasondata.AccessDenied
+		if !wallet.Contains(tx.Signer()) {
+			why = activityreasondata.SenderNotLinked
+		}
+		return observation.failure(DeniedCompletion, denied(req.id), why)
 	}
 	audience, err := e.raw.wallets.ResolveRecipients(ctx, entries)
 	if err != nil {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	actors := audience.Actors()
 	sort.Strings(actors)
 	if ctx.Err() != nil || view.RequireLive() != nil {
-		return observation.failure(DeniedCompletion, denied(req.id))
+		return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 	}
 	var execution *rpcexecution.CallExecution
 	var prepared *guardbridge.QualifiedPrepared
@@ -594,7 +603,7 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 		}
 		native, err = current.engine()
 		if err != nil {
-			return observation.failure(DeniedCompletion, denied(req.id))
+			return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 		}
 	}
 	var approvedCheck *nativeadmission.ApprovedSignedCheck
@@ -604,7 +613,7 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 		} else {
 			var decision policycore.Decision
 			decision, approvedCheck, err = native.CheckSignedWithCreationPlanObserved(ctx, view, orgID, execution, wallet)
-			observation.class(nativeClass(decision))
+			observation.decision(decision)
 			if err != nil && decision.Allowed {
 				observation.class(EvaluationFailedCompletion)
 			}
@@ -613,13 +622,16 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 			return denied(req.id)
 		}
 		observation.class(UnavailableCompletion)
-	} else if !native.CheckSigned(ctx, view, orgID, execution, wallet).Allowed {
-		return observation.failure(DeniedCompletion, denied(req.id))
+	} else {
+		decision := native.CheckSigned(ctx, view, orgID, execution, wallet)
+		if !decision.Allowed {
+			return observation.failure(DeniedCompletion, denied(req.id), compatiblePolicyReason(decision, DeniedCompletion))
+		}
 	}
 	if len(actors) > 0 {
 		code, known := execution.Code(to)
 		if !known || !code.HasCode() || code.Precompile() || code.Delegated() {
-			return observation.failure(DeniedCompletion, denied(req.id))
+			return observation.failure(DeniedCompletion, denied(req.id), activityreasondata.AccessDenied)
 		}
 	}
 	input := admission.TrustedRawInput{ApprovedCheck: approvedCheck, View: view, OrganizationID: orgID, Transaction: tx, Execution: execution, WalletSnapshot: wallet, Audience: actors}
@@ -657,7 +669,7 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 		return responseError(req.id, -32002, "unavailable")
 	}
 	if !result.Decision().Allowed {
-		return observation.failure(DeniedCompletion, responseError(req.id, -32003, "transaction blocked by compliance policy"))
+		return observation.failure(DeniedCompletion, responseError(req.id, -32003, "transaction blocked by compliance policy"), activityreasondata.ComplianceBlocked)
 	}
 	receipt, ok := result.Receipt()
 	if !ok || !receipt.Matches(input) {
@@ -706,7 +718,7 @@ func (e *Engine) submitRawAuthorized(ctx context.Context, assertion, explicitOrg
 		_, err = binding.client.BroadcastRaw(ctx, tx)
 	}
 	if err != nil {
-		return observation.failure(UnconfirmedCompletion, outcomeUnknown(req.id, tx))
+		return observation.failure(UnconfirmedCompletion, outcomeUnknown(req.id, tx), activityreasondata.SubmissionOutcomeUnknown)
 	}
 	observation.class(SuccessfulCompletion)
 	hash := tx.Hash().Hex()

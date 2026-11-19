@@ -125,7 +125,7 @@ func (o observedOperation) completion(s *Service, remote string) (activitylog.Co
 		if err != nil {
 			return invalid, err
 		}
-		c, err := completion(rpcengine.OperationMetadata{Class: m.Class, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
+		c, err := completion(rpcengine.OperationMetadata{Class: m.Class, Reason: m.Reason, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
 		if err != nil || !activitylog.ValidMethod(m.Method) {
 			return c, ErrInvalid
 		}
@@ -137,7 +137,7 @@ func (o observedOperation) completion(s *Service, remote string) (activitylog.Co
 		if err != nil {
 			return invalid, err
 		}
-		c, err := completion(rpcengine.OperationMetadata{Class: m.Class, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
+		c, err := completion(rpcengine.OperationMetadata{Class: m.Class, Reason: m.Reason, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
 		if err != nil || !activitylog.ValidMethod(m.Method) {
 			return c, ErrInvalid
 		}
@@ -156,7 +156,7 @@ func (o observedOperation) completion(s *Service, remote string) (activitylog.Co
 		if err != nil {
 			return invalid, err
 		}
-		c, err := completion(rpcengine.OperationMetadata{Class: m.Class, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
+		c, err := completion(rpcengine.OperationMetadata{Class: m.Class, Reason: m.Reason, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
 		if err != nil || !activitylog.ValidMethod(m.Method) {
 			return c, ErrInvalid
 		}
@@ -168,7 +168,7 @@ func (o observedOperation) completion(s *Service, remote string) (activitylog.Co
 		if err != nil {
 			return invalid, err
 		}
-		c, err := completion(rpcengine.OperationMetadata{Class: m.Class, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
+		c, err := completion(rpcengine.OperationMetadata{Class: m.Class, Reason: m.Reason, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
 		if err != nil || !activitylog.ValidMethod(m.Method) {
 			return c, ErrInvalid
 		}
@@ -179,7 +179,7 @@ func (o observedOperation) completion(s *Service, remote string) (activitylog.Co
 	if err != nil {
 		return invalid, err
 	}
-	c, err := completion(rpcengine.OperationMetadata{Class: m.Class, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
+	c, err := completion(rpcengine.OperationMetadata{Class: m.Class, Reason: m.Reason, ActorID: m.ActorID, OrganizationID: m.OrganizationID, PolicyDigest: m.PolicyDigest, RPCErrorCode: m.RPCErrorCode}, remote)
 	if err != nil || !activitylog.ValidMethod(m.Method) {
 		return c, ErrInvalid
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"privacy-proxy/internal/activityreasondata"
 	"privacy-proxy/internal/historyfacts"
 	"privacy-proxy/internal/policybundle"
 	"privacy-proxy/internal/rpcexecution"
@@ -13,6 +14,7 @@ type HistoryOperationMetadata struct {
 	Method                  string
 	Canonical               rpcexecution.HistoryMethod
 	Class                   CompletionClass
+	Reason                  activityreasondata.Code
 	ActorID, OrganizationID string
 	PolicyDigest            policybundle.Digest
 	RPCErrorCode            *int32
@@ -30,11 +32,12 @@ type HistoryOperationResult struct {
 	result       json.RawMessage
 }
 
-func (r *HistoryOperationResult) fail(class CompletionClass, code int32) *HistoryOperationResult {
+func (r *HistoryOperationResult) fail(class CompletionClass, code int32, why ...activityreasondata.Code) *HistoryOperationResult {
 	r.observation = nil
 	r.result = nil
 	r.code = code
 	r.metadata.Class = class
+	r.metadata.Reason = capturedReason(why)
 	r.metadata.RPCErrorCode = &code
 	return r
 }
@@ -43,6 +46,9 @@ func (r *HistoryOperationResult) owned(e *HistoryEngine) bool {
 }
 func (r *HistoryOperationResult) MetadataFor(e *HistoryEngine) (HistoryOperationMetadata, error) {
 	if !r.owned(e) {
+		return HistoryOperationMetadata{}, errHistory
+	}
+	if !validCapturedReason(r.metadata.Class, r.metadata.Reason) {
 		return HistoryOperationMetadata{}, errHistory
 	}
 	m := r.metadata

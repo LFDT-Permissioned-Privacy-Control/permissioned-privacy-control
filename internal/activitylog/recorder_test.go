@@ -43,8 +43,8 @@ func TestOperationalSpoolRecoveryWithPreviousWriterMethodConfiguration(t *testin
 	if err = r.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	// The old image's allowed writer methods do not include the operational
-	// label. Recovery still uses the unchanged exact v1 spool/envelope grammar.
+	// A compatible image with the previous allowed-method configuration can
+	// recover this operational label; this is not a v1-only binary rollback.
 	c.Methods = []string{"eth_call"}
 	oldWriter, err := New(t.Context(), c, store)
 	if err != nil {
