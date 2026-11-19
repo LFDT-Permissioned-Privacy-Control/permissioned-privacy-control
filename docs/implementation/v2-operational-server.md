@@ -108,6 +108,23 @@ This is a sampled dependency check, not an atomic fleet-wide guarantee or an
 external identity-provider availability check. Requests still validate their
 exact node anchor, observer progress, permissions and data freshness.
 
+An actual node HTTP 429 starts a one-second local cooldown for that exact
+configured node URL and credential header/value. Aliases using the same
+credential material share it; different credentials or URLs remain independent.
+Configured unauthenticated nodes use an endpoint-only cooldown. All native node
+clients, including protected reads and readiness probes, share these fixed
+startup bindings. A cooldown can therefore temporarily fail readiness; the
+ordinary health sample may retain that failed result for up to another second.
+Cooldown calls fail immediately without reaching the node. OPS does not sleep,
+retry, replay a transaction, reset the caller's deadline or relay the node's
+error body. Existing typed unavailable and uncertain-submission results remain;
+this does not make upstream 429 a new client HTTP 429 contract. A failure at the
+broadcast handoff remains an uncertain submission, including a locally
+suppressed call; OPS does not claim the transaction was never submitted.
+A late successful
+call does not clear a newer cooldown. This is per-instance node-load protection,
+not a shared rate quota or a guarantee against network denial of service.
+
 ## Operational storage and workers
 
 Initialize stores using their offline administration commands and distinct

@@ -53,7 +53,7 @@ type dataPlane struct {
 	index               *explorerindex.Reader
 	indexBinding        explorerquery.Binding
 	activityReader      *activitysql.Reader
-	transport           *http.Transport
+	transport           http.RoundTripper
 	reference           creationfacts.Source
 	referenceCredential rpcexecution.Credential
 	admissionState      admission.ExpectedState
@@ -81,12 +81,16 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 		return nil, ErrInvalid
 	}
 	network := creationfacts.Network{Key: creationfacts.Digest(key), Environment: wb.Environment, ChainID: wb.ChainID, Genesis: common.HexToHash(wb.GenesisHash), Deployment: wb.DeploymentID}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxConnsPerHost = 32
-	transport.MaxIdleConnsPerHost = 16
-	transport.ResponseHeaderTimeout = 15 * time.Second
+	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+	baseTransport.MaxConnsPerHost = 32
+	baseTransport.MaxIdleConnsPerHost = 16
+	baseTransport.ResponseHeaderTimeout = 15 * time.Second
+	s.close = append(s.close, baseTransport.CloseIdleConnections)
+	transport, e := newNodeTransport(baseTransport, s.config, time.Now)
+	if e != nil {
+		return nil, e
+	}
 	p.transport = transport
-	s.close = append(s.close, transport.CloseIdleConnections)
 	credential, ref, e := endpointCredential(c.DefaultNode.Credential)
 	if e != nil {
 		return nil, e
