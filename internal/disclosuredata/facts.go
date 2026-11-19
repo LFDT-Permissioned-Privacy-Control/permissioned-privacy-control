@@ -46,6 +46,13 @@ func validateFacts(scope ReadScope, ds []SourceDescriptor, f Facts, after *Posit
 }
 
 func validateFactsForHistory(scope ReadScope, ds []SourceDescriptor, f Facts, after *Position, historyKind string) (factContext, error) {
+	return validateFactsForHistoryMode(scope, ds, f, after, historyKind, true)
+}
+
+// Rendering revalidates detached page contents but has no caller's cursor. The
+// service/source validators separately enforce the authenticated initial/after
+// boundary; the renderer still verifies counts, ordering, End and exact Next.
+func validateFactsForHistoryMode(scope ReadScope, ds []SourceDescriptor, f Facts, after *Position, historyKind string, checkInitial bool) (factContext, error) {
 	c := factContext{scope: scope, descriptors: map[SourceKind]SourceDescriptor{}, targets: map[[20]byte][]string{}, mine: map[[20]byte]bool{}, historyKind: historyKind}
 	if e := PositionForQuery(scope.Query, after); e != nil {
 		return c, e
@@ -57,7 +64,7 @@ func validateFactsForHistory(scope ReadScope, ds []SourceDescriptor, f Facts, af
 		return c, ErrTooBroad
 	}
 	branches := 0
-	for _, present := range []bool{f.Addresses != nil, f.Activities != nil, f.Transactions != nil, f.ActivitySummary != nil, f.Sanctions != nil, f.Compliance != nil} {
+	for _, present := range []bool{f.Addresses != nil, f.Activities != nil, f.Transactions != nil, f.ActivitySummary != nil, f.Sanctions != nil, f.Compliance != nil, f.FinanceEvidence != nil} {
 		if present {
 			branches++
 		}
@@ -182,6 +189,23 @@ func validateFactsForHistory(scope ReadScope, ds []SourceDescriptor, f Facts, af
 			return c, ErrUnavailable
 		}
 	case p.ComplianceReport:
+		if q.view == List {
+			v := f.FinanceEvidence
+			if historyKind != RetainedHistoryPopulation || v == nil || v.Items == nil || !countValid(v.MatchingRetainedCount) || !countValid(v.BeforeCount) || len(v.Items) > int(q.limit) {
+				return c, ErrUnavailable
+			}
+			total, before := countValue(v.MatchingRetainedCount), countValue(v.BeforeCount)
+			if total > MaxEntries || before > total || uint64(len(v.Items)) > total-before || f.End != (before+uint64(len(v.Items)) == total) || checkInitial && after == nil && before != 0 || after != nil && before == 0 {
+				return c, ErrUnavailable
+			}
+			for _, ev := range v.Items {
+				if !c.evidence(ev) {
+					return c, ErrUnavailable
+				}
+				positions = append(positions, Position{Kind: FinanceSource, Finance: &FinancePosition{ID: ev.ID}})
+			}
+			break
+		}
 		if f.Compliance == nil || !summaryValid(f.Compliance.Activity) || !c.sanctions(f.Compliance.Sanctions) || f.Compliance.KYC != "not_evaluated" || len(f.Compliance.Evidence) > 100 {
 			return c, ErrUnavailable
 		}

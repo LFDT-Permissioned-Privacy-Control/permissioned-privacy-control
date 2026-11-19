@@ -57,8 +57,8 @@ func DecodeQuery(raw []byte) (Query, error) {
 	return decodeQuery(raw, false)
 }
 
-// DecodeRetainedQuery admits the retained profile's opaque address selector
-// for a transaction list. Normalization and case authorization still follow.
+// DecodeRetainedQuery admits retained transaction address selectors and the
+// finance-only admission list. Normalization and case authorization still follow.
 func DecodeRetainedQuery(raw []byte) (Query, error) {
 	return decodeQuery(raw, true)
 }
@@ -108,7 +108,7 @@ func decodeQuery(raw []byte, retained bool) (Query, error) {
 			}
 		}
 	}
-	if strictjson.ExactDecodeWithOptions(v, &q, strictjson.ShapeOptions{OptionalOmitEmpty: true}) != nil || q.Version != 1 || !combination(q.Resource, q.View) {
+	if strictjson.ExactDecodeWithOptions(v, &q, strictjson.ShapeOptions{OptionalOmitEmpty: true}) != nil || q.Version != 1 || !(combination(q.Resource, q.View) || retained && q.Resource == p.ComplianceReport && q.View == List) {
 		return Query{}, ErrInvalid
 	}
 	if q.Limit != nil && (*q.Limit < 1 || *q.Limit > MaxPage) || q.Cursor != nil && (len(*q.Cursor) < 1 || len(*q.Cursor) > 2048) || q.AddressID != nil && len(*q.AddressID) > 128 || q.TransactionHash != nil && len(*q.TransactionHash) > 128 {
@@ -136,8 +136,8 @@ func Normalize(q Query, original p.Scope) (NormalizedQuery, error) {
 	return normalize(q, original, false)
 }
 
-// NormalizeRetained also accepts an opaque address selector for a transaction
-// list. The operational source resolves it only within actual current targets.
+// NormalizeRetained additionally supports the finance-only admission list and
+// a transaction address selector resolved within actual current targets.
 func NormalizeRetained(q Query, original p.Scope) (NormalizedQuery, error) {
 	return normalize(q, original, true)
 }
@@ -145,7 +145,7 @@ func NormalizeRetained(q Query, original p.Scope) (NormalizedQuery, error) {
 func normalize(q Query, original p.Scope, retained bool) (NormalizedQuery, error) {
 	var n NormalizedQuery
 	s, e := p.NormalizeScope(original, p.DefaultLimits())
-	if e != nil || q.Version != 1 || !combination(q.Resource, q.View) || !slices.Contains(s.Resources, q.Resource) {
+	if e != nil || q.Version != 1 || !(combination(q.Resource, q.View) || retained && q.Resource == p.ComplianceReport && q.View == List) || !slices.Contains(s.Resources, q.Resource) {
 		return n, ErrInvalid
 	}
 	addressList := retained && q.Resource == p.Transactions && q.View == List && q.AddressID != nil

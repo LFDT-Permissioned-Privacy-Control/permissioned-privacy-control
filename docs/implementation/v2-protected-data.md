@@ -73,7 +73,15 @@ Recognized resource/view pairs are:
 | `activity_logs` | `list` |
 | `activity_summary` | `report` |
 | `sanctions_report` | `report` |
-| `compliance_report` | `report` |
+| `compliance_report` | `report`; retained profile also `list` for admission decisions |
+
+The admission-decisions list returns `{items, nextCursor,
+matchingRetainedCount}`. Its count belongs to the complete bounded finance
+selection, not activity totals. It needs finance only, has no chain-history
+basis, and preserves the existing evidence-field omissions at lower disclosure
+levels. Coverage is `RETAINED_AT_READ`; a changed full-selection fingerprint
+invalidates the cursor. Downloading a page does not produce a complete compliance
+report. See [retained financial evidence](v2-disclosure-finance.md) for bounds.
 
 `events:list` is recognized but has no output implementation in this library.
 The data constructor rejects a selected rule requiring it. This guard does not

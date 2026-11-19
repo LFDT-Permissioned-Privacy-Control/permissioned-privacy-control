@@ -211,12 +211,22 @@ type ComplianceAggregate struct {
 	Evidence  []ComplianceEvidence // sortedbounded<=100, reportTooBroad rather thantruncate
 	KYC       string               // literal not_evaluated inA unless a separately approved actual source added
 }
+
+// FinanceEvidencePage carries one page and exact counts from the entire bounded
+// retained finance observation. BeforeCount is private scan evidence, not OFFSET.
+type FinanceEvidencePage struct {
+	Items                 []ComplianceEvidence
+	MatchingRetainedCount Count
+	BeforeCount           Count
+}
 type Position struct {
 	Kind        SourceKind
 	Activity    *ActivityPosition
 	Transaction *TransactionPosition
 	Address     *AddressPosition
+	Finance     *FinancePosition
 }
+type FinancePosition struct{ ID Count }
 type ActivityPosition struct {
 	ObservedAtMicros  int64
 	ProducerID, RunID string
@@ -243,6 +253,7 @@ type Facts struct {
 	ActivitySummary *ActivityAggregate
 	Sanctions       *SanctionsAggregate
 	Compliance      *ComplianceAggregate
+	FinanceEvidence *FinanceEvidencePage
 	End             bool
 	Next            *Position
 	Wallets         []WalletFact // ONE total<=4096 unioned snapshot; split query targets vs viewer by ActorID

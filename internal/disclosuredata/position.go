@@ -11,6 +11,10 @@ func ClonePosition(p *Position) *Position {
 		return nil
 	}
 	c := *p
+	if p.Finance != nil {
+		f := *p.Finance
+		c.Finance = &f
+	}
 	if p.Activity != nil {
 		a := *p.Activity
 		c.Activity = &a
@@ -27,6 +31,9 @@ func ClonePosition(p *Position) *Position {
 }
 func validPosition(a Position) bool {
 	n := 0
+	if a.Finance != nil {
+		n++
+	}
 	if a.Activity != nil {
 		n++
 	}
@@ -40,6 +47,8 @@ func validPosition(a Position) bool {
 		return false
 	}
 	switch a.Kind {
+	case FinanceSource:
+		return a.Finance != nil && countValid(a.Finance.ID) && countValue(a.Finance.ID) > 0 && countValue(a.Finance.ID) <= 9223372036854775807
 	case ActivitySource:
 		x := a.Activity
 		return x != nil && x.ObservedAtMicros >= 0 && x.ObservedAtMicros <= p.MaxUnixSeconds*1000000+999999 && uuidValid(x.ProducerID) && uuidValid(x.RunID) && uuidValid(x.RecordID) && countValid(x.CompletionOrdinal) && countValue(x.CompletionOrdinal) > 0
@@ -63,6 +72,8 @@ func PositionForQuery(q NormalizedQuery, a *Position) error {
 		want = ActivitySource
 	case p.Transactions:
 		want = HistorySource
+	case p.ComplianceReport:
+		want = FinanceSource
 	case p.AddressHistory:
 	default:
 		return ErrInvalid
@@ -77,6 +88,8 @@ func ComparePositions(a, b Position) (int, error) {
 		return 0, ErrInvalid
 	}
 	switch a.Kind {
+	case FinanceSource:
+		return cmp.Compare(countValue(a.Finance.ID), countValue(b.Finance.ID)), nil
 	case ActivitySource:
 		x, y := a.Activity, b.Activity
 		for _, n := range []int{cmp.Compare(x.ObservedAtMicros, y.ObservedAtMicros), cmp.Compare(x.ProducerID, y.ProducerID), cmp.Compare(x.RunID, y.RunID), cmp.Compare(countValue(x.CompletionOrdinal), countValue(y.CompletionOrdinal)), cmp.Compare(x.RecordID, y.RecordID)} {

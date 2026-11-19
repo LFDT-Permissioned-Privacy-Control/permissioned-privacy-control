@@ -1,3 +1,5 @@
+import { validateEvidencePage } from './disclosureEvidence'
+
 export type ObjectValue = Record<string, unknown>
 export function record(value: unknown): ObjectValue {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -130,6 +132,7 @@ export function protectedData(
   value: unknown,
   selected: NativeCase,
   resource: string,
+  expected: { view?: string; dataTime?: CaseScope['dataTime']; limit?: number; until?: number } = {},
 ): ProtectedData {
   const v = record(value),
     coverage = record(v.coverage),
@@ -140,14 +143,25 @@ export function protectedData(
     v.caseId !== selected.caseId ||
     v.resource !== resource ||
     v.level !== selected.scope.level ||
-    time.start !== selected.scope.dataTime.start ||
-    time.end !== selected.scope.dataTime.end ||
+    time.start !== (expected.dataTime ?? selected.scope.dataTime).start ||
+    time.end !== (expected.dataTime ?? selected.scope.dataTime).end ||
+    Number(time.start) < selected.scope.dataTime.start || Number(time.end) > selected.scope.dataTime.end ||
+    expected.view !== undefined && v.view !== expected.view ||
     !Number.isSafeInteger(v.effectiveUntil) ||
-    Number(v.effectiveUntil) <= Date.now() / 1000 ||
+    Number(v.effectiveUntil) <= Date.now() / 1000 || Number(v.effectiveUntil) > Math.min(selected.expiresAt, expected.until ?? selected.expiresAt) ||
     !['COMPLETE_AT_CUT', 'RETAINED_AT_READ'].includes(String(coverage.status)) ||
     !Array.isArray(coverage.populations)
   )
     throw Error('Disclosure response does not match this case')
+  if (resource === 'compliance_report' && v.view === 'list') {
+    if (Object.keys(v).sort().join() !== 'caseId,coverage,dataTime,effectiveUntil,level,readId,resource,result,v,view' ||
+      Object.keys(time).sort().join() !== 'end,start' ||
+      coverage.status !== 'RETAINED_AT_READ' || Object.keys(coverage).sort().join() !== 'populations,preparedAt,sourceBasisDigest,status' ||
+      JSON.stringify(coverage.populations) !== '["RETAINED_ADMISSION_DECISIONS_AS_OF_SNAPSHOT"]' || typeof coverage.sourceBasisDigest !== 'string' ||
+      !/^sha256:[0-9a-f]{64}$/.test(coverage.sourceBasisDigest) || !Number.isSafeInteger(coverage.preparedAt) ||
+      Number(coverage.preparedAt) < 0 || Number(coverage.preparedAt) >= Number(v.effectiveUntil)) throw Error('Invalid admission evidence coverage')
+    validateEvidencePage(result, String(v.level), expected.dataTime ?? selected.scope.dataTime, expected.limit ?? 100)
+  }
   text(v.readId)
   if (resource === 'activity_logs')
     for (const row of rows(result.items)) {

@@ -4,6 +4,7 @@ import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import type { OperationScope } from './controller'
+import { readNarrowing } from './disclosureEvidence'
 import {
   actorID,
   address,
@@ -377,7 +378,7 @@ function CreateCase({
               required
             />
             <Field
-              label="Data ends (UTC, exclusive)"
+              label="Data ends (UTC, inclusive)"
               type="datetime-local"
               value={end}
               onChange={setEnd}
@@ -461,28 +462,63 @@ function CaseDetail({
     [auditCursor, setAuditCursor] = useState(''),
     [reason, setReason] = useState(''),
     [revoking, setRevoking] = useState(false),
-    [filter, setFilter] = useState('')
+    [filter, setFilter] = useState(''),
+    [readView, setReadView] = useState('list'),
+    [target, setTarget] = useState(''),
+    [from, setFrom] = useState(''),
+    [to, setTo] = useState(''),
+    [history, setHistory] = useState<ProtectedData[]>([]),
+    [historyIndex, setHistoryIndex] = useState(0),
+    [historyTrimmed, setHistoryTrimmed] = useState(false)
+  const queryRevision = useRef(0), alive = useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false; queryRevision.current++ } }, [])
+  const clearRead = () => {
+    queryRevision.current++
+    setData(undefined); setCursor(''); setHistory([]); setHistoryIndex(0); setHistoryTrimmed(false)
+    task.clearError()
+  }
   const recipient = selected.recipientActorId === scope.identity.actor
   const read = async (next = '') => {
+    const revision = queryRevision.current
     setData(undefined)
-    const report = resource.endsWith('_report') || resource === 'activity_summary'
+    const narrowed = readNarrowing(selected.scope, target, from, to)
+    const report = resource === 'compliance_report' ? readView === 'report' : resource.endsWith('_report') || resource === 'activity_summary'
     const body = {
       v: 1,
       resource,
       view: report ? 'report' : 'list',
       ...(report ? {} : { limit: 25, ...(next ? { cursor: next } : {}) }),
+      ...narrowed.body,
     }
-    const value = protectedData(
-      await scope.request(base + '/' + selected.caseId + '/read', {
-        method: 'POST',
-        body: JSON.stringify(body),
-      }),
-      selected,
-      resource,
-    )
+    try {
+      const value = protectedData(
+        await scope.request(base + '/' + selected.caseId + '/read', { method: 'POST', body: JSON.stringify(body) }),
+        selected, resource, { view: body.view, dataTime: narrowed.dataTime, limit: 25, until: scope.identity.expires },
+      )
+      scope.check()
+      if (!alive.current || revision !== queryRevision.current) return
+      if (next && resource === 'compliance_report') {
+        const previous = history[historyIndex]
+        if (!previous || previous.coverage.sourceBasisDigest !== value.coverage.sourceBasisDigest ||
+          previous.result.matchingRetainedCount !== value.result.matchingRetainedCount ||
+          (rows(previous.result.items).length && rows(value.result.items).length &&
+            BigInt(text(rows(value.result.items)[0].id)) <= BigInt(text(rows(previous.result.items).at(-1)!.id)))) throw Error('The admission evidence changed. Start a new read; pages have been cleared.')
+      }
+      const loaded = next ? [...history.slice(0, historyIndex + 1), value] : [value]
+      if (loaded.length > 10) setHistoryTrimmed(true)
+      setHistory(loaded.slice(-10)); setHistoryIndex(Math.min(loaded.length, 10) - 1)
+      setData(value); setCursor(optionalText(value.result.nextCursor))
+    } catch (error) {
+      if (!alive.current || revision !== queryRevision.current) return
+      setData(undefined); setCursor(''); setHistory([]); setHistoryIndex(0); setHistoryTrimmed(false)
+      throw error
+    }
+  }
+  const cachedPage = (index: number) => {
     scope.check()
-    setData(value)
-    setCursor(optionalText(value.result.nextCursor))
+    const page = history[index]
+    if (!page || page.effectiveUntil <= Date.now() / 1000) { clearRead(); return }
+    setHistoryIndex(index); setData(page); setCursor(optionalText(page.result.nextCursor))
   }
   const loadAudit = async (next = '') => {
     const value = record(
@@ -499,20 +535,13 @@ function CaseDetail({
     setAuditCursor(text(value.nextCursor))
   }
   useEffect(() => {
-    setData(undefined)
-    setCursor('')
-  }, [resource])
-  useEffect(() => {
     if (!data) return
     const timer = setTimeout(
-      () => {
-        setData(undefined)
-        setCursor('')
-      },
-      Math.max(1, data.effectiveUntil * 1000 - Date.now()),
+      () => { clearRead() },
+      Math.max(1, Math.min(...history.map(p => p.effectiveUntil), data.effectiveUntil) * 1000 - Date.now()),
     )
     return () => clearTimeout(timer)
-  }, [data])
+  }, [data, history])
   const allowed =
     selected.status === 'open' &&
     selected.expiresAt > Date.now() / 1000 &&
@@ -537,7 +566,7 @@ function CaseDetail({
             ['Privacy level', selected.scope.level],
             ['Expires', instant(selected.expiresAt)],
             ['Data begins', instant(selected.scope.dataTime.start)],
-            ['Data ends (exclusive)', instant(selected.scope.dataTime.end)],
+            ['Data ends (inclusive)', instant(selected.scope.dataTime.end)],
           ].map(([label, value]) => (
             <div key={label}>
               <dt className="text-xs text-neutral-500">{label}</dt>
@@ -557,8 +586,7 @@ function CaseDetail({
             value={resource}
             disabled={task.busy}
             onChange={(value) => {
-              setData(undefined)
-              setCursor('')
+              clearRead()
               setResource(value)
             }}
             options={resourceOptions.filter(
@@ -567,6 +595,7 @@ function CaseDetail({
                 (!logsOnly || o.value === 'activity_logs' || o.value === 'activity_summary'),
             )}
           />
+          {resource === 'compliance_report' && <SelectField label="Compliance view" value={readView} disabled={task.busy} onChange={value => { clearRead(); setReadView(value) }} options={[{ value: 'list', label: 'Admission decisions' }, { value: 'report', label: 'Complete report (up to 100 admission decisions)' }]} />}
           <Button disabled={task.busy || !allowed} onClick={() => void task.run(() => read())}>
             Read permitted data
           </Button>
@@ -583,9 +612,11 @@ function CaseDetail({
             </Button>
           )}
         </div>
+        {recipient && <fieldset disabled={task.busy} className="mt-4 rounded-lg border border-neutral-200 p-4 space-y-3"><legend className="px-1 text-sm font-medium">Narrow this read</legend><div className="grid gap-3 md:grid-cols-3"><SelectField label="Target actor" value={target} onChange={value => { clearRead(); setTarget(value) }} options={[{ value: '', label: 'All targets in this case' }, ...selected.scope.targetActors.map(value => ({ value, label: value }))]} /><Field label="From (UTC, inclusive)" type="datetime-local" step={1} value={from} onChange={value => { clearRead(); setFrom(value) }} /><Field label="Through (UTC, inclusive)" type="datetime-local" step={1} value={to} onChange={value => { clearRead(); setTo(value) }} /></div><p className="text-xs text-neutral-500">Blank dates use the case interval. Both endpoints are inclusive UTC instants; narrowing cannot extend the case. Changing a filter clears loaded pages.</p></fieldset>}
         {selected.scope.resources.includes('events') && (
           <p className="mt-3 text-sm text-warning-dark">
-            Event disclosures are unavailable. The other resources in this case remain usable.
+            Blockchain event disclosures are not implemented. Do not deploy standing rules containing
+            Events until that support is available.
           </p>
         )}
         {!resourceOptions.some((o) => selected.scope.resources.includes(o.value)) && (
@@ -597,7 +628,7 @@ function CaseDetail({
       </Panel>
       {data && (
         <Panel
-          title={resourceOptions.find((o) => o.value === data.resource)?.label ?? data.resource}
+          title={data.resource === 'compliance_report' && data.view === 'list' ? 'Admission decisions' : resourceOptions.find((o) => o.value === data.resource)?.label ?? data.resource}
           actions={
             <Button
               variant="outline"
@@ -605,14 +636,14 @@ function CaseDetail({
               onClick={() =>
                 void task.run(async () => {
                   if (data.effectiveUntil <= Date.now() / 1000) {
-                    setData(undefined)
+                    clearRead()
                     throw Error('The case data expired. Read again if still permitted.')
                   }
-                  saveJSON('ops-disclosure-report.json', data, scope.check)
+                  saveJSON(data.view === 'list' ? 'ops-disclosure-page.json' : 'ops-disclosure-report.json', data, scope.check)
                 })
               }
             >
-              Download verified report
+              {data.view === 'list' ? 'Download this page' : 'Download report'}
             </Button>
           }
         >
@@ -623,6 +654,7 @@ function CaseDetail({
               : ''}{' '}
             · Valid until {instant(data.effectiveUntil)}
           </p>
+          {data.resource === 'compliance_report' && data.view === 'list' && <p className="mb-4 text-sm text-neutral-600">Matching retained admission decisions: <strong>{quantity(data.result.matchingRetainedCount)}</strong>. These are recorded decisions, not proof of mining or a complete compliance report. A source change requires a new read.</p>}
           {data.resource === 'activity_logs' && (
             <div className="mb-3 max-w-md">
               <Field
@@ -634,7 +666,7 @@ function CaseDetail({
             </div>
           )}
           <ProtectedResult data={data} filter={filter} />
-          <More cursor={cursor} busy={task.busy} onNext={() => void task.run(() => read(cursor))} />
+          {data.view === 'list' && <div className="flex flex-wrap items-center justify-between gap-3 pt-4"><div className="text-xs text-neutral-500">{historyTrimmed ? 'Earlier pages were released; the latest 10 pages are kept in this tab.' : 'Up to 10 loaded pages are kept in this tab until expiry.'} Previous shows an already loaded page.</div><div className="flex gap-2"><Button variant="outline" disabled={task.busy || historyIndex === 0} onClick={() => void task.run(async () => cachedPage(historyIndex - 1))}>Previous page</Button>{(cursor || historyIndex + 1 < history.length) && <Button variant="outline" disabled={task.busy} onClick={() => void task.run(async () => { if (historyIndex + 1 < history.length) cachedPage(historyIndex + 1); else await read(cursor) })}>Next page</Button>}</div></div>}
         </Panel>
       )}
       {!!audit.length && (
@@ -718,6 +750,17 @@ function ProtectedResult({ data, filter }: { data: ProtectedData; filter: string
             { key: 'actorId', label: 'Actor' },
             { key: 'ipAddress', label: 'IP address' },
           ]
+        : data.resource === 'compliance_report'
+          ? [
+              { key: 'id', label: 'Decision ID' },
+              { key: 'time', label: 'Time', render: r => instant(r.time) },
+              { key: 'decision', label: 'Admission decision' },
+              { key: 'monitored', label: 'Mode', render: r => r.monitored ? 'Monitor' : 'Enforce' },
+              { key: 'coverage', label: 'Recorded coverage' },
+              { key: 'transactionHash', label: 'Transaction' },
+              { key: 'reason', label: 'Reason' },
+              { key: 'policyDigest', label: 'Policy digest' },
+            ]
         : data.resource === 'addresses'
           ? [
               { key: 'display', label: 'Wallet' },

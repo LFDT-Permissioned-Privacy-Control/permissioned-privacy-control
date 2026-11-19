@@ -55,10 +55,10 @@ func retainedBindingDigest(plan SourcePlan, b CursorBinding, resource p.Resource
 }
 
 func retainedCursorSelection(plan SourcePlan, resource p.Resource, basis RetainedBasis, refs []SourceRef, position Position) error {
-	if !ValidRetainedPlan(plan) || !slices.Contains(plan.Resources, resource) || BasisForResource(resource, basis) != nil || basis.Valid() && basis.NetworkKey != plan.NetworkKey {
+	if !ValidRetainedPlan(plan) || !slices.Contains(plan.Resources, resource) || BasisForResourceView(resource, List, basis) != nil || basis.Valid() && basis.NetworkKey != plan.NetworkKey {
 		return ErrInvalid
 	}
-	kinds, err := RequiredKinds(resource)
+	kinds, err := RequiredKindsRetained(resource, List)
 	if err != nil || len(kinds) != len(refs) || len(refs) < 1 || len(refs) > 5 {
 		return ErrInvalid
 	}
@@ -71,6 +71,10 @@ func retainedCursorSelection(plan SourcePlan, resource p.Resource, basis Retaine
 		return ErrInvalid
 	}
 	switch resource {
+	case p.ComplianceReport:
+		if position.Kind == FinanceSource {
+			return nil
+		}
 	case p.AddressHistory:
 		if position.Kind == WalletSource {
 			return nil

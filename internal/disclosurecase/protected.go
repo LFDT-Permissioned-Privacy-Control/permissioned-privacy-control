@@ -9,6 +9,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -335,7 +336,7 @@ func (s *Service) Read(ctx context.Context, token, id string, q d.Query) (*Respo
 		}
 		if e == nil && !nilInterface(owned) {
 			selectedBasis = owned.Basis().Clone()
-			if d.BasisForResource(query.Resource(), selectedBasis) != nil || selectedBasis.Valid() && selectedBasis.NetworkKey != s.data.network {
+			if d.BasisForResourceView(query.Resource(), query.View(), selectedBasis) != nil || selectedBasis.Valid() && selectedBasis.NetworkKey != s.data.network {
 				owned.Close()
 				return nil, ErrUnavailable
 			}
@@ -527,7 +528,11 @@ func ValidateExposureEvent(e Event) error {
 		if x.View != d.List {
 			return ErrInvalid
 		}
-	case p.ActivitySummary, p.SanctionsReport, p.ComplianceReport:
+	case p.ComplianceReport:
+		if x.View != d.Report && x.View != d.List {
+			return ErrInvalid
+		}
+	case p.ActivitySummary, p.SanctionsReport:
 		if x.View != d.Report {
 			return ErrInvalid
 		}
@@ -536,6 +541,15 @@ func ValidateExposureEvent(e Event) error {
 	}
 	if x.View != d.List && x.ReturnedRows != 1 {
 		return ErrInvalid
+	}
+	if x.Resource == p.ComplianceReport && x.View == d.List {
+		if x.QualifiedTotal == nil || !d.ValidCount(*x.QualifiedTotal) {
+			return ErrInvalid
+		}
+		total, _ := strconv.ParseUint(string(*x.QualifiedTotal), 10, 64)
+		if total < uint64(x.ReturnedRows) || total > d.MaxEntries {
+			return ErrInvalid
+		}
 	}
 	if x.QualifiedTotal != nil {
 		if x.Resource != p.ActivitySummary && x.Resource != p.ComplianceReport {

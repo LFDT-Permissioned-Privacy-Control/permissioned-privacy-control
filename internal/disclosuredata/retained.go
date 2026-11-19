@@ -91,6 +91,15 @@ func (b RetainedBasis) Equal(other RetainedBasis) bool {
 // resource choice, not a permission to omit an anchor for retained history.
 func BasisForResource(resource p.Resource, b RetainedBasis) error {
 	kinds, err := RequiredKinds(resource)
+	return basisForKinds(kinds, err, b)
+}
+
+func BasisForResourceView(resource p.Resource, view View, b RetainedBasis) error {
+	kinds, err := RequiredKindsRetained(resource, view)
+	return basisForKinds(kinds, err, b)
+}
+
+func basisForKinds(kinds []SourceKind, err error, b RetainedBasis) error {
 	if err != nil {
 		return err
 	}

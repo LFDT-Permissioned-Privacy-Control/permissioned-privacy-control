@@ -42,6 +42,7 @@ export function Field({
   required = false,
   disabled = false,
   hint,
+  step,
 }: {
   label: string
   value: string
@@ -50,6 +51,7 @@ export function Field({
   required?: boolean
   disabled?: boolean
   hint?: string
+  step?: number
 }) {
   return (
     <label className="block space-y-1 text-sm font-medium text-neutral-700">
@@ -61,6 +63,7 @@ export function Field({
         onChange={(e) => onChange(e.target.value)}
         required={required}
         disabled={disabled}
+        step={step}
       />
       {hint && <span className="block text-xs font-normal text-neutral-500">{hint}</span>}
     </label>

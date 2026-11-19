@@ -122,12 +122,22 @@ func financeReadCommitFailure(t *testing.T, cfg admissionsql.FinanceReaderConfig
 	}
 	defer store.Close()
 	cfg.Store = store
-	reader, err := admissionsql.NewFinanceReader(cfg)
+	var reader *admissionsql.FinanceReader
+	if d.ValidRetainedPlan(cfg.Plan) {
+		reader, err = admissionsql.NewRetainedFinanceReader(cfg)
+	} else {
+		reader, err = admissionsql.NewFinanceReader(cfg)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	arm.Store(true)
-	snapshot, err := reader.Open(t.Context(), scope, nil)
+	var snapshot *admissionsql.FinanceSnapshot
+	if scope.Query.View() == d.List {
+		snapshot, err = reader.OpenPage(t.Context(), scope, nil, nil)
+	} else {
+		snapshot, err = reader.Open(t.Context(), scope, nil)
+	}
 	if snapshot != nil || !errors.Is(err, d.ErrUnavailable) {
 		t.Fatal("unknown read commit published sample", snapshot, err)
 	}

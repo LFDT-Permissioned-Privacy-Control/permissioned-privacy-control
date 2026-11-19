@@ -95,3 +95,29 @@ func TestLegacyMetadataIsNotNewExposureReceipt(t *testing.T) {
 		t.Fatal("dedicated validator skipped common event binding")
 	}
 }
+
+func TestFinanceListExposureRequiresOwnBoundedCount(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	total := d.Count("123")
+	e := c.Event{ID: "11111111-1111-4111-8111-111111111111", CaseID: "22222222-2222-4222-8222-222222222222", Epoch: "epoch", Actor: f.Actor(f.Subject), Action: "exposure_prepared", Outcome: "allowed", RuleID: "auditor", RuleDigest: digest, BundleDigest: digest, AttemptID: "33333333-3333-4333-8333-333333333333", CaseVersion: 1, PreparedAt: time.Unix(f.Now, 0).UTC(), Summary: c.EventSummary{Count: 25, RuleContext: "current", Exposure: &c.ExposureSummary{Version: 1, Resource: p.ComplianceReport, View: d.List, QueryDigest: digest, SourceSetDigest: digest, RenderDigest: digest, OutputDigest: digest, OutputBytes: 100, ReturnedRows: 25, QualifiedTotal: &total}}}
+	if err := c.ValidateExposureEvent(e); err != nil {
+		t.Fatal(err)
+	}
+	e.Summary.Exposure.QualifiedTotal = nil
+	if c.ValidateExposureEvent(e) == nil {
+		t.Fatal("finance list accepted no count")
+	}
+	e.Summary.Exposure.QualifiedTotal = &total
+	for _, bad := range []d.Count{"24", "16385", "01"} {
+		total = bad
+		if c.ValidateExposureEvent(e) == nil {
+			t.Fatal("invalid finance count", bad)
+		}
+	}
+	total = "0"
+	e.Summary.Count = 0
+	e.Summary.Exposure.ReturnedRows = 0
+	if c.ValidateExposureEvent(e) != nil {
+		t.Fatal("authoritative zero page rejected")
+	}
+}

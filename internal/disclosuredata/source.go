@@ -24,6 +24,18 @@ func RequiredKinds(r p.Resource) ([]SourceKind, error) {
 	}
 	return nil, ErrUnsupported
 }
+
+// RequiredKindsRetained is a closed resource/view selection. The new finance
+// List is deliberately absent from the legacy profile and needs finance only.
+func RequiredKindsRetained(r p.Resource, v View) ([]SourceKind, error) {
+	if r == p.ComplianceReport && v == List {
+		return []SourceKind{FinanceSource}, nil
+	}
+	if !combination(r, v) {
+		return nil, ErrUnsupported
+	}
+	return RequiredKinds(r)
+}
 func population(k SourceKind) string {
 	switch k {
 	case WalletSource:
@@ -62,6 +74,11 @@ func SourceSetDigest(ds []SourceDescriptor, r p.Resource, v View) (Digest, error
 
 func sourceSetDigest(ds []SourceDescriptor, r p.Resource, v View, refs []SourceRef, version uint8, domain string) (Digest, error) {
 	k, e := RequiredKinds(r)
+	if version == 2 {
+		k, e = RequiredKindsRetained(r, v)
+	} else if !combination(r, v) {
+		return "", ErrUnsupported
+	}
 	if e != nil {
 		return "", e
 	}

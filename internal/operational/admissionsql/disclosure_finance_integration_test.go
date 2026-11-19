@@ -334,6 +334,17 @@ func TestPostgresDisclosureFinance(t *testing.T) {
 		}
 	})
 	t.Run("actual read COMMIT connection loss returns no snapshot", func(t *testing.T) { financeReadCommitFailure(t, cfg, db.readerDSN, scope) })
+	t.Run("retained page COMMIT connection loss returns no snapshot", func(t *testing.T) {
+		pageCfg := cfg
+		pageCfg.Plan.Version = 2
+		pageCfg.Plan.Profile = d.RetainedSourceProfile
+		pageScope := scope
+		pageScope.Query, err = d.NormalizeRetained(d.Query{Version: 1, Resource: p.ComplianceReport, View: d.List}, original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		financeReadCommitFailure(t, pageCfg, db.readerDSN, pageScope)
+	})
 }
 
 func strconvInt(v int64) string { return strconv.FormatInt(v, 10) }

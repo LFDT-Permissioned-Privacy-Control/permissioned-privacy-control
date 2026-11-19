@@ -50,6 +50,9 @@ type FinanceSnapshot struct {
 	scope      d.ReadScope
 	descriptor d.SourceDescriptor
 	evidence   []d.ComplianceEvidence
+	page       *d.FinanceEvidencePage
+	after      *d.Position
+	pageEnd    bool
 	closed     atomic.Bool
 }
 
@@ -65,8 +68,8 @@ func NewFinanceReader(c FinanceReaderConfig) (*FinanceReader, error) {
 }
 
 // NewRetainedFinanceReader accepts only the separate retained assembly plan.
-// The source still reports retained admission decisions, capped at 100 events;
-// it does not turn them into a complete execution or compliance ledger.
+// Complete reports remain capped at 100. List reads scan a bounded cohort and
+// retain one page; neither view is an execution or compliance ledger.
 func NewRetainedFinanceReader(c FinanceReaderConfig) (*FinanceReader, error) {
 	return newFinanceReader(c, true)
 }
@@ -106,7 +109,7 @@ func (r *FinanceReader) validateScope(s d.ReadScope) (p.Scope, error) {
 	if !a.ValidUUID(s.CaseID) || s.CaseVersion < 1 || !a.ValidUUID(s.DataOrganizationID) || !identity.ValidActorID(s.RecipientActorID) || !financeTime(s.EffectiveUntil) || s.BundleDigest != r.plan.BundleDigest {
 		return p.Scope{}, d.ErrInvalid
 	}
-	if s.Query.Resource() != p.ComplianceReport || s.Query.View() != d.Report || !slices.Contains(r.plan.Resources, p.ComplianceReport) {
+	if s.Query.Resource() != p.ComplianceReport || (s.Query.View() != d.Report && !(r.plan.Version == 2 && s.Query.View() == d.List)) || !slices.Contains(r.plan.Resources, p.ComplianceReport) {
 		return p.Scope{}, d.ErrUnsupported
 	}
 	sc := s.Query.Scope()
@@ -127,6 +130,9 @@ func (r *FinanceReader) Open(ctx context.Context, s d.ReadScope, expected *d.Sou
 	if err != nil {
 		return nil, err
 	}
+	if s.Query.View() != d.Report {
+		return nil, d.ErrUnsupported
+	}
 	if expected != nil {
 		if _, ok := financeDigest(expected.ID); !ok || expected.Kind != d.FinanceSource {
 			return nil, d.ErrInvalid
@@ -146,9 +152,14 @@ func (r *FinanceReader) Open(ctx context.Context, s d.ReadScope, expected *d.Sou
 	epoch := a.HashParts("ops.disclosure.finance-epoch/v1", r.network[:], []byte(r.state.Generation), r.state.Coverage[:])
 	format := a.HashParts("ops.disclosure.finance-retained-format/v1")
 	desc := d.SourceDescriptor{Version: 1, Kind: d.FinanceSource, Reference: d.Digest(ref.String()), NetworkKey: d.Digest(r.network.String()), Epoch: d.Digest(epoch.String()), Generation: r.state.Generation, PlanDigest: r.plan.PlanDigest, FormatDigest: d.Digest(format.String()), CoverageDigest: d.Digest(coverage.String()), AsOf: asOf, Population: "RETAINED_ADMISSION_DECISIONS_AS_OF_SNAPSHOT"}
+	evidence := financeEvidence(events, desc.Reference)
+	return &FinanceSnapshot{reader: r, scope: s, descriptor: desc, evidence: evidence}, nil
+}
+
+func financeEvidence(events []a.Event, reference d.Digest) []d.ComplianceEvidence {
 	evidence := make([]d.ComplianceEvidence, 0, len(events))
 	for _, e := range events {
-		out := d.ComplianceEvidence{ID: d.Count(strconv.FormatInt(e.ID, 10)), Provenance: d.Provenance{Source: desc.Reference, DataOrganizationID: e.Scope.Organization, TargetActorIDs: []string{e.Scope.Actor}, Kind: "ADMISSION_DECISION"}, TransactionHash: [32]byte(e.Scope.Hash), DecisionAt: e.DecisionAt, Decision: e.Decision, Monitored: e.Monitored, Kind: e.Kind, Reason: e.Reason, PolicyDigest: d.Digest(e.PolicyDigest.String()), Coverage: e.Coverage, RecordID: e.RecordID}
+		out := d.ComplianceEvidence{ID: d.Count(strconv.FormatInt(e.ID, 10)), Provenance: d.Provenance{Source: reference, DataOrganizationID: e.Scope.Organization, TargetActorIDs: []string{e.Scope.Actor}, Kind: "ADMISSION_DECISION"}, TransactionHash: [32]byte(e.Scope.Hash), DecisionAt: e.DecisionAt, Decision: e.Decision, Monitored: e.Monitored, Kind: e.Kind, Reason: e.Reason, PolicyDigest: d.Digest(e.PolicyDigest.String()), Coverage: e.Coverage, RecordID: e.RecordID}
 		if q := e.Quote; q != nil {
 			value, _ := a.CanonicalFiat(q.Value)
 			digest := d.Digest(q.Digest.String())
@@ -157,7 +168,7 @@ func (r *FinanceReader) Open(ctx context.Context, s d.ReadScope, expected *d.Sou
 		}
 		evidence = append(evidence, out)
 	}
-	return &FinanceSnapshot{reader: r, scope: s, descriptor: desc, evidence: evidence}, nil
+	return evidence
 }
 
 func (s *FinanceSnapshot) Descriptor() d.SourceDescriptor {
@@ -196,7 +207,14 @@ func (s *FinanceSnapshot) CheckCurrent(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, ref, _, err := s.reader.read(ctx, s.scope.DataOrganizationID, sc)
+	var ref a.Digest
+	if s.page != nil {
+		var got financePageObservation
+		got, err = s.reader.readPage(ctx, s.scope.DataOrganizationID, sc, s.after, 0)
+		ref = got.reference
+	} else {
+		_, ref, _, err = s.reader.read(ctx, s.scope.DataOrganizationID, sc)
+	}
 	if err != nil {
 		return err
 	}
@@ -391,7 +409,7 @@ func (r *FinanceReader) reference(org string, sc p.Scope, events []a.Event) (a.D
 	}
 	scopeDigest := a.HashParts("ops.disclosure.finance-scope/v1", parts...)
 	hashBytes := 65536 + 16384 // conservative scope and fixed framing/descriptor overhead
-	coverageParts := [][]byte{r.network[:], []byte(r.state.Generation), r.state.Coverage[:], scopeDigest[:], []byte(strconv.Itoa(len(events)))}
+	digests := make([]a.Digest, 0, len(events))
 	for i, e := range events {
 		if i > 0 && events[i-1].ID >= e.ID {
 			return a.Digest{}, a.Digest{}, d.ErrUnavailable
@@ -406,7 +424,15 @@ func (r *FinanceReader) reference(org string, sc p.Scope, events []a.Event) (a.D
 		}
 		hashBytes += framed
 		digest := a.HashParts("ops.disclosure.finance-event/v1", row...)
-		coverageParts = append(coverageParts, digest[:])
+		digests = append(digests, digest)
+	}
+	return r.referenceDigests(scopeDigest, digests)
+}
+
+func (r *FinanceReader) referenceDigests(scopeDigest a.Digest, digests []a.Digest) (a.Digest, a.Digest, error) {
+	coverageParts := [][]byte{r.network[:], []byte(r.state.Generation), r.state.Coverage[:], scopeDigest[:], []byte(strconv.Itoa(len(digests)))}
+	for i := range digests {
+		coverageParts = append(coverageParts, digests[i][:])
 	}
 	coverage := a.HashParts("ops.disclosure.finance-retained-coverage/v1", coverageParts...)
 	epoch := a.HashParts("ops.disclosure.finance-epoch/v1", r.network[:], []byte(r.state.Generation), r.state.Coverage[:])

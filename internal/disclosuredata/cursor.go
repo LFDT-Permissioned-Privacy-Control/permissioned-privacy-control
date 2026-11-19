@@ -125,6 +125,7 @@ type cursorPosition struct {
 	Index    *uint32 `json:"i,omitempty"`
 	Hash     *string `json:"h,omitempty"`
 	Address  *string `json:"a,omitempty"`
+	Finance  *string `json:"f,omitempty"`
 }
 type cursorPayload struct {
 	V        uint8          `json:"v"`
@@ -142,6 +143,8 @@ func positionWire(p Position) (cursorPosition, error) {
 		return out, ErrInvalid
 	}
 	switch p.Kind {
+	case FinanceSource:
+		out.Finance = ptr(string(p.Finance.ID))
 	case ActivitySource:
 		x := p.Activity
 		out.Time = ptr(strconv.FormatInt(x.ObservedAtMicros, 10))
@@ -162,7 +165,7 @@ func positionWire(p Position) (cursorPosition, error) {
 func positionRead(w cursorPosition) (Position, error) {
 	out := Position{Kind: codeKind(w.Kind)}
 	used := 0
-	for _, v := range []*string{w.Time, w.Producer, w.Run, w.Ordinal, w.Record, w.Block, w.Hash, w.Address} {
+	for _, v := range []*string{w.Time, w.Producer, w.Run, w.Ordinal, w.Record, w.Block, w.Hash, w.Address, w.Finance} {
 		if v != nil {
 			used++
 		}
@@ -171,6 +174,11 @@ func positionRead(w cursorPosition) (Position, error) {
 		used++
 	}
 	switch out.Kind {
+	case FinanceSource:
+		if used != 1 || w.Finance == nil {
+			return out, ErrInvalid
+		}
+		out.Finance = &FinancePosition{ID: Count(*w.Finance)}
 	case ActivitySource:
 		if used != 5 || w.Time == nil || w.Producer == nil || w.Run == nil || w.Ordinal == nil || w.Record == nil {
 			return out, ErrInvalid
@@ -214,7 +222,7 @@ func cursorAAD(id string) []byte {
 	return framed([]byte("ops.disclosure.data-cursor/v1"), []byte("dd1"), []byte(id))
 }
 func (c *Cursor) Seal(b CursorBinding, set Digest, refs []SourceRef, pos Position, until time.Time) (string, error) {
-	if c == nil || c.keys[c.active] == nil {
+	if c == nil || c.keys[c.active] == nil || pos.Kind == FinanceSource {
 		return "", ErrInvalid
 	}
 	bind, e := bindingDigest(b)
@@ -315,6 +323,9 @@ func (c *Cursor) Open(raw string, b CursorBinding, now time.Time) (Continuation,
 	pos, e := positionRead(payload.Position)
 	if e != nil {
 		return out, e
+	}
+	if pos.Kind == FinanceSource {
+		return out, ErrInvalid
 	}
 	out.position = pos
 	out.sourceSet = set

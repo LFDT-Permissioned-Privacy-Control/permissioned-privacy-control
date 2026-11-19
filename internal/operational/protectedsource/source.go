@@ -42,8 +42,8 @@ type snapshot struct {
 	read, closed       bool
 }
 
-func referenceMap(resource p.Resource, refs []d.SourceRef) (map[d.SourceKind]*d.SourceRef, error) {
-	kinds, err := d.RequiredKinds(resource)
+func referenceMap(resource p.Resource, view d.View, refs []d.SourceRef) (map[d.SourceKind]*d.SourceRef, error) {
+	kinds, err := d.RequiredKindsRetained(resource, view)
 	if err != nil {
 		return nil, err
 	}
@@ -86,10 +86,10 @@ func indexError(err error) error {
 }
 
 func (s *Sources) OpenRetained(ctx context.Context, scope d.ReadScope, refs []d.SourceRef, basis *d.RetainedBasis, after *d.Position) (d.RetainedSnapshot, error) {
-	if s == nil || ctx == nil || scope.BundleDigest != s.plan.BundleDigest || !slices.Contains(s.plan.Resources, scope.Query.Resource()) || d.PositionForQuery(scope.Query, after) != nil || basis != nil && d.BasisForResource(scope.Query.Resource(), *basis) != nil {
+	if s == nil || ctx == nil || scope.BundleDigest != s.plan.BundleDigest || !slices.Contains(s.plan.Resources, scope.Query.Resource()) || d.PositionForQuery(scope.Query, after) != nil || basis != nil && d.BasisForResourceView(scope.Query.Resource(), scope.Query.View(), *basis) != nil {
 		return nil, d.ErrInvalid
 	}
-	expected, err := referenceMap(scope.Query.Resource(), refs)
+	expected, err := referenceMap(scope.Query.Resource(), scope.Query.View(), refs)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +104,7 @@ func (s *Sources) OpenRetained(ctx context.Context, scope d.ReadScope, refs []d.
 			read.Close()
 		}
 	}()
-	kinds, _ := d.RequiredKinds(scope.Query.Resource())
+	kinds, _ := d.RequiredKindsRetained(scope.Query.Resource(), scope.Query.View())
 	if slices.Contains(kinds, d.ActivitySource) {
 		read.activity, err = s.activity.Open(ctx, scope, expected[d.ActivitySource], d.ClonePosition(after))
 		if err != nil {
@@ -125,11 +125,22 @@ func (s *Sources) OpenRetained(ctx context.Context, scope d.ReadScope, refs []d.
 		read.facts.Wallets = read.wallet.Wallets()
 	}
 	if slices.Contains(kinds, d.FinanceSource) {
-		read.finance, err = s.finance.Open(ctx, scope, expected[d.FinanceSource])
+		if scope.Query.View() == d.List {
+			read.finance, err = s.finance.OpenPage(ctx, scope, expected[d.FinanceSource], after)
+		} else {
+			read.finance, err = s.finance.Open(ctx, scope, expected[d.FinanceSource])
+		}
 		if err != nil {
 			return nil, err
 		}
 		read.descriptors = append(read.descriptors, read.finance.Descriptor())
+		if scope.Query.View() == d.List {
+			read.facts = d.Facts{FinanceEvidence: read.finance.Page(), End: read.finance.End()}
+			if !read.facts.End {
+				items := read.facts.FinanceEvidence.Items
+				read.facts.Next = &d.Position{Kind: d.FinanceSource, Finance: &d.FinancePosition{ID: items[len(items)-1].ID}}
+			}
+		}
 	}
 	if slices.Contains(kinds, d.HistorySource) {
 		if err = read.openHistory(ctx, basis, expected[d.HistorySource]); err != nil {

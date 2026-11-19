@@ -20,6 +20,11 @@ type page[T any] struct {
 	Items      []T     `json:"items"`
 	NextCursor *string `json:"nextCursor"`
 }
+type financeEvidencePageDTO struct {
+	Items                 []ComplianceEvidenceDTO `json:"items"`
+	NextCursor            *string                 `json:"nextCursor"`
+	MatchingRetainedCount Count                   `json:"matchingRetainedCount"`
+}
 type singleton[T any] struct {
 	Item T `json:"item"`
 }
@@ -49,6 +54,9 @@ func (r Result) WithCursor(raw string) (Result, error) {
 		return Result{}, ErrInvalid
 	}
 	switch body := r.body.(type) {
+	case financeEvidencePageDTO:
+		body.NextCursor = ptr(raw)
+		r.body = body
 	case page[AddressDTO]:
 		body.NextCursor = ptr(raw)
 		r.body = body
@@ -89,6 +97,10 @@ func (r Result) MarshalJSON() ([]byte, error) {
 		return nil, ErrInvalid
 	}
 	switch body := r.body.(type) {
+	case financeEvidencePageDTO:
+		if r.scope.Query.resource == p.ComplianceReport && r.scope.Query.view == List {
+			return envelope(r, body)
+		}
 	case page[AddressDTO]:
 		if r.scope.Query.resource == p.AddressHistory && r.scope.Query.view == List {
 			return envelope(r, body)
@@ -334,7 +346,7 @@ func renderProfile(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext,
 	if retained == nil {
 		fc, e = validateFacts(s, ds, f, nil)
 	} else {
-		fc, e = validateFactsForHistory(s, ds, f, nil, RetainedHistoryPopulation)
+		fc, e = validateFactsForHistoryMode(s, ds, f, nil, RetainedHistoryPopulation, false)
 	}
 	if e != nil {
 		return result, e
@@ -357,11 +369,11 @@ func renderProfile(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext,
 	pops = slices.Compact(pops)
 	coverage := CoverageDTO{Status: "COMPLETE_AT_CUT", Populations: pops, SourceCutDigest: set, PreparedAt: c.PreparedAt.Unix()}
 	if retained != nil {
-		kinds, err := RequiredKinds(s.Query.resource)
+		kinds, err := RequiredKindsRetained(s.Query.resource, s.Query.view)
 		if err != nil {
 			return Result{}, err
 		}
-		if slices.Contains(kinds, HistorySource) {
+		if slices.Contains(kinds, HistorySource) || s.Query.resource == p.ComplianceReport && s.Query.view == List {
 			coverage.Status, coverage.SourceCutDigest, coverage.SourceBasisDigest = "RETAINED_AT_READ", "", set
 		}
 	}
@@ -444,20 +456,21 @@ func renderProfile(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext,
 		result.body = sanctionsDTO(c, fc, *f.Sanctions)
 		result.rows = 1
 	case p.ComplianceReport:
+		if s.Query.view == List {
+			v := f.FinanceEvidence
+			body := financeEvidencePageDTO{Items: []ComplianceEvidenceDTO{}, MatchingRetainedCount: v.MatchingRetainedCount}
+			for _, ev := range v.Items {
+				body.Items = append(body.Items, evidenceDTO(ev, s.Query.scope.Level))
+			}
+			result.body = body
+			result.rows = uint16(len(body.Items))
+			result.total = ptr(v.MatchingRetainedCount)
+			break
+		}
 		v := f.Compliance
 		body := ComplianceDTO{Activity: summaryDTO(v.Activity), Sanctions: sanctionsDTO(c, fc, v.Sanctions), KYC: "not_evaluated", Evidence: []ComplianceEvidenceDTO{}}
 		for _, ev := range v.Evidence {
-			entry := ComplianceEvidenceDTO{ID: ev.ID, Population: "ADMISSION_DECISION", Time: ev.DecisionAt.Unix(), Kind: ev.Kind, Decision: ev.Decision, Monitored: ev.Monitored, Coverage: ev.Coverage, PolicyDigest: ev.PolicyDigest, QuoteDigest: ev.QuoteDigest}
-			if s.Query.scope.Level == p.Full {
-				entry.TransactionHash = ptr(hashString(ev.TransactionHash))
-				entry.RecordID = ev.RecordID
-				if ev.Reason != "" {
-					entry.Reason = ptr(ev.Reason)
-				}
-				if q := ev.Quote; q != nil {
-					entry.Quote = &QuoteDTO{q.ID, q.Currency, q.SourceID, q.Value, q.ProviderAsOf.Unix(), q.FetchedAt.Unix(), q.Digest}
-				}
-			}
+			entry := evidenceDTO(ev, s.Query.scope.Level)
 			body.Evidence = append(body.Evidence, entry)
 		}
 		result.body = body
@@ -467,4 +480,19 @@ func renderProfile(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext,
 		return Result{}, ErrUnsupported
 	}
 	return result, nil
+}
+
+func evidenceDTO(ev ComplianceEvidence, level p.Level) ComplianceEvidenceDTO {
+	entry := ComplianceEvidenceDTO{ID: ev.ID, Population: "ADMISSION_DECISION", Time: ev.DecisionAt.Unix(), Kind: ev.Kind, Decision: ev.Decision, Monitored: ev.Monitored, Coverage: ev.Coverage, PolicyDigest: ev.PolicyDigest, QuoteDigest: ev.QuoteDigest}
+	if level == p.Full {
+		entry.TransactionHash = ptr(hashString(ev.TransactionHash))
+		entry.RecordID = ev.RecordID
+		if ev.Reason != "" {
+			entry.Reason = ptr(ev.Reason)
+		}
+		if q := ev.Quote; q != nil {
+			entry.Quote = &QuoteDTO{q.ID, q.Currency, q.SourceID, q.Value, q.ProviderAsOf.Unix(), q.FetchedAt.Unix(), q.Digest}
+		}
+	}
+	return entry
 }

@@ -1,7 +1,7 @@
 package admissionsql
 
 // Finance selection applies the complete predicate before the sentinel.
-const financeQuery = `-- ONE data query inside the existing bounded READ ONLY REPEATABLE READ
+const financeQueryPrefix = `-- ONE data query inside the existing bounded READ ONLY REPEATABLE READ
 -- transaction. Reuse bounded/begin/rollback; known successful COMMIT is required
 -- before publishing the copied snapshot. No SQL is held across A rendering/audit.
 -- $1 network_key bytea; $2 expected generation uuid; $3 expected coverage bytea;
@@ -77,7 +77,9 @@ LEFT JOIN LATERAL (
  WHERE gate.ok AND network_key=$1 AND org_id=$8::uuid AND actor_id=ANY($9::text[])
   AND decision_at >= $10::timestamptz AND decision_at <= $11::timestamptz
   AND ($12::boolean OR from_address=ANY($13::bytea[]) OR to_address=ANY($13::bytea[]))
- ORDER BY decision_at DESC,id DESC LIMIT 101
+`
+
+const financeQuery = financeQueryPrefix + ` ORDER BY decision_at DESC,id DESC LIMIT 101
 ) e ON true
 ORDER BY e.decision_at DESC NULLS LAST,e.id DESC NULLS LAST;
 
@@ -96,3 +98,9 @@ ORDER BY e.decision_at DESC NULLS LAST,e.id DESC NULLS LAST;
 -- TooBroad, no truncation. Canonical source/evidence order is actual id ASC in Go
 -- AFTER proving the full retained set <=100, reusing compliance_org_page for SQL.
 `
+
+// The complete matched cohort is read in ID order, independently of page after.
+// The full-set fingerprint catches late lower-ID commits; ID is not commit order.
+const financePageQuery = financeQueryPrefix + ` ORDER BY id ASC LIMIT $14
+) e ON true
+ORDER BY e.id ASC NULLS LAST;`
