@@ -1,22 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Shield, Copy, Check, Wallet, Building2, Clock, ShieldCheck, ShieldX, KeyRound } from 'lucide-react';
+import { useEffect, useState, type ReactNode } from 'react';
+import { Shield, Wallet, Building2, Clock, ShieldCheck, ShieldX, KeyRound } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { Badge } from '../ui/badge';
-import { Button } from '../ui/button';
-
-export function CopyValue({ value, label = 'Copy' }: { value: string; label?: string }) {
-  const [copied, setCopied] = useState(false);
-  const timer = useRef<ReturnType<typeof setTimeout>>();
-  useEffect(() => () => clearTimeout(timer.current), []);
-  async function copy() {
-    try { await navigator.clipboard.writeText(value); }
-    catch { const input = document.createElement('textarea'); input.value = value; input.style.position = 'fixed'; input.style.left = '-999999px'; document.body.appendChild(input); input.select(); document.execCommand('copy'); input.remove(); }
-    setCopied(true); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 2000);
-  }
-  return <Button onClick={() => void copy()} variant="ghost" size="icon" className="h-8 w-8 flex-shrink-0" title={label} aria-label={label}>
-    {copied ? <Check className="h-4 w-4 text-success-dark" /> : <Copy className="h-4 w-4 text-neutral-400" />}
-  </Button>;
-}
+import { CopyValue } from '../ui/CopyValue';
+export { CopyValue } from '../ui/CopyValue';
 
 // The original AccountPage cards take verified display data and action slots.
 // They neither choose a session nor fetch identity/membership information.

@@ -12,13 +12,13 @@ vi.mock('./SourceReview', () => ({ download: mocks.download }))
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); mocks.download.mockReset() })
 // Explicit offline acceptance gate: first run SourceAuthoringExport with its
 // fixture directory, then native unpack/prepare/check/simulate in that directory.
-it.runIf(!!process.env.OPS_AUTHORING_GO_REPORT_DIR)('imports the actual Go simulation of the UI-exported source and scenario with exact byte binding', async () => {
+for (const [scenarioFile, reportFile] of [['authoring-scenario.json', 'authoring-simulation-report.json'], ['authoring-scenario-unknown-signer.json', 'authoring-unknown-signer-report.json'], ['authoring-signer-present-scenario.json', 'authoring-signer-present-report.json']]) it.runIf(!!process.env.OPS_AUTHORING_GO_REPORT_DIR)(`imports the actual Go simulation of ${scenarioFile} with exact byte binding`, async () => {
   vi.stubGlobal('crypto', webcrypto)
-  const directory = resolve(process.env.OPS_AUTHORING_GO_REPORT_DIR!), source = readFileSync(resolve(directory, 'authoring-source-package.json'), 'utf8'), scenario = readFileSync(resolve(directory, 'authoring-scenario.json'), 'utf8'), report = readFileSync(resolve(directory, 'authoring-simulation-report.json'), 'utf8'), expected = JSON.parse(report)
+  const directory = resolve(process.env.OPS_AUTHORING_GO_REPORT_DIR!), source = readFileSync(resolve(directory, 'authoring-source-package.json'), 'utf8'), scenario = readFileSync(resolve(directory, scenarioFile), 'utf8'), report = readFileSync(resolve(directory, reportFile), 'utf8'), expected = JSON.parse(report)
   const project = await loadSavedSourcePackage(source), org = project.roots[0].draft.organizations[0].id
   render(<SourceScenario project={project} root={project.roots[0].id} organization={org} check={() => {}} />)
   function file(raw: string) { const file = new File([raw], 'offline.json'); Object.defineProperty(file, 'text', { value: async () => raw }); return file }
-  fireEvent.change(screen.getByLabelText('Import hypothetical scenario'), { target: { files: [file(scenario)] } }); await waitFor(() => expect(screen.getByLabelText('Hypothetical signer')).toHaveValue(JSON.parse(scenario).context.Signer))
+  fireEvent.change(screen.getByLabelText('Import hypothetical scenario'), { target: { files: [file(scenario)] } }); await waitFor(() => expect(screen.getByLabelText('Hypothetical signer')).toHaveValue(JSON.parse(scenario).context.Signer ?? ''))
   await userEvent.click(screen.getByRole('button', { name: 'Export policy scenario' })); await waitFor(() => expect(mocks.download).toHaveBeenCalledTimes(1)); expect(mocks.download.mock.calls[0][1]).toBe(scenario)
   fireEvent.change(screen.getByLabelText('Selected prepared manifest digest'), { target: { value: expected.manifestDigest } }); fireEvent.change(screen.getByLabelText('Go scenario result'), { target: { files: [file(report)] } })
   expect(await screen.findByText(`Conditional ${expected.decision.Allowed ? 'allow' : 'deny'}${expected.decision.Code ? ': ' + expected.decision.Code : ''}`)).toBeInTheDocument()

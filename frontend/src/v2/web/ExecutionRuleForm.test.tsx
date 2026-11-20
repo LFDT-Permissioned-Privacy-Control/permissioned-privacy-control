@@ -68,3 +68,24 @@ it('renders read-only named function and typed constraints with zero-safe bounds
   expect(screen.getByText('At most (inclusive): 9007199254740993123456789')).toBeInTheDocument()
   expect(screen.getByText('0 wei')).toBeInTheDocument()
 })
+
+it('uses the V1 function browser and selected check while preserving native default call-type omission', async () => {
+  vi.stubGlobal('crypto', webcrypto)
+  const p = { ...props(), value: { storageAddress: address, selector: '0xa9059cbb', abiDigest: go.fixtures[0].report.abiDigest, args: [{ index: 0, addressEquals: { source: 'principal.linked' } }], except: [{ target: address, groups: ['retain'] }], futureRule: { keep: true } } }
+  render(<ExecutionRuleForm {...p} />); await screen.findByText('ABI assistance ready for this source')
+  expect(screen.getByRole('button', { name: 'transfer(address,uint256)' })).toHaveAttribute('aria-pressed', 'true'); expect(screen.getByLabelText('call')).toBeChecked(); expect(screen.getByLabelText('staticcall')).toBeChecked(); expect(screen.getByText(/Native default · call and staticcall/)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'transfer(address,uint256)' })); fireEvent.change(screen.getByLabelText('Maximum native value (wei)'), { target: { value: '0' } }); await userEvent.click(screen.getByRole('button', { name: 'Save rule draft' }))
+  expect(p.onSave).toHaveBeenCalledWith({ ...p.value, maxValue: '0' }); expect(p.onSave.mock.calls[0][0]).not.toHaveProperty('callTypes')
+})
+it('retains unsupported target/call/argument variants visibly and provides advanced repair', async () => {
+  const p = { ...props(), value: { storageAddress: '', targetClass: 'future-target', selector: '*', abiDigest: '', callTypes: ['future-call'], args: { importedShape: 'keep' }, futureRule: true } }
+  render(<ExecutionRuleForm {...p} />)
+  expect(screen.getByRole('option', { name: 'Unsupported imported target — retained in advanced JSON' })).toBeInTheDocument(); expect(screen.getByText(/Unsupported imported call types are retained/)).toBeInTheDocument(); expect(screen.getByText(/Unsupported imported argument shape is retained/)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Advanced native JSON' })); await userEvent.click(screen.getByRole('button', { name: 'Save rule draft' })); expect(p.onSave).toHaveBeenCalledWith(p.value)
+})
+
+it('keeps malformed imported nested argument variants inspectable instead of crashing the guided view', async () => {
+  vi.stubGlobal('crypto', webcrypto)
+  const p = { ...props(), value: { storageAddress: address, selector: '0xa9059cbb', abiDigest: go.fixtures[0].report.abiDigest, args: [{ index: 0, addressEquals: 'future-shape', retain: true }] } }
+  render(<ExecutionRuleForm {...p} />); expect(screen.getByText(/advanced constraint retained; inspect advanced JSON/)).toBeInTheDocument(); await userEvent.click(screen.getByRole('button', { name: 'Advanced native JSON' })); await userEvent.click(screen.getByRole('button', { name: 'Save rule draft' })); expect(p.onSave).toHaveBeenCalledWith(p.value)
+})

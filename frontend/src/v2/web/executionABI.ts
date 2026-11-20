@@ -3,7 +3,7 @@ import { closedJSON } from '../auth/protocol'
 import { object, type JSONObject } from './sourceProject'
 
 const knownKeys = new Set(['type', 'name', 'inputs', 'outputs', 'stateMutability', 'payable', 'constant', 'anonymous', 'indexed', 'components', 'internalType'])
-export interface FunctionChoice { signature: string; selector: string; inputs: readonly AbiParameter[] }
+export interface FunctionChoice { signature: string; selector: string; inputs: readonly AbiParameter[]; stateMutability?: string }
 export interface ABIChoices { functions: FunctionChoice[]; events: { signature: string; anonymous: boolean; signatureHash: string; topic0?: string; topicRuleEligible: boolean }[] }
 export interface ABIReport extends ABIChoices { fileByteDigest: string; canonicalByteDigest: string; abiDigest: string; deploymentVerified: false }
 export function selectedABIBytes(abi: unknown): string { return JSON.stringify(abi, null, 2) + '\n' }
@@ -54,7 +54,7 @@ export function abiChoices(abi: unknown): ABIChoices {
       if (typeof item.name !== 'string' || !Array.isArray(item.inputs)) throw Error('The ABI function is incomplete.')
       const fn = { ...item, inputs: item.inputs.map(parameter) } as unknown as AbiFunction
       const signature = toFunctionSignature(fn), selector = toFunctionSelector(signature).toLowerCase()
-      functions.push({ signature, selector, inputs: fn.inputs })
+      functions.push({ signature, selector, inputs: fn.inputs, ...(typeof item.stateMutability === 'string' ? { stateMutability: item.stateMutability } : item.constant === true ? { stateMutability: 'view' } : {}) })
     }
     if (item.type === 'event') {
       if (typeof item.name !== 'string' || !Array.isArray(item.inputs)) throw Error('The ABI event is incomplete.')

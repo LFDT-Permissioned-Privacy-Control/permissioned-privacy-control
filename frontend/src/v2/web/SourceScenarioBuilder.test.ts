@@ -17,3 +17,10 @@ it('enforces native frame, uint256, uint8, calldata and depth bounds', () => {
   expect(() => validateScenario({ ...context, Claims: 256 }, [frame])).toThrow(/uint8/); expect(() => validateScenario({ ...context, LinkedAddresses: ['bad'] }, [frame])).toThrow(/Linked addresses/); expect(() => validateScenario(context, [{ ...frame, facts: { CallerAddress: 'bad' } }])).toThrow(/caller/)
   expect(() => parseScenarioImport('{"apiVersion":"ops.policy-scenario/v1","apiVersion":"ops.policy-scenario/v1"}', org)).toThrow()
 })
+
+it('exports/imports native unknown signer without manufacturing identity, and clears a previous signer explicitly', () => {
+  const frames = JSON.stringify([initialScenarioFrame()]), supplied = { ...context, Signer: context.Signer, GroupSourceClaims: { retain: 7 }, FutureContext: 'keep' }
+  const value = scenarioDocument({ context: JSON.stringify(supplied), frames, organization: org, signer: '', groups: [] })
+  expect(value.context).not.toHaveProperty('Signer'); expect(value.context).toMatchObject({ GroupSourceClaims: { retain: 7 }, FutureContext: 'keep' }); const imported = parseScenarioImport(JSON.stringify(value), org); expect(imported.signer).toBe(''); expect(JSON.parse(imported.context)).not.toHaveProperty('Signer')
+  expect(() => scenarioDocument({ context: '{}', frames, organization: org, signer: 'bad', groups: [] })).toThrow(/optional hypothetical signer/)
+})

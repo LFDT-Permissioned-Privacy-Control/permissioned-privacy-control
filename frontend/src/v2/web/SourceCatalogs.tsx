@@ -1,14 +1,12 @@
-import { useState } from 'react'
 import { SourceAuthoringScope } from './SourceAuthoringScope'
 import { useAuthoringState, useClearAuthoring } from './sourceAuthoring'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import { SourceRecordForm, SourceRecords, type SourceField } from './SourceRecords'
-import { SourceReadGrants } from './SourceReadGrants'
+import { SourceContracts } from './SourceContracts'
 import { SourceClaimMappings } from './SourceClaimMappings'
 import { SourceComplianceSettings } from './SourceComplianceSettings'
-import { SourceContractABI } from './SourceContractABI'
-import { createCatalog, documentFor, documentValue, groupsOf, object, referenceFiles, rootOf, updateDocument, type JSONObject, type SourceProject } from './sourceProject'
+import { createCatalog, documentValue, object, referenceFiles, rootOf, updateDocument, type JSONObject, type SourceProject } from './sourceProject'
 
 interface Props { project: SourceProject; root: string; organization: string; page: string; editing: boolean; onChange(project: SourceProject): void }
 const field = (key: string, label: string, kind?: SourceField['kind'], optional = false, help?: string): SourceField => ({ key, label, kind, optional, help })
@@ -28,25 +26,10 @@ const profileFields: SourceField[] = [field('id', 'Profile ID'), { ...field('kin
 const ruleFields: SourceField[] = [field('id', 'Rule ID'), field('dataOrganizationId', 'Data organization ID'), field('viewers', 'Permitted viewers', 'json', false, 'Group references {organizationId,groupId} and/or canonical verified actor IDs.'), field('targets', 'Permitted target actors', 'json'), field('resources', 'Permitted resources', 'list'), field('addresses', 'Address scope', 'json'), field('dataTime', 'Data time interval', 'json'), { ...field('maxLevel', 'Maximum detail'), options: ['redacted', 'pseudonymous', 'full'] }, field('validity', 'Rule validity', 'json'), field('maxCaseSeconds', 'Maximum case seconds', 'number')]
 export function SourceCatalogs(props: Props) {
   const { project, root, organization, page, editing, onChange } = props, source = rootOf(project, root)
-  const clear = useClearAuthoring()
-  const [grantEditor, setGrantIndex] = useAuthoringState<number | null>('read-grant-contract', null)
-  const [inspection, setInspection] = useState<number | null>(null)
-  const grantIndex = inspection ?? (editing ? grantEditor : null)
   const get = (key: string) => source.draft[key] === undefined ? null : { path: String(object(source.draft[key]).path), value: documentValue(project, root, String(object(source.draft[key]).path)) }
   const save = (path: string, value: JSONObject) => onChange(updateDocument(project, root, path, value))
   function missing(key: string, title: string, value: JSONObject) { return <div className="space-y-3"><h3 className="text-sm font-medium">{title}</h3><p className="text-sm text-neutral-500">This source root has no {title.toLowerCase()} document. Import the matching complete source or add a local catalog proposal. Its profile and coordinated deployment must support it.</p>{editing && <Button variant="outline" onClick={() => onChange(createCatalog(project, root, key, value))}>Add {title.toLowerCase()} draft</Button>}</div> }
-  if (page === 'contracts') {
-    if (!organization) return <p className="text-sm text-neutral-500 py-12 text-center">Select an organization from the imported source</p>
-    const path = documentFor(source, organization, 'contract-registry'), doc = documentValue(project, root, path), spec = object(doc.spec), contracts = spec.contracts as JSONObject[]
-    const contract = grantIndex === null ? null : object(contracts[grantIndex])
-    return <div className="space-y-5"><SourceRecords title="Contracts" description="Registered addresses, public ABI, read grants and event visibility. Execution permissions are authored separately in Execution Policy." records={contracts} editing={editing}
-      fields={[field('id', 'Contract ID'), field('name', 'Name'), field('address', 'Contract address'), field('allowVisibleToUnlock', 'Visible to unlock', 'boolean'), field('eventsAllowDynamicPayload', 'Allow dynamic event payload', 'boolean')]}
-      defaults={() => ({ id: uid(), name: '', address: '', abi: [], allowVisibleToUnlock: false, eventsAllowDynamicPayload: false, readGrants: [] })}
-      onChange={rows => save(path, { ...doc, spec: { ...spec, contracts: rows } })} dependencies={r => referenceFiles(project, root, String(r.address), path)} renderActions={(row, index) => <><SourceContractABI contract={row} identity={`${root}:${organization}:${String(row.id)}`} generation={project.generation} editing={editing} onSave={abi => save(path, { ...doc, spec: { ...spec, contracts: contracts.map((c, i) => i === index ? { ...c, abi } : c) } })} /><Button variant="outline" size="sm" onClick={() => { if (editing) setGrantIndex(index); else setInspection(index) }}>Read grants</Button></>} />
-      <Dialog open={contract !== null} onOpenChange={open => { if (!open) { if (inspection !== null) setInspection(null); else { clear('read-grants'); setGrantIndex(null) } } }}><DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{String(contract?.name ?? '')} — read grants</DialogTitle></DialogHeader>{contract && <SourceAuthoringScope id={inspection === null ? "read-grants" : "inspect-read-grants"}><SourceReadGrants contract={contract} groups={groupsOf(project, root, organization)} editing={editing && inspection === null}
-        onChange={readGrants => save(path, { ...doc, spec: { ...spec, contracts: contracts.map((c, i) => i === grantIndex ? { ...c, readGrants } : c) } })} /></SourceAuthoringScope>}</DialogContent></Dialog>
-    </div>
-  }
+  if (page === 'contracts') return <SourceContracts project={project} root={root} organization={organization} editing={editing} onChange={onChange} />
   if (page === 'identity-profiles' || page === 'claim-mappings') {
     const catalog = get('identityCatalog')
     if (!catalog) return missing('identityCatalog', 'Identity catalog', { apiVersion: 'ops.identity-catalog/v1alpha1', kind: 'IdentityCatalog', issuers: [], profiles: [], mappings: [] })

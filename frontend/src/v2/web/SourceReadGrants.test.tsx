@@ -139,3 +139,17 @@ it('offers only unassigned groups and refuses a duplicate group even through adv
   expect(within(dialog).getByRole('alert')).toHaveTextContent('already has a read grant')
   expect(onChange).not.toHaveBeenCalled()
 })
+
+it('keeps selected V1 radio colors and compact OR constraints legible in readonly inspection', async () => {
+  const grant = { id: 'existing', groupId: reader, eventRules: { mode: 'allowlist', rules: [{ topic0: transferTopic, name: 'Transfer', paramRules: [{ index: 0, must_be: 'self' }, { index: 1, must_be: 'self' }] }] } }
+  const onChange = component(contract([grant]), false)
+  expect(screen.getByText(/from = viewer’s linked address \(self\) OR to/)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Bank Readers' }))
+  const selected = screen.getByLabelText('Specific events only')
+  expect(selected).toBeChecked(); expect(selected).toBeDisabled(); expect(selected.closest('label')).toHaveClass('border-primary'); expect(selected.closest('label')?.querySelector('[data-state="checked"]')).toHaveClass('bg-primary')
+  expect(screen.queryByRole('button', { name: 'Remove event Transfer' })).not.toBeInTheDocument(); expect(screen.getByText('Advanced native read grant JSON').closest('details')).not.toHaveAttribute('open'); expect(onChange).not.toHaveBeenCalled()
+})
+it('shows exact declared source group metadata without presenting an effective admin bypass', async () => {
+  render(<SourceReadGrants contract={contract([{ id: 'existing', groupId: reader, eventRules: { mode: 'all', rules: [] } }])} groups={[{ ...choices[0], isOrgAdmin: true, allowedMethods: ['eth_call'], claims: [] }]} editing={false} onChange={vi.fn()} />)
+  expect(screen.getByText('Organization admin role')).toBeInTheDocument(); expect(screen.getByText('Execution claims: none declared')).toBeInTheDocument(); expect(screen.queryByText(/admin bypass/i)).not.toBeInTheDocument()
+})
