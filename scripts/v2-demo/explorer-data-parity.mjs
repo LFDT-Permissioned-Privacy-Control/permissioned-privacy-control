@@ -74,6 +74,66 @@ async function renderedCount(cell, count, label, interact = false) {
     await page.keyboard.press('Escape'); await tooltip.waitFor({ state: 'hidden' });
   }
 }
+function blockCount(block) {
+  const metric=block.counts?.transactions,text=countText(metric);
+  assert.equal(metric.consistency,'SNAPSHOT');
+  if(metric.range){assert.equal(metric.range.fromBlock,block.number);assert.equal(metric.range.throughBlock,block.number);assert.equal(metric.range.headHash,block.hash);}
+  if(metric.status==='unavailable')assert.equal(metric.observedAt,undefined);
+  else assert.notEqual(block.source,'NODE','Node-only header never supplies a numeric historical count');
+  exactFlatFields(block,{transactionCount:'transactions'});
+  return {text,scope:`Ordinary transactions in block ${block.number}.`,metric};
+}
+function blockCountObservationMatches(block,rendered) {
+  const expected=blockCount(block),note=rendered.title;
+  if(rendered.count!==expected.text||typeof note!=='string'||!note.includes(expected.scope))return false;
+  const metric=expected.metric;
+  if(metric.status==='unavailable')return !note.includes('Observed ')&&/unavailable/i.test(note)&&(metric.coverage!=='history_pruned'||note.includes('has been pruned'))&&(metric.coverage!=='index_floor'||note.includes('has not been indexed'))&&(metric.coverage!=='scan_limited'||note.includes('read’s limits'));
+  return note.includes(`Observed ${metric.observedAt}.`)&&note.includes(`Retained blocks ${metric.range.fromBlock}–${metric.range.throughBlock}.`)&&(metric.coverage!=='history_pruned'||note.includes('has been pruned'))&&(metric.coverage!=='index_floor'||note.includes('has not been indexed'))&&(metric.coverage!=='scan_limited'||note.includes('safety limit'));
+}
+async function renderedBlockCount(cell,block,label,interact=false) {
+  const expected=blockCount(block);
+  await renderedCount(cell,expected.metric,label,interact);
+  const button=cell.getByRole('button');
+  assert.ok(blockCountObservationMatches(block,{count:await button.textContent(),title:await button.getAttribute('title')}),label+': selected-block scope, range and observation belong to this response');
+  return expected;
+}
+async function blockCountSurfaces(page,runtime,name) {
+  const list=await renderedResponse(page,runtime.explorerOrigin,'/blocks',()=>page.goto(runtime.explorerOrigin+'/blocks'),query=>query.get('limit')==='25');
+  await page.getByRole('heading',{name:'Blocks',exact:true}).waitFor();
+  let exact=0;
+  for(const block of list.items){const row=page.getByTestId('block-row').filter({has:page.locator(`a[href="/block/${block.number}"]`)}),cell=row.locator('td').nth(2);await row.waitFor();const expected=await renderedBlockCount(cell,block,name+' block list');if(expected.metric.status==='exact')exact++;}
+  assert.ok(exact>0,name+': known block-authorized list proves an actual exact per-block count');
+  const selected=list.items[0];assert.ok(selected,'Known authorized block fixture is nonempty');
+  const detail=await renderedResponse(page,runtime.explorerOrigin,'/blocks/'+selected.number,()=>page.getByTestId('block-row').filter({has:page.locator(`a[href="/block/${selected.number}"]`)}).locator('a[href="/block/'+selected.number+'"]').click());
+  const row=page.locator('[data-testid="info-row"][data-label="Transactions"]'),expected=await renderedBlockCount(row,detail,name+' block detail');
+  const tab=page.getByTestId('tab-transactions');assert.ok((await tab.textContent()).includes(expected.text));
+  for(const activation of ['click','Enter','Space']){
+    await page.getByTestId('tab-details').click();
+    if(activation==='click')await tab.click();else{await tab.focus();await tab.press(activation);}
+    assert.equal(await tab.getAttribute('aria-selected'),'true');const tooltip=page.getByRole('tooltip');await tooltip.waitFor();assert.ok(blockCountObservationMatches(detail,{count:expected.text,title:await tooltip.textContent()}),'Tab coverage and observation belong to the same block response');await page.keyboard.press('Escape');await tooltip.waitFor({state:'hidden'});
+  }
+  assert.equal(await tab.locator('button').count(),0,'Tab metadata contains no nested button');
+  return {listRows:list.items.length,exactRows:exact,detailNumber:detail.number,detailCount:expected.text,oracle:'Each surface uses its own actual Block response; tab never derives count from its loaded transaction page'};
+}
+async function knownTransactionBlockCount(page,runtime,hash,screenshots) {
+  assert.match(hash,/^0x[0-9a-f]{64}$/,'Existing private transaction fixture is required');
+  const tx=await renderedResponse(page,runtime.explorerOrigin,'/transactions/'+hash,()=>page.goto(runtime.explorerOrigin+'/tx/'+hash));
+  if(tx===null){await page.getByRole('heading',{name:'Transaction unavailable',exact:true}).waitFor();return {qualified:false,reason:'Existing authorized transaction fixture is unavailable; positive per-block UI is not live-qualified'};}
+  assert.equal(tx.hash,hash);assert.ok(quantity(tx.blockNumber),'Known historical fixture is mined');
+  const link=page.locator('[data-testid="info-row"][data-label="Block"]').locator(`a[href="/block/${tx.blockNumber}"]`);
+  const block=await renderedResponse(page,runtime.explorerOrigin,'/blocks/'+tx.blockNumber,()=>link.click());
+  if(block===null){await page.getByRole('heading',{name:'Block unavailable',exact:true}).waitFor();return {qualified:false,reason:'Existing transaction block is unavailable; positive per-block UI is not live-qualified'};}
+  assert.equal(block.number,tx.blockNumber);
+  const expected=await renderedBlockCount(page.locator('[data-testid="info-row"][data-label="Transactions"]'),block,'Deployer known-transaction block',true);
+  if(expected.metric.status==='unavailable'){
+    assert.ok(['history_pruned','index_floor'].includes(expected.metric.coverage),'Known existing transaction block must prove a numeric count unless its history is explicitly missing/pruned');
+    return {qualified:false,blockNumber:block.number,coverage:expected.metric.coverage,reason:'Existing transaction block history is missing/pruned; positive per-block UI is not live-qualified'};
+  }
+  assert.ok(BigInt(expected.metric.value??expected.metric.lowerBound)>=1n,'Existing authorized transaction proves a positive historical block count');
+  assert.ok((await page.getByTestId('tab-transactions').textContent()).includes(expected.text),'Positive tab badge uses the same block result');
+  await page.screenshot({path:path.join(screenshots,'deployer-known-transaction-block-count.png'),fullPage:true,animations:'disabled'});
+  return {qualified:true,blockNumber:block.number,count:expected.metric,oracle:'Existing ordinary Deployer transaction links to its own actual block response; count is positive without seeding or transaction-page inference'};
+}
 // Inspect painted text fragments, not just page overflow: fixed-height rows
 // can overlap their neighbours while document.scrollWidth remains correct.
 async function homeRowBounds(page) {
@@ -98,7 +158,7 @@ async function homeAverage(page, blockPages, blockStatuses, expectedStatus) {
   await page.getByText('Avg Block Time', { exact:true }).waitFor();
   // Capture the rendered page and its derived value atomically: a later5s
   // poll may replace both while count tooltip checks continue.
-  const rendered=await page.evaluate(()=>{const card=[...document.querySelectorAll('[data-testid="stat-card"]')].find(card=>card.textContent.includes('Avg Block Time'));return{heights:[...document.querySelectorAll('[data-testid="block-row"] a[href^="/block/"]')].map(link=>link.getAttribute('href').split('/').at(-1)),value:card.querySelector('button').textContent,note:card.querySelector('[data-testid="block-time-sample"]').textContent};});
+  const rendered=await page.evaluate(()=>{const card=[...document.querySelectorAll('[data-testid="stat-card"]')].find(card=>card.textContent.includes('Avg Block Time'));return{blockRows:[...document.querySelectorAll('[data-testid="block-row"]')].map(row=>({number:row.querySelector('a[href^="/block/"]').getAttribute('href').split('/').at(-1),count:row.querySelector('button')?.textContent,title:row.querySelector('button')?.getAttribute('title')})),heights:[...document.querySelectorAll('[data-testid="block-row"] a[href^="/block/"]')].map(link=>link.getAttribute('href').split('/').at(-1)),value:card.querySelector('button').textContent,note:card.querySelector('[data-testid="block-time-sample"]').textContent};});
   const heights=rendered.heights,status=blockStatuses.at(-1);
   assert.equal(status,expectedStatus,'Known persona keeps its actual block-read permission');
   if(status===403) {
@@ -109,8 +169,11 @@ async function homeAverage(page, blockPages, blockStatuses, expectedStatus) {
     await trigger.focus();await trigger.click();const tooltip=page.getByRole('tooltip');await tooltip.waitFor();assert.ok((await tooltip.textContent()).includes('No authorized block-page range is available.'));await page.keyboard.press('Escape');await tooltip.waitFor({state:'hidden'});
     return {value:'Unavailable',usablePairs:'0',blockStatus:status,source:'Actual403 block read; no authorized block-page range'};
   }
-  const body=[...blockPages].reverse().find(body=>JSON.stringify(body.items.map(row=>row.number))===JSON.stringify(heights));
+  const body=[...blockPages].reverse().find(body=>JSON.stringify(body.items.map(row=>row.number))===JSON.stringify(heights)&&body.items.every((block,index)=>blockCountObservationMatches(block,rendered.blockRows[index])));
   assert.ok(body,'Average oracle must use one actual response matching the rendered block page');
+  let exactBlockCounts=0;
+  for(let index=0;index<body.items.length;index++){const block=body.items[index],expected=blockCount(block),row=rendered.blockRows[index];assert.equal(row.number,block.number);assert.ok(blockCountObservationMatches(block,row));if(expected.metric.status==='exact')exactBlockCounts++;}
+  assert.ok(exactBlockCounts>0,'Known block-authorized Home proves an actual exact per-block count');
   assert.equal(new Set(body.items.map(row=>row.number)).size,body.items.length);assert.equal(new Set(body.items.map(row=>row.hash)).size,body.items.length);
   const headers=body.items.filter(row=>row.number!=='0').map(row=>({height:BigInt(row.number),time:BigInt(row.timestamp)})).sort((a,b)=>a.height<b.height?-1:1);
   let seconds=0n,pairs=0n;
@@ -122,7 +185,7 @@ async function homeAverage(page, blockPages, blockStatuses, expectedStatus) {
   await button.waitFor();assert.equal(rendered.value,value);
   if(headers.length)assert.equal(rendered.note,`${pairs} usable interval${pairs===1n?'':'s'} · page blocks ${headers[0].height}–${headers.at(-1).height}`);
   await button.focus();await button.click();const tooltip=page.getByRole('tooltip');await tooltip.waitFor();assert.ok((await tooltip.textContent()).includes('not a whole-chain or last-100-block average'));await page.keyboard.press('Escape');await tooltip.waitFor({state:'hidden'});
-  return {value,usablePairs:String(pairs),blockStatus:status,fromBlock:headers[0]?.height.toString(),throughBlock:headers.at(-1)?.height.toString(),source:'Single actual authorized rendered block-page response'};
+  return {value,usablePairs:String(pairs),blockStatus:status,exactBlockCounts,fromBlock:headers[0]?.height.toString(),throughBlock:headers.at(-1)?.height.toString(),source:'Single actual authorized rendered block-page response'};
 }
 function exactFlatFields(item, mapping) {
   for (const [flat, metric] of Object.entries(mapping)) if (Object.hasOwn(item, flat)) {
@@ -130,7 +193,7 @@ function exactFlatFields(item, mapping) {
     assert.equal(item[flat], item.counts[metric].value);
   }
 }
-export async function checkViewerCountRendering({ users, runtime, screenshots, passed }) {
+export async function checkViewerCountRendering({ users, runtime, privateHash, screenshots, passed }) {
   const results = [], exactCurrentAccounts = [], numericHistory = []; let tokenDetails = 0, accountDetails = 0;
   for (const name of ['admin', 'deployer', 'reader']) {
     const page = users.get(name).page; await page.setViewportSize({ width: 1280, height: 900 });
@@ -159,6 +222,7 @@ export async function checkViewerCountRendering({ users, runtime, screenshots, p
     if (stats.counts?.accounts?.status === 'exact' && stats.counts.accounts.consistency === 'CURRENT') exactCurrentAccounts.push(name);
     if (['exact', 'at_least'].includes(stats.counts?.transactions?.status)) numericHistory.push(name);
     await page.setViewportSize({ width: 1280, height: 900 });
+    const blockSurfaces=name==='reader'?{qualification:'Actual403 block feed; no block count is inferred from another population'}:await blockCountSurfaces(page,runtime,name);
     const accounts = await renderedResponse(page, runtime.explorerOrigin, '/accounts', () => page.goto(runtime.explorerOrigin + '/accounts'));
     await page.getByRole('heading', { name: 'Accounts', exact: true }).waitFor();
     for (const account of accounts.items) {
@@ -196,13 +260,14 @@ export async function checkViewerCountRendering({ users, runtime, screenshots, p
       }
       tokenDetails++;
     }
-    results.push({ persona: name, stats: stats.counts, averageBlockTime: average, mobileHomeRows:mobileRows, returnedAccountRowsChecked: accounts.items.length, returnedTokenRowsChecked: tokens.items.length });
+    results.push({ persona: name, stats: stats.counts, averageBlockTime: average, blockCounts:blockSurfaces, mobileHomeRows:mobileRows, returnedAccountRowsChecked: accounts.items.length, returnedTokenRowsChecked: tokens.items.length });
   }
   assert.ok(accountDetails > 0, 'Existing authorized demo accounts must exercise detail metadata');
   assert.ok(exactCurrentAccounts.some(name => name === 'admin' || name === 'deployer'), 'Small known method-authorized fixture must prove an exact CURRENT accounts count; all-unavailable is a failed restoration gate');
   assert.ok(numericHistory.length > 0, 'Small retained transaction fixture must prove a numeric exact/lower-bound metric; all-unavailable is a failed restoration gate');
+  const positiveHistoricalBlock=await knownTransactionBlockCount(users.get('deployer').page,runtime,privateHash,screenshots);
   passed('viewer count cards/account cells match their authorized response; known CURRENT accounts and retained transactions are numeric; token coverage is recorded separately');
-  return { personas: results, accountDetails, tokenDetails, exactCurrentAccounts, numericHistory, populatedTokenMetadataExercised: tokenDetails > 0, tokenCoverage: tokenDetails ? 'Actual authorized populated token rows checked' : 'Preserved DemoRecord/custom-event fixture has an empty authorized token feed. Populated supply/holder/transfer metadata is NOT live-browser-qualified; actual Go/PG engine and qualified component evidence remain separate.', oracle: 'Same rendered response only; no page size or separate CURRENT observation promoted to a total' };
+  return { personas: results, accountDetails, tokenDetails, exactCurrentAccounts, numericHistory, positiveHistoricalBlock, populatedTokenMetadataExercised: tokenDetails > 0, tokenCoverage: tokenDetails ? 'Actual authorized populated token rows checked' : 'Preserved DemoRecord/custom-event fixture has an empty authorized token feed. Populated supply/holder/transfer metadata is NOT live-browser-qualified; actual Go/PG engine and qualified component evidence remain separate.', oracle: 'Same rendered response only; no page size or separate CURRENT observation promoted to a total' };
 }
 export async function checkTransferTypeRendering({ users, runtime, screenshots, passed }) {
   const results = [];

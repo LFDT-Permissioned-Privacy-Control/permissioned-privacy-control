@@ -534,7 +534,7 @@ export async function checkNativeUIParity({ users, runtime, privateHash, sharedH
   const adminEntry = await checkAdminEntry({ users, runtime, outputDirectory, passed });
   const navigation = await checkAdminNavigation({ user: users.get('admin'), runtime, sourceDirectory, outputDirectory, passed });
   const authoring = await checkSourceAuthoringParity({ user: users.get('admin'), runtime, sourceDirectory, outputDirectory, passed });
-  const viewerCounts = await checkViewerCountRendering({ users, runtime, screenshots, passed });
+  const viewerCounts = await checkViewerCountRendering({ users, runtime, privateHash, screenshots, passed });
   const transferTypes = await checkTransferTypeRendering({ users, runtime, screenshots, passed });
   const cases = [];
   await transactionView(users.get('deployer'), runtime, privateHash, [['From', 'own_address', 'Mine', true], ['To', 'rbac_group_member', 'My Org', true]], screenshots, 'owner'); cases.push('owner-Mine');
