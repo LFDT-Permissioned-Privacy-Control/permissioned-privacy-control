@@ -218,8 +218,13 @@ Disclosure authorization comes from standing Git-approved rules. A permitted
 case is checked and audited automatically; there is no customer approval step.
 The Explorer adapts its protected views to the existing case/read API rather
 than introducing a second grant authority.
-Event disclosure reads are unavailable in the current protected-data API;
-mixed cases retain their other usable resources and show this limitation.
+Event disclosure reads use that same case/read API with explicit Events
+authority in both the standing rule and case. They cover same-organisation
+emitters in transactions whose sender or recipient is a proved target wallet.
+Full Events reveals whole payloads, potentially including other parties;
+lower levels withhold payloads and hashes. Ordinary RPC and Explorer permissions
+remain independent. See [Event disclosure](v2-disclosure-events.md) for the
+population, privacy and continuation contract.
 Full transaction rows include a case-bound `addressId` for an actual in-scope
 target participant. It permits detail navigation in a transaction-only case;
 it does not grant the separate address-browsing resource.

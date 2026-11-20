@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../componen
 import type { OperationScope } from './controller'
 import { readNarrowing } from './disclosureEvidence'
 import { caseDisplayStatus, useCaseDisplayClock } from './caseDisplay'
+import { DisclosureEventCards } from './DisclosureEventCards'
 import {
   actorID,
   address,
@@ -743,14 +744,7 @@ function CaseDetail({
 }
 function ProtectedResult({ data, filter }: { data: ProtectedData; filter: string }) {
   const result = data.result
-  if (data.resource === 'events') return <DataTable items={rows(result.items)} empty="No eligible events on this page." columns={[
-    { key: 'blockNumber', label: 'Block' },
-    { key: 'transactionIndex', label: 'Transaction index', render: row => String(row.transactionIndex) },
-    { key: 'logIndex', label: 'Log index', render: row => String(row.logIndex) },
-    { key: 'blockTime', label: 'Time', render: row => instant(row.blockTime) },
-    { key: 'emitter', label: 'Emitter' },
-    { key: 'payload', label: 'Payload', render: row => row.payload === 'withheld' ? 'Payload withheld' : <details><summary className="cursor-pointer text-primary">Raw payload</summary><dl className="mt-2 space-y-2 text-xs"><dt>Transaction hash</dt><dd className="break-all font-mono">{text(row.transactionHash)}</dd><dt>Block hash</dt><dd className="break-all font-mono">{text(row.blockHash)}</dd><dt>Topics</dt><dd>{(row.topics as string[]).length ? <ol>{(row.topics as string[]).map((topic, index) => <li key={index} className="break-all font-mono">{topic}</li>)}</ol> : 'No topics'}</dd><dt>Data</dt><dd><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono">{String(row.data)}</pre></dd></dl></details> },
-  ]} />
+  if (data.resource === 'events') return <DisclosureEventCards items={rows(result.items)} level={data.level} />
   if (Array.isArray(result.items)) {
     const columns: Column[] =
       data.resource === 'activity_logs'

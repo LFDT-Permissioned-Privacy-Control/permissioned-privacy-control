@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
 import actualDTO from './testdata/disclosure-events-go-dto.json'
 import { NativeDisclosures } from './NativeDisclosures'
+import { DisclosureEventCards } from './DisclosureEventCards'
 import { protectedData, type NativeCase } from './operationsModels'
 import type { OperationScope } from './controller'
 
@@ -54,7 +55,7 @@ function fixture(level: NativeCase['scope']['level'] = 'full') {
     return path.endsWith(selected().caseId) ? selected(level) : { items: [selected(level)], nextCursor: '', scanComplete: true }
   })
   const scope = { identity: { actor, expires: now + 300 }, signal: new AbortController().signal, check: vi.fn(), request, self: { organizations: [] } } as unknown as OperationScope
-  return { scope, bodies }
+  return { scope, bodies, request }
 }
 async function open(scope: OperationScope) {
   render(<MemoryRouter><NativeDisclosures scope={scope} /></MemoryRouter>)
@@ -64,11 +65,13 @@ async function open(scope: OperationScope) {
 it.each(['full', 'pseudonymous', 'redacted'] as const)('shows Events-only %s case, continues an empty page, and keeps Previous local', async level => {
   const fixtureValue = fixture(level); await open(fixtureValue.scope)
   fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
-  await screen.findByRole('cell', { name: '9007199254740993' })
+  await screen.findByRole('article', { name: 'Disclosed event 7' })
+  expect(screen.getByText('9007199254740993')).toBeInTheDocument()
+  expect(screen.getByText('Disclosed')).toBeInTheDocument()
+  expect(screen.getByText(level === 'full' ? 'Full' : level === 'redacted' ? 'Redacted' : 'Pseudonymous')).toBeInTheDocument()
   expect(fixtureValue.bodies).toEqual([{ v: 1, resource: 'events', view: 'list', limit: 25 }, { v: 1, resource: 'events', view: 'list', limit: 25, cursor: 'continue-opaque' }])
   expect(screen.queryByRole('link', { name: /Explorer|Details/ })).not.toBeInTheDocument()
   if (level === 'full') {
-    fireEvent.click(screen.getByText('Raw payload'))
     expect(screen.getByText('0xdeadbeef')).toBeInTheDocument()
     expect(screen.getByText('0x' + 'c'.repeat(64))).toBeInTheDocument()
     expect(screen.getByText(/may include other parties/)).toBeInTheDocument()
@@ -76,6 +79,7 @@ it.each(['full', 'pseudonymous', 'redacted'] as const)('shows Events-only %s cas
   fireEvent.click(screen.getByRole('button', { name: 'Previous page' }))
   expect(screen.getByText('No eligible events on this page.')).toBeInTheDocument()
   expect(fixtureValue.bodies).toHaveLength(2)
+  expect(fixtureValue.request.mock.calls.every(([path]) => path.startsWith('/api/v1/disclosure/cases'))).toBe(true)
 })
 it('clears Events caches at original session expiry while the case remains open', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }); vi.spyOn(Date, 'now').mockReturnValue(now * 1000)
@@ -101,9 +105,43 @@ it('rechecks the shorter case cutoff after download materialization', async () =
   }) as OperationScope['request']
   await open(value.scope)
   fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
-  await screen.findByRole('cell', { name: '9007199254740993' })
+  await screen.findByRole('article', { name: 'Disclosed event 7' })
   fireEvent.click(screen.getByRole('button', { name: 'Download this page' }))
   await screen.findByRole('alert')
   expect(click).not.toHaveBeenCalled(); expect(revoke).toHaveBeenCalledWith('blob:event-expired'); expect(value.bodies).toHaveLength(2)
   expect(screen.queryByRole('button', { name: 'Download this page' })).not.toBeInTheDocument()
+})
+
+it('renders genuine empty Full evidence in Admin cards without ordinary navigation or metadata reads', () => {
+  const fetch = vi.fn(() => { throw Error('A case card must not fetch ordinary metadata') })
+  vi.stubGlobal('fetch', fetch)
+  const item = { ...event(), topics: [], data: '0x' }
+  render(<DisclosureEventCards items={[item]} level="full" />)
+  expect(screen.getByText('Disclosed')).toBeInTheDocument()
+  expect(screen.getByText('Full')).toBeInTheDocument()
+  expect(screen.getByText('No topics')).toBeInTheDocument()
+  expect(screen.getByText('0x')).toBeInTheDocument()
+  expect(screen.queryByText('Payload withheld')).not.toBeInTheDocument()
+  expect(screen.queryByRole('link')).not.toBeInTheDocument()
+  expect(fetch).not.toHaveBeenCalled()
+})
+
+it.each(['pseudonymous', 'redacted'] as const)('keeps the %s card payload and hashes absent with inert emitter text', level => {
+  const fetch = vi.fn(() => { throw Error('A case card must not fetch ordinary metadata') })
+  vi.stubGlobal('fetch', fetch)
+  render(<DisclosureEventCards items={[event(level)]} level={level} />)
+  expect(screen.getByText('Disclosed')).toBeInTheDocument()
+  expect(screen.getByText('Payload withheld')).toBeInTheDocument()
+  expect(screen.getByText(event(level).emitter)).toBeInTheDocument()
+  expect(screen.queryByText('Topics')).not.toBeInTheDocument()
+  expect(screen.queryByText('Data')).not.toBeInTheDocument()
+  expect(screen.queryByText('Transaction hash')).not.toBeInTheDocument()
+  expect(screen.queryByRole('link')).not.toBeInTheDocument()
+  expect(fetch).not.toHaveBeenCalled()
+})
+
+it('does not apply the short administrative text-field limit to authorized raw event data', () => {
+  const data = '0x' + 'ab'.repeat(20000)
+  render(<DisclosureEventCards items={[{ ...event(), data }]} level="full" />)
+  expect(screen.getByText(data)).toBeInTheDocument()
 })

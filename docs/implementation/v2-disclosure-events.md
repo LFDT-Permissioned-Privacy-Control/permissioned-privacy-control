@@ -3,7 +3,8 @@
 An auditor opens a disclosure case, selects **Events**, and reads the
 logs allowed by its Git-approved standing rule. The same case screen is available
 in Admin and Explorer. Customer approval is not required. Ordinary Explorer access
-and case access remain separate permissions.
+and case access remain separate permissions. Disclosure never adds events to
+ordinary `eth_getLogs`, receipts or Explorer lists.
 
 ## Which events are included
 
@@ -42,8 +43,21 @@ Full transactions does not add Events authority.
 Full Events returns the complete raw topics and data for each qualifying log,
 with actual emitter, transaction hash and block hash. The payload may include
 other parties in the same batch. Administrators must account for this when
-authoring the standing rule. The UI labels raw values and does not infer ABI
-arguments or field-level redaction.
+authoring the standing rule. This is complete-record disclosure, like Full
+transaction disclosure with its raw calldata and counterparties. It is not the
+embedded-address masking used by ordinary event reads, or a promise to reveal
+only fields concerning the case target.
+
+Explorer uses the same log-card presentation, local event-format decoder and
+topic controls as ordinary logs, with an explicit **Disclosed** badge and case
+privacy level. A known canonical format can be decoded locally; this describes
+the format, not an attestation about the emitting contract. Unknown or malformed
+formats retain their exact raw evidence. Case cards do not fetch an ABI through
+ordinary contract endpoints or turn disclosed addresses into ordinary-access
+links. Custom approved-ABI enrichment needs its own case-authorized source;
+the current case API does not supply one. Admin presents the evidence using its
+existing card and badge components. Neither display performs authorization or
+field-level redaction.
 
 Pseudonymous and Redacted levels omit all topics, data and hashes. They retain
 block number, transaction index, block-global log index, block time and a
