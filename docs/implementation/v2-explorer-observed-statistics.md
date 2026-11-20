@@ -91,3 +91,10 @@ decimal strings; unknown supply/price remains absent rather than zero. Portfolio
 values use those returned prices without inferring a complete portfolio total.
 The all-transfer type control filters at the source before pagination, and its
 cursor is bound to that selected standard.
+
+The Home **Avg Block Time** card uses only the one ordinary block page already
+returned to that browser. It averages positive timestamp differences between
+consecutive-height neighbours, excludes genesis and gaps, and shows the usable
+interval count and sampled page range. Fewer than two usable headers gives no
+value. This is a sampled display, not the legacy last-100-row SQL average. It
+adds no endpoint or permission and never combines separate polls or pages.
