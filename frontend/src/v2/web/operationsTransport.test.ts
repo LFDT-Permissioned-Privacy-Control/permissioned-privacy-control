@@ -21,6 +21,7 @@ afterEach(() => vi.unstubAllGlobals())
 it('accepts only finite native operations and their exact query/method contracts', () => {
   for (const [path, method] of [
     [`/api/v2/orgs/${org}/compliance/config`, 'GET'],
+    [`/api/v2/orgs/${org}/diagnostics`, 'GET'],
     [`/api/v2/orgs/${org}/compliance/travel-rule-records`, 'POST'],
     [`/api/v2/orgs/${org}/compliance/travel-rule-records/${id}`, 'DELETE'],
     [`/api/v1/disclosure/cases?role=data-org-admin&organizationId=${org}&limit=25`, 'GET'],
@@ -32,6 +33,8 @@ it('accepts only finite native operations and their exact query/method contracts
     expect(operationEndpoint(path, method), path).toBe(true)
   for (const [path, method] of [
     [`/api/v2/orgs/${org}/compliance/config`, 'POST'],
+    [`/api/v2/orgs/${org}/diagnostics`, 'POST'],
+    [`/api/v2/orgs/${org}/diagnostics?url=other`, 'GET'],
     ['https://evil.test/api', 'GET'],
     ['//evil.test/api', 'GET'],
     ['/api/v1/users', 'GET'],

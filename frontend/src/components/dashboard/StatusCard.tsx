@@ -18,6 +18,7 @@ function getStatusConfig(status: string): {
   switch (status.toLowerCase()) {
     case 'running':
     case 'connected':
+    case 'ready':
       return {
         dotClass: 'status-dot-success',
         icon: <Wifi className="w-4 h-4" />,

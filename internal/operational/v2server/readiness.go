@@ -15,12 +15,13 @@ import (
 // Readiness is a bounded dependency observation, never request authorization.
 // At most one caller owns a probe; a completed sample lasts at most one second.
 type readiness struct {
-	checks []func(context.Context) error
-	local  func() error
-	probe  chan struct{}
-	mu     sync.Mutex
-	until  time.Time
-	ready  bool
+	checks    []func(context.Context) error
+	local     func() error
+	probe     chan struct{}
+	mu        sync.Mutex
+	until     time.Time
+	ready     bool
+	sampledAt time.Time
 }
 
 func newReadiness(local func() error, checks []func(context.Context) error) *readiness {
@@ -76,13 +77,14 @@ func (p *readiness) check(parent context.Context) bool {
 		p.mu.Unlock()
 		return false
 	}
-	p.until = time.Now().Add(time.Second)
+	p.sampledAt = time.Now().UTC()
+	p.until = p.sampledAt.Add(time.Second)
 	p.ready = ready
 	p.mu.Unlock()
 	return ready && p.local() == nil && ctx.Err() == nil
 }
 
-func (s *Server) addReadyNode(client *rpcexecution.MetadataClient, credential rpcexecution.Credential, requireSync bool) {
+func (s *Server) addReadyNode(client *rpcexecution.MetadataClient, credential rpcexecution.Credential, requireSync bool, org string) {
 	// Distinct credential bindings on the same URL are independent dependencies.
 	// Hash private material for startup-only de-duplication; never log it.
 	raw, _ := json.Marshal(struct {
@@ -96,7 +98,24 @@ func (s *Server) addReadyNode(client *rpcexecution.MetadataClient, credential rp
 	}
 	if !s.readyNodes[key] {
 		s.readyNodes[key] = true
-		s.readyChecks = append(s.readyChecks, nodeReady(client, requireSync))
+		if s.nodeObservations == nil {
+			s.nodeObservations = map[[32]byte]*observedNode{}
+		}
+		observer := newObservedNode(nodeReady(client, requireSync), time.Now)
+		s.nodeObservations[key] = observer
+		s.readyChecks = append(s.readyChecks, observer.observe)
+	}
+	if org != "" {
+		if s.diagnosticNodes == nil {
+			s.diagnosticNodes = map[string][]*observedNode{}
+		}
+		observer := s.nodeObservations[key]
+		for _, existing := range s.diagnosticNodes[org] {
+			if existing == observer {
+				return
+			}
+		}
+		s.diagnosticNodes[org] = append(s.diagnosticNodes[org], observer)
 	}
 }
 

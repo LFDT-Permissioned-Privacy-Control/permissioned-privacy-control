@@ -257,7 +257,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 				method := methods[name]
 				requireSync = requireSync || historyFamily(method) || method == "debug_traceTransaction" || method == "eth_sendTransaction" || method == "eth_sendRawTransaction" || method == "eth_syncing"
 			}
-			s.addReadyNode(readyClient, cr, requireSync)
+			s.addReadyNode(readyClient, cr, requireSync, org.ID)
 			source := creationfacts.Source{Network: network, Organization: org.ID, URL: n.URL, CredentialRef: ref, CredentialHeader: cr.Header, Profile: "reth-prague-included-creations/v1", PragueStart: n.PragueStart, PragueEnd: n.PragueEnd}
 			for _, name := range g.AllowedMethods {
 				canonical := methods[name]
@@ -398,7 +398,7 @@ func (s *Server) buildData(ctx context.Context, wb walletops.ServiceBinding, ws 
 	if e != nil {
 		return nil, e
 	}
-	s.addReadyNode(md, credential, true)
+	s.addReadyNode(md, credential, true, "")
 	sd, e := rpcexecution.NewStateClient(transport, defaultSource, credential, rpcexecution.DefaultStateLimits())
 	if e != nil {
 		return nil, e

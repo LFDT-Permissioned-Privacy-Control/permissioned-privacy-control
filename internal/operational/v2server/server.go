@@ -26,6 +26,7 @@ import (
 	"privacy-proxy/internal/selfhttp"
 	"privacy-proxy/internal/ssopolicy"
 	m "privacy-proxy/internal/ssotransaction"
+	"privacy-proxy/internal/version"
 	"privacy-proxy/internal/wallethttp"
 	"privacy-proxy/internal/walletops"
 )
@@ -33,18 +34,20 @@ import (
 // Server is deliberately SQL-linked. Its Core snapshot is a single immutable
 // pointer; the broker has its separately approved, differently profiled bundle.
 type Server struct {
-	core        *policybundle.CatalogSnapshot
-	handler     *http.ServeMux
-	config      Config
-	certificate tls.Certificate
-	close       []func()
-	once        sync.Once
-	data        *dataPlane
-	dataReady   bool // set only by the actual shared RPC/Explorer/protected assembly
-	closed      atomic.Bool
-	readyChecks []func(context.Context) error
-	ready       *readiness
-	readyNodes  map[[32]byte]bool
+	core             *policybundle.CatalogSnapshot
+	handler          *http.ServeMux
+	config           Config
+	certificate      tls.Certificate
+	close            []func()
+	once             sync.Once
+	data             *dataPlane
+	dataReady        bool // set only by the actual shared RPC/Explorer/protected assembly
+	closed           atomic.Bool
+	readyChecks      []func(context.Context) error
+	ready            *readiness
+	readyNodes       map[[32]byte]bool
+	nodeObservations map[[32]byte]*observedNode
+	diagnosticNodes  map[string][]*observedNode
 }
 
 func (s *Server) Close() {
@@ -314,6 +317,12 @@ func Open(parent context.Context, c Config) (*Server, error) {
 		}
 		return s.data.recorder.Healthy()
 	}, s.readyChecks)
+	diagnostics := newDiagnosticsSampler(s.ready, s.diagnosticNodes)
+	diagnosticsHTTP, e := selfhttp.NewDiagnostics(selfhttp.DiagnosticsConfig{Config: selfhttp.Config{Snapshot: core, Origin: source.WebOrigin, Clock: time.Now}, Build: selfhttp.BuildIdentity{Version: version.Version, Commit: version.Commit, BuiltAt: version.BuildTime}, Sample: diagnostics.sample})
+	if e != nil {
+		return fail("diagnostics HTTP")
+	}
+	diagnosticsHTTP.Register(s.handler)
 	s.handler.HandleFunc("GET /health/ready", s.ready.handler)
 	s.handler.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")

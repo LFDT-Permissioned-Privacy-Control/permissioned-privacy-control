@@ -62,7 +62,9 @@ export function operationEndpoint(endpoint: string, method: string): boolean {
     '^/api/v1/disclosure/cases(?:/(' + uuid + ')(?:/(audit|read|revoke))?)?$',
   ).exec(path)
   const accessLogs = new RegExp('^/api/v2/orgs/(' + uuid + ')/access-logs$').exec(path)
-  if (accessLogs && canonicalUUID(accessLogs[1])) {
+  const diagnostics = new RegExp('^/api/v2/orgs/(' + uuid + ')/diagnostics$').exec(path)
+  if (diagnostics && canonicalUUID(diagnostics[1])) valid = method === 'GET'
+  else if (accessLogs && canonicalUUID(accessLogs[1])) {
     valid = method === 'GET'
     allowed = ['from', 'to', 'actorId', 'method', 'outcome', 'requestReference', 'limit', 'cursor']
   } else if (compliance && canonicalUUID(compliance[1])) {

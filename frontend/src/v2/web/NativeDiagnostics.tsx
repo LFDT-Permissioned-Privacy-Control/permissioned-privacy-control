@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { StatusCard } from '../../components/dashboard/StatusCard'
 import { Button } from '../../components/ui/button'
 import type { OperationScope } from './controller'
 import { record, type ObjectValue } from './operationsModels'
@@ -8,10 +7,10 @@ import { useApprovedTokens } from './approvedTokens'
 import { ExactAmount, TokenChoice, useExactAmountState } from './ExactTokenAmount'
 import { diagnosticRequest, diagnosticResult, diagnosticTemplates, type DiagnosticTemplate } from './diagnosticTemplates'
 import { Field, Panel, SelectField, TaskError, useNativeTask } from './operationsUI'
+import { NativeHealth } from './NativeHealth'
 
 export function NativeDiagnostics({ scope }: { scope: OperationScope }) {
   const task = useNativeTask(scope),
-    [health, setHealth] = useState<{ live: boolean; ready: boolean }>(),
     [org, setOrg] = useState(
       scope.self.organizations.length === 1 ? scope.self.organizations[0].id : '',
     ),
@@ -26,44 +25,10 @@ export function NativeDiagnostics({ scope }: { scope: OperationScope }) {
   const requestKey = JSON.stringify([org, mode, method, params, template, token, owner, spender, recipient, amount, amountMode, selectedToken?.decimals]), latest = useRef(requestKey), latestScope = useRef(scope), live = useRef(true)
   latest.current = requestKey; latestScope.current = scope
   useEffect(() => { live.current = true; return () => { live.current = false } }, [])
-  const load = async () => {
-    const live = record(await scope.request('/health/live')),
-      ready = record(await scope.request('/health/ready'))
-    scope.check()
-    setHealth({ live: live.ready === true, ready: ready.ready === true })
-  }
-  useEffect(() => {
-    void task.run(load)
-  }, [])
   return (
     <section className="space-y-6">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-semibold">Diagnostics</h2>
-          <p className="mt-1 text-sm text-neutral-500">
-            Current OPS health and requests under your verified permissions
-          </p>
-        </div>
-        <Button variant="outline" disabled={task.busy} onClick={() => void task.run(load)}>
-          Refresh
-        </Button>
-      </div>
+      <NativeHealth scope={scope} />
       <TaskError message={task.error} />
-      <div className="grid gap-4 md:grid-cols-2">
-        <StatusCard
-          title="OPS process"
-          status={!health ? 'Checking' : health.live ? 'Running' : 'Error'}
-        />
-        <StatusCard
-          title="Operational readiness"
-          status={!health ? 'Checking' : health.ready ? 'Connected' : 'Error'}
-        />
-      </div>
-      <p className="text-xs text-neutral-500">
-        Readiness covers configured operational dependencies. Explorer and disclosure reads check
-        Indexer availability separately. No internal endpoints, credentials or cache statistics are
-        exposed here.
-      </p>
       <Panel title="Test request">
         <p className="mb-4 text-sm text-neutral-500">For a signed transaction, <Link to="/admin/account" className="font-medium text-primary hover:underline">set up your wallet and RPC connection</Link>. This tester checks reads and estimates with your own verified identity.</p>
         <form

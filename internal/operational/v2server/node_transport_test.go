@@ -348,6 +348,14 @@ func TestNodeCooldownHistoryBatchMetadataStateAndReadinessShareBinding(t *testin
 	if w.Code != 503 || w.Body.Len() != 0 || calls.Load() != 1 || batches.Load() != 1 {
 		t.Fatal("readiness bypassed shared cooldown or exposed provider details", w.Code, calls.Load(), batches.Load())
 	}
+	observer := newObservedNode(nodeReady(metadata, true), time.Now)
+	diagnostics := newDiagnosticsSampler(readiness, map[string][]*observedNode{"owned-org": {observer}})
+	for range 2 {
+		sample := diagnostics.sample(t.Context(), "owned-org")
+		if sample.Node.State != "unavailable" || calls.Load() != 1 || batches.Load() != 1 {
+			t.Fatal("diagnostics bypassed shared cooldown or its bounded sample cache", sample, calls.Load(), batches.Load())
+		}
+	}
 	clock.advance(time.Second)
 	throttle.Store(false)
 	readiness.mu.Lock()

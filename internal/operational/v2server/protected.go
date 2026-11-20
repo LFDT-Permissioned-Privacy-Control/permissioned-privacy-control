@@ -129,7 +129,7 @@ func (s *Server) mountProtected(ctx context.Context, p *dataPlane, wb walletops.
 		if e != nil {
 			return e
 		}
-		s.addReadyNode(readyClient, cr, true)
+		s.addReadyNode(readyClient, cr, true, n.OrganizationID)
 	}
 	render, e := dataKeys(c.RenderKeys)
 	if e != nil {
