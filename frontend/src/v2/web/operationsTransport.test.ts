@@ -167,3 +167,16 @@ it('preserves typed retention/source/cursor errors without trusting arbitrary re
     }
   }
 })
+it('composes caller cancellation with mandatory scope cancellation for an explicit record detail', async () => {
+  const caller = new AbortController(), owner = new AbortController()
+  let passed: AbortSignal | undefined
+  vi.stubGlobal('fetch', vi.fn(async (_path: string, options: RequestInit) => {
+    passed = options.signal as AbortSignal
+    return new Promise((_resolve, reject) => passed!.addEventListener('abort', () => reject(Error('aborted')), { once: true }))
+  }))
+  const request = operationRequest('private', `/api/v2/orgs/${org}/compliance/travel-rule-records/${id}`, { signal: caller.signal }, owner.signal, () => {})
+  expect(passed?.aborted).toBe(false)
+  caller.abort()
+  await expect(request).rejects.toThrow('aborted')
+  expect(passed?.aborted).toBe(true)
+})

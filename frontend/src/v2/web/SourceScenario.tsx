@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
-import { Textarea } from '../../components/ui/textarea'
 import { Badge } from '../../components/ui/badge'
 import { download } from './SourceReview'
 import { groupsOf, object, rootOf, type SourceProject } from './sourceProject'
 import { useAuthoringState } from './sourceAuthoring'
 import { closedJSON } from '../auth/protocol'
+import { initialScenarioFrame, parseScenarioImport, scenarioDocument, SourceScenarioBuilder } from './SourceScenarioBuilder'
 
 export async function scenarioDigest(raw: string): Promise<string> {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))
@@ -14,23 +14,17 @@ export async function scenarioDigest(raw: string): Promise<string> {
 }
 export function SourceScenario({ project, root, organization, check }: { project: SourceProject; root: string; organization: string; check(): void }) {
   const selected = rootOf(project, root), groups = groupsOf(project, root, organization)
-  const [signer, setSigner] = useAuthoringState('signer', ''), [memberships, setMemberships] = useAuthoringState<string[]>('memberships', []), [frames, setFrames] = useAuthoringState('frames', '[\n  {"callType":"call","storageAddress":"0x0000000000000000000000000000000000000000","codeAddress":"0x0000000000000000000000000000000000000000","calldata":"0x","value":"0","depth":0,"facts":{}}\n]')
+  const [signer, setSigner] = useAuthoringState('signer', ''), [memberships, setMemberships] = useAuthoringState<string[]>('memberships', []), [frames, setFrames] = useAuthoringState('frames', JSON.stringify([initialScenarioFrame()], null, 2))
   const [context, setContext] = useAuthoringState('context', '{"LinkedAddresses":[],"Claims":0,"GroupSourceClaims":{}}'), [error, setError] = useState<string | null>(null), [expectedManifest, setExpectedManifest] = useAuthoringState('manifest', '')
   const [exported, setExported] = useState<{ raw: string; digest: string; generation: number } | null>(null), [result, setResult] = useState<{ raw: string; manifest: string; generation: number; allowed: boolean; code: string; reason: string } | null>(null)
-  const picker = useRef<HTMLInputElement>(null), alive = useRef(true), latest = useRef({ raw: '', generation: project.generation, manifest: expectedManifest })
+  const scenarioPicker = useRef<HTMLInputElement>(null), picker = useRef<HTMLInputElement>(null), alive = useRef(true), latest = useRef({ raw: '', generation: project.generation, manifest: expectedManifest, input: '', selection: root + ':' + organization })
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   function build(): string {
-    const facts = object(closedJSON(context, 1 << 20, 32)), input = closedJSON(frames, 1 << 20, 32)
-    if (!Array.isArray(input) || !input.length || input.length > 256) throw Error('Provide one to 256 hypothetical frames.')
-    for (const frame of input) {
-      const f = object(frame)
-      if (!Number.isSafeInteger(f.depth) || Number(f.depth) < 0 || typeof f.value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(f.value)) throw Error('Frame depth must be a safe nonnegative integer and value an exact decimal string.')
-    }
-    if (!/^0x[0-9a-fA-F]{40}$/.test(signer)) throw Error('Provide the hypothetical signer address.')
-    return JSON.stringify({ apiVersion: 'ops.policy-scenario/v1', context: { ...facts, Org: organization, Groups: memberships, Signer: signer }, frames: input }, null, 2)
+    return JSON.stringify(scenarioDocument({ context, frames, organization, signer, groups: memberships }), null, 2)
   }
   let currentRaw = ''; try { currentRaw = build() } catch { /* An incomplete scenario is editable, never evaluated in JS. */ }
-  latest.current = { raw: currentRaw, generation: project.generation, manifest: expectedManifest }
+  useEffect(() => { setResult(null) }, [currentRaw, project.generation, expectedManifest])
+  latest.current = { raw: currentRaw, generation: project.generation, manifest: expectedManifest, input: JSON.stringify({ signer, memberships, frames, context }), selection: root + ':' + organization }
   async function exportScenario() {
     const generation = project.generation
     try {
@@ -53,15 +47,24 @@ export function SourceScenario({ project, root, organization, check }: { project
       setResult({ raw: original.raw, manifest, generation, allowed: decision.Allowed, code: decision.Code, reason: decision.Reason }); setError(null)
     } catch (e) { if (alive.current) setError(e instanceof Error ? e.message : 'Could not read scenario report.') }
   }
+  async function importScenario(file: File) {
+    const original = latest.current
+    try {
+      check(); if (file.size > 1 << 20) throw Error('The local scenario is too large.')
+      const raw = await file.text(); check()
+      if (!alive.current || latest.current.input !== original.input || latest.current.generation !== original.generation || latest.current.selection !== original.selection) return
+      const value = parseScenarioImport(raw, organization)
+      setSigner(value.signer); setMemberships(value.groups); setContext(value.context); setFrames(value.frames); setExported(null); setResult(null); setError(null)
+    } catch (e) { if (alive.current && latest.current.input === original.input && latest.current.generation === original.generation && latest.current.selection === original.selection) setError(e instanceof Error ? e.message : 'Could not import scenario.') }
+  }
   const currentResult = result && result.raw === currentRaw && result.generation === project.generation && result.manifest === expectedManifest
   const shell = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'"
   return <section className="space-y-4"><h3 className="text-sm font-medium">Policy scenario</h3>
     <p className="text-sm text-neutral-500">Evaluate hypothetical facts using the matching Go reference evaluator. This does not execute an EVM call, prove a current identity or node trace, establish owner facts, or verify deployed Guard equivalence.</p>
     <label className="block text-sm font-medium">Hypothetical signer<Input value={signer} onChange={e => setSigner(e.target.value)} placeholder="0x..." /></label>
     <fieldset><legend className="text-sm font-medium mb-2">Hypothetical groups</legend><div className="flex flex-wrap gap-4">{groups.map(g => <label key={g.id} className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={memberships.includes(g.id)} onChange={e => setMemberships(e.target.checked ? [...memberships, g.id] : memberships.filter(id => id !== g.id))} />{g.name}</label>)}</div></fieldset>
-    <label className="block text-sm font-medium">Hypothetical context facts<Textarea variant="code" value={context} onChange={e => setContext(e.target.value)} className="min-h-28" /></label>
-    <label className="block text-sm font-medium">Hypothetical frames<Textarea variant="code" value={frames} onChange={e => setFrames(e.target.value)} className="min-h-48" /></label>
-    <p className="text-xs text-neutral-500">Calldata is 0x hex; value is an exact decimal string. Native facts use Go Frame names, such as CodeOrg, StorageOrg, GroupClaims and CallerAddress. They are operator-supplied assumptions, never imported identity authority.</p>
+    <SourceScenarioBuilder context={context} frames={frames} organizations={selected.draft.organizations} onContext={setContext} onFrames={setFrames} />
+    <Button variant="outline" onClick={() => scenarioPicker.current?.click()}>Import scenario JSON</Button><input ref={scenarioPicker} type="file" accept=".json" className="sr-only" aria-label="Import hypothetical scenario" onChange={e => { const file = e.currentTarget.files?.[0]; e.currentTarget.value = ''; if (file) void importScenario(file) }} />
     <Button onClick={() => void exportScenario()}>Export policy scenario</Button>{exported && <p className="text-xs text-neutral-500 break-all">{exported.raw === currentRaw && exported.generation === project.generation ? 'Exported scenario' : 'Scenario or source changed; export again'}: <code>{exported.digest}</code></p>}
     <pre className="text-xs rounded-lg bg-neutral-100 p-3 whitespace-pre-wrap break-all">{`ops-v2 policy simulate --bundle ./artifact-NEW --expected-digest REVIEWED_MANIFEST_DIGEST --environment ${shell(selected.draft.environment)} --chain-id ${shell(selected.draft.chainId)} --profile ${shell(selected.draft.profile)}${selected.draft.profile === 'catalog-runtime-creation-observed/v1' ? ' --consumer delivery' : ''} --scenario ./ops-policy-scenario.json`}</pre>
     <label className="block text-sm font-medium">Selected prepared manifest digest<Input value={expectedManifest} onChange={e => setExpectedManifest(e.target.value)} placeholder="sha256:..." /></label>

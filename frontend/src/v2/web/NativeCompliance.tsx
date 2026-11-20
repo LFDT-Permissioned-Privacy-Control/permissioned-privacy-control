@@ -1,10 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import type { OperationScope } from './controller'
+import { ComplianceEventDetails, TravelRecordDetails } from './ComplianceDetails'
+import { useApprovedTokens } from './approvedTokens'
+import { ExactAmount, TokenChoice, amountInBaseUnits, useExactAmountState } from './ExactTokenAmount'
 import {
   actorID,
   address,
@@ -111,7 +114,8 @@ function ComplianceSection({
     [data, setData] = useState<ObjectValue>(),
     [items, setItems] = useState<ObjectValue[]>([]),
     [cursor, setCursor] = useState(''),
-    [source, setSource] = useState('')
+    [source, setSource] = useState(''),
+    [eventDetail, setEventDetail] = useState<{ scope: OperationScope; value: ObjectValue }>()
   const base = `/api/v2/orgs/${org}/compliance/`
   const load = async (next = '') => {
     const page = tab === 'travel-rule-records' || tab === 'events'
@@ -242,6 +246,7 @@ function ComplianceSection({
           <TravelRecords
             scope={scope}
             base={base}
+            org={org}
             items={items}
             canWrite={canWrite}
             refresh={load}
@@ -269,8 +274,10 @@ function ComplianceSection({
                 { key: 'reason', label: 'Reason' },
                 { key: 'amountWei', label: 'Exact amount' },
                 { key: 'currency', label: 'Currency' },
+                { key: 'details', label: 'Evidence', render: r => <Button size="sm" variant="outline" onClick={() => { scope.check(); setEventDetail({ scope, value: r }) }}>View details</Button> },
               ]}
             />
+            <Dialog open={eventDetail?.scope === scope} onOpenChange={open => { if (!open) setEventDetail(undefined) }}><DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>Compliance event details</DialogTitle></DialogHeader>{eventDetail?.scope === scope && <ComplianceEventDetails event={eventDetail.value} />}</DialogContent></Dialog>
             <p className="mt-3 text-xs text-neutral-500">
               A monitored allow decision is not a compliance certification.
             </p>
@@ -305,19 +312,21 @@ function Settings({ data }: { data: ObjectValue }) {
 function TravelRecords({
   scope,
   base,
+  org,
   items,
   canWrite,
   refresh,
 }: {
   scope: OperationScope
   base: string
+  org: string
   items: ObjectValue[]
   canWrite: boolean
   refresh: () => Promise<void>
 }) {
   const task = useNativeTask(scope),
     [form, setForm] = useState(false),
-    [detail, setDetail] = useState<ObjectValue>(),
+    [detail, setDetail] = useState<{ scope: OperationScope; value: ObjectValue }>(),
     [uncertain, setUncertain] = useState(false),
     [deleteTarget, setDeleteTarget] = useState<string>()
   const [actor, setActor] = useState(scope.identity.actor),
@@ -327,16 +336,19 @@ function TravelRecords({
     [institution, setInstitution] = useState(''),
     [kind, setKind] = useState('eth'),
     [token, setToken] = useState(''),
-    [beneficiary, setBeneficiary] = useState(''),
-    [amount, setAmount] = useState('')
+    [beneficiary, setBeneficiary] = useState('')
+  const catalog = useApprovedTokens(scope, org), selectedToken = catalog.tokens.find(t => t.address === token), live = useRef(true), detailOperation = useRef(0), detailAbort = useRef<AbortController>()
+  const decimals = kind === 'eth' ? 18 : selectedToken?.decimals, amountState = useExactAmountState(`${org}:${kind}:${kind === 'eth' ? 'native' : token}:${decimals ?? 'unknown'}`, decimals)
+  const { amount, mode: amountMode, setAmount, setMode: setAmountMode } = amountState
+  useEffect(() => { live.current = true; return () => { live.current = false; detailOperation.current++; detailAbort.current?.abort() } }, [])
   async function create(e: React.FormEvent) {
     e.preventDefault()
     if (uncertain) return
     await task.run(async () => {
       if (!actorID(actor) || !address(beneficiary) || (kind === 'erc20' && !address(token)))
         throw Error('Check the OPS actor and lowercase addresses.')
-      quantity(amount)
-      if (amount === '0') throw Error('Enter a positive amount in base units.')
+      const amountWei = amountInBaseUnits(amount, amountMode, kind === 'eth' ? 18 : selectedToken?.decimals)
+      if (amountWei === '0') throw Error('Enter a positive amount in base units.')
       const body = {
         originatorActorId: actor,
         originatorData: { name: originName, accountRef: originRef },
@@ -344,7 +356,7 @@ function TravelRecords({
         transferType: kind,
         ...(kind === 'erc20' ? { tokenAddress: token } : {}),
         beneficiaryAddress: beneficiary,
-        amountWei: amount,
+        amountWei,
       }
       setUncertain(true)
       try {
@@ -443,11 +455,14 @@ function TravelRecords({
                   disabled={task.busy}
                   onClick={() =>
                     void task.run(async () => {
+                      const operation = ++detailOperation.current
+                      detailAbort.current?.abort()
+                      const abort = new AbortController(); detailAbort.current = abort
                       const v = record(
-                        await scope.request(base + 'travel-rule-records/' + text(r.id)),
+                        await scope.request(base + 'travel-rule-records/' + text(r.id), { signal: abort.signal }),
                       )
                       scope.check()
-                      setDetail(v)
+                      if (live.current && operation === detailOperation.current) setDetail({ scope, value: v })
                     })
                   }
                 >
@@ -492,7 +507,7 @@ function TravelRecords({
           if (!task.busy) setForm(open)
         }}
       >
-        <DialogContent>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Create travel-rule record</DialogTitle>
           </DialogHeader>
@@ -529,7 +544,7 @@ function TravelRecords({
               ]}
             />
             {kind === 'erc20' && (
-              <Field label="Token address" value={token} onChange={setToken} required />
+              <TokenChoice tokens={catalog.tokens} token={token} onChange={setToken} />
             )}
             <Field
               label="Beneficiary wallet"
@@ -537,13 +552,8 @@ function TravelRecords({
               onChange={setBeneficiary}
               required
             />
-            <Field
-              label="Amount in base units"
-              value={amount}
-              onChange={setAmount}
-              required
-              hint="Exact integer, for example 1000000000000000000 for 1 ETH. The server applies the approved valuation."
-            />
+            {catalog.error && <p className="text-xs text-neutral-500">{catalog.error}</p>}
+            <ExactAmount amount={amount} mode={amountMode} decimals={kind === 'eth' ? 18 : selectedToken?.decimals} unit={kind === 'eth' ? 'Native currency' : selectedToken?.symbol ?? 'Token base units'} onAmount={setAmount} onMode={setAmountMode} notice={amountState.notice} disabled={task.busy} />
             {uncertain && (
               <p role="status" className="text-sm text-warning-dark">
                 This request may have created a record. Close this form and refresh the list to
@@ -557,37 +567,9 @@ function TravelRecords({
           </form>
         </DialogContent>
       </Dialog>
-      <Dialog open={!!detail} onOpenChange={() => setDetail(undefined)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Travel-rule record details</DialogTitle>
-          </DialogHeader>
-          {detail && (
-            <div className="space-y-3">
-              <p className="break-all text-sm font-mono">{text(detail.id)}</p>
-              <p className="text-xs text-neutral-500">
-                Personal data is loaded only for this explicit detail view.
-              </p>
-              {[
-                ['Originator', detail.originatorData],
-                ['Beneficiary', detail.beneficiaryData],
-              ].map(([label, value]) => (
-                <section key={String(label)}>
-                  <h4 className="font-medium">{String(label)}</h4>
-                  <dl>
-                    {Object.entries(record(value)).map(([key, v]) => (
-                      <div key={key} className="flex gap-3 py-1 text-sm">
-                        <dt className="text-neutral-500">{key}</dt>
-                        <dd className="break-words">
-                          {typeof v === 'string' ? v : JSON.stringify(v)}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                </section>
-              ))}
-            </div>
-          )}
+      <Dialog open={detail?.scope === scope} onOpenChange={() => { detailOperation.current++; detailAbort.current?.abort(); setDetail(undefined) }}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>Travel-rule record details</DialogTitle></DialogHeader>
+          {detail?.scope === scope && <TravelRecordDetails detail={detail.value} tokens={catalog.tokens} />}
         </DialogContent>
       </Dialog>
     </div>

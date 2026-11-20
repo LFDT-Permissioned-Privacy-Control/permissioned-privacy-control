@@ -1,0 +1,768 @@
+{
+  "producer": "Actual existing ops-v2 policy abi tool, no mocked inspector",
+  "binarySHA256": "bd5e9a1e947c2e4e30495bef1f0865541346217a58991d16cf6d310233da54f3",
+  "fixtures": [
+    {
+      "name": "common",
+      "automaticSubset": true,
+      "input": [
+        {
+          "type": "function",
+          "name": "transfer",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "to",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint256"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "ok",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "type": "function",
+          "name": "transfer",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "to",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint256"
+            },
+            {
+              "name": "memo",
+              "type": "bytes32"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "ok",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "type": "function",
+          "name": "batch",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "items",
+              "type": "tuple[]",
+              "components": [
+                {
+                  "name": "who",
+                  "type": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256"
+                }
+              ]
+            }
+          ],
+          "outputs": []
+        },
+        {
+          "type": "event",
+          "name": "Transfer",
+          "anonymous": false,
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      ],
+      "inputText": "[\n  {\n    \"type\": \"function\",\n    \"name\": \"transfer\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"to\",\n        \"type\": \"address\"\n      },\n      {\n        \"name\": \"amount\",\n        \"type\": \"uint256\"\n      }\n    ],\n    \"outputs\": [\n      {\n        \"name\": \"ok\",\n        \"type\": \"bool\"\n      }\n    ]\n  },\n  {\n    \"type\": \"function\",\n    \"name\": \"transfer\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"to\",\n        \"type\": \"address\"\n      },\n      {\n        \"name\": \"amount\",\n        \"type\": \"uint256\"\n      },\n      {\n        \"name\": \"memo\",\n        \"type\": \"bytes32\"\n      }\n    ],\n    \"outputs\": [\n      {\n        \"name\": \"ok\",\n        \"type\": \"bool\"\n      }\n    ]\n  },\n  {\n    \"type\": \"function\",\n    \"name\": \"batch\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"items\",\n        \"type\": \"tuple[]\",\n        \"components\": [\n          {\n            \"name\": \"who\",\n            \"type\": \"address\"\n          },\n          {\n            \"name\": \"value\",\n            \"type\": \"uint256\"\n          }\n        ]\n      }\n    ],\n    \"outputs\": []\n  },\n  {\n    \"type\": \"event\",\n    \"name\": \"Transfer\",\n    \"anonymous\": false,\n    \"inputs\": [\n      {\n        \"name\": \"from\",\n        \"type\": \"address\",\n        \"indexed\": true\n      },\n      {\n        \"name\": \"to\",\n        \"type\": \"address\",\n        \"indexed\": true\n      },\n      {\n        \"name\": \"value\",\n        \"type\": \"uint256\",\n        \"indexed\": false\n      }\n    ]\n  }\n]\n",
+      "report": {
+        "fileByteDigest": "sha256:fd76fa4497663cfbe5a438115c70e52d58fa87320c54f7a33ecb92c4b1eb000d",
+        "canonicalByteDigest": "sha256:4c47ca759eca2c02db1ede7c958b254240cd155934c072705e2aa3ca5b440a8c",
+        "abiDigest": "4c47ca759eca2c02db1ede7c958b254240cd155934c072705e2aa3ca5b440a8c",
+        "functions": [
+          {
+            "signature": "batch((address,uint256)[])",
+            "selector": "0xf4af1f8e"
+          },
+          {
+            "signature": "transfer(address,uint256)",
+            "selector": "0xa9059cbb"
+          },
+          {
+            "signature": "transfer(address,uint256,bytes32)",
+            "selector": "0x57cfeeee"
+          }
+        ],
+        "events": [
+          {
+            "signature": "Transfer(address,address,uint256)",
+            "anonymous": false,
+            "signatureHash": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topicRuleEligible": true
+          }
+        ],
+        "deploymentVerified": false
+      }
+    },
+    {
+      "name": "escaped",
+      "automaticSubset": true,
+      "input": [
+        {
+          "type": "function",
+          "name": "transfer",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "to",
+              "type": "address",
+              "internalType": "address <>&  "
+            },
+            {
+              "name": "amount",
+              "type": "uint256"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "ok",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "type": "function",
+          "name": "transfer",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "to",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint256"
+            },
+            {
+              "name": "memo",
+              "type": "bytes32"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "ok",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "type": "function",
+          "name": "batch",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "items",
+              "type": "tuple[]",
+              "components": [
+                {
+                  "name": "who",
+                  "type": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256"
+                }
+              ]
+            }
+          ],
+          "outputs": []
+        },
+        {
+          "type": "event",
+          "name": "Transfer",
+          "anonymous": false,
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      ],
+      "inputText": "[\n  {\n    \"type\": \"function\",\n    \"name\": \"transfer\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"to\",\n        \"type\": \"address\",\n        \"internalType\": \"address <>&  \"\n      },\n      {\n        \"name\": \"amount\",\n        \"type\": \"uint256\"\n      }\n    ],\n    \"outputs\": [\n      {\n        \"name\": \"ok\",\n        \"type\": \"bool\"\n      }\n    ]\n  },\n  {\n    \"type\": \"function\",\n    \"name\": \"transfer\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"to\",\n        \"type\": \"address\"\n      },\n      {\n        \"name\": \"amount\",\n        \"type\": \"uint256\"\n      },\n      {\n        \"name\": \"memo\",\n        \"type\": \"bytes32\"\n      }\n    ],\n    \"outputs\": [\n      {\n        \"name\": \"ok\",\n        \"type\": \"bool\"\n      }\n    ]\n  },\n  {\n    \"type\": \"function\",\n    \"name\": \"batch\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"items\",\n        \"type\": \"tuple[]\",\n        \"components\": [\n          {\n            \"name\": \"who\",\n            \"type\": \"address\"\n          },\n          {\n            \"name\": \"value\",\n            \"type\": \"uint256\"\n          }\n        ]\n      }\n    ],\n    \"outputs\": []\n  },\n  {\n    \"type\": \"event\",\n    \"name\": \"Transfer\",\n    \"anonymous\": false,\n    \"inputs\": [\n      {\n        \"name\": \"from\",\n        \"type\": \"address\",\n        \"indexed\": true\n      },\n      {\n        \"name\": \"to\",\n        \"type\": \"address\",\n        \"indexed\": true\n      },\n      {\n        \"name\": \"value\",\n        \"type\": \"uint256\",\n        \"indexed\": false\n      }\n    ]\n  }\n]\n",
+      "report": {
+        "fileByteDigest": "sha256:db2c12209181dcdffc664d3088f952b8507e25645c1e32ca44f26302eb114906",
+        "canonicalByteDigest": "sha256:580ff835c776ca73cbdad7fcfb008ae94a4b17c27c6624e2edcccd3e84f91608",
+        "abiDigest": "580ff835c776ca73cbdad7fcfb008ae94a4b17c27c6624e2edcccd3e84f91608",
+        "functions": [
+          {
+            "signature": "batch((address,uint256)[])",
+            "selector": "0xf4af1f8e"
+          },
+          {
+            "signature": "transfer(address,uint256)",
+            "selector": "0xa9059cbb"
+          },
+          {
+            "signature": "transfer(address,uint256,bytes32)",
+            "selector": "0x57cfeeee"
+          }
+        ],
+        "events": [
+          {
+            "signature": "Transfer(address,address,uint256)",
+            "anonymous": false,
+            "signatureHash": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topicRuleEligible": true
+          }
+        ],
+        "deploymentVerified": false
+      }
+    },
+    {
+      "name": "reversed",
+      "automaticSubset": true,
+      "input": [
+        {
+          "outputs": [
+            {
+              "type": "bool",
+              "name": "ok"
+            }
+          ],
+          "inputs": [
+            {
+              "internalType": "address <>&  ",
+              "type": "address",
+              "name": "to"
+            },
+            {
+              "type": "uint256",
+              "name": "amount"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "name": "transfer",
+          "type": "function"
+        },
+        {
+          "outputs": [
+            {
+              "type": "bool",
+              "name": "ok"
+            }
+          ],
+          "inputs": [
+            {
+              "type": "address",
+              "name": "to"
+            },
+            {
+              "type": "uint256",
+              "name": "amount"
+            },
+            {
+              "type": "bytes32",
+              "name": "memo"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "name": "transfer",
+          "type": "function"
+        },
+        {
+          "outputs": [],
+          "inputs": [
+            {
+              "components": [
+                {
+                  "type": "address",
+                  "name": "who"
+                },
+                {
+                  "type": "uint256",
+                  "name": "value"
+                }
+              ],
+              "type": "tuple[]",
+              "name": "items"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "name": "batch",
+          "type": "function"
+        },
+        {
+          "inputs": [
+            {
+              "indexed": true,
+              "type": "address",
+              "name": "from"
+            },
+            {
+              "indexed": true,
+              "type": "address",
+              "name": "to"
+            },
+            {
+              "indexed": false,
+              "type": "uint256",
+              "name": "value"
+            }
+          ],
+          "anonymous": false,
+          "name": "Transfer",
+          "type": "event"
+        }
+      ],
+      "inputText": "[\n  {\n    \"outputs\": [\n      {\n        \"type\": \"bool\",\n        \"name\": \"ok\"\n      }\n    ],\n    \"inputs\": [\n      {\n        \"internalType\": \"address <>&  \",\n        \"type\": \"address\",\n        \"name\": \"to\"\n      },\n      {\n        \"type\": \"uint256\",\n        \"name\": \"amount\"\n      }\n    ],\n    \"stateMutability\": \"nonpayable\",\n    \"name\": \"transfer\",\n    \"type\": \"function\"\n  },\n  {\n    \"outputs\": [\n      {\n        \"type\": \"bool\",\n        \"name\": \"ok\"\n      }\n    ],\n    \"inputs\": [\n      {\n        \"type\": \"address\",\n        \"name\": \"to\"\n      },\n      {\n        \"type\": \"uint256\",\n        \"name\": \"amount\"\n      },\n      {\n        \"type\": \"bytes32\",\n        \"name\": \"memo\"\n      }\n    ],\n    \"stateMutability\": \"nonpayable\",\n    \"name\": \"transfer\",\n    \"type\": \"function\"\n  },\n  {\n    \"outputs\": [],\n    \"inputs\": [\n      {\n        \"components\": [\n          {\n            \"type\": \"address\",\n            \"name\": \"who\"\n          },\n          {\n            \"type\": \"uint256\",\n            \"name\": \"value\"\n          }\n        ],\n        \"type\": \"tuple[]\",\n        \"name\": \"items\"\n      }\n    ],\n    \"stateMutability\": \"nonpayable\",\n    \"name\": \"batch\",\n    \"type\": \"function\"\n  },\n  {\n    \"inputs\": [\n      {\n        \"indexed\": true,\n        \"type\": \"address\",\n        \"name\": \"from\"\n      },\n      {\n        \"indexed\": true,\n        \"type\": \"address\",\n        \"name\": \"to\"\n      },\n      {\n        \"indexed\": false,\n        \"type\": \"uint256\",\n        \"name\": \"value\"\n      }\n    ],\n    \"anonymous\": false,\n    \"name\": \"Transfer\",\n    \"type\": \"event\"\n  }\n]\n",
+      "report": {
+        "fileByteDigest": "sha256:ba5a8d7f377b425a9d391038e995fd93d6226bda46d241b48ba03848c809ee6a",
+        "canonicalByteDigest": "sha256:580ff835c776ca73cbdad7fcfb008ae94a4b17c27c6624e2edcccd3e84f91608",
+        "abiDigest": "580ff835c776ca73cbdad7fcfb008ae94a4b17c27c6624e2edcccd3e84f91608",
+        "functions": [
+          {
+            "signature": "batch((address,uint256)[])",
+            "selector": "0xf4af1f8e"
+          },
+          {
+            "signature": "transfer(address,uint256)",
+            "selector": "0xa9059cbb"
+          },
+          {
+            "signature": "transfer(address,uint256,bytes32)",
+            "selector": "0x57cfeeee"
+          }
+        ],
+        "events": [
+          {
+            "signature": "Transfer(address,address,uint256)",
+            "anonymous": false,
+            "signatureHash": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topicRuleEligible": true
+          }
+        ],
+        "deploymentVerified": false
+      }
+    },
+    {
+      "name": "numeric",
+      "automaticSubset": false,
+      "input": [
+        {
+          "type": "function",
+          "name": "transfer",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "to",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint256"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "ok",
+              "type": "bool"
+            }
+          ],
+          "gas": 42
+        },
+        {
+          "type": "function",
+          "name": "transfer",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "to",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint256"
+            },
+            {
+              "name": "memo",
+              "type": "bytes32"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "ok",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "type": "function",
+          "name": "batch",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "items",
+              "type": "tuple[]",
+              "components": [
+                {
+                  "name": "who",
+                  "type": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256"
+                }
+              ]
+            }
+          ],
+          "outputs": []
+        },
+        {
+          "type": "event",
+          "name": "Transfer",
+          "anonymous": false,
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      ],
+      "inputText": "[\n  {\n    \"type\": \"function\",\n    \"name\": \"transfer\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"to\",\n        \"type\": \"address\"\n      },\n      {\n        \"name\": \"amount\",\n        \"type\": \"uint256\"\n      }\n    ],\n    \"outputs\": [\n      {\n        \"name\": \"ok\",\n        \"type\": \"bool\"\n      }\n    ],\n    \"gas\": 42\n  },\n  {\n    \"type\": \"function\",\n    \"name\": \"transfer\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"to\",\n        \"type\": \"address\"\n      },\n      {\n        \"name\": \"amount\",\n        \"type\": \"uint256\"\n      },\n      {\n        \"name\": \"memo\",\n        \"type\": \"bytes32\"\n      }\n    ],\n    \"outputs\": [\n      {\n        \"name\": \"ok\",\n        \"type\": \"bool\"\n      }\n    ]\n  },\n  {\n    \"type\": \"function\",\n    \"name\": \"batch\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"items\",\n        \"type\": \"tuple[]\",\n        \"components\": [\n          {\n            \"name\": \"who\",\n            \"type\": \"address\"\n          },\n          {\n            \"name\": \"value\",\n            \"type\": \"uint256\"\n          }\n        ]\n      }\n    ],\n    \"outputs\": []\n  },\n  {\n    \"type\": \"event\",\n    \"name\": \"Transfer\",\n    \"anonymous\": false,\n    \"inputs\": [\n      {\n        \"name\": \"from\",\n        \"type\": \"address\",\n        \"indexed\": true\n      },\n      {\n        \"name\": \"to\",\n        \"type\": \"address\",\n        \"indexed\": true\n      },\n      {\n        \"name\": \"value\",\n        \"type\": \"uint256\",\n        \"indexed\": false\n      }\n    ]\n  }\n]\n",
+      "report": {
+        "fileByteDigest": "sha256:67a94bf18e6a309a4d4cee7932601a9a5c63add35ff910cd7dcf6de18daf0bc8",
+        "canonicalByteDigest": "sha256:74a878702d45af6bfc282840b49b8e8bcd0ff11b8012a06110f19acf01a9cba6",
+        "abiDigest": "74a878702d45af6bfc282840b49b8e8bcd0ff11b8012a06110f19acf01a9cba6",
+        "functions": [
+          {
+            "signature": "batch((address,uint256)[])",
+            "selector": "0xf4af1f8e"
+          },
+          {
+            "signature": "transfer(address,uint256)",
+            "selector": "0xa9059cbb"
+          },
+          {
+            "signature": "transfer(address,uint256,bytes32)",
+            "selector": "0x57cfeeee"
+          }
+        ],
+        "events": [
+          {
+            "signature": "Transfer(address,address,uint256)",
+            "anonymous": false,
+            "signatureHash": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topicRuleEligible": true
+          }
+        ],
+        "deploymentVerified": false
+      }
+    },
+    {
+      "name": "custom",
+      "automaticSubset": false,
+      "input": [
+        {
+          "type": "function",
+          "name": "transfer",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "to",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint256"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "ok",
+              "type": "bool"
+            }
+          ],
+          "customHint": "unrecognized extension"
+        },
+        {
+          "type": "function",
+          "name": "transfer",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "to",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint256"
+            },
+            {
+              "name": "memo",
+              "type": "bytes32"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "ok",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "type": "function",
+          "name": "batch",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "items",
+              "type": "tuple[]",
+              "components": [
+                {
+                  "name": "who",
+                  "type": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256"
+                }
+              ]
+            }
+          ],
+          "outputs": []
+        },
+        {
+          "type": "event",
+          "name": "Transfer",
+          "anonymous": false,
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      ],
+      "inputText": "[\n  {\n    \"type\": \"function\",\n    \"name\": \"transfer\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"to\",\n        \"type\": \"address\"\n      },\n      {\n        \"name\": \"amount\",\n        \"type\": \"uint256\"\n      }\n    ],\n    \"outputs\": [\n      {\n        \"name\": \"ok\",\n        \"type\": \"bool\"\n      }\n    ],\n    \"customHint\": \"unrecognized extension\"\n  },\n  {\n    \"type\": \"function\",\n    \"name\": \"transfer\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"to\",\n        \"type\": \"address\"\n      },\n      {\n        \"name\": \"amount\",\n        \"type\": \"uint256\"\n      },\n      {\n        \"name\": \"memo\",\n        \"type\": \"bytes32\"\n      }\n    ],\n    \"outputs\": [\n      {\n        \"name\": \"ok\",\n        \"type\": \"bool\"\n      }\n    ]\n  },\n  {\n    \"type\": \"function\",\n    \"name\": \"batch\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"items\",\n        \"type\": \"tuple[]\",\n        \"components\": [\n          {\n            \"name\": \"who\",\n            \"type\": \"address\"\n          },\n          {\n            \"name\": \"value\",\n            \"type\": \"uint256\"\n          }\n        ]\n      }\n    ],\n    \"outputs\": []\n  },\n  {\n    \"type\": \"event\",\n    \"name\": \"Transfer\",\n    \"anonymous\": false,\n    \"inputs\": [\n      {\n        \"name\": \"from\",\n        \"type\": \"address\",\n        \"indexed\": true\n      },\n      {\n        \"name\": \"to\",\n        \"type\": \"address\",\n        \"indexed\": true\n      },\n      {\n        \"name\": \"value\",\n        \"type\": \"uint256\",\n        \"indexed\": false\n      }\n    ]\n  }\n]\n",
+      "report": {
+        "fileByteDigest": "sha256:c8051f6f89fc166be7ddfb1a7a5430196ce0e240fe731e52e997304c498fedea",
+        "canonicalByteDigest": "sha256:6fa725e194b61532b2f0c287680a7a7f693475369be1e807b536d6ae07fc1153",
+        "abiDigest": "6fa725e194b61532b2f0c287680a7a7f693475369be1e807b536d6ae07fc1153",
+        "functions": [
+          {
+            "signature": "batch((address,uint256)[])",
+            "selector": "0xf4af1f8e"
+          },
+          {
+            "signature": "transfer(address,uint256)",
+            "selector": "0xa9059cbb"
+          },
+          {
+            "signature": "transfer(address,uint256,bytes32)",
+            "selector": "0x57cfeeee"
+          }
+        ],
+        "events": [
+          {
+            "signature": "Transfer(address,address,uint256)",
+            "anonymous": false,
+            "signatureHash": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topicRuleEligible": true
+          }
+        ],
+        "deploymentVerified": false
+      }
+    },
+    {
+      "name": "lexical",
+      "automaticSubset": false,
+      "input": [
+        {
+          "type": "function",
+          "name": "transfer",
+          "stateMutability": "nonpayable",
+          "gas": 1.0,
+          "xRate": 1000.0,
+          "inputs": [
+            {
+              "name": "to",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint256"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "ok",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "type": "function",
+          "name": "transfer",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "to",
+              "type": "address"
+            },
+            {
+              "name": "amount",
+              "type": "uint256"
+            },
+            {
+              "name": "memo",
+              "type": "bytes32"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "ok",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "type": "function",
+          "name": "batch",
+          "stateMutability": "nonpayable",
+          "inputs": [
+            {
+              "name": "items",
+              "type": "tuple[]",
+              "components": [
+                {
+                  "name": "who",
+                  "type": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256"
+                }
+              ]
+            }
+          ],
+          "outputs": []
+        },
+        {
+          "type": "event",
+          "name": "Transfer",
+          "anonymous": false,
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      ],
+      "inputText": "[\n  {\n    \"type\": \"function\",\n    \"name\": \"transfer\",\n    \"stateMutability\": \"nonpayable\",\n    \"gas\": 1.0,\n    \"xRate\": 1e+3,\n    \"inputs\": [\n      {\n        \"name\": \"to\",\n        \"type\": \"address\"\n      },\n      {\n        \"name\": \"amount\",\n        \"type\": \"uint256\"\n      }\n    ],\n    \"outputs\": [\n      {\n        \"name\": \"ok\",\n        \"type\": \"bool\"\n      }\n    ]\n  },\n  {\n    \"type\": \"function\",\n    \"name\": \"transfer\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"to\",\n        \"type\": \"address\"\n      },\n      {\n        \"name\": \"amount\",\n        \"type\": \"uint256\"\n      },\n      {\n        \"name\": \"memo\",\n        \"type\": \"bytes32\"\n      }\n    ],\n    \"outputs\": [\n      {\n        \"name\": \"ok\",\n        \"type\": \"bool\"\n      }\n    ]\n  },\n  {\n    \"type\": \"function\",\n    \"name\": \"batch\",\n    \"stateMutability\": \"nonpayable\",\n    \"inputs\": [\n      {\n        \"name\": \"items\",\n        \"type\": \"tuple[]\",\n        \"components\": [\n          {\n            \"name\": \"who\",\n            \"type\": \"address\"\n          },\n          {\n            \"name\": \"value\",\n            \"type\": \"uint256\"\n          }\n        ]\n      }\n    ],\n    \"outputs\": []\n  },\n  {\n    \"type\": \"event\",\n    \"name\": \"Transfer\",\n    \"anonymous\": false,\n    \"inputs\": [\n      {\n        \"name\": \"from\",\n        \"type\": \"address\",\n        \"indexed\": true\n      },\n      {\n        \"name\": \"to\",\n        \"type\": \"address\",\n        \"indexed\": true\n      },\n      {\n        \"name\": \"value\",\n        \"type\": \"uint256\",\n        \"indexed\": false\n      }\n    ]\n  }\n]\n",
+      "report": {
+        "fileByteDigest": "sha256:13d2fa92c57f199c9b1d67b46ca415f0df745d85633744fa17ed368e9974c963",
+        "canonicalByteDigest": "sha256:ffbf84f6952760507b460048297b95854aebe08e649ba94f732ece9af53111e9",
+        "abiDigest": "ffbf84f6952760507b460048297b95854aebe08e649ba94f732ece9af53111e9",
+        "functions": [
+          {
+            "signature": "batch((address,uint256)[])",
+            "selector": "0xf4af1f8e"
+          },
+          {
+            "signature": "transfer(address,uint256)",
+            "selector": "0xa9059cbb"
+          },
+          {
+            "signature": "transfer(address,uint256,bytes32)",
+            "selector": "0x57cfeeee"
+          }
+        ],
+        "events": [
+          {
+            "signature": "Transfer(address,address,uint256)",
+            "anonymous": false,
+            "signatureHash": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "topicRuleEligible": true
+          }
+        ],
+        "deploymentVerified": false
+      }
+    }
+  ]
+}

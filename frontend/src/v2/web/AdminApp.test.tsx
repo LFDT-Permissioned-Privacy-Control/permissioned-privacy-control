@@ -259,15 +259,14 @@ describe('native account with the established Admin presentation', () => {
     await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Cancel'}))
     expect(screen.getByText('Local draft')).toBeInTheDocument()
   })
-  it('recovers invalid unsaved record JSON and permits source export only after those fields are saved or canceled', async () => {
+  it('recovers invalid unsaved ABI replacement JSON and permits source export only after those fields are saved or canceled', async () => {
     const page = harness(); await importFiles(await fullPackageFiles()); await userEvent.click(screen.getByRole('button', {name: 'Edit local proposal'}))
     await userEvent.click(within(screen.getByRole('table')).getByText('Imported Bank'))
-    await userEvent.click(screen.getByRole('tab', {name: 'Contracts'})); await userEvent.click(screen.getByRole('button', {name: 'Add contract'}))
-    fireEvent.change(screen.getByLabelText('Name'), {target: {value: 'New private record'}})
-    fireEvent.change(screen.getByLabelText('Public ABI'), {target: {value: '[ unfinished JSON '}})
+    await userEvent.click(screen.getByRole('tab', {name: 'Contracts'})); await userEvent.click(screen.getByRole('button', {name: /ABI ·/}))
+    await userEvent.click(screen.getByText('Paste or inspect ABI JSON'))
+    fireEvent.change(screen.getByLabelText('Public ABI JSON'), {target: {value: '[ unfinished JSON '}})
     page.transition(proofRequired()); page.transition(selected)
-    expect(await screen.findByLabelText('Name')).toHaveValue('New private record')
-    expect(screen.getByLabelText('Public ABI')).toHaveValue('[ unfinished JSON ')
+    expect(await screen.findByLabelText('Public ABI JSON')).toHaveValue('[ unfinished JSON ')
     // Browser history can leave a modal's route; unfinished fields stay owned,
     // but they cannot be silently omitted from an apparent complete export.
     fireEvent.mouseDown(screen.getByTestId('tab-configuration'), {button: 0, ctrlKey: false})
@@ -279,7 +278,7 @@ describe('native account with the established Admin presentation', () => {
     expect(page.mock.logout).not.toHaveBeenCalled()
     await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Cancel'}))
     await userEvent.click(screen.getByRole('tab', {name: 'Contracts'}))
-    expect(await screen.findByLabelText('Public ABI')).toHaveValue('[ unfinished JSON ')
+    expect(await screen.findByLabelText('Public ABI JSON')).toHaveValue('[ unfinished JSON ')
     await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Cancel'}))
     await userEvent.click(screen.getByRole('tab', {name: 'Configuration'}))
     expect(screen.getByRole('button', {name: 'Export complete source package'})).toBeEnabled()
@@ -287,16 +286,19 @@ describe('native account with the established Admin presentation', () => {
   it('recovers a nested execution-rule form with exact unfinished decimal and JSON strings', async () => {
     const page = harness(); await importFiles(await fullPackageFiles()); await userEvent.click(screen.getByRole('button', {name: 'Edit local proposal'}))
     await userEvent.click(within(screen.getByRole('table')).getByText('Imported Bank'))
-    await userEvent.click(screen.getByRole('tab', {name: 'Execution Policy'})); await userEvent.click(screen.getByRole('button', {name: 'Frame rules'}))
+    await userEvent.click(screen.getByRole('tab', {name: 'Execution Policy'}))
     await userEvent.click(screen.getByRole('button', {name: 'Add frame rule'}))
-    fireEvent.change(screen.getByLabelText('Maximum native value (exact decimal wei)'), {target: {value: '90071992547409931234567890'}})
-    fireEvent.change(screen.getByLabelText('Argument constraints'), {target: {value: '[unfinished'}})
+    fireEvent.change(screen.getByLabelText('Maximum native value (wei)'), {target: {value: '90071992547409931234567890'}})
     page.transition(proofRequired()); page.transition(selected)
-    expect(await screen.findByLabelText('Maximum native value (exact decimal wei)')).toHaveValue('90071992547409931234567890')
-    expect(screen.getByLabelText('Argument constraints')).toHaveValue('[unfinished')
+    expect(await screen.findByLabelText('Maximum native value (wei)')).toHaveValue('90071992547409931234567890')
+    await userEvent.click(screen.getByRole('button', {name: 'Advanced native JSON'}))
+    fireEvent.change(screen.getByLabelText('Advanced frame rule JSON'), {target: {value: '[unfinished'}})
+    page.transition(proofRequired()); page.transition(selected)
+    expect(await screen.findByLabelText('Advanced frame rule JSON')).toHaveValue('[unfinished')
+    expect(screen.queryByLabelText('Maximum native value (wei)')).not.toBeInTheDocument()
     const dialogs = screen.getAllByRole('dialog')
     await userEvent.click(within(dialogs.at(-1)!).getByRole('button', {name: 'Cancel'}))
-    expect(screen.queryByLabelText('Argument constraints')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Advanced frame rule JSON')).not.toBeInTheDocument()
     expect(screen.getByText('Local draft')).toBeInTheDocument()
   })
   it('recovers guided read-grant choices and an invalid custom constraint through proof renewal', async () => {
@@ -369,8 +371,8 @@ describe('native account with the established Admin presentation', () => {
         }
       }
       if (kind === 'frame') {
-        tab = 'Execution Policy'; field = 'Maximum native value (exact decimal wei)'; pending = '90071992547409931234567890'
-        await userEvent.click(screen.getByRole('tab', {name: tab})); await userEvent.click(screen.getByRole('button', {name: 'Frame rules'})); await userEvent.click(screen.getByRole('button', {name: 'Add frame rule'}))
+        tab = 'Execution Policy'; field = 'Maximum native value (wei)'; pending = '90071992547409931234567890'
+        await userEvent.click(screen.getByRole('tab', {name: tab})); await userEvent.click(screen.getByRole('button', {name: 'Add frame rule'}))
       }
     }
     fireEvent.change(screen.getByLabelText(field), {target: {value: pending}})
@@ -397,8 +399,8 @@ describe('native account with the established Admin presentation', () => {
       await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Close'}))
     }
     if (kind === 'frame') {
-      await userEvent.click(screen.getByRole('button', {name: 'Frame rules'}))
-      expect(screen.getByRole('dialog')).toHaveTextContent('Execution frame rules')
+      await userEvent.click(screen.getByRole('button', {name: 'Inspect binding'}))
+      expect(screen.getByRole('dialog')).toHaveTextContent('Native execution inspection')
       expect(screen.queryByRole('button', {name: 'Add frame rule'})).not.toBeInTheDocument()
       await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Close'}))
     }

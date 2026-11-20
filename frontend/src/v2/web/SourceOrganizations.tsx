@@ -6,11 +6,10 @@ import { GroupCards } from '../../components/rbac/GroupCards'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
 import { Textarea } from '../../components/ui/textarea'
-import { Badge } from '../../components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import { SourceAuthoringScope } from './SourceAuthoringScope'
 import { useAuthoringState, useClearAuthoring } from './sourceAuthoring'
-import { METHOD_SECTIONS } from '../../types/rbac'
+import { SourcePermissionChoices } from './SourcePermissions'
 import type { DraftGroup } from './workspace'
 import { createGroup, createOrganization, documentFor, groupsOf, referenceFiles, removeGroup, removeOrganization, rootOf, updateGroup, updateOrganization, type SourceProject } from './sourceProject'
 
@@ -58,8 +57,7 @@ export function SourceOrganizations({ project, root, organization, groupsPage, e
         onChange(updateGroup(next, root, org.id, id, value)); close()
       }} /></SourceAuthoringScope></SourceAuthoringScope>}
       {modal?.kind === 'inspect' && <div className="space-y-4"><p className="text-sm text-neutral-500">Declared source permissions; effective access also depends on verified current claims and contract/execution rules.</p><p>{modal.group.description}</p>
-        <div><h4 className="text-sm font-medium mb-2">RPC methods</h4><div className="flex flex-wrap gap-2">{modal.group.allowedMethods.map(m => <Badge key={m} variant="outline" className="font-mono">{m}</Badge>)}</div></div>
-        <div><h4 className="text-sm font-medium mb-2">Claims</h4><div className="flex flex-wrap gap-2">{modal.group.claims.map(c => <Badge key={c} variant="outline">{c}</Badge>)}</div></div>
+        <SourcePermissionChoices methods={modal.group.allowedMethods} claims={modal.group.claims} isAdmin={modal.group.isOrgAdmin} />
       </div>}
       {deleting && <div className="space-y-4"><p className="text-sm">This removes only the selected organization/group and its own documents. Other policy references are preserved for review.</p>
         {!!dependencies.length && <div className="rounded-lg bg-warning-light p-3 text-sm text-warning-dark"><p>Review these files for dependent references:</p><ul className="list-disc ml-5">{dependencies.map(p => <li key={p}>{p}</li>)}</ul><p className="mt-2">The Go checker will reject any unresolved references.</p></div>}
@@ -80,14 +78,15 @@ function GroupDraftForm({ value, onSave, onClose }: { value?: DraftGroup; onSave
   const [role, setRole] = useAuthoringState('role', value?.isOrgAdmin ? 'admin' : value?.isOrgReadonlyAdmin ? 'readonly' : 'member', { draft: true, base: value })
   const [methods, setMethods] = useAuthoringState<string[]>('methods', value?.allowedMethods ?? [], { draft: true, base: value }), [extra, setExtra] = useAuthoringState('extra-methods', '', { draft: true, base: value }), [claims, setClaims] = useAuthoringState<string[]>('claims', value?.claims ?? [], { draft: true, base: value })
   const [verboseErrors, setVerbose] = useAuthoringState('verbose', value?.verboseErrors ?? false, { draft: true, base: value }), [credential, setCredential] = useAuthoringState('credential-reference', value?.rpcCredential?.fromEnv ?? '', { draft: true, base: value }), [error, setError] = useState<string | null>(null)
-  const toggle = (items: string[], item: string) => items.includes(item) ? items.filter(i => i !== item) : [...items, item]
   function submit(event: FormEvent) {
     event.preventDefault()
     try {
-      const allowedMethods = [...new Set([...methods, ...extra.split(/[\s,]+/).filter(Boolean)])].sort()
+      const additional = extra.split(/[\s,]+/).filter(Boolean)
+      if (additional.some(m => !/^[a-zA-Z][a-zA-Z0-9]*_[a-zA-Z][a-zA-Z0-9_]*$/.test(m))) throw Error('Additional methods must be exact method names, without wildcards.')
+      const allowedMethods = [...new Set([...methods, ...additional])].sort()
       if (credential && !/^[A-Z][A-Z0-9_]*$/.test(credential)) throw Error('Use an environment variable reference, never a credential value.')
       onSave({ name: name.trim(), slug: slug.trim(), description, isOrgAdmin: role === 'admin', isOrgReadonlyAdmin: role === 'readonly', allowedMethods, claims: role === 'admin' ? [] : claims, verboseErrors,
-        rpcCredential: credential ? { fromEnv: credential } : undefined })
+        rpcCredential: credential ? { ...value?.rpcCredential, fromEnv: credential } : undefined })
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not update this draft.') }
   }
   return <form onSubmit={submit} className="space-y-5">
@@ -96,11 +95,8 @@ function GroupDraftForm({ value, onSave, onClose }: { value?: DraftGroup; onSave
     <label className="block text-sm font-medium">Slug<Input required value={slug} onChange={e => setSlug(e.target.value)} pattern="[a-z0-9]+([_-][a-z0-9]+)*" /></label>
     <label className="block text-sm font-medium">Description<Textarea value={description} onChange={e => setDescription(e.target.value)} /></label>
     <label className="block text-sm font-medium">Organization role<select className="mt-1 block w-full rounded-lg border border-neutral-300 p-2" value={role} onChange={e => setRole(e.target.value)}><option value="member">Member</option><option value="admin">Organization admin</option><option value="readonly">Read-only organization admin</option></select></label>
-    <fieldset className="space-y-2"><legend className="text-sm font-medium">Execution claims</legend>{role === 'admin' ? <p className="text-xs text-neutral-500">Organization admin groups have no execution claim flags. Their RPC methods remain explicit below.</p> : ['admin', 'deploy', 'upgrade'].map(c => <label key={c} className="inline-flex gap-2 mr-5 text-sm"><input type="checkbox" checked={claims.includes(c)} onChange={() => setClaims(toggle(claims, c))} />{c}</label>)}</fieldset>
-    <fieldset className="space-y-3"><legend className="text-sm font-medium">RPC methods</legend>{Object.entries(METHOD_SECTIONS).map(([section, data]) => <details key={section} open><summary className="text-sm font-medium">{section}</summary><div className="grid gap-2 mt-2 sm:grid-cols-2">{data.methods.map(m => <label key={m} className="inline-flex items-center gap-2 text-xs"><input type="checkbox" checked={methods.includes(m)} onChange={() => setMethods(toggle(methods, m))} /><code>{m}</code></label>)}</div></details>)}
-      <label className="block text-sm">Additional method names<Input value={extra} onChange={e => setExtra(e.target.value)} placeholder="Exact names, separated by spaces" /></label><p className="text-xs text-neutral-500">Existing additional names are preserved. The matching Go tool checks the complete method catalog and the deployed runtime checks supported operations.</p>
-      {!!methods.filter(m => !Object.values(METHOD_SECTIONS).some(s => (s.methods as readonly string[]).includes(m))).length && <div className="flex flex-wrap gap-2">{methods.filter(m => !Object.values(METHOD_SECTIONS).some(s => (s.methods as readonly string[]).includes(m))).map(m => <Button key={m} type="button" variant="outline" size="sm" onClick={() => setMethods(methods.filter(v => v !== m))}>{m} ×</Button>)}</div>}
-    </fieldset>
+    <SourcePermissionChoices methods={methods} claims={claims} isAdmin={role === 'admin'} onMethods={setMethods} onClaims={setClaims} />
+    <label className="block text-sm">Additional exact method names<Input aria-label="Additional method names" value={extra} onChange={e => setExtra(e.target.value)} placeholder="Exact names, separated by spaces" /><span className="text-xs text-neutral-500">Explicit names only; source validation and runtime configuration decide support.</span></label>
     <label className="block text-sm font-medium">RPC credential environment reference<Input value={credential} onChange={e => setCredential(e.target.value)} placeholder="BANK_RPC_TOKEN" /><span className="text-xs font-normal text-neutral-500">Optional reference only. The operator must bind it to this organization's configured node.</span></label>
     <label className="inline-flex gap-2 text-sm"><input type="checkbox" checked={verboseErrors} onChange={e => setVerbose(e.target.checked)} />Verbose error policy</label>
     <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit">Save group draft</Button></div>

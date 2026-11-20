@@ -164,6 +164,7 @@ export async function operationRequest(
     body: options.body,
     signal: AbortSignal.any([
       signal,
+      ...(options.signal ? [options.signal] : []),
       AbortSignal.timeout(endpoint.startsWith('/rpc/') ? 25000 : 5000),
     ]),
   })

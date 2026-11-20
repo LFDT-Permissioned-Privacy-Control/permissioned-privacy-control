@@ -134,6 +134,7 @@ it('an uncertain travel-record create is not repeated and requires a list check'
   await screen.findByText('No records in this scope.')
   await userEvent.click(screen.getByRole('button', { name: 'Create travel-rule record' }))
   const dialog = screen.getByRole('dialog')
+  fireEvent.change(within(dialog).getByLabelText('Amount entry'), { target: { value: 'base' } })
   for (const [label, value] of [
     ['Originator name', 'Bank operator'],
     ['Beneficiary name', 'Recipient'],
@@ -366,6 +367,7 @@ it('diagnostic inputs are frozen while pending and changed parameters clear the 
   await waitFor(() =>
     expect(screen.getByRole('button', { name: 'Send test request' })).toBeEnabled(),
   )
+  fireEvent.change(screen.getByLabelText('Request mode'), { target: { value: 'advanced' } })
   await userEvent.click(screen.getByRole('button', { name: 'Send test request' }))
   expect(screen.getByLabelText('Organization')).toBeDisabled()
   expect(screen.getByLabelText('RPC method')).toBeDisabled()
