@@ -11,11 +11,11 @@ async function fixture() {
     'groups.json': { apiVersion: 'ops.policy-document/v1alpha1', kind: 'groups', organizationId: org, spec: { groups: [] } },
   }
   const project = await loadSourceProject(Object.entries(values).map(([path, value]) => { const raw = JSON.stringify(value); return { path, size: raw.length, read: async () => raw } }))
-  const state: State = { phase: 'selected', busy: false, pending: null, candidate: null, flow: null, error: null, profiles: [], self: { actorId: actor, sourceProfile: 'bank', sourceProfileDigest: 'sha256:' + 'a'.repeat(64), principalKind: 'human', expiresAt: Math.floor(Date.now() / 1000) + 300, organizations: [] } }
+  const state: State = { phase: 'selected', busy: false, pending: null, candidate: null, flow: null, error: null, profiles: [], self: { actorId: actor, sourceProfile: 'bank', sourceProfileDigest: 'sha256:' + 'a'.repeat(64), principalKind: 'human', expiresAt: Math.floor(Date.now() / 1000) + 300, organizations: [{ id: org, slug: 'bank', name: 'Bank', isOrgAdmin: true, isOrgReadonlyAdmin: false }] } }
   const controller = { snapshot: () => state, scopeRevision: 0, ownsScope: (scope: number, who: string) => scope === 0 && who === actor } as Pick<Controller, 'snapshot' | 'scopeRevision' | 'ownsScope'>
   writeMultiMarker(activeMulti({ actorId: actor, sourceProfile: 'bank', provider: 'privado', browserSessionId: '22222222-2222-4222-8222-222222222222' }))
   const memory = new SourceDraftMemory(controller); memory.write(project, 0, actor, true)
-  return { memory, project }
+  return { memory, project, state }
 }
 afterEach(() => localStorage.clear())
 
@@ -42,4 +42,20 @@ it('retires every old form callback after reimport, even if the source bytes and
   expect(memory.snapshot().authoring).toEqual({})
   expect(memory.snapshot().unfinished).toBe(false)
   expect(memory.snapshot().dirty).toBe(false)
+})
+
+it('clears a same-account draft on loss of console roles and refuses stale write callbacks', async () => {
+  const { memory, project, state } = await fixture(), epoch = memory.snapshot().epoch
+  memory.writeAuthoring('/form', { value: 'private input', base: 'node', dirty: true }, 0, actor, epoch)
+  state.self = { ...state.self!, organizations: state.self!.organizations.map(org => ({ ...org, isOrgAdmin: false })) }
+  // A callback captured before downgrade must fail even before observe runs.
+  expect(() => memory.write(project, 0, actor)).toThrow()
+  memory.observe()
+  expect(memory.snapshot().project).toBeNull()
+  expect(memory.snapshot().authoring).toEqual({})
+  state.self = { ...state.self, organizations: state.self.organizations.map(org => ({ ...org, isOrgAdmin: true })) }
+  memory.observe()
+  expect(memory.snapshot().project).toBeNull()
+  memory.writeAuthoring('/form', { value: 'stale input', base: 'node', dirty: true }, 0, actor, epoch)
+  expect(memory.snapshot().authoring).toEqual({})
 })

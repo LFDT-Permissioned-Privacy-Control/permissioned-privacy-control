@@ -63,13 +63,14 @@ the original signed expiry to verify that private displays clear; they do not
 claim to test a provider or server clock.
 
 `make demo-v2-ui-parity` checks the running demo's native transaction pages with
-the four real proof personas. It pairs API reasons with **Mine**, **My Org**,
+the four real proof personas. It checks console entry and protected API denial
+for non-admins while retaining their own Account and Explorer access. It pairs API reasons with **Mine**, **My Org**,
 **Counterparty** and **Shared** badges, checks denied views and compact transfer
 details, and creates, reads and revokes one disclosure case while requiring
 ordinary RPC and Explorer results to remain unchanged. It uses the private and
 shared sample transactions from a passing walkthrough; run the walkthrough
 first if they are absent. Results and screenshots are stored in
-`ui-parity-results.json` and `ui-parity/` under the demo directory. The full
+`ui-parity-results.json`, `admin-entry/` and `ui-parity/` under the demo directory. The full
 functional walkthrough also runs these checks. The unmapped outsider is not a
 second-organization fixture; server canonicality tests cover reorg fences,
 while this UI check does not change the chain's canonical history.
@@ -128,7 +129,8 @@ does not apply arbitrary edits to them.
 
 To inspect them in the familiar Admin UI, open the OPS origin printed by
 `make demo-v2-info`, followed by `/admin`. Complete sign-in or the fresh Privado
-proof requested on reload. If shown, choose **Open configuration workspace**.
+proof requested on reload using **Demo Admin** (or a configured organization
+admin/read-only admin). If shown, choose **Open configuration workspace**.
 Choose **Import source folder** and select the exported parent containing both
 `core` and `broker` (a single `core` root also works for inspection).
 The **Organizations** tab shows Demo Bank. Select its row to open that bank's
@@ -148,7 +150,8 @@ This checks one OPS instance, not the broker or the whole deployment.
 Choose **Edit local proposal** to create organizations/groups or edit their
 permissions, contracts, read grants, execution rules, identity mappings and
 selected platform sources. **Configuration** compares and exports the complete
-proposal; **Open saved package** recovers it later. Run the actual Go
+proposal; **Open saved draft** restores those files later without changing the
+running configuration. Run the actual Go
 `policy unpack`, `prepare`, `check` and optional `simulate` commands from the
 [policy workspace guide](v2-policy-workspace.md). New organizations also require
 explicit compliance entries, matching Core/broker identity references, node
@@ -156,6 +159,12 @@ bindings and deployment preparation described there. The browser does not
 activate proposals or provision a new organization's infrastructure.
 
 ## 2. Sign in as the prepared identities
+
+Every signed-in identity can open its own Account and wallet settings. The
+admin console requires an organization-admin or read-only-admin role. Demo
+Reader, Deployer and Outsider have no admin navigation and cannot open console
+pages directly. Deployer's contract execution permissions do not grant
+organization administration.
 
 Once per browser profile, open the printed OPS and demo wallet URLs and accept
 their local certificate warnings. Chrome may remember the exceptions separately

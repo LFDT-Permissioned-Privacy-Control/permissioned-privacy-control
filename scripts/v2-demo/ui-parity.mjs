@@ -5,6 +5,55 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { demoAccount } from '../../tools/v2-demo-wallet/accounts.mjs';
 
+export async function checkAdminEntry({ users, runtime, outputDirectory, passed }) {
+  const results = [];
+  const screenshots = path.join(outputDirectory, 'admin-entry');
+  await mkdir(screenshots, { recursive: true, mode: 0o700 });
+  const from = new Date(Date.now() - 60000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const to = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const logs = `/api/v2/orgs/${runtime.organizationId}/access-logs?` + new URLSearchParams({ from, to, limit: '1' });
+  const endpoints = ['/api/v2/self/selection', `/api/v2/orgs/${runtime.organizationId}/compliance/config`, logs,
+    '/api/v1/disclosure/cases?' + new URLSearchParams({ role: 'data-org-admin', organizationId: runtime.organizationId, limit: '1' })];
+  for (const name of ['admin', 'deployer', 'reader', 'outsider']) {
+    const user = users.get(name), admin = name === 'admin';
+    const selfResponse = await user.context.request.get(runtime.opsOrigin + '/api/v2/self', { headers: { Authorization: 'Bearer ' + user.access.accessToken } });
+    assert.equal(selfResponse.status(), 200);
+    const self = await selfResponse.json();
+    assert.equal(self.actorId, user.access.actorId);
+    assert.equal(self.organizations.some(org => org.isOrgAdmin === true || org.isOrgReadonlyAdmin === true), admin, name + ': live organization role');
+    await user.page.goto(runtime.opsOrigin + '/admin/account');
+    await user.page.getByTestId('account-identity').waitFor();
+    assert.ok((await user.page.getByTestId('account-identity').textContent()).includes(self.actorId), name + ': own account actor matches verified Self');
+    assert.equal(await user.page.getByTestId('admin-nav').count(), admin ? 1 : 0, name + ': own account admin navigation');
+    await user.page.getByTestId('account-dropdown-trigger').click();
+    assert.equal(await user.page.getByTestId('back-to-app-link').count(), admin ? 1 : 0, name + ': dashboard menu');
+    await user.page.keyboard.press('Escape');
+    await user.page.goto(runtime.opsOrigin + '/admin/rbac/organizations');
+    if (admin) await user.page.getByRole('button', { name: 'Open saved draft', exact: true }).waitFor();
+    else {
+      await user.page.getByRole('heading', { name: 'Access Denied', exact: true }).waitFor();
+      assert.equal(await user.page.getByTestId('admin-nav').count(), 0);
+      assert.equal(await user.page.getByTestId('rbac-manager').count(), 0);
+      await user.page.screenshot({ path: path.join(screenshots, name + '-denied.png'), fullPage: true, animations: 'disabled' });
+      await user.page.getByRole('button', { name: 'Go to your account', exact: true }).click();
+      await user.page.getByTestId('account-identity').waitFor();
+    }
+    const statuses = [];
+    for (const endpoint of endpoints) {
+      const response = await user.context.request.get(runtime.opsOrigin + endpoint, { headers: { Authorization: 'Bearer ' + user.access.accessToken } });
+      const deniedStatus = endpoint.startsWith('/api/v1/disclosure/cases?') ? 404 : 403; // Case administration hides unauthorized scope existence.
+      assert.equal(response.status(), admin ? 200 : deniedStatus, name + ': protected API ' + endpoint.split('?')[0]);
+      statuses.push(response.status());
+    }
+    await user.page.screenshot({ path: path.join(screenshots, name + '.png'), fullPage: true, animations: 'disabled' });
+    results.push({ persona: name, organizationAdmin: admin, ownAccountAvailable: true, consoleDenied: !admin, protectedAPIStatuses: statuses });
+    await user.page.goto(runtime.explorerOrigin);
+    await user.page.locator('[data-field=app-actor]').waitFor();
+  }
+  passed('verified admin console gate; Reader, execution-admin Deployer and unmapped accounts retain own account/Explorer but are denied protected API access');
+  return results;
+}
+
 async function copyVisibleAddress(page, row, expected) {
   // Exercise the real CopyButton without overwriting the operator's OS
   // clipboard. Only this temporary page's Clipboard API is substituted.
@@ -171,6 +220,7 @@ export async function checkNativeUIParity({ users, runtime, privateHash, sharedH
   assert.notEqual(privateHash, sharedHash, 'Private and explicitly shared scenarios require different transactions');
   assert.equal(new Set(['admin', 'deployer', 'reader', 'outsider'].map(name => users.get(name).access.actorId)).size, 4, 'Proof personas must remain different principals');
   const screenshots = path.join(outputDirectory, 'ui-parity'); await mkdir(screenshots, { recursive: true, mode: 0o700 });
+  const adminEntry = await checkAdminEntry({ users, runtime, outputDirectory, passed });
   const cases = [];
   await transactionView(users.get('deployer'), runtime, privateHash, [['From', 'own_address', 'Mine', true], ['To', 'rbac_group_member', 'My Org', true]], screenshots, 'owner'); cases.push('owner-Mine');
   await transactionView(users.get('admin'), runtime, sharedHash, [['From', 'participant_override', 'Counterparty', false], ['To', 'rbac_group_member', 'My Org', true]], screenshots, 'same-org-counterparty'); cases.push('same-org-Counterparty');
@@ -182,5 +232,5 @@ export async function checkNativeUIParity({ users, runtime, privateHash, sharedH
   passed('native V2 API-to-page Mine/My Org/Counterparty/Shared and denied persona matrix');
   const isolation = await caseIsolation({ users, runtime, hash: privateHash, nodeRPC, rpc, bff, screenshots });
   passed('persisted case create/read/revoke leaves ordinary RPC and Explorer unchanged for the recipient and another principal');
-  return { cases, screenshots, isolation, clipboard: 'Real rendered CopyButton with a page-local Clipboard API substitute; OS clipboard untouched', limits: ['The unmapped outsider has no organization; a second-organization browser fixture is not claimed.', 'The Admin case recipient already has ordinary emitter authority. The full-case canary check establishes isolation from another principal (Reader), not an otherwise deprived case recipient.', 'Server reorg acquisition/delivery regressions are separate; this browser run does not mutate chain canonicality.'] };
+  return { cases, screenshots, isolation, adminEntry, clipboard: 'Real rendered CopyButton with a page-local Clipboard API substitute; OS clipboard untouched', limits: ['The unmapped outsider has no organization; a second-organization browser fixture is not claimed.', 'The Admin case recipient already has ordinary emitter authority. The full-case canary check establishes isolation from another principal (Reader), not an otherwise deprived case recipient.', 'Server reorg acquisition/delivery regressions are separate; this browser run does not mutate chain canonicality.'] };
 }

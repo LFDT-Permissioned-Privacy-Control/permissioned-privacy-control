@@ -57,12 +57,13 @@ interface AdminLayoutProps {
   accountMenu: ReactNode;
   children: ReactNode;
   disabledTabs?: AdminTab[];
+  showNavigation?: boolean;
   notice?: ReactNode;
 }
 
 // The established product shell is shared without importing any authentication
 // provider or data client. Each runtime owns its account/session boundary.
-export function AdminLayout({ accountMenu, children, disabledTabs = [], notice }: AdminLayoutProps) {
+export function AdminLayout({ accountMenu, children, disabledTabs = [], showNavigation = true, notice }: AdminLayoutProps) {
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -131,7 +132,7 @@ export function AdminLayout({ accountMenu, children, disabledTabs = [], notice }
                   the prior "Dashboard" landing tab; its content (system
                   status + test request panel + demo deploy) is dev / ops
                   tooling, not where admins start their day. */}
-              <Tabs value={activeTab} onValueChange={handleTabChange} className="order-last w-full lg:order-none lg:w-auto" data-testid="admin-nav">
+              {showNavigation && <Tabs value={activeTab} onValueChange={handleTabChange} className="order-last w-full lg:order-none lg:w-auto" data-testid="admin-nav">
                 <TabsList className="w-full justify-around lg:w-auto">
                   <TabsTrigger disabled={disabledTabs.includes('rbac')} title={disabledTabs.includes('rbac') ? 'Not yet available in this UI preview' : undefined} aria-label="RBAC" value="rbac" className="gap-2" data-testid="nav-rbac">
                     <Users className="w-4 h-4" />
@@ -154,7 +155,7 @@ export function AdminLayout({ accountMenu, children, disabledTabs = [], notice }
                     <span className="hidden sm:inline">Diagnostics</span>
                   </TabsTrigger>
                 </TabsList>
-              </Tabs>
+              </Tabs>}
 
               {/* Account Menu */}
               {accountMenu}

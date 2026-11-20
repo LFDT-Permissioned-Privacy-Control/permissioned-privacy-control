@@ -20,7 +20,7 @@ interface AccountMenuProps {
   providerLabel: string;
   isAccountPage: boolean;
   onAccount(): void;
-  onDashboard(): void;
+  onDashboard?(): void;
   onSignOut(): Promise<void>;
   dashboardLabel?: string;
   busy?: boolean;
@@ -114,7 +114,7 @@ export function AccountMenu({ userDID, providerLabel, isAccountPage, onAccount, 
             {/* The counterpart to the "Admin dashboard" button on the user
                 page — an admin who switched over should not have to edit the
                 URL to get back. */}
-            <button
+            {onDashboard && <button
               type="button"
               onClick={() => { setOpen(false); onDashboard(); }}
               className="flex w-full items-center gap-2.5 px-4 py-2 text-sm text-neutral-700 transition-colors hover:bg-neutral-50"
@@ -123,7 +123,7 @@ export function AccountMenu({ userDID, providerLabel, isAccountPage, onAccount, 
             >
               <ArrowLeftRight className="h-4 w-4" />
               {dashboardLabel}
-            </button>
+            </button>}
             <button
               type="button"
               disabled={busy}

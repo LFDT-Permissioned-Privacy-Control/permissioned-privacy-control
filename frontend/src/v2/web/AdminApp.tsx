@@ -17,6 +17,8 @@ import { adminLocation } from './routes'
 import { CONTEXT_KEY } from '../auth/context'
 import { SourceDraftMemory } from './sourceDraftMemory'
 import { SourceAuthoringProvider } from './SourceAuthoringScope'
+import { hasAdminRole } from './adminAccess'
+import { AdminAccessDenied } from '../../components/auth/AdminAccessDenied'
 import './style.css'
 
 const LocalDemoHost = import.meta.env.VITE_OPS_LOCAL_DEMO === '1' ? lazy(() => import('./LocalDemoHost')) : null
@@ -29,6 +31,7 @@ function SelectedAccount({ controller, state, draft }: { controller: Controller;
   const {project, authoring, epoch, locked, dirty, unfinished} = useSyncExternalStore(draft.subscribe, draft.snapshot)
   const [leaving, setLeaving] = useState<AccountAction | null>(null)
   const self = state.self!
+  const admin = hasAdminRole(self)
   const scope = controller.scopeRevision
   const setProject = (next: SourceProject | null, replace = false) => { if (epoch === draft.snapshot().epoch) draft.write(next, scope, self.actorId, replace) }
   const account = location.pathname === '/admin/account'
@@ -46,10 +49,11 @@ function SelectedAccount({ controller, state, draft }: { controller: Controller;
   const signOut = () => requestAccountAction('sign-out')
   const switchAccount = () => { void requestAccountAction('switch-account') }
   const menu = <AccountMenu userDID={self.actorId} providerLabel={provider} busy={state.busy} isAccountPage={account}
-    onAccount={() => navigate('/admin/account')} onDashboard={() => navigate('/admin/rbac/organizations')} dashboardLabel="Configuration workspace"
+    onAccount={() => navigate('/admin/account')} onDashboard={admin ? () => navigate('/admin/rbac/organizations') : undefined} dashboardLabel="Configuration workspace"
     onSignOut={signOut} />
-  return <AdminLayout accountMenu={menu}>
+  return <AdminLayout accountMenu={menu} showNavigation={admin}>
     {account ? <NativeAccountPage controller={controller} state={state} onSignOut={signOut} onSwitchAccount={switchAccount} onRefreshSession={() => { void requestAccountAction('refresh-session') }} onDownloadWalletToken={() => { void requestAccountAction('download-wallet-token') }} />
+      : !admin ? <AdminAccessDenied onAccount={() => navigate('/admin/account', { replace: true })} accountLabel="Go to your account" />
       : section ? <NativeOperationsPage controller={controller} state={state} section={section} />
       : <>
         {locked ? <p className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-500" role="status">Your source draft is kept in this tab while your session is checked.</p> : <SourceAuthoringProvider project={project} state={authoring} update={(key, entry) => draft.writeAuthoring(key, entry, scope, self.actorId, epoch)} clear={prefix => draft.clearAuthoring(prefix, scope, self.actorId, epoch)}><SourceWorkspacePage key={epoch} controller={controller} project={project} onProject={setProject} unfinished={unfinished} /></SourceAuthoringProvider>}
@@ -82,7 +86,7 @@ export function NativeAdminApp({ controller }: { controller: Controller }) {
   useEffect(() => {
     if (state.phase === 'anonymous' && location.pathname.startsWith('/admin')) navigate('/login', { replace: true })
   }, [location.pathname, navigate, state.phase])
-  const content = (demoSlot: React.ReactNode = null, demoBusy = false) => state.phase === 'selected' && state.self && !state.flow && !state.pending && adminLocation(location)
+  const content = (demoSlot: React.ReactNode = null, demoBusy = false) => state.phase === 'selected' && state.self && state.self.expiresAt * 1000 > Date.now() && !state.flow && !state.pending && adminLocation(location)
     ? <SelectedAccount key={`${controller.scopeRevision}:${state.self.actorId}`} controller={controller} state={state} draft={draft} />
     : <AuthenticationPage controller={controller} demoSlot={demoSlot} demoBusy={demoBusy} notice={draftView.locked && <p role="status" className="mb-5 rounded-lg border border-primary/20 bg-primary-50 p-3 text-xs text-neutral-700">Your draft is kept here while you verify this account. It is discarded if sign-in fails or is canceled, you change account, or you close or reload this tab.</p>} />
   // The buffer stays above short-lived selected-account components. No source

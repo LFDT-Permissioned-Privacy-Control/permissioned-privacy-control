@@ -4,6 +4,7 @@ import type { SourceProject } from './sourceProject'
 import { multiPair, readMultiMarker, type MultiMarker } from '../auth/multiContext'
 import { sameSession, type MultiSession } from '../auth/multiProtocol'
 import { retainAuthoring, type AuthoringEntry, type AuthoringState } from './sourceAuthoring'
+import { hasAdminRole } from './adminAccess'
 
 interface Owner extends MultiSession {
   digest: string; kind: Self['principalKind']; scope: number; expiresAt: number
@@ -43,6 +44,7 @@ export class SourceDraftMemory {
     const owner = this.owner
     if (!owner || !this.project) return
     const state = this.controller.snapshot()
+    if (state.self && !hasAdminRole(state.self)) { this.clear(); return }
     let marker: MultiMarker | null
     try { marker = this.marker() } catch { this.clear(); return }
     const pair = this.currentPair(marker)
@@ -80,7 +82,7 @@ export class SourceDraftMemory {
     let marker: MultiMarker | null
     try { marker = this.marker() } catch { throw Error('The selected account changed. Import the source again.') }
     const pair = this.currentPair(marker)
-    if (!self || self.actorId !== actor || state.busy || state.flow || state.pending || self.expiresAt * 1000 <= this.clock() ||
+    if (!self || !hasAdminRole(self) || self.actorId !== actor || state.busy || state.flow || state.pending || self.expiresAt * 1000 <= this.clock() ||
       marker?.phase !== 'active' || !pair || pair.actorId !== actor || pair.sourceProfile !== self.sourceProfile) throw Error('The selected account changed. Import the source again.')
     if (this.owner && (!sameSession(pair, this.owner) || !this.sameIdentity(self, this.owner))) throw Error('The selected account changed. Import the source again.')
     if (!next) { this.clear(); return }

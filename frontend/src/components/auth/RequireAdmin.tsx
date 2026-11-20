@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Loader2, ShieldAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/contexts/AuthContext';
+import { AdminAccessDenied } from './AdminAccessDenied';
 
 interface RequireAdminProps {
   children: ReactNode;
@@ -137,33 +138,7 @@ export function RequireAdmin({ children }: RequireAdminProps) {
   }
 
   if (check.status === 'denied') {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="mx-auto max-w-md rounded-lg border border-red-200 bg-red-50 p-8 text-center">
-          <ShieldAlert className="mx-auto mb-4 h-12 w-12 text-red-500" />
-          <h2 className="mb-2 text-xl font-semibold text-red-900">Access Denied</h2>
-          <p className="text-sm text-red-700">
-            You don't have admin privileges. Contact your organization administrator.
-          </p>
-          {/* Without a way out this screen is a dead end: signing out of an
-              admin account and back in as a regular user lands on the
-              remembered /admin URL, and the only escape was editing the
-              address bar. Only offered to a signed-in user — this branch also
-              covers "no token at all", where /success would bounce straight
-              back to the login page and the label would be a lie. */}
-          {accessToken && (
-            <Button
-              onClick={() => navigate('/success', { replace: true })}
-              variant="outline"
-              className="mt-6"
-              data-testid="admin-denied-back-btn"
-            >
-              Go to your dashboard
-            </Button>
-          )}
-        </div>
-      </div>
-    );
+    return <AdminAccessDenied onAccount={accessToken ? () => navigate('/success', { replace: true }) : undefined} />;
   }
 
   if (check.status === 'error') {

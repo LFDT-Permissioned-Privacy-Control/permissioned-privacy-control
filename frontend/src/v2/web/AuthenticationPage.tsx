@@ -6,6 +6,7 @@ import { LoginCard, LoginFrame, LoginStatus, MicrosoftLoginPanel, PrivadoBrandPa
 import { MicrosoftIcon, PrivadoIcon } from '../../components/auth/ProviderIcons'
 import { Button } from '../../components/ui/button'
 import { Controller, State } from './controller'
+import { hasAdminRole } from './adminAccess'
 import { walletLinks } from './protocol'
 
 type Provider = 'azure' | 'privado'
@@ -33,7 +34,7 @@ export function AuthenticationPage({ controller, demoSlot, demoBusy = false, not
   const links = state.pending?.requestUri ? walletLinks(state.pending.requestUri) : null
   const demoRenewal = !!demoSlot && state.pending?.status === 'proof_required' && state.pending.provider === 'privado' && state.pending.mode === 'renew'
   const switching = (location.state as { switchAccount?: boolean } | null)?.switchAccount === true
-  const selected = !!state.self && (!switching || !!state.flow)
+  const selected = state.phase === 'selected' && !!state.self && state.self.expiresAt * 1000 > Date.now() && !state.pending && (!switching || !!state.flow)
   const title = state.phase === 'context-changed' ? 'Choose your account' : selected ? state.flow ? 'Continue to application' : 'Signed In' : state.pending?.status === 'proof_required' ? 'Verify Your Identity' : 'Sign In'
   const description = state.flow ? <>Continue to <strong data-field="app">{state.flow.displayName}</strong> after signing in.</> : demoRenewal ? 'Verify the same local demo identity to continue.' : demoSlot && !selected && !state.pending ? 'Choose a local demo identity' : active === 'azure' ? 'Use your Microsoft or corporate account' : 'Verify with your Privado ID wallet'
   const canChoose = !state.pending && !selected && state.phase !== 'booting' && !demoBusy
@@ -56,7 +57,7 @@ export function AuthenticationPage({ controller, demoSlot, demoBusy = false, not
       {selected && state.self && !demoBusy && <div className="space-y-5">
         <LoginStatus tone="success" title="Authentication successful!">{state.flow ? 'Confirm this account to continue to the application.' : 'Your account is ready.'}</LoginStatus>
         <div className="rounded-lg bg-neutral-50 p-3"><p className="text-xs text-neutral-400 uppercase tracking-wide mb-1">OPS identity</p><p data-field="actorId" className="break-all font-mono text-xs text-neutral-700">{state.self.actorId}</p></div>
-        {state.flow ? <Button className="w-full" disabled={state.busy} onClick={() => void controller.continue()}>{state.busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}{state.busy ? 'Continuing…' : 'Continue to application'}</Button> : <><Button asChild className="w-full"><Link to="/admin/account">Open account</Link></Button><Button asChild variant="outline" className="w-full"><Link to="/admin/rbac/organizations">Open configuration workspace</Link></Button></>}
+        {state.flow ? <Button className="w-full" disabled={state.busy} onClick={() => void controller.continue()}>{state.busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}{state.busy ? 'Continuing…' : 'Continue to application'}</Button> : <><Button asChild className="w-full"><Link to="/admin/account">Open account</Link></Button>{hasAdminRole(state.self) && <Button asChild variant="outline" className="w-full"><Link to="/admin/rbac/organizations">Open configuration workspace</Link></Button>}</>}
         <Button variant="ghost" size="sm" className="w-full" disabled={state.busy} onClick={() => void controller.logout()}>Sign out of OPS</Button>
       </div>}
       {(canChoose || demoBusy || demoRenewal) && demoSlot}

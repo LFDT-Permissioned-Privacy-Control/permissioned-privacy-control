@@ -42,6 +42,14 @@ describe('native sign-in with the V1 presentation', () => {
     expect(screen.getByText('Application sign-in expired')).toBeInTheDocument()
     expect(screen.getByText('Return to the application and start sign-in again.')).toBeInTheDocument()
   })
+  it('hides console entry and signed-in confirmation for an expired retained account', () => {
+    page({ ...anonymous, phase: 'selected', self: { actorId: 'ops:p1:' + 'A'.repeat(43), principalKind: 'human', sourceProfile: profile.id,
+      sourceProfileDigest: 'sha256:' + 'b'.repeat(64), expiresAt: Math.floor(Date.now() / 1000) - 1,
+      organizations: [{ id: '11111111-1111-1111-1111-111111111111', slug: 'bank', name: 'Bank', isOrgAdmin: true, isOrgReadonlyAdmin: false }] } })
+    expect(screen.queryByRole('link', { name: 'Open configuration workspace' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Authentication successful!')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Continue with Privado ID' })).toBeInTheDocument()
+  })
   it.each(['azure', 'privado'] as const)('keeps %s application confirmation focused on the selected account and application', provider => {
     const expiresAt = Math.floor(Date.now() / 1000) + 300
     const controller = page({ ...anonymous, phase: 'selected', profiles: [{ ...profile, provider }],

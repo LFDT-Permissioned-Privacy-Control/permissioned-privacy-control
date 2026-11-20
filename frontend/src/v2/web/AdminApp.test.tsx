@@ -8,16 +8,21 @@ import { Controller, State } from './controller'
 import { WalletController } from './wallet'
 import { CONTEXT_KEY } from '../auth/context'
 import { activeMulti, deniedMulti, writeMultiMarker, type MultiMarker } from '../auth/multiContext'
-vi.mock('./NativeOperationsPages', () => ({ NativeOperationsPage: () => <p>Operational page fixture</p> }))
+const protectedRenders = vi.hoisted(() => [] as boolean[])
+vi.mock('./NativeOperationsPages', () => ({ NativeOperationsPage: ({ state }: { state: State }) => {
+  protectedRenders.push(state.self!.organizations.some(org => org.isOrgAdmin === true || org.isOrgReadonlyAdmin === true))
+  return <p>Operational page fixture</p>
+} }))
 
 const org = '11111111-1111-1111-1111-111111111111', group = '22222222-2222-2222-2222-222222222222'
 const family = '33333333-3333-4333-8333-333333333333', requestID = '44444444-4444-4444-8444-444444444444'
 const selected: State = { phase: 'selected', busy: false, flow: null, pending: null, candidate: null, error: null,
   profiles: [{ id: 'bank', provider: 'privado', principalKind: 'human' }],
   self: { actorId: 'ops:p1:' + 'A'.repeat(43), principalKind: 'human', sourceProfile: 'bank', sourceProfileDigest: 'sha256:' + 'a'.repeat(64),
-    expiresAt: Math.floor(Date.now() / 1000) + 300, organizations: [] } }
-function harness(path = '/admin/rbac/organizations') {
-  let state = { ...selected }, revision = 0
+    expiresAt: Math.floor(Date.now() / 1000) + 300, organizations: [{ id: org, slug: 'live-bank', name: 'Serving Bank', isOrgAdmin: true, isOrgReadonlyAdmin: false }] } }
+const member: State = { ...selected, self: { ...selected.self!, organizations: [{ ...selected.self!.organizations[0], isOrgAdmin: false, isOrgReadonlyAdmin: false }] } }
+function harness(path = '/admin/rbac/organizations', initial = selected) {
+  let state = { ...initial }, revision = 0
   localStorage.clear(); sessionStorage.clear()
   function markerFor(next: State): MultiMarker {
     if (next.pending?.status === 'proof_required') {
@@ -84,7 +89,7 @@ async function editSource() {
   fireEvent.change(editor, {target: {value: raw}})
   return raw
 }
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); localStorage.clear(); sessionStorage.clear() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); localStorage.clear(); sessionStorage.clear(); protectedRenders.length = 0 })
 
 describe('native account with the established Admin presentation', () => {
   it('shows real imported organization/group permissions using the original shell, separate from live roles', async () => {
@@ -97,7 +102,8 @@ describe('native account with the established Admin presentation', () => {
     await importFiles()
     expect(screen.getByTestId('workspace-source')).toHaveTextContent('worktree-revision')
     expect(within(screen.getByRole('table')).getByText('Imported Bank')).toBeInTheDocument()
-    expect(screen.getByText('No organizations are assigned to this identity by the current approved rules.')).toBeInTheDocument()
+    expect(screen.getByText('Serving Bank')).toBeInTheDocument()
+    expect(screen.getByText('Organization admin')).toBeInTheDocument()
     expect(screen.getByText(/Imported source files are a local proposal/)).toBeInTheDocument()
     await userEvent.click(within(screen.getByRole('table')).getByText('Imported Bank'))
     expect(await screen.findByTestId('group-card')).toHaveTextContent('Payments team')
@@ -270,7 +276,7 @@ describe('native account with the established Admin presentation', () => {
     // Browser history can leave a modal's route; unfinished fields stay owned,
     // but they cannot be silently omitted from an apparent complete export.
     fireEvent.mouseDown(screen.getByTestId('tab-configuration'), {button: 0, ctrlKey: false})
-    expect(await screen.findByRole('button', {name: 'Export complete source package'})).toBeDisabled()
+    expect(await screen.findByRole('button', {name: 'Export configuration draft'})).toBeDisabled()
     expect(screen.getByText(/Save or cancel unfinished form fields before exporting source/)).toBeInTheDocument()
     await userEvent.click(screen.getByTestId('account-dropdown-trigger')); await userEvent.click(screen.getByRole('menuitem', {name: 'Sign Out'}))
     expect(screen.getByRole('dialog')).toHaveTextContent('Unfinished form fields are not part of a source export')
@@ -281,7 +287,7 @@ describe('native account with the established Admin presentation', () => {
     expect(await screen.findByLabelText('Public ABI JSON')).toHaveValue('[ unfinished JSON ')
     await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Cancel'}))
     await userEvent.click(screen.getByRole('tab', {name: 'Configuration'}))
-    expect(screen.getByRole('button', {name: 'Export complete source package'})).toBeEnabled()
+    expect(screen.getByRole('button', {name: 'Export configuration draft'})).toBeEnabled()
   })
   it('recovers a nested execution-rule form with exact unfinished decimal and JSON strings', async () => {
     const page = harness(); await importFiles(await fullPackageFiles()); await userEvent.click(screen.getByRole('button', {name: 'Edit local proposal'}))
@@ -457,7 +463,7 @@ describe('native account with the established Admin presentation', () => {
     expect(screen.getByLabelText('Name')).toHaveValue('')
   })
   it('keeps the ordinary own-account/wallet page available without organization admin roles', () => {
-    harness('/admin/account')
+    harness('/admin/account', { ...member, self: { ...member.self!, organizations: [] } })
     expect(screen.getByTestId('account-identity')).toHaveTextContent(selected.self!.actorId)
     expect(screen.getByRole('button', { name: 'Refresh session' })).toBeEnabled()
     expect(screen.getByRole('heading', { name: 'Linked Addresses' })).toBeInTheDocument()
@@ -467,6 +473,59 @@ describe('native account with the established Admin presentation', () => {
     expect(screen.queryByText('Forget remembered app choices')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Cancel/ })).not.toBeInTheDocument()
     expect(screen.getByTestId('account-session').querySelector('time')).toHaveAttribute('datetime', new Date(selected.self!.expiresAt * 1000).toISOString())
+    expect(screen.queryByTestId('admin-nav')).not.toBeInTheDocument()
+  })
+  it.each(['/admin', '/admin/rbac', '/admin/rbac/organizations', '/admin/rbac/configuration', '/admin/compliance', '/admin/disclosure', '/disclosures', '/admin/logs', '/admin/diagnostics'])('denies a member direct console entry at %s without mounting protected content', async path => {
+    const request = vi.fn(); vi.stubGlobal('fetch', request)
+    harness(path, member)
+    expect(screen.getByRole('heading', { name: 'Access Denied' })).toBeInTheDocument()
+    expect(screen.queryByTestId('admin-nav')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('rbac-manager')).not.toBeInTheDocument()
+    expect(screen.queryByText('Operational page fixture')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('account-dropdown-trigger'))
+    expect(screen.queryByTestId('back-to-app-link')).not.toBeInTheDocument()
+    await userEvent.keyboard('{Escape}')
+    await userEvent.click(screen.getByRole('button', { name: 'Go to your account' }))
+    expect(screen.getByTestId('account-identity')).toBeInTheDocument()
+    expect(request).not.toHaveBeenCalled()
+  })
+  it('allows verified read-only organization admins into the console', () => {
+    harness('/admin/rbac/organizations', { ...selected, self: { ...selected.self!, organizations: [{ ...selected.self!.organizations[0], isOrgAdmin: false, isOrgReadonlyAdmin: true }] } })
+    expect(screen.getByTestId('admin-nav')).toBeInTheDocument()
+    expect(screen.getByTestId('rbac-manager')).toBeInTheDocument()
+    expect(screen.getByText('Read-only organization admin')).toBeInTheDocument()
+  })
+  it.each(['same-session', 'proof-renewal', 'switch-account'])('immediately removes console content and retires drafts on %s downgrade', async kind => {
+    const page = harness(); await editSource()
+    if (kind === 'proof-renewal') page.transition(proofRequired())
+    const next = kind === 'switch-account' ? { ...member, self: { ...member.self!, actorId: 'ops:p1:' + 'B'.repeat(42) + 'A' } } : member
+    page.transition(next)
+    expect(screen.getByRole('heading', { name: 'Access Denied' })).toBeInTheDocument()
+    expect(screen.queryByTestId('admin-nav')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Proposed source')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument()
+    page.transition(selected)
+    expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument()
+    expect(screen.getByText('Open your policy source to view organizations and groups')).toBeInTheDocument()
+  })
+  it('offers no console link to a signed-in member at login', () => {
+    harness('/login', member)
+    expect(screen.getByRole('link', { name: 'Open account' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Open configuration workspace' })).not.toBeInTheDocument()
+  })
+  it('never renders a protected operational subtree under a downgraded same-session identity', () => {
+    const page = harness('/admin/logs')
+    expect(protectedRenders.length).toBeGreaterThan(0)
+    const before = protectedRenders.length
+    page.transition(member)
+    expect(protectedRenders).toHaveLength(before)
+    expect(protectedRenders.every(Boolean)).toBe(true)
+    expect(screen.getByRole('heading', { name: 'Access Denied' })).toBeInTheDocument()
+  })
+  it('explains saved drafts without presenting them as deployed configuration', () => {
+    harness()
+    expect(screen.getByRole('button', { name: 'Open saved draft' })).toHaveAttribute('title', 'Restore a configuration draft you exported earlier. This does not change the running configuration.')
+    expect(screen.getByLabelText('Saved configuration draft')).toHaveAttribute('accept', '.json')
   })
   it('does not render a source workspace at unsupported routes', () => {
     harness('/admin/users')
@@ -490,7 +549,7 @@ describe('native account with the established Admin presentation', () => {
     expect(screen.queryByRole('button', { name: 'New organization' })).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Open source for repair' }))
     expect(screen.getByLabelText('Proposed source')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Export complete source package' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Export configuration draft' })).toBeEnabled()
   })
   it('retains typed raw text through file switches and includes it in export and unsaved-close handling', async () => {
     let blob: Blob | undefined
@@ -503,7 +562,7 @@ describe('native account with the established Admin presentation', () => {
       expect(screen.getByText('Changed local draft')).toBeInTheDocument()
       await userEvent.click(screen.getByRole('button', { name: /^groups\.json/ })); await userEvent.click(screen.getByRole('button', { name: /^draft\.json/ }))
       expect(screen.getByLabelText('Proposed source')).toHaveValue(raw)
-      await userEvent.click(screen.getByRole('button', { name: 'Export complete source package' }))
+      await userEvent.click(screen.getByRole('button', { name: 'Export configuration draft' }))
       const saved = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = reject; reader.readAsText(blob!) })
       expect(atob(JSON.parse(saved).roots[0].files.find((f: { path: string }) => f.path === 'draft.json').dataBase64)).toBe(raw)
       await userEvent.click(screen.getByRole('button', { name: 'Close source' }))
