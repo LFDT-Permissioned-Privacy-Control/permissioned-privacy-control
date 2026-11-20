@@ -140,6 +140,7 @@ case "${1:-up}" in
     require_prepared browser
     NODE_EXTRA_CA_CERTS="$OPS_V2_DEMO_CONTROL_DIR/ca.crt" node "$ROOT/scripts/v2-demo/check-demo-login.mjs" "$OPS_V2_DEMO_CONTROL_DIR";;
   check-prepared) check_prepared;;
+  check-ui-parity) check_prepared ui-parity;;
   check-ui)
     export OPS_TEST_BROWSER_CHANNEL="${OPS_TEST_BROWSER_CHANNEL:-chrome}"
     require_prepared browser

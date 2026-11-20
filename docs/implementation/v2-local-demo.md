@@ -62,6 +62,18 @@ verified wallet links. Its expiry checks advance only the browser clock past
 the original signed expiry to verify that private displays clear; they do not
 claim to test a provider or server clock.
 
+`make demo-v2-ui-parity` checks the running demo's native transaction pages with
+the four real proof personas. It pairs API reasons with **Mine**, **My Org**,
+**Counterparty** and **Shared** badges, checks denied views and compact transfer
+details, and creates, reads and revokes one disclosure case while requiring
+ordinary RPC and Explorer results to remain unchanged. It uses the private and
+shared sample transactions from a passing walkthrough; run the walkthrough
+first if they are absent. Results and screenshots are stored in
+`ui-parity-results.json` and `ui-parity/` under the demo directory. The full
+functional walkthrough also runs these checks. The unmapped outsider is not a
+second-organization fixture; server canonicality tests cover reorg fences,
+while this UI check does not change the chain's canonical history.
+
 Prepared commands use installed Chrome by default. An already installed
 Playwright Chromium can be selected with `OPS_TEST_BROWSER_CHANNEL=chromium`.
 They do not install a browser. `make demo-v2-check` performs initial setup and is

@@ -3,6 +3,7 @@ import { Plus, Pencil, Settings, Trash2 } from 'lucide-react'
 import { OrganizationTable } from '../../components/rbac/OrganizationTable'
 import { OrganizationFormView } from '../../components/rbac/OrganizationFormView'
 import { GroupCards } from '../../components/rbac/GroupCards'
+import { PermissionCheck, permissionMethodClasses } from '../../components/rbac/PermissionSelectionView'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
 import { Textarea } from '../../components/ui/textarea'
@@ -94,11 +95,11 @@ function GroupDraftForm({ value, onSave, onClose }: { value?: DraftGroup; onSave
     <label className="block text-sm font-medium">Name<Input required value={name} onChange={e => { setName(e.target.value); if (!value) setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')) }} /></label>
     <label className="block text-sm font-medium">Slug<Input required value={slug} onChange={e => setSlug(e.target.value)} pattern="[a-z0-9]+([_-][a-z0-9]+)*" /></label>
     <label className="block text-sm font-medium">Description<Textarea value={description} onChange={e => setDescription(e.target.value)} /></label>
-    <label className="block text-sm font-medium">Organization role<select className="mt-1 block w-full rounded-lg border border-neutral-300 p-2" value={role} onChange={e => setRole(e.target.value)}><option value="member">Member</option><option value="admin">Organization admin</option><option value="readonly">Read-only organization admin</option></select></label>
-    <SourcePermissionChoices methods={methods} claims={claims} isAdmin={role === 'admin'} onMethods={setMethods} onClaims={setClaims} />
+    <label className="block text-sm font-medium">Organization role<select className="mt-1 block w-full rounded-lg border border-neutral-300 p-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:border-primary" value={role} onChange={e => setRole(e.target.value)}><option value="member">Member</option><option value="admin">Organization admin</option><option value="readonly">Read-only organization admin</option></select></label>
+    <SourcePermissionChoices methods={methods} claims={claims} isAdmin={role === 'admin'} onMethods={setMethods} onClaims={setClaims} pendingAdditionalMethods={!!extra.trim()} />
     <label className="block text-sm">Additional exact method names<Input aria-label="Additional method names" value={extra} onChange={e => setExtra(e.target.value)} placeholder="Exact names, separated by spaces" /><span className="text-xs text-neutral-500">Explicit names only; source validation and runtime configuration decide support.</span></label>
     <label className="block text-sm font-medium">RPC credential environment reference<Input value={credential} onChange={e => setCredential(e.target.value)} placeholder="BANK_RPC_TOKEN" /><span className="text-xs font-normal text-neutral-500">Optional reference only. The operator must bind it to this organization's configured node.</span></label>
-    <label className="inline-flex gap-2 text-sm"><input type="checkbox" checked={verboseErrors} onChange={e => setVerbose(e.target.checked)} />Verbose error policy</label>
+    <label className={permissionMethodClasses()}><input className="sr-only" aria-label="Verbose error policy" type="checkbox" checked={verboseErrors} onChange={e => setVerbose(e.target.checked)} /><PermissionCheck checked={verboseErrors} /><span className="text-sm text-neutral-700">Verbose error policy</span></label>
     <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit">Save group draft</Button></div>
   </form>
 }

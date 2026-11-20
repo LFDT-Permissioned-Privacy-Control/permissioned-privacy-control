@@ -12,10 +12,10 @@ import {
   CLAIM_LABELS,
   CLAIM_DESCRIPTIONS,
 } from '@/types/rbac';
-import { cn } from '@/lib/utils';
+import { PermissionCheck, PermissionCount, permissionClaimClasses, permissionMethodClasses, permissionPresetClasses } from './PermissionSelectionView';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { AlertCircle, Save, X, Loader2, Check, Wallet, Server, Code, ShieldCheck } from 'lucide-react';
+import { AlertCircle, Save, X, Loader2, Wallet, Server, Code, ShieldCheck } from 'lucide-react';
 
 const PRESET_ICONS: Record<string, React.ElementType> = {
   Wallet,
@@ -277,11 +277,7 @@ export default function GroupAccessForm({
             return (
               <label
                 key={claim}
-                className={cn(
-                  'flex items-start gap-3 p-3 rounded-lg border transition-colors',
-                  effectivelyChecked ? 'border-primary bg-white shadow-sm' : 'border-neutral-200 hover:border-primary-200 bg-white',
-                  isDisabled && 'opacity-60 cursor-not-allowed'
-                )}
+                className={permissionClaimClasses(effectivelyChecked, !isDisabled, isDisabled)}
                 onClick={(e) => {
                   e.preventDefault();
                   if (isDisabled) return;
@@ -301,12 +297,7 @@ export default function GroupAccessForm({
                   });
                 }}
               >
-                <div className={cn(
-                  'w-4 h-4 mt-0.5 rounded border flex items-center justify-center flex-shrink-0 transition-colors',
-                  effectivelyChecked ? 'bg-primary border-primary' : 'border-neutral-300 bg-white'
-                )}>
-                  {effectivelyChecked && <Check className="w-3 h-3 text-white stroke-[3]" />}
-                </div>
+                <PermissionCheck checked={effectivelyChecked} size="claim" />
                 <div>
                   <div className="text-sm font-semibold text-neutral-900">{CLAIM_LABELS[claim]}</div>
                   <div className="text-[11px] text-neutral-500 leading-tight mt-0.5">{CLAIM_DESCRIPTIONS[claim]}</div>
@@ -330,12 +321,7 @@ export default function GroupAccessForm({
                 key={preset.id}
                 type="button"
                 onClick={() => applyPreset(preset)}
-                className={cn(
-                  'flex flex-col items-start gap-1 p-3 rounded-lg border-2 text-left transition-all',
-                  selectedPresetId === preset.id
-                    ? 'border-primary bg-primary-50'
-                    : 'border-neutral-200 hover:border-primary-200'
-                )}
+                className={permissionPresetClasses(selectedPresetId === preset.id)}
               >
                 <IconComponent className="w-5 h-5 text-primary" />
                 <span className="text-sm font-semibold text-neutral-900">{preset.name}</span>
@@ -369,9 +355,7 @@ export default function GroupAccessForm({
               <div className="flex items-center justify-between p-3">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-neutral-700">{sectionLabel}</span>
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-primary-50 text-primary">
-                    {selectedCount} / {sectionMethods.length}
-                  </span>
+                  <PermissionCount selected={selectedCount} total={sectionMethods.length} />
                 </div>
                 <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
                   <button
@@ -403,20 +387,13 @@ export default function GroupAccessForm({
                   {sectionMethods.map((method: string) => (
                     <label
                       key={method}
-                      className="flex items-center gap-2 p-1.5 rounded hover:bg-primary-50 cursor-pointer border border-transparent hover:border-neutral-100 transition-colors"
+                      className={permissionMethodClasses()}
                       onClick={(e) => {
                         e.preventDefault();
                         toggleMethod(method);
                       }}
                     >
-                      <div className={cn(
-                        'w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 transition-colors',
-                        allowedMethods.includes(method)
-                          ? 'bg-primary border-primary'
-                          : 'border-neutral-300 bg-white'
-                      )}>
-                        {allowedMethods.includes(method) && <Check className="w-2.5 h-2.5 text-white stroke-[3]" />}
-                      </div>
+                      <PermissionCheck checked={allowedMethods.includes(method)} />
                       <span className="text-xs font-mono text-neutral-700 truncate" title={method}>
                         {method}
                       </span>
@@ -481,26 +458,14 @@ export default function GroupAccessForm({
                         key={method}
                         aria-disabled={locked || undefined}
                         title={locked ? 'Only an admin-tier token can add a passthrough method to a group.' : undefined}
-                        className={cn(
-                          'flex items-center gap-2 p-1.5 rounded border border-transparent transition-colors',
-                          locked
-                            ? 'opacity-60 cursor-not-allowed'
-                            : 'hover:bg-primary-50 cursor-pointer hover:border-neutral-100'
-                        )}
+                        className={permissionMethodClasses(!locked, locked)}
                         onClick={(e) => {
                           e.preventDefault();
                           if (locked) return;
                           toggleMethod(method);
                         }}
                       >
-                        <div className={cn(
-                          'w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 transition-colors',
-                          allowedMethods.includes(method)
-                            ? 'bg-primary border-primary'
-                            : 'border-neutral-300 bg-white'
-                        )}>
-                          {allowedMethods.includes(method) && <Check className="w-2.5 h-2.5 text-white stroke-[3]" />}
-                        </div>
+                        <PermissionCheck checked={allowedMethods.includes(method)} />
                         <span className="text-xs font-mono text-neutral-700 truncate" title={method}>
                           {method}
                         </span>

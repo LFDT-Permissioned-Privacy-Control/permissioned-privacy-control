@@ -30,7 +30,7 @@ it('uses native presets, section controls and rich inspection while preserving c
   await userEvent.click(within(dialog).getByRole('button', { name: /Network reader/ }))
   await userEvent.click(within(dialog).getByRole('button', { name: 'Select all account state' }))
   await userEvent.click(within(dialog).getByRole('button', { name: 'Clear network and fees' }))
-  expect(within(dialog).getByText('Account state · 5/5 selected')).toBeInTheDocument()
+  expect(within(dialog).getByLabelText('Account state: 5 of 5 selected')).toHaveTextContent('5 / 5')
   await userEvent.click(within(dialog).getByRole('button', { name: 'Save group draft' }))
   // Access through native model, retaining imported/unknown rows and flags.
   const actual = (object(documentValue(onChange.mock.calls[0][0], 'source', 'groups.json').spec).groups as JSONObject[])[0]

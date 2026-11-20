@@ -10,14 +10,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { demoAccount } from '../../tools/v2-demo-wallet/accounts.mjs';
 import { signChallenge } from '../../tools/v2-demo-wallet/sign-message.mjs';
+import { checkNativeUIParity } from './ui-parity.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const directory = path.resolve(process.argv[2] ?? '');
 assert.ok(directory.startsWith(path.join(root, '.tmp/v2-demo') + path.sep));
 const mode = process.argv[3] ?? 'walkthrough';
-assert.ok(['walkthrough', 'reader-admin', 'reader-reader', 'disclosure', 'ui-preview', 'ui-transaction'].includes(mode), 'Unknown demo check mode');
+assert.ok(['walkthrough', 'reader-admin', 'reader-reader', 'disclosure', 'ui-preview', 'ui-transaction', 'ui-parity'].includes(mode), 'Unknown demo check mode');
 const interactive = process.env.OPS_DEMO_INTERACTIVE === '1';
 assert.ok(!interactive || process.stdin.isTTY, 'Run the visible walkthrough in an interactive terminal');
-const resultsFile = path.join(directory, mode === 'walkthrough' ? 'check-results.json' : mode === 'ui-preview' ? 'ui-preview-results.json' : mode === 'ui-transaction' ? 'transaction-ui-results.json' : 'mapping-results.json');
+const resultsFile = path.join(directory, mode === 'walkthrough' ? 'check-results.json' : mode === 'ui-preview' ? 'ui-preview-results.json' : mode === 'ui-transaction' ? 'transaction-ui-results.json' : mode === 'ui-parity' ? 'ui-parity-results.json' : 'mapping-results.json');
 await rm(resultsFile, { force: true });
 const runtime = JSON.parse(await readFile(path.join(directory, 'runtime.json'), 'utf8'));
 assert.equal(runtime.testOnly, true); assert.equal(runtime.chainId, '31337');
@@ -472,6 +473,16 @@ async function checkUIPreview(user) {
 try {
   await (async () => {
   if (mode === 'ui-preview') { await checkEntryScreens(); await checkUIPreview(await login('admin', { clock: true, capture: true })); return; }
+  if (mode === 'ui-parity') {
+    const previous = JSON.parse(await readFile(path.join(directory, 'check-results.json'), 'utf8'));
+    assert.equal(previous.passed, true, 'Run the functional walkthrough before the focused native UI parity check');
+    assert.match(previous.transaction ?? '', /^0x[0-9a-f]{64}$/); assert.match(previous.sharedTransaction ?? '', /^0x[0-9a-f]{64}$/);
+    for (const persona of ['admin', 'deployer', 'reader', 'outsider']) await login(persona);
+    stage = 'native-ui-parity';
+    const parity = await checkNativeUIParity({ users, runtime, privateHash: previous.transaction, sharedHash: previous.sharedTransaction, outputDirectory: directory, nodeRPC, rpc, bff, passed });
+    await writeFile(resultsFile, JSON.stringify({ passed: true, cases: count, ...parity }, null, 2) + '\n', { mode: 0o600 });
+    return;
+  }
   if (mode === 'ui-transaction') {
     const user = await login('deployer');
     const saved = JSON.parse(await readFile(path.join(directory, 'check-state.json'), 'utf8'));
@@ -618,6 +629,9 @@ try {
   assert.equal(await rpc(reader, 'eth_getTransactionByHash', [hash]), null);
   assert.equal((await bff(users.get('outsider'), '/transactions/' + sharedHash)).status, 403);
   passed('explicit visibleTo sharing reveals only the new transaction to Reader; old private transaction and outsider remain restricted');
+  stage = 'native-ui-parity';
+  const parity = await checkNativeUIParity({ users, runtime, privateHash: hash, sharedHash, outputDirectory: directory, nodeRPC, rpc, bff, passed });
+  await writeFile(path.join(directory, 'ui-parity-results.json'), JSON.stringify({ passed: true, ...parity }, null, 2) + '\n', { mode: 0o600 });
   const caseUrl = await checkDisclosure(admin, deployer, reader, hash);
   stage = 'immutable-config-revision-restart';
   readerRevoked = true;
