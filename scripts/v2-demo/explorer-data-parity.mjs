@@ -109,7 +109,11 @@ async function blockCountSurfaces(page,runtime,name) {
   const tab=page.getByTestId('tab-transactions');assert.ok((await tab.textContent()).includes(expected.text));
   for(const activation of ['click','Enter','Space']){
     await page.getByTestId('tab-details').click();
+    await page.locator('[data-testid="tab-details"][aria-selected="true"]').waitFor({timeout:5000});await row.waitFor({state:'visible',timeout:5000});
     if(activation==='click')await tab.click();else{await tab.focus();await tab.press(activation);}
+    // BrowserRouter may commit its navigation after the input action resolves.
+    // Wait for the real selected child, retaining the explicit assertion below.
+    await page.locator('[data-testid="tab-transactions"][aria-selected="true"]').waitFor({timeout:5000});await row.waitFor({state:'hidden',timeout:5000});
     assert.equal(await tab.getAttribute('aria-selected'),'true');const tooltip=page.getByRole('tooltip');await tooltip.waitFor();assert.ok(blockCountObservationMatches(detail,{count:expected.text,title:await tooltip.textContent()}),'Tab coverage and observation belong to the same block response');await page.keyboard.press('Escape');await tooltip.waitFor({state:'hidden'});
   }
   assert.equal(await tab.locator('button').count(),0,'Tab metadata contains no nested button');
