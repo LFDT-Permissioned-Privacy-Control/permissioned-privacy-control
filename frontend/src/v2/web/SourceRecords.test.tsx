@@ -35,6 +35,9 @@ it('displays configured nested fact and event permissions in row details and ins
   await userEvent.click(screen.getByRole('button', { name: 'mapping' }))
   expect(within(screen.getByRole('dialog')).getByText('azure.role')).toBeInTheDocument()
   expect(within(screen.getByRole('dialog')).getByText('allowlist')).toBeInTheDocument()
-  expect(within(screen.getByRole('dialog')).getByText(/"name": "Paid"/)).toBeInTheDocument()
+  const details = within(screen.getByRole('dialog')).getByText('Show event rules').closest('details')!
+  expect(details).not.toHaveAttribute('open')
+  await userEvent.click(within(details).getByText('Show event rules'))
+  expect(within(details).getByText(/"name": "Paid"/)).toBeVisible()
   expect(within(screen.getByRole('dialog')).queryByText('Not set')).not.toBeInTheDocument()
 })

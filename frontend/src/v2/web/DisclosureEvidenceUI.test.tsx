@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -96,7 +96,7 @@ it('shows an empty long-lived case page with a separate original-session deadlin
   const coverage = screen.getByText(/Available in this session until/)
   expect(coverage).toHaveTextContent('Case/rule cutoff ' + new Date((now + 900) * 1000).toLocaleString())
   expect(coverage).toHaveTextContent('Available in this session until ' + new Date((now + 300) * 1000).toLocaleString())
-  expect(screen.getByText('0')).toBeInTheDocument()
+  expect(within(screen.getByRole('dialog')).getByText('0')).toBeInTheDocument()
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 })
 

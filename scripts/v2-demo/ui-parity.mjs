@@ -13,7 +13,7 @@ export async function checkAdminEntry({ users, runtime, outputDirectory, passed 
   const to = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const logs = `/api/v2/orgs/${runtime.organizationId}/access-logs?` + new URLSearchParams({ from, to, limit: '1' });
   const endpoints = ['/api/v2/self/selection', `/api/v2/orgs/${runtime.organizationId}/compliance/config`, logs,
-    '/api/v1/disclosure/cases?' + new URLSearchParams({ role: 'data-org-admin', organizationId: runtime.organizationId, limit: '1' })];
+    '/api/v1/disclosure/cases?' + new URLSearchParams({ role: 'data-org-admin', organizationId: runtime.organizationId, limit: '1' }), `/api/v2/orgs/${runtime.organizationId}/diagnostics`];
   for (const name of ['admin', 'deployer', 'reader', 'outsider']) {
     const user = users.get(name), admin = name === 'admin';
     const selfResponse = await user.context.request.get(runtime.opsOrigin + '/api/v2/self', { headers: { Authorization: 'Bearer ' + user.access.accessToken } });
@@ -24,6 +24,11 @@ export async function checkAdminEntry({ users, runtime, outputDirectory, passed 
     await user.page.goto(runtime.opsOrigin + '/admin/account');
     await user.page.getByTestId('account-identity').waitFor();
     assert.ok((await user.page.getByTestId('account-identity').textContent()).includes(self.actorId), name + ': own account actor matches verified Self');
+    for (const org of self.organizations) {
+      assert.ok(Array.isArray(org.groups) && org.groups.length === org.groupCount && org.groupsTruncated === false, name + ': complete own-group projection for this small demo');
+      for (const group of org.groups) assert.equal(await user.page.getByTestId('account-own-groups').getByText(group.name, { exact: true }).isVisible(), true, name + ': verified own group badge');
+    }
+    if (name !== 'outsider') assert.ok(self.organizations.some(org => org.groups.length > 0), name + ': proof mapped into a real group');
     assert.equal(await user.page.getByTestId('admin-nav').count(), admin ? 1 : 0, name + ': own account admin navigation');
     await user.page.getByTestId('account-dropdown-trigger').click();
     assert.equal(await user.page.getByTestId('back-to-app-link').count(), admin ? 1 : 0, name + ': dashboard menu');
@@ -53,6 +58,21 @@ export async function checkAdminEntry({ users, runtime, outputDirectory, passed 
     }
     await user.page.screenshot({ path: path.join(screenshots, name + '.png'), fullPage: true, animations: 'disabled' });
     results.push({ persona: name, organizationAdmin: admin, ownAccountAvailable: true, consoleDenied: !admin, protectedAPIStatuses: statuses });
+    if (admin) {
+      const endpoint = `/api/v2/orgs/${runtime.organizationId}/diagnostics`;
+      const sample = user.page.waitForResponse(response => new URL(response.url()).pathname === endpoint && response.request().method() === 'GET');
+      await user.page.goto(runtime.opsOrigin + '/admin/diagnostics?org=' + runtime.organizationId);
+      const response = await sample; assert.equal(response.status(), 200);
+      const health = await response.json(); assert.equal(health.organizationId, runtime.organizationId);
+      assert.equal(response.headers()['cache-control'], 'no-store');
+      await user.page.getByRole('heading', { name: 'OPS build', exact: true }).waitFor();
+      await user.page.getByText(health.build.commit, { exact: true }).waitFor();
+      const node = user.page.getByText('Blockchain node (sampled)', { exact: true }).locator('xpath=ancestor::div[contains(concat(" ",normalize-space(@class)," ")," group ")][1]');
+      await node.getByText({ connected: 'Connected', unavailable: 'Unavailable', unknown: 'Unknown' }[health.node.state], { exact: true }).waitFor();
+      const next = await user.page.waitForResponse(response => new URL(response.url()).pathname === endpoint && response.request().method() === 'GET', { timeout: 12000 });
+      assert.equal(next.status(), 200, 'Visible diagnostics refreshes within the V1 five-second interval');
+      await user.page.screenshot({ path: path.join(screenshots, 'admin-diagnostics.png'), fullPage: true, animations: 'disabled' });
+    }
     await user.page.goto(runtime.explorerOrigin);
     await user.page.locator('[data-field=app-actor]').waitFor();
   }
