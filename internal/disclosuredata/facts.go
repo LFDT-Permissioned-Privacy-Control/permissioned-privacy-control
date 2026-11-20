@@ -21,6 +21,7 @@ type factContext struct {
 	targets       map[[20]byte][]string
 	mine          map[[20]byte]bool
 	historyKind   string
+	nativeEvents  bool
 	nativeFinance bool
 }
 
@@ -54,7 +55,10 @@ func validateFactsForHistory(scope ReadScope, ds []SourceDescriptor, f Facts, af
 // service/source validators separately enforce the authenticated initial/after
 // boundary; the renderer still verifies counts, ordering, End and exact Next.
 func validateFactsForHistoryMode(scope ReadScope, ds []SourceDescriptor, f Facts, after *Position, historyKind string, checkInitial bool, native ...bool) (factContext, error) {
-	c := factContext{scope: scope, descriptors: map[SourceKind]SourceDescriptor{}, targets: map[[20]byte][]string{}, mine: map[[20]byte]bool{}, historyKind: historyKind, nativeFinance: len(native) == 1 && native[0]}
+	c := factContext{scope: scope, descriptors: map[SourceKind]SourceDescriptor{}, targets: map[[20]byte][]string{}, mine: map[[20]byte]bool{}, historyKind: historyKind, nativeFinance: len(native) > 0 && native[0], nativeEvents: len(native) > 1 && native[1]}
+	if c.nativeEvents && scope.Query.resource == p.Events {
+		c.historyKind = RetainedEventsPopulation
+	}
 	if e := PositionForQuery(scope.Query, after); e != nil {
 		return c, e
 	}
@@ -65,7 +69,7 @@ func validateFactsForHistoryMode(scope ReadScope, ds []SourceDescriptor, f Facts
 		return c, ErrTooBroad
 	}
 	branches := 0
-	for _, present := range []bool{f.Addresses != nil, f.Activities != nil, f.Transactions != nil, f.ActivitySummary != nil, f.Sanctions != nil, f.Compliance != nil, f.FinanceEvidence != nil, f.FinanceLive != nil} {
+	for _, present := range []bool{f.Addresses != nil, f.Activities != nil, f.Transactions != nil, f.ActivitySummary != nil, f.Sanctions != nil, f.Compliance != nil, f.FinanceEvidence != nil, f.FinanceLive != nil, f.Events != nil} {
 		if present {
 			branches++
 		}
@@ -162,6 +166,11 @@ func validateFactsForHistoryMode(scope ReadScope, ds []SourceDescriptor, f Facts
 			}
 			positions = append(positions, pos)
 		}
+	case p.Events:
+		if err := c.validateEvents(f, after, checkInitial); err != nil {
+			return c, err
+		}
+		return c, nil
 	case p.Transactions:
 		max := int(q.limit)
 		if q.view == Detail {

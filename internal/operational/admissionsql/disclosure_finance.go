@@ -90,11 +90,11 @@ func newFinanceReader(c FinanceReaderConfig, retained bool) (*FinanceReader, err
 	if retained {
 		profileOK = d.ValidRetainedPlan(c.Plan)
 	}
-	if !ok || !bundleOK || !profileOK || c.Plan.NetworkKey != d.Digest(network.String()) || len(c.Plan.Resources) < 1 || len(c.Plan.Resources) > 6 || !slices.Contains(c.Plan.Resources, p.ComplianceReport) || !financeTime(c.Clock().UTC().Truncate(time.Microsecond)) {
+	if !ok || !bundleOK || !profileOK || c.Plan.NetworkKey != d.Digest(network.String()) || len(c.Plan.Resources) < 1 || len(c.Plan.Resources) > d.PlanResourceLimit(c.Plan) || !slices.Contains(c.Plan.Resources, p.ComplianceReport) || !financeTime(c.Clock().UTC().Truncate(time.Microsecond)) {
 		return nil, d.ErrInvalid
 	}
 	for i, r := range c.Plan.Resources {
-		if _, err := d.RequiredKinds(r); err != nil || i > 0 && c.Plan.Resources[i-1] >= r {
+		if _, err := d.RequiredPlanKinds(c.Plan, r); err != nil || i > 0 && c.Plan.Resources[i-1] >= r {
 			return nil, d.ErrInvalid
 		}
 	}

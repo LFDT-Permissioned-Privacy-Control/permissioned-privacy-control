@@ -312,12 +312,25 @@ func (read *snapshot) openHistory(ctx context.Context, original *d.RetainedBasis
 		return err
 	}
 	ref := digestParts("ops.disclosure.retained-history-basis/v1", read.scope.Namespace, read.scope.CaseID, read.scope.CaseVersion, read.scope.RecipientActorID, read.scope.DataOrganizationID, read.scope.RuleDigest, read.scope.Query.Digest(), read.basis, read.wallet.Descriptor().Reference, namespace.rangePass.AuthorityDigest(), namespace.rangePass.RequirementsDigest(), destinations)
+	if read.scope.Query.Resource() == p.Events {
+		// Stable across pages; page-varying emitter selections are separately
+		// qualified. All namespace revisions invalidate old Events cursors.
+		ref = digestParts("ops.disclosure.events-history-basis/v1", ref, namespace.metadata)
+	}
 	if expected != nil && expected.ID != ref {
 		return d.ErrConflict
 	}
 	epoch := digestParts("ops.disclosure.retained-history-epoch/v1", read.basis.NetworkKey, read.basis.NodeSource, read.basis.APIVersion, read.basis.DatasetEpoch, read.basis.RunFloor)
 	descriptor := d.SourceDescriptor{Version: 2, Kind: d.HistorySource, Reference: ref, NetworkKey: s.plan.NetworkKey, Epoch: epoch, Generation: namespace.rangePass.Generation(), PlanDigest: s.plan.PlanDigest, FormatDigest: digestParts("ops.disclosure.retained-history-format/v1"), CoverageDigest: d.Digest(namespace.rangePass.AuthorityDigest().String()), AsOf: s.now(), Population: d.RetainedHistoryPopulation}
+	if read.scope.Query.Resource() == p.Events {
+		descriptor.Version = 3
+		descriptor.FormatDigest = d.EventsFormat()
+		descriptor.Population = d.RetainedEventsPopulation
+	}
 	read.descriptors = append(read.descriptors, descriptor)
+	if read.scope.Query.Resource() == p.Events {
+		return read.readEvents(ctx, predicate, actors, ref)
+	}
 	if read.scope.Query.Resource() == p.Transactions {
 		query := x.ProtectedTransactionQuery{Limit: read.scope.Query.Limit(), Address: selectedAddress}
 		if read.after != nil {

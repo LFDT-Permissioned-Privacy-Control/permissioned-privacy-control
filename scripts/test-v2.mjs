@@ -17,7 +17,7 @@ const suites = {
     required: ['TestNativeV2ServingExcludesLegacyServerAndEVMPolicyBackend', 'TestNativeIndexerConsumerUsesOnlyServiceAPI', 'TestPinnedArtifactRejectsMixedMissingAndUnexpectedFiles'],
   },
   indexer: {
-    packages: ['./internal/operational/explorerindex', './internal/operational/protectedsource', './internal/activitylog', './internal/rpcexecution'],
+    packages: ['./internal/operational/explorerindex', './internal/operational/protectedsource', './internal/activitylog', './internal/rpcexecution', './internal/disclosuredata'],
     required: ['TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP', 'TestActualRetainedSourcesComposeAllResources',
       'TestRetainedActualContinuationAndRecoveryFences', 'TestActualProtectedResultRowsShareOriginalLedger',
       'TestExplorerActualPrunedNodePointsPrivacyAndFinalReorgHTTP', 'TestActualRetainedTransactionPagingFitsSharedDeliveryBudget',
@@ -27,6 +27,12 @@ const suites = {
       'TestHistoryBlockSetCountsIncompleteWorkAndRejectsBadTail', 'TestHistoryBlockSetChargesUnconsumedBeforeHeaders',
       'TestHistoryBlockOwnershipIncludesReceiptLogsAndHonorsTightSetBudget', 'TestHistoryBlockFinishCannotOutliveAcquisitionChild',
       'TestActualNativeFinanceLivePagingAndAsOfSummary', 'TestActualNativeComplianceAggregateAboveInlineLimit',
+      'TestActualDisclosureEventsHTTPPaginationPrivacyAndFences', 'TestActualDisclosureEventsRelayerAndOversizedPayload',
+      'TestActualDisclosureEventsUseBlockGlobalOrdinalAcrossReceipts',
+      'TestActualDisclosureEventsRootCreationRequiresIncludedC2Association',
+      'TestEventsPayloadAdmissionIsAtomicAndPaysBeforeCloning', 'TestEventsLowerProjectionDoesNotChargeOrCloneRawPayload',
+      'TestEventsReserveUsesExistingOwnedWorkCeilingWithoutRefunds', 'TestEventsPendingInputCannotClaimGlobalEndOrAnotherParent',
+      'TestEventsOpaqueIdentityBindsNetworkCaseRecipientAndRenderGeneration', 'TestEventsPayloadBytesAreNotContainerCardinality',
       'TestRetainedAddressTransactionsThroughActualHTTP'],
   },
   identity: {

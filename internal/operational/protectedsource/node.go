@@ -365,7 +365,10 @@ func (n *nodeRead) supportNeeds(requirements *h.Requirements) (bodies, headers [
 	if requirements == nil {
 		return nil, nil, d.ErrUnavailable
 	}
-	for _, requirement := range requirements.Blocks() {
+	return n.supportBlockNeeds(requirements.Blocks())
+}
+func (n *nodeRead) supportBlockNeeds(blocks []h.BlockRequirement) (bodies, headers []uint64, err error) {
+	for _, requirement := range blocks {
 		if known, ok := n.canonical[requirement.Number]; ok && (!requirement.NeedTxCount || known.TxCount != nil) {
 			continue
 		}
@@ -381,6 +384,34 @@ func (n *nodeRead) supportNeeds(requirements *h.Requirements) (bodies, headers [
 	return bodies, headers, nil
 }
 
+// Merge only acquisition work. Each authority resolver still receives its own
+// original opaque Requirements and scope digest after actual support is read.
+func supportUnion(requirements ...*h.Requirements) ([]h.BlockRequirement, error) {
+	merged := map[uint64]bool{}
+	for _, req := range requirements {
+		if req == nil {
+			return nil, d.ErrUnavailable
+		}
+		for _, item := range req.Blocks() {
+			merged[item.Number] = merged[item.Number] || item.NeedTxCount
+		}
+	}
+	out := make([]h.BlockRequirement, 0, len(merged))
+	for number, count := range merged {
+		out = append(out, h.BlockRequirement{Number: number, NeedTxCount: count})
+	}
+	slices.SortFunc(out, func(a, b h.BlockRequirement) int {
+		if a.Number < b.Number {
+			return -1
+		}
+		if a.Number > b.Number {
+			return 1
+		}
+		return 0
+	})
+	return out, nil
+}
+
 // Metadata-only planning. Rejected/shrunk prefixes do not dispatch support
 // work, and all already spent candidate work stays in the ledger.
 func headerReserve(count int) nodeReserve {
@@ -391,7 +422,17 @@ func headerReserve(count int) nodeReserve {
 }
 
 func (n *nodeRead) canSupport(requirements *h.Requirements) bool {
-	bodies, headers, err := n.supportNeeds(requirements)
+	if requirements == nil {
+		return false
+	}
+	return n.canSupportBlocks(requirements.Blocks())
+}
+func (n *nodeRead) canSupportMany(requirements ...*h.Requirements) bool {
+	blocks, err := supportUnion(requirements...)
+	return err == nil && n.canSupportBlocks(blocks)
+}
+func (n *nodeRead) canSupportBlocks(blocks []h.BlockRequirement) bool {
+	bodies, headers, err := n.supportBlockNeeds(blocks)
 	if err != nil || !n.canTouch(append(slices.Clone(bodies), headers...)) || !n.canBodySet(bodies, headerReserve(len(headers))) || len(headers) > 0 && n.headerSets >= 2 {
 		return false
 	}
@@ -409,21 +450,31 @@ func (n *nodeRead) canSupport(requirements *h.Requirements) bool {
 }
 
 func (n *nodeRead) supports(ctx context.Context, requirements *h.Requirements) ([]h.CanonicalBlock, error) {
-	if !n.canSupport(requirements) {
-		return nil, d.ErrTooBroad
-	}
-	bodies, numbers, err := n.supportNeeds(requirements)
-	if err != nil {
+	if err := n.supportsMany(ctx, requirements); err != nil {
 		return nil, err
+	}
+	return n.knownSupport(requirements)
+}
+func (n *nodeRead) supportsMany(ctx context.Context, requirements ...*h.Requirements) error {
+	blocks, err := supportUnion(requirements...)
+	if err != nil {
+		return err
+	}
+	if !n.canSupportBlocks(blocks) {
+		return d.ErrTooBroad
+	}
+	bodies, numbers, err := n.supportBlockNeeds(blocks)
+	if err != nil {
+		return err
 	}
 	if len(bodies) > 0 {
 		if err = n.acquireSet(ctx, bodies, headerReserve(len(numbers)), false); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if len(numbers) > 0 {
 		if err = n.touch(numbers); err != nil {
-			return nil, err
+			return err
 		}
 		n.headerSets++
 		queries := make([]r.HeaderQuery, len(numbers))
@@ -432,18 +483,18 @@ func (n *nodeRead) supports(ctx context.Context, requirements *h.Requirements) (
 		}
 		batch, err := n.headers.Read(ctx, queries)
 		if err != nil {
-			return nil, n.sourceError(err)
+			return n.sourceError(err)
 		}
 		if !batch.Synced() || batch.Source() != n.config.Source || len(batch.Headers()) != len(numbers) {
-			return nil, d.ErrUnavailable
+			return d.ErrUnavailable
 		}
 		for _, header := range batch.Headers() {
 			if err = n.remember(canonicalHeader(header)); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
-	return n.knownSupport(requirements)
+	return nil
 }
 
 func (n *nodeRead) knownSupport(requirements *h.Requirements) ([]h.CanonicalBlock, error) {

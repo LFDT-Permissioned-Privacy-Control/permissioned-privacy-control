@@ -11,6 +11,14 @@ func ClonePosition(p *Position) *Position {
 		return nil
 	}
 	c := *p
+	if p.Events != nil {
+		e := *p.Events
+		if e.NextLogIndex != nil {
+			v := *e.NextLogIndex
+			e.NextLogIndex = &v
+		}
+		c.Events = &e
+	}
 	if p.FinanceLive != nil {
 		f := *p.FinanceLive
 		c.FinanceLive = &f
@@ -35,6 +43,9 @@ func ClonePosition(p *Position) *Position {
 }
 func validPosition(a Position) bool {
 	n := 0
+	if a.Events != nil {
+		n++
+	}
 	if a.FinanceLive != nil {
 		n++
 	}
@@ -63,6 +74,9 @@ func validPosition(a Position) bool {
 		x := a.Activity
 		return x != nil && x.ObservedAtMicros >= 0 && x.ObservedAtMicros <= p.MaxUnixSeconds*1000000+999999 && uuidValid(x.ProducerID) && uuidValid(x.RunID) && uuidValid(x.RecordID) && countValid(x.CompletionOrdinal) && countValue(x.CompletionOrdinal) > 0
 	case HistorySource:
+		if a.Events != nil {
+			return validEventsPosition(*a.Events)
+		}
 		return a.Transaction != nil && countValid(a.Transaction.BlockNumber)
 	case WalletSource:
 		return a.Address != nil
@@ -81,6 +95,14 @@ func PositionForQuery(q NormalizedQuery, a *Position) error {
 	case p.ActivityLogs:
 		want = ActivitySource
 	case p.Transactions:
+		if a.Transaction == nil {
+			return ErrInvalid
+		}
+		want = HistorySource
+	case p.Events:
+		if a.Events == nil {
+			return ErrInvalid
+		}
 		want = HistorySource
 	case p.ComplianceReport:
 		want = FinanceSource
@@ -117,6 +139,12 @@ func ComparePositions(a, b Position) (int, error) {
 			}
 		}
 	case HistorySource:
+		if a.Events != nil || b.Events != nil {
+			if a.Events == nil || b.Events == nil {
+				return 0, ErrInvalid
+			}
+			return compareEventsPositions(*a.Events, *b.Events), nil
+		}
 		x, y := a.Transaction, b.Transaction
 		for _, n := range []int{cmp.Compare(countValue(x.BlockNumber), countValue(y.BlockNumber)), cmp.Compare(x.TransactionIndex, y.TransactionIndex), bytes.Compare(x.Hash[:], y.Hash[:])} {
 			if n != 0 {
@@ -127,4 +155,26 @@ func ComparePositions(a, b Position) (int, error) {
 		return bytes.Compare(a.Address.Address[:], b.Address.Address[:]), nil
 	}
 	return 0, nil
+}
+
+func validEventsPosition(e EventsPosition) bool {
+	return countValid(e.Parent.BlockNumber) && countValue(e.Parent.BlockNumber) <= 9223372036854775807 && e.Parent.Hash != ([32]byte{}) &&
+		(e.Mode == "after" && e.NextLogIndex == nil || e.Mode == "pending" && e.NextLogIndex != nil && *e.NextLogIndex <= 2147483647)
+}
+func compareEventsPositions(a, b EventsPosition) int {
+	for _, n := range []int{cmp.Compare(countValue(a.Parent.BlockNumber), countValue(b.Parent.BlockNumber)), cmp.Compare(a.Parent.TransactionIndex, b.Parent.TransactionIndex), bytes.Compare(a.Parent.Hash[:], b.Parent.Hash[:])} {
+		if n != 0 {
+			return n
+		}
+	}
+	if a.Mode != b.Mode {
+		if a.Mode == "after" {
+			return 1
+		}
+		return -1
+	}
+	if a.Mode == "pending" {
+		return cmp.Compare(*a.NextLogIndex, *b.NextLogIndex)
+	}
+	return 0
 }

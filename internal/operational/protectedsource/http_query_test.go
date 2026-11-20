@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -126,6 +127,7 @@ func TestRetainedAddressTransactionsThroughActualHTTP(t *testing.T) {
 	request(serving, token, "/api/v1/disclosure/cases/"+create()+"/read", query, http.StatusNotFound)
 	legacyPlan := sources.Plan()
 	legacyPlan.Version, legacyPlan.Profile = 1, "ops.disclosure.data-sources/v1"
+	legacyPlan.Resources = slices.DeleteFunc(slices.Clone(legacyPlan.Resources), func(resource p.Resource) bool { return resource == p.Events })
 	legacy, err := c.NewWithData(cfg, c.DataConfig{Network: config.Network, Sources: legacyHTTPQuerySources{legacyPlan}, RenderKeys: data.RenderKeys, CursorKeys: data.CursorKeys})
 	if err != nil {
 		t.Fatal(err)

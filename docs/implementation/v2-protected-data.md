@@ -70,22 +70,27 @@ Recognized resource/view pairs are:
 | --- | --- |
 | `addresses` | `list`, `resolve` |
 | `transactions` | `list`, `detail` |
+| `events` | retained native `list` |
 | `activity_logs` | `list` |
 | `activity_summary` | `report` |
 | `sanctions_report` | `report` |
 | `compliance_report` | `report`; retained profile also `list` for admission decisions |
 
-The admission-decisions list returns `{items, nextCursor,
-matchingRetainedCount}`. Its count belongs to the complete bounded finance
-selection, not activity totals. It needs finance only, has no chain-history
-basis, and preserves the existing evidence-field omissions at lower disclosure
-levels. Coverage is `RETAINED_AT_READ`; a changed full-selection fingerprint
-invalidates the cursor. Downloading a page does not produce a complete compliance
-report. See [retained financial evidence](v2-disclosure-finance.md) for bounds.
+The native admission-decisions list returns `{v:2, items, nextCursor,
+matchingRetainedCount, observedAt, pagination:"live-keyset"}`. Count and observation
+time describe that page's current scoped retained rows, not activity totals or a
+fixed export. It needs finance only, has no chain-history basis, and preserves
+the evidence-field omissions at lower disclosure levels. Coverage is
+`RETAINED_AT_READ`; keyset paging permits concurrent retention and inserts.
+Native compliance reports contain an aggregate finance summary rather than
+requiring every matching admission row inline. The older complete-cohort profile
+retains its separate full-selection fingerprint contract. Downloading a page does
+not produce a complete compliance report. See [retained financial evidence](v2-disclosure-finance.md).
 
-`events:list` is recognized but has no output implementation in this library.
-The data constructor rejects a selected rule requiring it. This guard does not
-substitute for implementing and qualifying event privacy in an assembled release.
+The native Events profile implements `events:list`; older source profiles reject
+it. Both the standing rule and the case must explicitly include `events`.
+Transaction permission alone does not authorize event payloads. See
+[event disclosure](v2-disclosure-events.md) for population, privacy and pagination.
 Activity and summary data do not claim to support arbitrary address filters;
 address-restricted activity scopes are rejected rather than broadened.
 
@@ -136,10 +141,12 @@ receives the same configured render keys as the case service solely to resolve
 an optional case-bound address locator for a transaction list; it does not
 receive or authenticate the client's encrypted cursor.
 
-Rows must be strictly ordered, unique and after the authenticated position.
-A page must establish a full page plus lookahead or actual source exhaustion.
-Reaching a work budget returns an error, never a false end or partial complete
-report. Address resolution consumes a complete bounded candidate set rather than
+Rows must be ordered and unique. Transaction rows follow the authenticated
+position. An Events pending position names the next unscanned log and may include
+that log; its outgoing scan position must advance. Bounded transaction/Event
+pages may return a shorter prefix with a continuation. Events pages may contain
+no visible rows while advancing over withheld or empty receipts. Work limits
+never imply exhaustion or a complete report. Address resolution consumes a complete bounded candidate set rather than
 only its first page. Full detail matches a locator only against the returned
 transaction's qualified in-scope target participants.
 

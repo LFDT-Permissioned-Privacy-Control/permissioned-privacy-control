@@ -323,6 +323,36 @@ type HistoryLog struct {
 	TransactionIndex, LogIndex uint32
 }
 
+// HistoryLogMetadata lets a bounded caller plan scans and qualify emitter
+// ownership without copying any topics or payload bytes.
+type HistoryLogMetadata struct {
+	Address                    common.Address
+	TransactionIndex, LogIndex uint32
+	TopicCount, DataBytes      int
+}
+
+func (r HistoryReceipt) LogCount() uint32 { return uint32(len(r.logs)) }
+
+func (r HistoryReceipt) LogMetadata(index uint32) (HistoryLogMetadata, bool) {
+	if uint64(index) >= uint64(len(r.logs)) {
+		return HistoryLogMetadata{}, false
+	}
+	v := r.logs[index]
+	return HistoryLogMetadata{v.Address, v.TransactionIndex, v.LogIndex, len(v.Topics), len(v.Data)}, true
+}
+
+// Log returns one detached entry. Lower-privacy projections can use metadata
+// alone and never allocate raw payload for an entry they will not disclose.
+func (r HistoryReceipt) Log(index uint32) (HistoryLog, bool) {
+	if uint64(index) >= uint64(len(r.logs)) {
+		return HistoryLog{}, false
+	}
+	v := r.logs[index]
+	v.Data = bytes.Clone(v.Data)
+	v.Topics = append([]common.Hash(nil), v.Topics...)
+	return v, true
+}
+
 func (r HistoryReceipt) Logs() []HistoryLog {
 	out := make([]HistoryLog, len(r.logs))
 	for i, v := range r.logs {

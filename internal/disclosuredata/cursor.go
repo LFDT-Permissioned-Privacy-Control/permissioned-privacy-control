@@ -115,17 +115,19 @@ type cursorRef struct {
 	ID   string `json:"id"`
 }
 type cursorPosition struct {
-	Kind     string  `json:"k"`
-	Time     *string `json:"t,omitempty"`
-	Producer *string `json:"p,omitempty"`
-	Run      *string `json:"r,omitempty"`
-	Ordinal  *string `json:"o,omitempty"`
-	Record   *string `json:"id,omitempty"`
-	Block    *string `json:"n,omitempty"`
-	Index    *uint32 `json:"i,omitempty"`
-	Hash     *string `json:"h,omitempty"`
-	Address  *string `json:"a,omitempty"`
-	Finance  *string `json:"f,omitempty"`
+	Kind      string  `json:"k"`
+	Time      *string `json:"t,omitempty"`
+	Producer  *string `json:"p,omitempty"`
+	Run       *string `json:"r,omitempty"`
+	Ordinal   *string `json:"o,omitempty"`
+	Record    *string `json:"id,omitempty"`
+	Block     *string `json:"n,omitempty"`
+	Index     *uint32 `json:"i,omitempty"`
+	Hash      *string `json:"h,omitempty"`
+	Address   *string `json:"a,omitempty"`
+	Finance   *string `json:"f,omitempty"`
+	EventMode *string `json:"e,omitempty"`
+	EventLog  *uint32 `json:"l,omitempty"`
 }
 type cursorPayload struct {
 	V        uint8          `json:"v"`
@@ -154,6 +156,11 @@ func positionWire(p Position) (cursorPosition, error) {
 		out.Record = &x.RecordID
 	case HistorySource:
 		x := p.Transaction
+		if p.Events != nil {
+			x = &p.Events.Parent
+			out.EventMode = ptr(p.Events.Mode)
+			out.EventLog = p.Events.NextLogIndex
+		}
 		out.Block = ptr(string(x.BlockNumber))
 		out.Index = &x.TransactionIndex
 		out.Hash = ptr(base64.RawURLEncoding.EncodeToString(x.Hash[:]))
@@ -173,6 +180,12 @@ func positionRead(w cursorPosition) (Position, error) {
 	if w.Index != nil {
 		used++
 	}
+	if w.EventMode != nil {
+		used++
+	}
+	if w.EventLog != nil {
+		used++
+	}
 	switch out.Kind {
 	case FinanceSource:
 		if used != 1 || w.Finance == nil {
@@ -189,7 +202,16 @@ func positionRead(w cursorPosition) (Position, error) {
 		}
 		out.Activity = &ActivityPosition{t, *w.Producer, *w.Run, Count(*w.Ordinal), *w.Record}
 	case HistorySource:
-		if used != 3 || w.Block == nil || w.Index == nil || w.Hash == nil {
+		want := 3
+		if w.EventMode != nil {
+			want++
+			if w.EventLog != nil {
+				want++
+			}
+		} else if w.EventLog != nil {
+			return out, ErrInvalid
+		}
+		if used != want || w.Block == nil || w.Index == nil || w.Hash == nil {
 			return out, ErrInvalid
 		}
 		b, e := base64.RawURLEncoding.DecodeString(*w.Hash)
@@ -198,7 +220,11 @@ func positionRead(w cursorPosition) (Position, error) {
 		}
 		x := TransactionPosition{BlockNumber: Count(*w.Block), TransactionIndex: *w.Index}
 		copy(x.Hash[:], b)
-		out.Transaction = &x
+		if w.EventMode != nil {
+			out.Events = &EventsPosition{Parent: x, Mode: *w.EventMode, NextLogIndex: w.EventLog}
+		} else {
+			out.Transaction = &x
+		}
 	case WalletSource:
 		if used != 1 || w.Address == nil {
 			return out, ErrInvalid
@@ -227,6 +253,9 @@ func (c *Cursor) Seal(b CursorBinding, set Digest, refs []SourceRef, pos Positio
 	}
 	bind, e := bindingDigest(b)
 	if e != nil || !digestValid(set) || len(refs) < 1 || len(refs) > 5 || until.Unix() < 0 || until.Unix() > p.MaxUnixSeconds {
+		return "", ErrInvalid
+	}
+	if pos.Events != nil {
 		return "", ErrInvalid
 	}
 	w, e := positionWire(pos)
@@ -321,6 +350,9 @@ func (c *Cursor) Open(raw string, b CursorBinding, now time.Time) (Continuation,
 		out.refs = append(out.refs, SourceRef{k, id})
 	}
 	pos, e := positionRead(payload.Position)
+	if pos.Events != nil {
+		return out, ErrInvalid
+	}
 	if e != nil {
 		return out, e
 	}

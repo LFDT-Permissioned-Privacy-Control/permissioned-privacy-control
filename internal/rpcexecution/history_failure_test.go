@@ -134,6 +134,34 @@ func historyLogFixture(t *testing.T, root bool) *historyFixture {
 	return f
 }
 
+func TestHistoryReceiptBoundedLogMetadataAndDetachedEntry(t *testing.T) {
+	f := historyLogFixture(t, false)
+	b := historyAcquire(t, f.client(t, DefaultHistoryBlockLimits()))
+	r, ok := b.Receipt(0)
+	if !ok || r.LogCount() != 1 {
+		t.Fatal("qualified receipt log count")
+	}
+	m, ok := r.LogMetadata(0)
+	if !ok || m.Address != (common.Address{9}) || m.TransactionIndex != 0 || m.LogIndex != 0 || m.TopicCount != 1 || m.DataBytes != 3 {
+		t.Fatal("metadata differs from actual receipt", m)
+	}
+	v, ok := r.Log(0)
+	if !ok {
+		t.Fatal("actual log missing")
+	}
+	v.Data[0], v.Topics[0] = 99, common.Hash{}
+	unchanged, _ := r.Log(0)
+	if unchanged.Data[0] != 1 || unchanged.Topics[0] != (common.Hash{3}) {
+		t.Fatal("single-log getter aliases qualified receipt")
+	}
+	if _, ok := r.LogMetadata(1); ok {
+		t.Fatal("out-of-range metadata")
+	}
+	if _, ok := r.Log(1); ok {
+		t.Fatal("out-of-range log")
+	}
+}
+
 func TestHistoryLogsRootUnknownAndIndependentAssociations(t *testing.T) {
 	for _, root := range []bool{false, true} {
 		f := historyLogFixture(t, root)

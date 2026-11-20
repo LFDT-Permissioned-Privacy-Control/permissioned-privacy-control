@@ -235,7 +235,7 @@ func normalize(q Query, original p.Scope, retained bool) (NormalizedQuery, error
 	if (q.Resource == p.ActivityLogs || q.Resource == p.ActivitySummary || q.Resource == p.ComplianceReport) && s.Addresses.Mode == "list" {
 		return n, ErrUnsupported
 	}
-	if q.Resource == p.Events {
+	if q.Resource == p.Events && !retained {
 		return n, ErrUnsupported
 	}
 	canonical := struct {

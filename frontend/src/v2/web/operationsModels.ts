@@ -1,3 +1,4 @@
+import { validateEventsPage } from './disclosureEvents'
 import { validateComplianceSummary, validateEvidencePage } from './disclosureEvidence'
 
 export type ObjectValue = Record<string, unknown>
@@ -167,6 +168,15 @@ export function protectedData(
       Number(coverage.preparedAt) < 0 || Number(coverage.preparedAt) >= Number(v.effectiveUntil)) throw Error('Invalid admission evidence coverage')
     if (v.view === 'list') validateEvidencePage(result, String(v.level), expected.dataTime ?? selected.scope.dataTime, expected.limit ?? 100, Number(coverage.preparedAt))
     else validateComplianceSummary(result, selected.scope, Number(coverage.preparedAt))
+  }
+  if (resource === 'events') {
+    if (v.view !== 'list' || Object.keys(v).sort().join() !== 'caseId,coverage,dataTime,effectiveUntil,level,readId,resource,result,v,view' ||
+      Object.keys(time).sort().join() !== 'end,start' || coverage.status !== 'RETAINED_AT_READ' ||
+      Object.keys(coverage).sort().join() !== 'populations,preparedAt,sourceBasisDigest,status' ||
+      JSON.stringify(coverage.populations) !== '["CURRENT_PROVED_ASSOCIATIONS","RETAINED_SAME_ORG_EVENTS_FROM_DISCLOSED_TRANSACTIONS"]' ||
+      typeof coverage.sourceBasisDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(coverage.sourceBasisDigest) ||
+      !Number.isSafeInteger(coverage.preparedAt) || Number(coverage.preparedAt) < 0 || Number(coverage.preparedAt) >= Number(v.effectiveUntil)) throw Error('Invalid disclosed events coverage')
+    validateEventsPage(result, selected.scope.level, expected.dataTime ?? selected.scope.dataTime, expected.limit ?? 100)
   }
   text(v.readId)
   if (resource === 'activity_logs')

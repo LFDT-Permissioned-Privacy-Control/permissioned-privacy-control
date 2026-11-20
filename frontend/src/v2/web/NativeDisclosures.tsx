@@ -37,6 +37,7 @@ import {
 const base = '/api/v1/disclosure/cases'
 const resourceOptions = [
   { value: 'transactions', label: 'Transactions' },
+  { value: 'events', label: 'Events' },
   { value: 'addresses', label: 'Wallet history' },
   { value: 'activity_logs', label: 'Access logs' },
   { value: 'activity_summary', label: 'Activity summary' },
@@ -372,6 +373,7 @@ function CreateCase({
               ))}
             </div>
           </fieldset>
+          {resources.includes('events') && <p className="text-sm text-neutral-500">Events needs explicit authority in the standing rule and case. It covers same-organization emitters in transactions whose sender or recipient is a target wallet. {level === 'full' ? 'Full Events reveals the whole event payload and may include other parties’ data.' : 'Topics, raw data and hashes will be withheld.'}</p>}
           <div className="grid gap-3 sm:grid-cols-2">
             <Field
               label="Data starts (UTC)"
@@ -612,12 +614,7 @@ function CaseDetail({
           )}
         </div>
         {recipient && <fieldset disabled={task.busy} className="mt-4 rounded-lg border border-neutral-200 p-4 space-y-3"><legend className="px-1 text-sm font-medium">Narrow this read</legend><div className="grid gap-3 md:grid-cols-3"><SelectField label="Target actor" value={target} onChange={value => { clearRead(); setTarget(value) }} options={[{ value: '', label: 'All targets in this case' }, ...selected.scope.targetActors.map(value => ({ value, label: value }))]} /><Field label="From (UTC, inclusive)" type="datetime-local" step={1} value={from} onChange={value => { clearRead(); setFrom(value) }} /><Field label="Through (UTC, inclusive)" type="datetime-local" step={1} value={to} onChange={value => { clearRead(); setTo(value) }} /></div><p className="text-xs text-neutral-500">Blank dates use the case interval. Both endpoints are inclusive UTC instants; narrowing cannot extend the case. Changing a filter clears loaded pages.</p></fieldset>}
-        {selected.scope.resources.includes('events') && (
-          <p className="mt-3 text-sm text-warning-dark">
-            Blockchain event disclosures are not implemented. Do not deploy standing rules containing
-            Events until that support is available.
-          </p>
-        )}
+        {resource === 'events' && <p className="mt-3 text-sm text-neutral-500">Events from transactions covered by this case, emitted by contracts attributed to the data organization. This covers transactions whose sender or recipient is a target wallet; events mentioning a target only in their payload are outside this population. {selected.scope.level === 'full' ? 'Full Events reveals the whole event payload and may include other parties’ data.' : 'Topics, raw data and hashes are withheld at this privacy level.'}</p>}
         {!resourceOptions.some((o) => selected.scope.resources.includes(o.value)) && (
           <p className="mt-3 text-sm text-warning-dark">
             This case has no resource supported by the current protected-data API.
@@ -634,11 +631,14 @@ function CaseDetail({
               size="sm"
               onClick={() =>
                 void task.run(async () => {
-                  if (Math.min(data.effectiveUntil, scope.identity.expires) <= Date.now() / 1000) {
-                    clearRead()
-                    throw Error('The case data expired. Read again if still permitted.')
+                  const checkDownload = () => {
+                    scope.check()
+                    if (Math.min(data.effectiveUntil, scope.identity.expires) <= Date.now() / 1000) {
+                      clearRead()
+                      throw Error('The case data expired. Read again if still permitted.')
+                    }
                   }
-                  saveJSON(data.view === 'list' ? 'ops-disclosure-page.json' : 'ops-disclosure-report.json', data, scope.check)
+                  saveJSON(data.view === 'list' ? 'ops-disclosure-page.json' : 'ops-disclosure-report.json', data, checkDownload)
                 })
               }
             >
@@ -667,7 +667,7 @@ function CaseDetail({
             </div>
           )}
           <ProtectedResult data={data} filter={filter} />
-          {data.view === 'list' && <div className="flex flex-wrap items-center justify-between gap-3 pt-4"><div className="text-xs text-neutral-500">{historyTrimmed ? 'Earlier pages were released; the latest 10 pages are kept in this tab.' : 'Up to 10 loaded pages are kept in this tab until expiry.'} Previous shows an already loaded page.</div><div className="flex gap-2">{data.resource === 'compliance_report' && <Button variant="outline" disabled={task.busy || !allowed} onClick={() => void task.run(async () => { clearRead(); await read() })}>Refresh admission decisions</Button>}<Button variant="outline" disabled={task.busy || historyIndex === 0} onClick={() => void task.run(async () => cachedPage(historyIndex - 1))}>Previous page</Button>{(cursor || historyIndex + 1 < history.length) && <Button variant="outline" disabled={task.busy} onClick={() => void task.run(async () => { if (historyIndex + 1 < history.length) cachedPage(historyIndex + 1); else await read(cursor) })}>Next page</Button>}</div></div>}
+          {data.view === 'list' && <div className="flex flex-wrap items-center justify-between gap-3 pt-4"><div className="text-xs text-neutral-500">{historyTrimmed ? 'Earlier pages were released; the latest 10 pages are kept in this tab.' : 'Up to 10 loaded pages are kept in this tab until expiry.'} Previous shows an already loaded page.</div><div className="flex gap-2">{data.resource === 'compliance_report' && <Button variant="outline" disabled={task.busy || !allowed} onClick={() => void task.run(async () => { clearRead(); await read() })}>Refresh admission decisions</Button>}<Button variant="outline" disabled={task.busy || historyIndex === 0} onClick={() => void task.run(async () => cachedPage(historyIndex - 1))}>Previous page</Button>{(cursor || historyIndex + 1 < history.length) && <Button variant="outline" disabled={task.busy} onClick={() => void task.run(async () => { if (historyIndex + 1 < history.length) cachedPage(historyIndex + 1); else await read(cursor) })}>{data.resource === 'events' && rows(data.result.items).length === 0 ? 'Continue' : 'Next page'}</Button>}</div></div>}
         </Panel>
       )}
       {!!audit.length && (
@@ -743,6 +743,14 @@ function CaseDetail({
 }
 function ProtectedResult({ data, filter }: { data: ProtectedData; filter: string }) {
   const result = data.result
+  if (data.resource === 'events') return <DataTable items={rows(result.items)} empty="No eligible events on this page." columns={[
+    { key: 'blockNumber', label: 'Block' },
+    { key: 'transactionIndex', label: 'Transaction index', render: row => String(row.transactionIndex) },
+    { key: 'logIndex', label: 'Log index', render: row => String(row.logIndex) },
+    { key: 'blockTime', label: 'Time', render: row => instant(row.blockTime) },
+    { key: 'emitter', label: 'Emitter' },
+    { key: 'payload', label: 'Payload', render: row => row.payload === 'withheld' ? 'Payload withheld' : <details><summary className="cursor-pointer text-primary">Raw payload</summary><dl className="mt-2 space-y-2 text-xs"><dt>Transaction hash</dt><dd className="break-all font-mono">{text(row.transactionHash)}</dd><dt>Block hash</dt><dd className="break-all font-mono">{text(row.blockHash)}</dd><dt>Topics</dt><dd>{(row.topics as string[]).length ? <ol>{(row.topics as string[]).map((topic, index) => <li key={index} className="break-all font-mono">{topic}</li>)}</ol> : 'No topics'}</dd><dt>Data</dt><dd><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono">{String(row.data)}</pre></dd></dl></details> },
+  ]} />
   if (Array.isArray(result.items)) {
     const columns: Column[] =
       data.resource === 'activity_logs'

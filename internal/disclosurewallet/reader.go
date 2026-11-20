@@ -108,7 +108,7 @@ func newReader(c Config, retained bool) (*Reader, error) {
 	if retained {
 		profileOK = d.ValidRetainedPlan(c.Plan)
 	}
-	if err != nil || !profileOK || c.Plan.NetworkKey != digest(net) || len(c.Plan.Resources) < 1 || len(c.Plan.Resources) > 6 {
+	if err != nil || !profileOK || c.Plan.NetworkKey != digest(net) || len(c.Plan.Resources) < 1 || len(c.Plan.Resources) > d.PlanResourceLimit(c.Plan) {
 		return nil, d.ErrInvalid
 	}
 	if _, ok := parseDigest(c.Plan.BundleDigest); !ok {
@@ -119,7 +119,7 @@ func newReader(c Config, retained bool) (*Reader, error) {
 		return nil, d.ErrInvalid
 	}
 	for i, resource := range c.Plan.Resources {
-		if _, err := d.RequiredKinds(resource); err != nil || i > 0 && c.Plan.Resources[i-1] >= resource {
+		if _, err := d.RequiredPlanKinds(c.Plan, resource); err != nil || i > 0 && c.Plan.Resources[i-1] >= resource {
 			return nil, d.ErrInvalid
 		}
 	}
@@ -143,7 +143,7 @@ func scopeActors(s d.ReadScope, plan d.SourcePlan) ([]string, error) {
 	if !validUUID(s.CaseID) || s.CaseVersion < 1 || !validUUID(s.DataOrganizationID) || !identity.ValidActorID(s.RecipientActorID) || !validTime(s.EffectiveUntil) || s.BundleDigest != plan.BundleDigest {
 		return nil, d.ErrInvalid
 	}
-	kinds, err := d.RequiredKinds(s.Query.Resource())
+	kinds, err := d.RequiredPlanKinds(plan, s.Query.Resource())
 	if err != nil || !slices.Contains(plan.Resources, s.Query.Resource()) || !slices.Contains(kinds, d.WalletSource) {
 		return nil, d.ErrUnsupported
 	}

@@ -28,6 +28,9 @@ func RequiredKinds(r p.Resource) ([]SourceKind, error) {
 // RequiredKindsRetained is a closed resource/view selection. The new finance
 // List is deliberately absent from the legacy profile and needs finance only.
 func RequiredKindsRetained(r p.Resource, v View) ([]SourceKind, error) {
+	if r == p.Events && v == List {
+		return []SourceKind{HistorySource, WalletSource}, nil
+	}
 	if r == p.ComplianceReport && v == List {
 		return []SourceKind{FinanceSource}, nil
 	}
@@ -169,6 +172,13 @@ var timeType = reflect.TypeOf(time.Time{})
 func valueBudget(v reflect.Value, b *Budget) error {
 	if !v.IsValid() || v.Type() == timeType {
 		return nil
+	}
+	if v.Type() == reflect.TypeOf(EventPayload{}) {
+		payload := v.Interface().(EventPayload)
+		if err := b.AddItems(uint64(1 + len(payload.Topics))); err != nil {
+			return err
+		}
+		return b.AddBytes(uint64(len(payload.Data) + 32*len(payload.Topics)))
 	}
 	switch v.Kind() {
 	case reflect.String:

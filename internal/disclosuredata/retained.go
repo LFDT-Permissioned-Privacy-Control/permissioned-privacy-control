@@ -12,11 +12,34 @@ import (
 
 const RetainedSourceProfile = "ops.disclosure.retained-data-sources/v1"
 const NativeFinanceSourceProfile = "ops.disclosure.retained-data-sources/v2"
+const NativeEventsSourceProfile = "ops.disclosure.retained-data-sources/v3"
+const RetainedEventsPopulation = "RETAINED_SAME_ORG_EVENTS_FROM_DISCLOSED_TRANSACTIONS"
+const EventPagePopulation = "EVENTS_FROM_DISCLOSED_TRANSACTIONS"
+
+func NativeEventsPlan(plan SourcePlan) bool {
+	return plan.Version == 4 && plan.Profile == NativeEventsSourceProfile
+}
+func EventsFormat() Digest { return hashParts("ops.disclosure.receipt-events/v1") }
+func PlanResourceLimit(plan SourcePlan) int {
+	if NativeEventsPlan(plan) {
+		return 7
+	}
+	return 6
+}
+func RequiredPlanKinds(plan SourcePlan, resource p.Resource) ([]SourceKind, error) {
+	if resource == p.Events {
+		if !NativeEventsPlan(plan) {
+			return nil, ErrUnsupported
+		}
+		return []SourceKind{HistorySource, WalletSource}, nil
+	}
+	return RequiredKinds(resource)
+}
 
 // NativeFinancePlan selects the fixed live financial paging/report contract.
 // It supplies no permission or source readiness.
 func NativeFinancePlan(plan SourcePlan) bool {
-	return plan.Version == 3 && plan.Profile == NativeFinanceSourceProfile
+	return plan.Version == 3 && plan.Profile == NativeFinanceSourceProfile || NativeEventsPlan(plan)
 }
 func FinanceSummaryFormat() Digest { return hashParts("ops.disclosure.finance-summary/v1") }
 func FinanceLiveFormat() Digest    { return hashParts("ops.disclosure.finance-live-page/v1") }
@@ -124,11 +147,11 @@ func basisForKinds(kinds []SourceKind, err error, b RetainedBasis) error {
 }
 
 func ValidRetainedPlan(plan SourcePlan) bool {
-	if !(plan.Version == 2 && plan.Profile == RetainedSourceProfile || NativeFinancePlan(plan)) || !digestValid(plan.BundleDigest) || !digestValid(plan.NetworkKey) || !digestValid(plan.PlanDigest) || len(plan.Resources) < 1 || len(plan.Resources) > 6 {
+	if !(plan.Version == 2 && plan.Profile == RetainedSourceProfile || NativeFinancePlan(plan)) || !digestValid(plan.BundleDigest) || !digestValid(plan.NetworkKey) || !digestValid(plan.PlanDigest) || len(plan.Resources) < 1 || len(plan.Resources) > PlanResourceLimit(plan) {
 		return false
 	}
 	for i, resource := range plan.Resources {
-		if _, err := RequiredKinds(resource); err != nil || i > 0 && plan.Resources[i-1] >= resource {
+		if _, err := RequiredPlanKinds(plan, resource); err != nil || i > 0 && plan.Resources[i-1] >= resource {
 			return false
 		}
 	}
@@ -155,6 +178,9 @@ func SourceReferencesRetained(plan SourcePlan, descriptors []SourceDescriptor) (
 	refs := make([]SourceRef, 0, len(descriptors))
 	for i, d := range descriptors {
 		version, population := retainedPopulation(d.Kind)
+		if NativeEventsPlan(plan) && d.Kind == HistorySource && d.FormatDigest == EventsFormat() {
+			version, population = 3, RetainedEventsPopulation
+		}
 		if NativeFinancePlan(plan) && d.Kind == FinanceSource {
 			version = 2
 		}
@@ -172,6 +198,14 @@ func SourceSetDigestRetained(plan SourcePlan, descriptors []SourceDescriptor, re
 		return "", err
 	}
 	if !slices.Contains(plan.Resources, resource) {
+		return "", ErrUnsupported
+	}
+	for _, descriptor := range descriptors {
+		if descriptor.Kind == HistorySource && (resource == p.Events) != (descriptor.Version == 3 && descriptor.Population == RetainedEventsPopulation && descriptor.FormatDigest == EventsFormat()) {
+			return "", ErrUnavailable
+		}
+	}
+	if resource == p.Events && !NativeEventsPlan(plan) {
 		return "", ErrUnsupported
 	}
 	if NativeFinancePlan(plan) && resource == p.ComplianceReport {
@@ -195,6 +229,6 @@ func ValidateFactsRetained(plan SourcePlan, scope ReadScope, descriptors []Sourc
 	if _, err := SourceSetDigestRetained(plan, descriptors, scope.Query.Resource(), scope.Query.View()); err != nil {
 		return err
 	}
-	_, err := validateFactsForHistoryMode(scope, descriptors, facts, after, RetainedHistoryPopulation, true, NativeFinancePlan(plan))
+	_, err := validateFactsForHistoryMode(scope, descriptors, facts, after, RetainedHistoryPopulation, true, NativeFinancePlan(plan), NativeEventsPlan(plan))
 	return err
 }

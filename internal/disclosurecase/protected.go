@@ -109,11 +109,11 @@ func newWithData(config Config, dc DataConfig, retained d.RetainedSources) (*Ser
 			return nil, ErrInvalid
 		}
 	}
-	if plan.BundleDigest != d.Digest(metadata.ManifestDigest) || plan.NetworkKey != netID || !ValidDigest(string(plan.PlanDigest)) || plan.Resources == nil || len(plan.Resources) > 6 {
+	if plan.BundleDigest != d.Digest(metadata.ManifestDigest) || plan.NetworkKey != netID || !ValidDigest(string(plan.PlanDigest)) || plan.Resources == nil || len(plan.Resources) > d.PlanResourceLimit(plan) {
 		return nil, ErrInvalid
 	}
 	for i, r := range plan.Resources {
-		if _, e := d.RequiredKinds(r); e != nil || i > 0 && plan.Resources[i-1] >= r {
+		if _, e := d.RequiredPlanKinds(plan, r); e != nil || i > 0 && plan.Resources[i-1] >= r {
 			return nil, d.ErrUnsupported
 		}
 	}
@@ -553,7 +553,7 @@ func ValidateExposureEvent(e Event) error {
 		if x.View != d.List && x.View != d.Detail {
 			return ErrInvalid
 		}
-	case p.ActivityLogs:
+	case p.ActivityLogs, p.Events:
 		if x.View != d.List {
 			return ErrInvalid
 		}

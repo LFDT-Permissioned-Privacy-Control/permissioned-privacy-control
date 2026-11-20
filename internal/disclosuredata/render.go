@@ -63,6 +63,9 @@ func (r Result) WithCursor(raw string) (Result, error) {
 		return Result{}, ErrInvalid
 	}
 	switch body := r.body.(type) {
+	case eventsPageDTO:
+		body.NextCursor = ptr(raw)
+		r.body = body
 	case financeLivePageDTO:
 		body.NextCursor = ptr(raw)
 		r.body = body
@@ -109,6 +112,10 @@ func (r Result) MarshalJSON() ([]byte, error) {
 		return nil, ErrInvalid
 	}
 	switch body := r.body.(type) {
+	case eventsPageDTO:
+		if r.scope.Query.resource == p.Events && r.scope.Query.view == List {
+			return envelope(r, body)
+		}
 	case financeLivePageDTO:
 		if r.scope.Query.resource == p.ComplianceReport && r.scope.Query.view == List {
 			return envelope(r, body)
@@ -290,6 +297,16 @@ func emissionBudget(f Facts, fc factContext, c RenderContext) error {
 			}
 		}
 	}
+	for _, event := range f.Events {
+		if e := b.AddBytes(1024); e != nil {
+			return e
+		}
+		if event.Payload != nil {
+			if e := b.AddBytes(uint64(2*len(event.Payload.Data) + 66*len(event.Payload.Topics))); e != nil {
+				return e
+			}
+		}
+	}
 	for range f.Transactions {
 		if e := b.AddBytes(512); e != nil {
 			return e
@@ -366,7 +383,7 @@ func renderProfile(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext,
 	if retained == nil {
 		fc, e = validateFacts(s, ds, f, nil)
 	} else {
-		fc, e = validateFactsForHistoryMode(s, ds, f, nil, RetainedHistoryPopulation, false, NativeFinancePlan(*retained))
+		fc, e = validateFactsForHistoryMode(s, ds, f, nil, RetainedHistoryPopulation, false, NativeFinancePlan(*retained), NativeEventsPlan(*retained))
 	}
 	if e != nil {
 		return result, e
@@ -399,6 +416,13 @@ func renderProfile(s ReadScope, ds []SourceDescriptor, f Facts, c RenderContext,
 	}
 	result = Result{scope: s, readID: readID, coverage: coverage, sourceDigest: set, renderDigest: rd}
 	switch s.Query.resource {
+	case p.Events:
+		body := eventsPageDTO{Version: 1, Population: EventPagePopulation, Items: []EventDTO{}}
+		for _, event := range f.Events {
+			body.Items = append(body.Items, eventDTO(c, event, fc.descriptors[HistorySource].NetworkKey))
+		}
+		result.body = body
+		result.rows = uint16(len(body.Items))
 	case p.AddressHistory:
 		if s.Query.view == Resolve {
 			var selected *AddressFact

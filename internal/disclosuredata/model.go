@@ -165,6 +165,26 @@ type TransactionDetailFact struct {
 	RevertReason         *string
 	ContractAddress      *[20]byte
 }
+
+// EventFact retains the actual parent for case-participant validation. The
+// operational source separately qualifies the emitter at that parent position.
+// Payload is present only at Full; lower projections never carry raw bytes.
+type EventFact struct {
+	Transaction TransactionFact
+	Emitter     [20]byte
+	LogIndex    uint32
+	Payload     *EventPayload
+}
+type EventPayload struct {
+	Topics [][32]byte
+	Data   []byte
+}
+
+type EventsPosition struct {
+	Parent       TransactionPosition
+	Mode         string  // pending: resume this parent; after: next parent strictly after it
+	NextLogIndex *uint32 // actual block-global ordinal, pending only
+}
 type MethodCount struct {
 	Method                    string
 	Total, Successful, Failed Count
@@ -240,6 +260,7 @@ type Position struct {
 	Address     *AddressPosition
 	Finance     *FinancePosition
 	FinanceLive *FinanceLivePosition
+	Events      *EventsPosition
 }
 type FinancePosition struct{ ID Count }
 type FinanceLivePosition struct {
@@ -274,6 +295,7 @@ type Facts struct {
 	Compliance      *ComplianceAggregate
 	FinanceEvidence *FinanceEvidencePage
 	FinanceLive     *FinanceLivePage
+	Events          []EventFact
 	End             bool
 	Next            *Position
 	Wallets         []WalletFact // ONE total<=4096 unioned snapshot; split query targets vs viewer by ActorID
@@ -352,6 +374,20 @@ type TransactionDetailDTO struct {
 	Error                *string `json:"error,omitempty"`
 	RevertReason         *string `json:"revertReason,omitempty"`
 	ContractAddress      *string `json:"contractAddress,omitempty"`
+}
+
+type EventDTO struct {
+	EventID          string    `json:"eventId"`
+	BlockNumber      Count     `json:"blockNumber"`
+	TransactionIndex uint32    `json:"transactionIndex"`
+	LogIndex         uint32    `json:"logIndex"`
+	BlockTime        int64     `json:"blockTime"`
+	Emitter          string    `json:"emitter"`
+	Payload          string    `json:"payload"`
+	TransactionHash  *string   `json:"transactionHash,omitempty"`
+	BlockHash        *string   `json:"blockHash,omitempty"`
+	Topics           *[]string `json:"topics,omitempty"`
+	Data             *string   `json:"data,omitempty"`
 }
 type ActivityDTO struct {
 	RecordID   string  `json:"recordId"`

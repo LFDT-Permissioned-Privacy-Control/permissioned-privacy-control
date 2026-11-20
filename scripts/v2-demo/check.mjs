@@ -162,6 +162,7 @@ async function checkDisclosure(admin, deployer, reader, hash) {
   await admin.page.getByLabel('From (local time)', { exact: true }).fill(localDate(Math.min(now, sampleTime) - 3600));
   await admin.page.getByLabel('Through (local time)', { exact: true }).fill(localDate(Math.max(now, sampleTime) + 120));
   for (const label of ['Addresses', 'Activity', 'Activity summary', 'Sanctions', 'Compliance']) await admin.page.getByLabel(label, { exact: true }).uncheck();
+  await admin.page.getByLabel('Events', { exact: true }).check();
   await admin.page.getByLabel('Detail level').selectOption('full');
   stage = 'disclosure-create-case';
   await admin.page.getByRole('button', { name: 'Open case', exact: true }).click();
@@ -191,15 +192,38 @@ async function checkDisclosure(admin, deployer, reader, hash) {
   }
   await admin.page.locator('a[href$="/transactions/' + hash + '"]').first().waitFor({ timeout: 30_000 });
   assert.equal(await admin.page.getByRole('alert').count(), 0);
-  stage = 'disclosure-reader-denied';
+  stage = 'disclosure-read-events';
   const caseId = new URL(caseUrl).pathname.split('/').at(-1);
+  const eventsResponse = admin.page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/disclosure/cases/' + caseId + '/read'));
+  await admin.page.getByRole('button', { name: 'Events', exact: true }).click();
+  let eventsRead = await eventsResponse, foundEvent = false;
+  const eventIds = new Set(), eventCursors = new Set();
+  for (let page = 0; page < 32; page++) {
+    assert.equal(eventsRead.status(), 200, 'Case Events read must succeed');
+    const value = await eventsRead.json();
+    assert.equal(value.result.v, 1); assert.equal(value.result.population, 'EVENTS_FROM_DISCLOSED_TRANSACTIONS');
+    for (const event of value.result.items) {
+      assert.ok(!eventIds.has(event.eventId), 'Case Events pagination repeated a log'); eventIds.add(event.eventId);
+      assert.equal(event.payload, 'disclosed'); assert.ok(Array.isArray(event.topics)); assert.match(event.data, /^0x(?:[0-9a-f]{2})*$/);
+      if (event.transactionHash === hash) { assert.equal(event.emitter, runtime.targetContract); foundEvent = true; }
+    }
+    if (foundEvent || !value.result.nextCursor) break;
+    assert.ok(!eventCursors.has(value.result.nextCursor)); eventCursors.add(value.result.nextCursor);
+    const next = admin.page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/disclosure/cases/' + caseId + '/read'));
+    await admin.page.getByRole('button', { name: value.result.items.length ? 'Next page' : 'Continue', exact: true }).click(); eventsRead = await next;
+  }
+  assert.ok(foundEvent, 'Case Events must include the actual sample contract log');
+  await admin.page.getByText('Raw payload', { exact: true }).first().click();
+  await admin.page.getByRole('button', { name: 'Download this page', exact: true }).waitFor();
+  assert.equal(await admin.page.getByRole('alert').count(), 0);
+  stage = 'disclosure-reader-denied';
   const deniedCase = reader.page.waitForResponse(r => r.request().method() === 'GET' && new URL(r.url()).pathname.endsWith('/disclosure/cases/' + caseId));
   await reader.page.goto(caseUrl);
   assert.equal((await deniedCase).status(), 404, 'Another recipient case must be unavailable, with a valid reader session');
   await reader.page.getByRole('alert').waitFor();
   assert.equal(await reader.page.locator('a[href$="/transactions/' + hash + '"]').count(), 0);
   assert.equal((await bff(reader, '/transactions/' + hash)).status, 200);
-  passed('admin opens a standing-rule disclosure and reads its transaction without customer approval; reader cannot use the case');
+  passed('admin opens a standing-rule disclosure and reads its transaction and contract event without customer approval; reader cannot use the case');
   return caseUrl;
 }
 async function uiScreenshot(page, name) {

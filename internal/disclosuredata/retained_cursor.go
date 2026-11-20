@@ -79,8 +79,12 @@ func retainedCursorSelection(plan SourcePlan, resource p.Resource, basis Retaine
 		if position.Kind == WalletSource {
 			return nil
 		}
+	case p.Events:
+		if NativeEventsPlan(plan) && position.Kind == HistorySource && position.Events != nil {
+			return nil
+		}
 	case p.Transactions:
-		if position.Kind == HistorySource {
+		if position.Kind == HistorySource && position.Transaction != nil {
 			return nil
 		}
 	case p.ActivityLogs:

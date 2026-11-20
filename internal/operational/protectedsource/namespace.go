@@ -22,6 +22,9 @@ type namespaceRead struct {
 	rangePass  *h.NamespaceRangePass
 	pointInput *h.TrustedRootScope
 	pointPass  *h.NamespacePass
+	eventInput *h.TrustedRangeScope
+	eventPass  *h.NamespaceRangePass
+	eventCells map[h.Address][]eventCell
 }
 
 func namespaceError(err error) error {
@@ -281,5 +284,5 @@ func (n *namespaceRead) check(ctx context.Context) error {
 			return d.ErrConflict
 		}
 	}
-	return nil
+	return n.checkEvents(ctx)
 }

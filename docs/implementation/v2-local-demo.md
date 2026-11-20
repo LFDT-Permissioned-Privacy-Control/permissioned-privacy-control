@@ -325,10 +325,16 @@ The walkthrough opens one case. To create another in **Explorer**, sign in as Ad
 | Legal basis | `Isolated test scenario` |
 | From / Through | Local-time interval containing the sample transaction; set Through just after it |
 | Case expires in minutes | `15` |
-| Data | Transactions |
+| Data | Transactions and Events |
 | Detail level | Full |
 
-Choose **Open case**, **Transactions**, then a row's **Details** link. Expand
+Choose **Open case**, **Transactions**, then a row's **Details** link. Return to
+the case and choose **Events** for the contract logs; expand **Raw payload** to
+inspect real topics and data. **Continue** can advance through a page containing
+no eligible logs. **Download this page** saves only that page. These are events
+from transactions covered by the case, not all activity mentioning a customer.
+Full includes the whole event payload, possibly other parties in a batch;
+Pseudonymous and Redacted withhold all raw topics, data and hashes. Expand
 **Case history** to inspect recorded activity. The customer is not asked to
 approve. The same case is unavailable as Reader, while Reader's permitted
 ordinary Explorer requests still work. Cases expire; create a new one if you
@@ -344,8 +350,13 @@ basis. Times here use **UTC**. The default expiry is 15 minutes; the demo rule
 allows at most 20 minutes. Select **Compliance report** under Resources for the
 finance view. After creating the case, select that data resource and choose
 **Admission decisions → Read permitted data**. You can narrow the target/time,
-page through evidence and **Download this page**. **Complete report** remains a
-separate view capped at 100 decisions; the page download is not a full export.
+page through evidence and **Download this page**. **Summary report** counts all
+matching retained decisions at its observation time; it does not inline every
+decision or cap the total at 100. The page download is not a full export.
+Select **Events** under Resources to author a case with separate Events
+authority. The prepared demo standing rule includes it; older prepared demo
+configurations need regeneration with the current demo tools before that rule
+can authorise Events.
 
 In **OPS Admin → Access Logs**, Demo Admin can inspect its organization's sealed
 request records directly; no disclosure case is required. Start with the last

@@ -123,12 +123,28 @@ func fixtureObject(t *testing.T, value any) map[string]any {
 	return object
 }
 
+type functionalEmitter struct {
+	Address      common.Address
+	Organization string
+}
+type functionalEventNodeOptions struct {
+	Logs     [][]*types.Log
+	Keys     map[int]*ecdsa.PrivateKey
+	To       map[int]*common.Address
+	Emitters []functionalEmitter
+}
+
+func ownedFunctionalEventNode(t *testing.T, options functionalEventNodeOptions) *functionalNode {
+	return ownedFunctionalNodeOptions(t, max(1, len(options.Logs)), 1, options)
+}
+
 type functionalNode struct {
 	config            NodeConfig
 	network           networkidentity.Binding
 	genesis, head     *types.Header
 	tx                *types.Transaction
 	signer            *ecdsa.PrivateKey
+	eventOptions      functionalEventNodeOptions
 	advanceHead       func(bool)
 	blocks            []*types.Header
 	transactions      []*types.Transaction
@@ -151,6 +167,15 @@ func ownedFunctionalNodeCount(t *testing.T, count int) *functionalNode {
 }
 
 func ownedFunctionalNodeShape(t *testing.T, count, perBlock int) *functionalNode {
+	return ownedFunctionalNodeOptions(t, count, perBlock, functionalEventNodeOptions{})
+}
+
+// Only explicit nil-To options use this real initcode, returning one STOP byte.
+// Ordinary call fixtures keep their original signed bytes and receipt fields.
+func functionalCreationInitCode() []byte {
+	return []byte{0x60, 1, 0x60, 12, 0x60, 0, 0x39, 0x60, 1, 0x60, 0, 0xf3, 0}
+}
+func ownedFunctionalNodeOptions(t *testing.T, count, perBlock int, options functionalEventNodeOptions) *functionalNode {
 	t.Helper()
 	if count < 1 || count > 128 || perBlock < 1 || perBlock > 100 || count*perBlock > 128 {
 		t.Fatal("bounded functional block/transaction count required")
@@ -165,7 +190,6 @@ func ownedFunctionalNodeShape(t *testing.T, count, perBlock int) *functionalNode
 	beacon := common.Hash{3}
 	requests := types.EmptyRequestsHash
 	genesis := &types.Header{Number: big.NewInt(0), Difficulty: big.NewInt(0), GasLimit: 30000000, Time: uint64(f.Now - int64(count) - 1), BaseFee: big.NewInt(1), UncleHash: types.EmptyUncleHash, TxHash: types.EmptyTxsHash, ReceiptHash: types.EmptyReceiptsHash, Extra: []byte{}, WithdrawalsHash: &withdrawals, BlobGasUsed: &zero, ExcessBlobGas: &zero, ParentBeaconRoot: &beacon, RequestsHash: &requests}
-	from := crypto.PubkeyToAddress(key.PublicKey)
 	headers := map[uint64]*types.Header{0: genesis}
 	empty := fixtureObject(t, genesis)
 	empty["transactions"], empty["uncles"], empty["withdrawals"] = []any{}, []any{}, []any{}
@@ -178,16 +202,59 @@ func ownedFunctionalNodeShape(t *testing.T, count, perBlock int) *functionalNode
 	for i := 0; i < count; i++ {
 		header := types.CopyHeader(genesis)
 		header.Number, header.Time, header.ParentHash = big.NewInt(int64(i+1)), parent.Time+1, parent.Hash()
-		header.GasUsed = 21000 * uint64(perBlock)
 		group := make([]*types.Transaction, perBlock)
 		ethReceipts := make(types.Receipts, perBlock)
+		gasUsed := make([]uint64, perBlock)
+		var totalLogs uint32
 		for j := range group {
-			tx, err := types.SignNewTx(key, types.LatestSignerForChainID(big.NewInt(1)), &types.LegacyTx{Nonce: uint64(i*perBlock + j), To: &to, Gas: 21000, GasPrice: big.NewInt(3), Value: big.NewInt(0), Data: []byte{}})
+			parentIndex := i*perBlock + j
+			signer := key
+			if options.Keys[parentIndex] != nil {
+				signer = options.Keys[parentIndex]
+			}
+			destination := &to
+			if override, ok := options.To[parentIndex]; ok {
+				destination = override
+			}
+			logs := []*types.Log{}
+			if parentIndex < len(options.Logs) {
+				for _, entry := range options.Logs[parentIndex] {
+					copy := *entry
+					copy.Topics = append([]common.Hash{}, entry.Topics...)
+					copy.Data = append([]byte{}, entry.Data...)
+					copy.TxIndex = uint(j)
+					copy.Index = uint(totalLogs)
+					copy.Removed = false
+					logs = append(logs, &copy)
+					totalLogs++
+				}
+			}
+			if totalLogs > 20000 {
+				t.Fatal("event fixture exceeds receipt log bound")
+			}
+			gasUsed[j] = 21000 + 1000*uint64(len(logs))
+			input := []byte{}
+			if destination == nil {
+				input = functionalCreationInitCode()
+				gasUsed[j] += 100000
+			}
+			header.GasUsed += gasUsed[j]
+			tx, err := types.SignNewTx(signer, types.LatestSignerForChainID(big.NewInt(1)), &types.LegacyTx{Nonce: uint64(parentIndex), To: destination, Gas: gasUsed[j], GasPrice: big.NewInt(3), Value: big.NewInt(0), Data: input})
 			if err != nil {
 				t.Fatal(err)
 			}
 			group[j] = tx
-			ethReceipts[j] = &types.Receipt{Type: 0, Status: 1, CumulativeGasUsed: 21000 * uint64(j+1), Logs: []*types.Log{}}
+			ethReceipts[j] = &types.Receipt{Type: 0, Status: 1, CumulativeGasUsed: header.GasUsed, Logs: logs}
+			if destination == nil {
+				ethReceipts[j].ContractAddress = crypto.CreateAddress(crypto.PubkeyToAddress(signer.PublicKey), tx.Nonce())
+			}
+			ethReceipts[j].Bloom = types.CreateBloom(ethReceipts[j])
+			for k, value := range ethReceipts[j].Bloom {
+				header.Bloom[k] |= value
+			}
+		}
+		if header.GasUsed > header.GasLimit {
+			t.Fatal("event fixture exceeds block gas")
 		}
 		header.TxHash = types.DeriveSha(types.Transactions(group), trie.NewStackTrie(nil))
 		header.ReceiptHash = types.DeriveSha(ethReceipts, trie.NewStackTrie(nil))
@@ -195,10 +262,28 @@ func ownedFunctionalNodeShape(t *testing.T, count, perBlock int) *functionalNode
 		items, receipts := make([]any, perBlock), make([]any, perBlock)
 		for j, tx := range group {
 			position := "0x" + strconv.FormatUint(uint64(j), 16)
+			txFrom, err := types.Sender(types.LatestSignerForChainID(big.NewInt(1)), tx)
+			if err != nil {
+				t.Fatal(err)
+			}
 			transaction := fixtureObject(t, tx)
-			transaction["from"], transaction["blockHash"], transaction["blockNumber"], transaction["transactionIndex"] = from.Hex(), header.Hash().Hex(), number, position
+			transaction["from"], transaction["blockHash"], transaction["blockNumber"], transaction["transactionIndex"] = txFrom.Hex(), header.Hash().Hex(), number, position
 			items[j] = transaction
-			receipts[j] = map[string]any{"transactionHash": tx.Hash().Hex(), "blockHash": header.Hash().Hex(), "blockNumber": number, "transactionIndex": position, "from": from.Hex(), "to": to.Hex(), "type": "0x0", "contractAddress": nil, "status": "0x1", "gasUsed": "0x5208", "cumulativeGasUsed": "0x" + strconv.FormatUint(21000*uint64(j+1), 16), "effectiveGasPrice": "0x3", "logsBloom": "0x" + strings.Repeat("00", 256), "logs": []any{}}
+			logs := make([]any, 0, len(ethReceipts[j].Logs))
+			for _, entry := range ethReceipts[j].Logs {
+				topics := make([]string, len(entry.Topics))
+				for k, topic := range entry.Topics {
+					topics[k] = topic.Hex()
+				}
+				logs = append(logs, map[string]any{"address": entry.Address.Hex(), "topics": topics, "data": "0x" + common.Bytes2Hex(entry.Data), "blockNumber": number, "blockHash": header.Hash().Hex(), "transactionHash": tx.Hash().Hex(), "transactionIndex": position, "logIndex": "0x" + strconv.FormatUint(uint64(entry.Index), 16), "removed": false})
+			}
+			var destination, created any
+			if tx.To() != nil {
+				destination = tx.To().Hex()
+			} else {
+				created = ethReceipts[j].ContractAddress.Hex()
+			}
+			receipts[j] = map[string]any{"transactionHash": tx.Hash().Hex(), "blockHash": header.Hash().Hex(), "blockNumber": number, "transactionIndex": position, "from": txFrom.Hex(), "to": destination, "type": "0x0", "contractAddress": created, "status": "0x1", "gasUsed": "0x" + strconv.FormatUint(gasUsed[j], 16), "cumulativeGasUsed": "0x" + strconv.FormatUint(ethReceipts[j].CumulativeGasUsed, 16), "effectiveGasPrice": "0x3", "logsBloom": "0x" + common.Bytes2Hex(ethReceipts[j].Bloom[:]), "logs": logs}
 		}
 		block := fixtureObject(t, header)
 		block["transactions"], block["uncles"], block["withdrawals"] = items, []any{}, []any{}
@@ -210,6 +295,16 @@ func ownedFunctionalNodeShape(t *testing.T, count, perBlock int) *functionalNode
 	latest := head
 	var latestMu sync.RWMutex
 	var attempts atomic.Int64
+	findTransaction := func(hash string) (*types.Transaction, map[string]any, map[string]any) {
+		for i, group := range groups {
+			for j, tx := range group {
+				if tx.Hash().Hex() == hash {
+					return tx, blocksByHash[blocks[i].Hash().Hex()]["transactions"].([]any)[j].(map[string]any), receiptsByHash[blocks[i].Hash().Hex()][j].(map[string]any)
+				}
+			}
+		}
+		return nil, nil, nil
+	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		attempts.Add(1)
 		var q struct {
@@ -253,11 +348,29 @@ func ownedFunctionalNodeShape(t *testing.T, count, perBlock int) *functionalNode
 			} else {
 				t.Error("unknown header number", selector)
 			}
-		case "eth_getBlockByHash":
+		case "eth_getBlockByHash", "eth_getBlockByNumber":
 			var hash string
 			_ = json.Unmarshal(q.Params[0], &hash)
+			if q.Method == "eth_getBlockByNumber" {
+				if number, err := strconv.ParseUint(strings.TrimPrefix(hash, "0x"), 16, 64); err == nil && headers[number] != nil {
+					hash = headers[number].Hash().Hex()
+				}
+			}
 			if block, ok := blocksByHash[hash]; ok {
 				result = block
+				var full bool
+				if len(q.Params) > 1 && json.Unmarshal(q.Params[1], &full) == nil && !full {
+					copy := map[string]any{}
+					for k, v := range block {
+						copy[k] = v
+					}
+					hashes := []any{}
+					for _, tx := range block["transactions"].([]any) {
+						hashes = append(hashes, tx.(map[string]any)["hash"])
+					}
+					copy["transactions"] = hashes
+					result = copy
+				}
 			} else {
 				t.Error("unknown block hash")
 			}
@@ -268,6 +381,61 @@ func ownedFunctionalNodeShape(t *testing.T, count, perBlock int) *functionalNode
 				result = receipts
 			} else {
 				t.Error("unknown receipts block hash")
+			}
+		case "eth_getTransactionByHash", "eth_getTransactionReceipt", "debug_traceTransaction":
+			var hash string
+			_ = json.Unmarshal(q.Params[0], &hash)
+			tx, transaction, receipt := findTransaction(hash)
+			if tx == nil {
+				break
+			}
+			switch q.Method {
+			case "eth_getTransactionByHash":
+				result = transaction
+			case "eth_getTransactionReceipt":
+				result = receipt
+			case "debug_traceTransaction":
+				from, _ := types.Sender(types.LatestSignerForChainID(big.NewInt(1)), tx)
+				trace := map[string]any{"type": "CALL", "from": from.Hex(), "input": "0x" + common.Bytes2Hex(tx.Data()), "value": "0x" + tx.Value().Text(16), "gas": "0x" + strconv.FormatUint(tx.Gas(), 16), "gasUsed": receipt["gasUsed"], "output": "0x", "calls": []any{}}
+				if tx.To() == nil {
+					trace["type"], trace["to"], trace["output"] = "CREATE", crypto.CreateAddress(from, tx.Nonce()).Hex(), "0x00"
+				} else {
+					trace["to"] = tx.To().Hex()
+				}
+				result = map[string]any{"callTracer": trace, "prestateTracer": map[string]any{}}
+			}
+		case "eth_getCode":
+			var address string
+			_ = json.Unmarshal(q.Params[0], &address)
+			result = "0x"
+			for i, group := range groups {
+				for _, tx := range group {
+					if tx.To() == nil {
+						from, _ := types.Sender(types.LatestSignerForChainID(big.NewInt(1)), tx)
+						if !strings.EqualFold(address, crypto.CreateAddress(from, tx.Nonce()).Hex()) {
+							continue
+						}
+						before := false
+						if len(q.Params) > 1 {
+							var tag string
+							if json.Unmarshal(q.Params[1], &tag) == nil {
+								if n, e := strconv.ParseUint(strings.TrimPrefix(tag, "0x"), 16, 64); e == nil {
+									before = n < blocks[i].Number.Uint64()
+								}
+							} else {
+								var selector struct {
+									BlockHash string `json:"blockHash"`
+								}
+								if json.Unmarshal(q.Params[1], &selector) == nil {
+									before = selector.BlockHash == genesis.Hash().Hex()
+								}
+							}
+						}
+						if !before {
+							result = "0x00"
+						}
+					}
+				}
 			}
 		default:
 			t.Error("unexpected node call", q.Method)
@@ -290,7 +458,7 @@ func ownedFunctionalNodeShape(t *testing.T, count, perBlock int) *functionalNode
 			latest.ParentHash = head.Hash()
 			latest.Time++
 		}
-	}, blocks: blocks, transactions: transactions, transactionGroups: groups, attempts: attempts.Load}
+	}, blocks: blocks, transactions: transactions, transactionGroups: groups, eventOptions: options, attempts: attempts.Load}
 }
 
 type functionalControl struct {
@@ -344,17 +512,35 @@ func actualFunctionalConfig(t *testing.T, node *functionalNode, controls ...func
 	if err != nil {
 		t.Fatal(err)
 	}
-	statement := map[string]any{"kind": "prague-finite", "address": strings.ToLower(node.tx.To().Hex()), "runtimeHash": h.Hash{9}.String(), "runtimeLength": 1, "initial": map[string]any{"kind": "org", "organizationId": f.Org}, "physical": map[string]any{"kind": "preexisting"}, "start": h.Cut{Number: 0, Hash: h.Hash(node.genesis.Hash()), Index: 0}, "end": h.Cut{Number: node.head.Number.Uint64(), Hash: h.Hash(node.head.Hash()), Index: uint32(len(node.transactionGroups[len(node.transactionGroups)-1]))}}
-	artifact, _ := json.Marshal(map[string]any{"apiVersion": h.ArtifactAPIVersion, "modelId": h.ModelID, "network": node.network, "era": era, "cohortId": uuid.NewString(), "statements": []any{statement}})
-	path := filepath.Join(t.TempDir(), "namespace.json")
-	if err = os.WriteFile(path, artifact, 0600); err != nil {
-		t.Fatal(err)
+	statement := map[string]any{"kind": "prague-finite", "runtimeHash": h.Hash{9}.String(), "runtimeLength": 1, "initial": map[string]any{"kind": "org", "organizationId": f.Org}, "physical": map[string]any{"kind": "preexisting"}, "start": h.Cut{Number: 0, Hash: h.Hash(node.genesis.Hash()), Index: 0}, "end": h.Cut{Number: node.head.Number.Uint64(), Hash: h.Hash(node.head.Hash()), Index: uint32(len(node.transactionGroups[len(node.transactionGroups)-1]))}}
+	statements := []any{}
+	if node.tx.To() != nil {
+		statement["address"] = strings.ToLower(node.tx.To().Hex())
+		statements = append(statements, statement)
 	}
-	imported, err := admissionsql.ImportNamespace(ctx, admissionDSN, binding, metadata.State, path, h.Digest(sha256.Sum256(artifact)), nil, true)
-	if err != nil {
-		t.Fatal("finite import", err)
+	for _, emitter := range node.eventOptions.Emitters {
+		item := map[string]any{}
+		for key, value := range statement {
+			item[key] = value
+		}
+		item["address"] = strings.ToLower(emitter.Address.Hex())
+		item["initial"] = map[string]any{"kind": "org", "organizationId": emitter.Organization}
+		statements = append(statements, item)
 	}
-	if err = admissionsql.FinalizeNamespaceRecovery(ctx, admissionDSN, binding, imported.State, h.Digest{7}, true, true, 60); err != nil {
+	state := metadata.State
+	if len(statements) > 0 {
+		artifact, _ := json.Marshal(map[string]any{"apiVersion": h.ArtifactAPIVersion, "modelId": h.ModelID, "network": node.network, "era": era, "cohortId": uuid.NewString(), "statements": statements})
+		path := filepath.Join(t.TempDir(), "namespace.json")
+		if err = os.WriteFile(path, artifact, 0600); err != nil {
+			t.Fatal(err)
+		}
+		imported, err := admissionsql.ImportNamespace(ctx, admissionDSN, binding, metadata.State, path, h.Digest(sha256.Sum256(artifact)), nil, true)
+		if err != nil {
+			t.Fatal("finite import", err)
+		}
+		state = imported.State
+	}
+	if err = admissionsql.FinalizeNamespaceRecovery(ctx, admissionDSN, binding, state, h.Digest{7}, true, true, 60); err != nil {
 		t.Fatal(err)
 	}
 	namespace, err := admissionsql.OpenNamespaceReader(ctx, functionalDSN(admissionDSN, "ad_namespace"), binding, generation, era)
@@ -376,7 +562,18 @@ func actualFunctionalConfig(t *testing.T, node *functionalNode, controls ...func
 		group := node.transactionGroups[i]
 		functionalExec(t, indexOwner, `INSERT INTO public.blocks(number,hash,parent_hash,timestamp,gas_used,gas_limit,transaction_count)VALUES($1,$2,$3,$4,$5,$6,$7)`, header.Number.Uint64(), header.Hash().Hex(), header.ParentHash.Hex(), header.Time, header.GasUsed, header.GasLimit, len(group))
 		for j, tx := range group {
-			functionalExec(t, indexOwner, `INSERT INTO public.transactions(hash,block_number,tx_index,from_address,to_address,value,gas_used,gas_price,status)VALUES($1,$2,$3,$4,$5,0,21000,3,1)`, tx.Hash().Hex(), header.Number.Uint64(), j, strings.ToLower(crypto.PubkeyToAddress(node.signer.PublicKey).Hex()), strings.ToLower(tx.To().Hex()))
+			txFrom, err := types.Sender(types.LatestSignerForChainID(big.NewInt(1)), tx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var to any
+			if tx.To() != nil {
+				to = strings.ToLower(tx.To().Hex())
+			}
+			functionalExec(t, indexOwner, `INSERT INTO public.transactions(hash,block_number,tx_index,from_address,to_address,value,gas_used,gas_price,status)VALUES($1,$2,$3,$4,$5,0,$6,3,1)`, tx.Hash().Hex(), header.Number.Uint64(), j, strings.ToLower(txFrom.Hex()), to, tx.Gas())
+			if tx.To() == nil {
+				functionalExec(t, indexOwner, `INSERT INTO public.contracts(address,bytecode,bytecode_hash,creator,creation_tx,block_number)VALUES($1,'0x00',$2,$3,$4,$5)`, strings.ToLower(crypto.CreateAddress(txFrom, tx.Nonce()).Hex()), crypto.Keccak256Hash([]byte{0}).Hex(), strings.ToLower(txFrom.Hex()), tx.Hash().Hex(), header.Number.Uint64())
+			}
 		}
 	}
 	readerDSN := functionalDSN(indexDSN, "retained_index_reader")
