@@ -74,6 +74,46 @@ async function renderedCount(cell, count, label, interact = false) {
     await page.keyboard.press('Escape'); await tooltip.waitFor({ state: 'hidden' });
   }
 }
+// Inspect painted text fragments, not just page overflow: fixed-height rows
+// can overlap their neighbours while document.scrollWidth remains correct.
+async function homeRowBounds(page) {
+  const result = await page.getByTestId('tx-row').evaluateAll(rows => {
+    const failures = [], heights = []; let badges = 0;
+    for (let index=0;index<rows.length;index++) {
+      const row=rows[index],box=row.getBoundingClientRect();heights.push(box.height);badges+=row.querySelectorAll('[data-testid="address-label"]').length;
+      if(index && rows[index-1].getBoundingClientRect().bottom>box.top+1)failures.push({index,kind:'row overlap'});
+      const walker=document.createTreeWalker(row,NodeFilter.SHOW_TEXT);
+      while(walker.nextNode()) {
+        const node=walker.currentNode;if(!node.textContent.trim())continue;
+        const range=document.createRange();range.selectNodeContents(node);
+        for(const rect of range.getClientRects())if(rect.width&&rect.height&&(rect.top<box.top-1||rect.bottom>box.bottom+1||rect.left<box.left-1||rect.right>box.right+1))failures.push({index,kind:'text outside own row'});
+      }
+    }
+    return {rows:rows.length,badges,heights,failures};
+  });
+  assert.deepEqual(result.failures, [], 'Native Home hashes/party badges stay inside their own rows');
+  return result;
+}
+async function homeAverage(page, blockPages) {
+  await page.getByText('Avg Block Time', { exact:true }).waitFor();
+  // Capture the rendered page and its derived value atomically: a later5s
+  // poll may replace both while count tooltip checks continue.
+  const rendered=await page.evaluate(()=>{const card=[...document.querySelectorAll('[data-testid="stat-card"]')].find(card=>card.textContent.includes('Avg Block Time'));return{heights:[...document.querySelectorAll('[data-testid="block-row"] a[href^="/block/"]')].map(link=>link.getAttribute('href').split('/').at(-1)),value:card.querySelector('button').textContent,note:card.querySelector('[data-testid="block-time-sample"]').textContent};});
+  const heights=rendered.heights;
+  const body=[...blockPages].reverse().find(body=>JSON.stringify(body.items.map(row=>row.number))===JSON.stringify(heights));
+  assert.ok(body,'Average oracle must use one actual response matching the rendered block page');
+  assert.equal(new Set(body.items.map(row=>row.number)).size,body.items.length);assert.equal(new Set(body.items.map(row=>row.hash)).size,body.items.length);
+  const headers=body.items.filter(row=>row.number!=='0').map(row=>({height:BigInt(row.number),time:BigInt(row.timestamp)})).sort((a,b)=>a.height<b.height?-1:1);
+  let seconds=0n,pairs=0n;
+  for(let i=1;i<headers.length;i++)if(headers[i].height===headers[i-1].height+1n&&headers[i].time>headers[i-1].time){seconds+=headers[i].time-headers[i-1].time;pairs++;}
+  const rounded=pairs?(seconds*200n+pairs)/(2n*pairs):undefined;
+  const value=rounded===undefined?'Unavailable':(rounded/100n).toLocaleString('en-US')+'.'+String(rounded%100n).padStart(2,'0')+'s';
+  const card=page.getByTestId('stat-card').filter({has:page.getByText('Avg Block Time',{exact:true})}),button=card.getByRole('button');
+  await button.waitFor();assert.equal(rendered.value,value);
+  if(headers.length)assert.equal(rendered.note,`${pairs} usable interval${pairs===1n?'':'s'} · page blocks ${headers[0].height}–${headers.at(-1).height}`);
+  await button.focus();await button.click();const tooltip=page.getByRole('tooltip');await tooltip.waitFor();assert.ok((await tooltip.textContent()).includes('not a whole-chain or last-100-block average'));await page.keyboard.press('Escape');await tooltip.waitFor({state:'hidden'});
+  return {value,usablePairs:String(pairs),fromBlock:headers[0]?.height.toString(),throughBlock:headers.at(-1)?.height.toString(),source:'Single actual authorized rendered block-page response'};
+}
 function exactFlatFields(item, mapping) {
   for (const [flat, metric] of Object.entries(mapping)) if (Object.hasOwn(item, flat)) {
     assert.equal(item.counts?.[metric]?.status, 'exact', flat + ': lower bounds never enter exact fields');
@@ -84,12 +124,25 @@ export async function checkViewerCountRendering({ users, runtime, screenshots, p
   const results = [], exactCurrentAccounts = [], numericHistory = []; let tokenDetails = 0, accountDetails = 0;
   for (const name of ['admin', 'deployer', 'reader']) {
     const page = users.get(name).page; await page.setViewportSize({ width: 1280, height: 900 });
-    const stats = await renderedResponse(page, runtime.explorerOrigin, '/stats', () => page.goto(runtime.explorerOrigin));
+    const blockPages=[],blockReads=[];
+    const collectBlocks=response=>{const url=new URL(response.url());if(url.origin===runtime.explorerOrigin&&url.pathname==='/api/v2/explorer/blocks'&&response.status()===200)blockReads.push(response.json().then(body=>blockPages.push(body)).catch(()=>{/* Canceled old response is not an oracle. */}));};
+    page.on('response',collectBlocks);
+    let stats,average;
+    try {
+      stats = await renderedResponse(page, runtime.explorerOrigin, '/stats', () => page.goto(runtime.explorerOrigin));
+      await page.getByRole('heading',{name:'Latest Blocks',exact:true}).waitFor();
+      await page.getByText('Avg Block Time',{exact:true}).waitFor();
+      await Promise.all(blockReads);
+      average = await homeAverage(page,blockPages);
+    } finally {page.off('response',collectBlocks);}
+    assert.equal(await page.getByTestId('stat-card').count(),5,'Tokens remains beside the restored fifth average card');
+    let mobileRows;
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 900 });
       for (const [metric, label] of [['transactions', 'Visible Transactions'], ['accounts', 'Visible Accounts'], ['tokens', 'Visible Tokens']]) {
         await renderedCount(page.getByTestId('stat-card').filter({ has: page.getByText(label, { exact: true }) }), stats.counts?.[metric], name + ' ' + label, true);
       }
+      if(width===390) mobileRows=await homeRowBounds(page);
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Count cards/tooltips keep page within ' + width);
       await page.screenshot({ path: path.join(screenshots, name + '-viewer-counts-' + width + '.png'), fullPage: true, animations: 'disabled' });
     }
@@ -133,7 +186,7 @@ export async function checkViewerCountRendering({ users, runtime, screenshots, p
       }
       tokenDetails++;
     }
-    results.push({ persona: name, stats: stats.counts, returnedAccountRowsChecked: accounts.items.length, returnedTokenRowsChecked: tokens.items.length });
+    results.push({ persona: name, stats: stats.counts, averageBlockTime: average, mobileHomeRows:mobileRows, returnedAccountRowsChecked: accounts.items.length, returnedTokenRowsChecked: tokens.items.length });
   }
   assert.ok(accountDetails > 0, 'Existing authorized demo accounts must exercise detail metadata');
   assert.ok(exactCurrentAccounts.some(name => name === 'admin' || name === 'deployer'), 'Small known method-authorized fixture must prove an exact CURRENT accounts count; all-unavailable is a failed restoration gate');
