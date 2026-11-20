@@ -7,6 +7,8 @@ import { Checkbox } from '../../components/ui/checkbox'
 import { Link } from 'react-router-dom'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
+import { Card, CardContent } from '../../components/ui/card'
+import { Archive, CheckCircle, Clock, FileText, XCircle } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import type { OperationScope } from './controller'
 import { readNarrowing } from './disclosureEvidence'
@@ -74,6 +76,7 @@ function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg, filters, 
     [visited, setVisited] = useState<{ cursor: string; number: number }[]>([]),
     [pageNumber, setPageNumber] = useState(1),
     [scanComplete, setScanComplete] = useState(true),
+    [hasList, setHasList] = useState(false),
     [loadingList, setLoadingList] = useState(false),
     [creating, setCreating] = useState(false),
     [selected, setSelected] = useState<NativeCase>()
@@ -100,6 +103,7 @@ function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg, filters, 
       const page = casePage(await scope.request(base + '?' + query.toString()))
       scope.check()
       setItems(page.items)
+      setHasList(true)
       setCursor(page.nextCursor)
       setScanComplete(page.scanComplete)
       setPageNumber(number)
@@ -164,6 +168,7 @@ function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg, filters, 
       )}
       {task.error && <div ref={listError} tabIndex={-1}><TaskError message={task.error} /></div>}
       {filterForm}
+      <CasePageSummary items={items} now={statusNow} loading={loadingList || !hasList} scanComplete={scanComplete} />
       <Panel title={logsOnly ? 'Choose an access-log case' : 'Disclosure cases'}>
         <DataTable
           loading={loadingList}
@@ -266,6 +271,18 @@ function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg, filters, 
       </Dialog>
     </section>
   )
+}
+
+export function CasePageSummary({ items, now, loading, scanComplete }: { items: readonly NativeCase[]; now: number; loading: boolean; scanComplete: boolean }) {
+  const count = (status: string) => items.filter(item => caseDisplayStatus(item, now).label === status).length
+  const cards = [
+    { id: 'total', label: 'Cases on this page', count: items.length, icon: FileText, color: 'text-primary' },
+    { id: 'open', label: 'Open (not expired)', count: count('Open'), icon: CheckCircle, color: 'text-success' },
+    { id: 'expired', label: 'Expired', count: count('Expired'), icon: Clock, color: 'text-warning-dark' },
+    { id: 'revoked', label: 'Revoked', count: count('Revoked'), icon: XCircle, color: 'text-error-dark' },
+    { id: 'closed', label: 'Closed', count: count('Closed'), icon: Archive, color: 'text-neutral-500' },
+  ]
+  return <section aria-label="Case counts on this page" className="space-y-2"><div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">{cards.map(card => <Card key={card.id} data-testid={'case-summary-' + card.id}><CardContent className="flex items-center justify-between gap-3 p-5"><div><p className="text-xs text-neutral-500">{card.label}</p><p className="mt-1 text-2xl font-semibold text-neutral-900">{loading ? '—' : card.count}</p></div><card.icon className={'h-7 w-7 shrink-0 ' + card.color} /></CardContent></Card>)}</div><p className="text-xs text-neutral-500">Counts cover only this loaded page and its filters, not the organization total.{!scanComplete && ' The scan is incomplete; more cases may follow.'} An open case still needs permission for each data read.</p></section>
 }
 function CreateCase({
   scope,

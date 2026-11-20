@@ -26,10 +26,18 @@ it('rejects a retained save or discard based on older files without losing the n
   memory.write(first, 0, actor, false, project)
   expect(() => memory.write(stale, 0, actor, false, project)).toThrow(/draft changed/)
   expect(() => memory.write(null, 0, actor, false, project)).toThrow(/draft changed/)
+  expect(() => memory.write(project, 0, actor, true, project)).toThrow(/draft changed/)
   expect(memory.snapshot().project).toBe(first)
   const current = updateSourceText(first, 'source', 'draft.json', documentText(first, 'source', 'draft.json') + '\n')
   memory.write(current, 0, actor, false, first)
   expect(memory.snapshot().project).toBe(current)
+})
+
+it('does not replace unsaved form fields when an import finishes after further typing', async () => {
+  const { memory, project } = await fixture(), before = memory.snapshot()
+  memory.writeAuthoring('/form', { value: 'newer unfinished name', base: 'node', dirty: true }, 0, actor, before.epoch)
+  expect(() => memory.write(project, 0, actor, true, project, before.authoring)).toThrow(/draft changed/)
+  expect(memory.snapshot().authoring['/form'].value).toBe('newer unfinished name')
 })
 
 it('invalidates unfinished fields only for changed source documents and rejects callbacks from their old versions', async () => {

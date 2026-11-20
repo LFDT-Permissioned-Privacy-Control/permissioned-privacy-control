@@ -104,6 +104,21 @@ async function editSource() {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); localStorage.clear(); sessionStorage.clear(); protectedRenders.length = 0 })
 
 describe('native account with the established Admin presentation', () => {
+  it.each([false, true])('retains newer %s-saved proposal work when a slow import finishes', async saved => {
+    harness(); await importFiles()
+    await userEvent.click(screen.getByRole('button', { name: 'Edit local proposal' }))
+    await userEvent.click(screen.getByRole('button', { name: 'New organization' }))
+    let finish!: () => void
+    const replacement = packageFiles(raw => new Promise(resolve => { finish = () => resolve(raw) }))
+    fireEvent.change(screen.getByLabelText('Policy source folder'), { target: { files: replacement } })
+    await waitFor(() => expect(finish).toBeTypeOf('function'))
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Newer work during import' } })
+    if (saved) await userEvent.click(screen.getByRole('button', { name: 'Save organization draft' }))
+    await act(async () => finish())
+    expect(await screen.findByText(/The configuration draft changed/)).toBeInTheDocument()
+    if (saved) expect(within(screen.getByRole('table')).getByText('Newer work during import')).toBeInTheDocument()
+    else expect(screen.getByLabelText('Name')).toHaveValue('Newer work during import')
+  })
   it('groups four RBAC pages and two Identity pages without making utilities into policy tabs', async () => {
     harness()
     expect(within(screen.getByTestId('rbac-tabs')).getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Organizations', 'Groups', 'Contracts', 'Execution Policy'])

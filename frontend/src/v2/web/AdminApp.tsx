@@ -36,7 +36,7 @@ function SelectedAccount({ controller, state, draft }: { controller: Controller;
   const self = state.self!
   const admin = hasAdminRole(self)
   const scope = controller.scopeRevision
-  const setProject = (next: SourceProject | null, replace = false) => { if (epoch === draft.snapshot().epoch) draft.write(next, scope, self.actorId, replace, project) }
+  const setProject = (next: SourceProject | null, replace = false) => { if (epoch === draft.snapshot().epoch) draft.write(next, scope, self.actorId, replace, project, authoring) }
   const account = location.pathname === '/admin/account'
   const profile = state.profiles.find(p => p.id === self.sourceProfile)
   const provider = profile?.provider === 'azure' ? 'Microsoft Entra ID' : profile?.provider === 'privado' ? 'Privado ID' : 'Verified OPS account'

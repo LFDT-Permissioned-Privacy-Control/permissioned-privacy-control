@@ -87,7 +87,7 @@ export class SourceDraftMemory {
     owner.scope = this.controller.scopeRevision; owner.expiresAt = state.self.expiresAt
     this.publish(false)
   }
-  write(next: SourceProject | null, scope: number, actor: string, replace = false, expected?: SourceProject | null): void {
+  write(next: SourceProject | null, scope: number, actor: string, replace = false, expected?: SourceProject | null, expectedAuthoring?: AuthoringState): void {
     if (this.view.locked || !this.controller.ownsScope(scope, actor)) throw Error('The source editor is locked while your account is checked.')
     const state = this.controller.snapshot(), self = state.self
     let marker: MultiMarker | null
@@ -98,7 +98,7 @@ export class SourceDraftMemory {
     if (this.owner && (!sameSession(pair, this.owner) || !this.sameIdentity(self, this.owner))) throw Error('The selected account changed. Import the source again.')
     // A retained form may still belong to this account/epoch while another
     // editor has changed the files. Never overwrite that newer proposal.
-    if (!replace && expected !== undefined && expected !== this.project) throw Error('The configuration draft changed. Reopen the form before saving.')
+    if (expected !== undefined && expected !== this.project || expectedAuthoring !== undefined && expectedAuthoring !== this.authoring) throw Error('The configuration draft changed. Review it before importing or saving again.')
     if (!next) { this.clear(); return }
     const mayEdit = this.updateAuthoringRole(self)
     if (!replace && next !== this.project && !mayEdit) throw Error('This account has read-only configuration access.')

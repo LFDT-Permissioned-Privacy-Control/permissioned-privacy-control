@@ -2,7 +2,7 @@ import { SourceAuthoringScope } from './SourceAuthoringScope'
 import { useAuthoringState, useClearAuthoring } from './sourceAuthoring'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
-import { SourceRecordForm, SourceRecords, type SourceField } from './SourceRecords'
+import { SourceFieldValue, SourceRecordForm, SourceRecords, type SourceField } from './SourceRecords'
 import { SourceContracts } from './SourceContracts'
 import { SourceClaimMappings } from './SourceClaimMappings'
 import { SourceComplianceSettings } from './SourceComplianceSettings'
@@ -69,7 +69,7 @@ function SettingsFormContent({ title, value, fields, editing, onSave }: { title:
   const clear = useClearAuthoring()
   const [open, setOpen] = useAuthoringState('open', false)
   const close = () => { clear('form'); setOpen(false) }
-  return <section className="space-y-3"><div className="flex justify-between items-center gap-3"><h3 className="text-sm font-medium">{title}</h3>{editing && <Button variant="outline" size="sm" onClick={() => setOpen(true)}>Edit {title.toLowerCase()} draft</Button>}</div><dl className="grid gap-3 sm:grid-cols-2">{fields.map(f => <div key={f.key} className="rounded-lg border border-neutral-200 p-3"><dt className="text-xs text-neutral-500">{f.label}</dt><dd className="text-sm mt-1 break-all whitespace-pre-wrap max-h-48 overflow-auto">{typeof value[f.key] === 'object' ? JSON.stringify(value[f.key], null, 2) : String(value[f.key] ?? 'Not set')}</dd></div>)}</dl><Dialog open={editing && open} onOpenChange={next => { if (next) setOpen(true); else close() }}><DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{title} draft</DialogTitle></DialogHeader>{editing && <SourceAuthoringScope id="form"><SourceRecordForm value={value} fields={fields} onClose={close} onSave={v => { onSave(v); close() }} /></SourceAuthoringScope>}</DialogContent></Dialog></section>
+  return <section className="space-y-3"><div className="flex justify-between items-center gap-3"><h3 className="text-sm font-medium">{title}</h3>{editing && <Button variant="outline" size="sm" onClick={() => setOpen(true)}>Edit {title.toLowerCase()} draft</Button>}</div><dl className="grid gap-3 sm:grid-cols-2">{fields.map(f => <div key={f.key} className="rounded-lg border border-neutral-200 p-3"><dt className="text-xs text-neutral-500">{f.label}</dt><dd className="mt-2 min-w-0"><SourceFieldValue value={value[f.key]} label={f.label} /></dd></div>)}</dl><Dialog open={editing && open} onOpenChange={next => { if (next) setOpen(true); else close() }}><DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{title} draft</DialogTitle></DialogHeader>{editing && <SourceAuthoringScope id="form"><SourceRecordForm value={value} fields={fields} onClose={close} onSave={v => { onSave(v); close() }} /></SourceAuthoringScope>}</DialogContent></Dialog></section>
 }
 
 function SettingsForm(props: Parameters<typeof SettingsFormContent>[0]) {
