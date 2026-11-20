@@ -2,7 +2,7 @@ import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useNavigate } from 'react-router-dom'
 import { NativeAdminApp } from './AdminApp'
 import { Controller, State } from './controller'
 import { WalletController } from './wallet'
@@ -23,6 +23,8 @@ const selected: State = { phase: 'selected', busy: false, flow: null, pending: n
 const member: State = { ...selected, self: { ...selected.self!, organizations: [{ ...selected.self!.organizations[0], isOrgAdmin: false, isOrgReadonlyAdmin: false }] } }
 function harness(path = '/admin/rbac/organizations', initial = selected) {
   let state = { ...initial }, revision = 0
+  let navigate: ReturnType<typeof useNavigate>
+  function NavigationProbe() { navigate = useNavigate(); return null }
   localStorage.clear(); sessionStorage.clear()
   function markerFor(next: State): MultiMarker {
     if (next.pending?.status === 'proof_required') {
@@ -43,8 +45,9 @@ function harness(path = '/admin/rbac/organizations', initial = selected) {
     refresh: vi.fn(), forgetAppChoices: vi.fn(), downloadOwnWalletToken: vi.fn(),
     wallet: new WalletController(async () => { throw Error('no operation requested') }),
   }
-  render(<MemoryRouter initialEntries={[path]}><NativeAdminApp controller={mock as unknown as Controller} /></MemoryRouter>)
+  render(<MemoryRouter initialEntries={[path]}><NavigationProbe /><NativeAdminApp controller={mock as unknown as Controller} /></MemoryRouter>)
   return { mock,
+    navigate: (path: string) => act(() => navigate(path)),
     replace: (next: State, marker?: MultiMarker) => act(() => { revision++; state = next; writeMultiMarker(marker ?? markerFor(next)); notify() }),
     transition: (next: State, marker?: MultiMarker) => act(() => { state = next; writeMultiMarker(marker ?? markerFor(next)); notify() }),
   }
@@ -80,10 +83,19 @@ async function importFiles(files = packageFiles()) {
   fireEvent.change(screen.getByLabelText('Policy source folder'), { target: { files } })
   await screen.findByTestId('workspace-source')
 }
+async function expectEmptySource() {
+  await waitFor(() => expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument())
+  expect(screen.queryByLabelText('Proposed source')).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Import source folder' })).toBeEnabled()
+}
+async function selectRBACPage(name: string) {
+  if (!screen.queryByTestId('rbac-tabs')) await userEvent.click(screen.getByRole('tab', { name: 'RBAC', exact: true }))
+  await userEvent.click(within(screen.getByTestId('rbac-tabs')).getByRole('tab', { name, exact: true }))
+}
 async function editSource() {
   await importFiles()
   await userEvent.click(screen.getByRole('button', {name: 'Edit local proposal'}))
-  await userEvent.click(screen.getByRole('tab', {name: 'Configuration'}))
+  await userEvent.click(screen.getByRole('button', {name: 'Review & export'}))
   const editor = screen.getByLabelText('Proposed source') as HTMLTextAreaElement
   const raw = editor.value + '\n{"unfinished":' // preserve even invalid work-in-progress bytes
   fireEvent.change(editor, {target: {value: raw}})
@@ -92,6 +104,72 @@ async function editSource() {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); localStorage.clear(); sessionStorage.clear(); protectedRenders.length = 0 })
 
 describe('native account with the established Admin presentation', () => {
+  it('groups four RBAC pages and two Identity pages without making utilities into policy tabs', async () => {
+    harness()
+    expect(within(screen.getByTestId('rbac-tabs')).getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Organizations', 'Groups', 'Contracts', 'Execution Policy'])
+    expect(within(screen.getByTestId('admin-nav')).getAllByRole('tab').map(tab => tab.textContent)).toEqual(['RBAC', 'Identity', 'Compliance', 'Disclosure'])
+    expect(screen.getByRole('link', { name: 'Settings' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Access Logs' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Diagnostics' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Review & export' })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Configuration' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('tab', { name: 'Identity' }))
+    expect(within(screen.getByTestId('identity-tabs')).getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Profiles', 'Claim mappings'])
+    expect(screen.queryByTestId('rbac-tabs')).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Azure Tenants' })).not.toBeInTheDocument()
+  })
+  it('keeps import and saved-draft restore on the selected Identity page', async () => {
+    harness('/admin/identity/claim-mappings')
+    await importFiles()
+    expect(screen.getByRole('tab', { name: 'Claim mappings' })).toHaveAttribute('aria-selected', 'true')
+    const { loadSourceProject, sourcePackage } = await import('./sourceProject')
+    const project = await loadSourceProject(packageFiles().map(file => ({ path: file.name, size: file.size, read: () => file.text() })))
+    const file = jsonFile('saved.json', sourcePackage(project)).file
+    fireEvent.change(screen.getByLabelText('Saved configuration draft'), { target: { files: [file] } })
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Claim mappings' })).toHaveAttribute('aria-selected', 'true'))
+    expect(screen.queryByTestId('rbac-tabs')).not.toBeInTheDocument()
+  })
+  it('keeps unfinished fields across all business sections, operational pages and review', async () => {
+    harness(); await importFiles()
+    await userEvent.click(screen.getByRole('button', { name: 'Edit local proposal' }))
+    await userEvent.click(screen.getByRole('button', { name: 'New organization' }))
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Unfinished bank' } })
+    // Model leaving an open dialog using browser navigation, without canceling it.
+    fireEvent.mouseDown(screen.getByTestId('nav-identity'), { button: 0, ctrlKey: false })
+    expect(screen.getByTestId('identity-tabs')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('tab', { name: 'Compliance', exact: true }))
+    expect(screen.getByText('Operational page fixture')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('tab', { name: 'Policy draft' }))
+    expect(screen.queryByText('Operational page fixture')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('tab', { name: 'Disclosure', exact: true }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Rules draft' }))
+    expect(screen.queryByText('Operational page fixture')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('link', { name: 'Settings' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Review & export' }))
+    expect(screen.getByRole('button', { name: 'Export configuration draft' })).toBeDisabled()
+    await userEvent.click(screen.getByRole('tab', { name: 'RBAC' }))
+    expect(screen.getByLabelText('Name')).toHaveValue('Unfinished bank')
+    await userEvent.click(screen.getByRole('button', { name: 'Save organization draft' }))
+    expect(within(screen.getByRole('table')).getByText('Unfinished bank')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Review & export' }))
+    expect(screen.getByRole('button', { name: 'Export configuration draft' })).toBeEnabled()
+  })
+  it('recovers a global Settings draft after the organization context changes elsewhere', async () => {
+    const page = harness(`/admin/settings?org=${org}`), files = await fullPackageFiles()
+    const draft = JSON.parse(await files[0].text()); draft.runtimeCatalog = { path: 'runtime.json' }
+    files[0] = jsonFile('draft.json', draft).file
+    files.push(jsonFile('runtime.json', { apiVersion: 'ops.runtime-policy/v1alpha7', kind: 'RuntimePolicy', readProfile: 'original-profile', nodeEvidenceProfile: '', intraOrgGrantTracing: false, rawSubmissionMode: 'guard-v1', sharedInfrastructure: [], addressScopes: [] }).file)
+    await importFiles(files)
+    await userEvent.click(screen.getByRole('button', { name: 'Edit local proposal' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Edit runtime policy draft' }))
+    fireEvent.change(screen.getByLabelText('Read profile'), { target: { value: 'Unfinished global value' } })
+    page.navigate('/admin/rbac/organizations?org=77777777-7777-4777-8777-777777777777')
+    await userEvent.click(screen.getByRole('link', { name: 'Settings' }))
+    expect(screen.getByLabelText('Read profile')).toHaveValue('Unfinished global value')
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Review & export' }))
+    expect(screen.getByRole('button', { name: 'Export configuration draft' })).toBeEnabled()
+  })
   it('shows real imported organization/group permissions using the original shell, separate from live roles', async () => {
     const request = vi.fn(); vi.stubGlobal('fetch', request)
     harness()
@@ -136,7 +214,7 @@ describe('native account with the established Admin presentation', () => {
     expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument()
     page.replace({ ...selected, self: { ...selected.self!, actorId: 'ops:p1:' + 'B'.repeat(42) + 'A' } })
     expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument()
-    expect(screen.getByText('Open your policy source to view organizations and groups')).toBeInTheDocument()
+    expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument()
   })
   it('does not publish a delayed file read after account replacement', async () => {
     const page = harness()
@@ -145,7 +223,7 @@ describe('native account with the established Admin presentation', () => {
     fireEvent.change(screen.getByLabelText('Policy source folder'), { target: { files: packageFiles(async raw => { await waiting; return raw }) } })
     page.replace({ ...selected, self: { ...selected.self!, actorId: 'ops:p1:' + 'B'.repeat(42) + 'A' } })
     await act(async () => { release(); await waiting })
-    await waitFor(() => expect(screen.getByText('Open your policy source to view organizations and groups')).toBeInTheDocument())
+    await expectEmptySource()
     expect(screen.queryByText('Imported Bank')).not.toBeInTheDocument()
   })
   it('keeps edited source hidden through a fresh proof and restores it only to the same verified family', async () => {
@@ -181,14 +259,14 @@ describe('native account with the established Admin presentation', () => {
     if (change === 'digest') self.sourceProfileDigest = 'sha256:' + 'b'.repeat(64)
     const marker = activeMulti({actorId: self.actorId, sourceProfile: self.sourceProfile, provider: 'privado', browserSessionId: change === 'family' ? '55555555-5555-4555-8555-555555555555' : family})
     page.transition({...selected, self}, marker)
-    expect(await screen.findByText('Open your policy source to view organizations and groups')).toBeInTheDocument()
+    await expectEmptySource()
     expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument()
   })
   it('discards a locked draft if the fresh account no longer owns the current scope', async () => {
     const page = harness(); await editSource(); page.transition(proofRequired())
     page.mock.ownsScope.mockReturnValueOnce(false)
     page.transition(selected)
-    expect(await screen.findByText('Open your policy source to view organizations and groups')).toBeInTheDocument()
+    await expectEmptySource()
   })
   it.each(['failed', 'anonymous'] as const)('does not recover a draft after verification becomes %s', async phase => {
     const page = harness(); await editSource(); page.transition(proofRequired())
@@ -196,7 +274,7 @@ describe('native account with the established Admin presentation', () => {
     page.transition(selected)
     const open = screen.queryByRole('link', {name: 'Open configuration workspace'})
     if (open) await userEvent.click(open)
-    expect(await screen.findByText('Open your policy source to view organizations and groups')).toBeInTheDocument()
+    await expectEmptySource()
   })
   it('retires a delayed import before checking authority during an ordinary proof renewal', async () => {
     const page = harness(); await importFiles()
@@ -219,13 +297,13 @@ describe('native account with the established Admin presentation', () => {
     })
     expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument()
     page.transition(selected)
-    expect(await screen.findByText('Open your policy source to view organizations and groups')).toBeInTheDocument()
+    await expectEmptySource()
   })
   it('clears the memory buffer when the document leaves instead of saving it in browser storage', async () => {
     const page = harness(); await editSource()
     act(() => window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true})))
     page.transition(selected)
-    expect(await screen.findByText('Open your policy source to view organizations and groups')).toBeInTheDocument()
+    await expectEmptySource()
     expect(localStorage.length).toBe(1); expect(localStorage.key(0)).toBe(CONTEXT_KEY); expect(sessionStorage.length).toBe(0)
   })
   it('restores unfinished organization input and edit mode, then removes canceled fields from the buffer', async () => {
@@ -268,14 +346,14 @@ describe('native account with the established Admin presentation', () => {
   it('recovers invalid unsaved ABI replacement JSON and permits source export only after those fields are saved or canceled', async () => {
     const page = harness(); await importFiles(await fullPackageFiles()); await userEvent.click(screen.getByRole('button', {name: 'Edit local proposal'}))
     await userEvent.click(within(screen.getByRole('table')).getByText('Imported Bank'))
-    await userEvent.click(screen.getByRole('tab', {name: 'Contracts'})); await userEvent.click(screen.getByRole('button', {name: /ABI ·/}))
+    await selectRBACPage('Contracts'); await userEvent.click(screen.getByRole('button', {name: /ABI ·/}))
     await userEvent.click(screen.getByText('Paste or inspect ABI JSON'))
     fireEvent.change(screen.getByLabelText('Public ABI JSON'), {target: {value: '[ unfinished JSON '}})
     page.transition(proofRequired()); page.transition(selected)
     expect(await screen.findByLabelText('Public ABI JSON')).toHaveValue('[ unfinished JSON ')
     // Browser history can leave a modal's route; unfinished fields stay owned,
     // but they cannot be silently omitted from an apparent complete export.
-    fireEvent.mouseDown(screen.getByTestId('tab-configuration'), {button: 0, ctrlKey: false})
+    fireEvent.click(screen.getByTestId('review-export-action'))
     expect(await screen.findByRole('button', {name: 'Export configuration draft'})).toBeDisabled()
     expect(screen.getByText(/Save or cancel unfinished form fields before exporting source/)).toBeInTheDocument()
     await userEvent.click(screen.getByTestId('account-dropdown-trigger')); await userEvent.click(screen.getByRole('menuitem', {name: 'Sign Out'}))
@@ -283,16 +361,16 @@ describe('native account with the established Admin presentation', () => {
     expect(within(screen.getByRole('dialog')).getByRole('button', {name: 'Export source'})).toBeDisabled()
     expect(page.mock.logout).not.toHaveBeenCalled()
     await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Cancel'}))
-    await userEvent.click(screen.getByRole('tab', {name: 'Contracts'}))
+    await selectRBACPage('Contracts')
     expect(await screen.findByLabelText('Public ABI JSON')).toHaveValue('[ unfinished JSON ')
     await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Cancel'}))
-    await userEvent.click(screen.getByRole('tab', {name: 'Configuration'}))
+    await userEvent.click(screen.getByRole('button', {name: 'Review & export'}))
     expect(screen.getByRole('button', {name: 'Export configuration draft'})).toBeEnabled()
   })
   it('recovers a nested execution-rule form with exact unfinished decimal and JSON strings', async () => {
     const page = harness(); await importFiles(await fullPackageFiles()); await userEvent.click(screen.getByRole('button', {name: 'Edit local proposal'}))
     await userEvent.click(within(screen.getByRole('table')).getByText('Imported Bank'))
-    await userEvent.click(screen.getByRole('tab', {name: 'Execution Policy'}))
+    await selectRBACPage('Execution Policy')
     await userEvent.click(screen.getByRole('button', {name: 'Add frame rule'}))
     fireEvent.change(screen.getByLabelText('Maximum native value (wei)'), {target: {value: '90071992547409931234567890'}})
     page.transition(proofRequired()); page.transition(selected)
@@ -310,7 +388,7 @@ describe('native account with the established Admin presentation', () => {
   it('recovers guided read-grant choices and an invalid custom constraint through proof renewal', async () => {
     const page = harness(); await importFiles(await fullPackageFiles()); await userEvent.click(screen.getByRole('button', {name: 'Edit local proposal'}))
     await userEvent.click(within(screen.getByRole('table')).getByText('Imported Bank'))
-    await userEvent.click(screen.getByRole('tab', {name: 'Contracts'})); await userEvent.click(screen.getByRole('button', {name: 'Read grants'}))
+    await selectRBACPage('Contracts'); await userEvent.click(screen.getByRole('button', {name: 'Read grants'}))
     await userEvent.click(screen.getByRole('button', {name: 'Edit read grant for Payments team'}))
     await userEvent.click(screen.getByLabelText('Specific events only'))
     await userEvent.click(screen.getByRole('button', {name: 'Transfer(address)'}))
@@ -324,7 +402,7 @@ describe('native account with the established Admin presentation', () => {
   it('restores hypothetical scenario input and mode without retaining old imported results', async () => {
     const page = harness(); await importFiles(await fullPackageFiles())
     await userEvent.click(within(screen.getByRole('table')).getByText('Imported Bank'))
-    await userEvent.click(screen.getByRole('tab', {name: 'Execution Policy'})); await userEvent.click(screen.getByRole('button', {name: 'Policy scenario'}))
+    await selectRBACPage('Execution Policy'); await userEvent.click(screen.getByRole('button', {name: 'Policy scenario'}))
     fireEvent.change(screen.getByLabelText('Hypothetical signer'), {target: {value: '0x' + '8'.repeat(40)}})
     fireEvent.change(screen.getByLabelText('Hypothetical context facts'), {target: {value: '{unfinished scenario'}})
     fireEvent.change(screen.getByLabelText('Hypothetical frames'), {target: {value: '[unfinished frames'}})
@@ -345,7 +423,7 @@ describe('native account with the established Admin presentation', () => {
     expect(screen.getByLabelText('Source root')).toHaveValue('core')
     fireEvent.change(screen.getByLabelText('Source root'), {target: {value: 'broker'}})
     await userEvent.click(screen.getByRole('button', {name: 'Edit local proposal'}))
-    await userEvent.click(screen.getByRole('tab', {name: 'Configuration'}))
+    await userEvent.click(screen.getByRole('button', {name: 'Review & export'}))
     await userEvent.click(within(screen.getByRole('navigation', {name: 'Source files'})).getByRole('button', {name: 'groups.json'}))
     page.transition(proofRequired()); page.transition(selected)
     expect(await screen.findByLabelText('Source root')).toHaveValue('broker')
@@ -365,7 +443,7 @@ describe('native account with the established Admin presentation', () => {
     else {
       await userEvent.click(within(screen.getByRole('table')).getByText('Imported Bank'))
       if (kind === 'group') { tab = 'Groups'; field = 'Description'; pending = 'Unsubmitted group description'; await userEvent.click(screen.getByTitle('Edit group draft')) }
-      if (kind === 'settings') { tab = 'Platform'; field = 'Read profile'; pending = 'unfinished profile !'; await userEvent.click(screen.getByRole('tab', {name: tab})); await userEvent.click(screen.getByRole('button', {name: 'Edit runtime policy draft'})) }
+      if (kind === 'settings') { tab = 'Settings'; field = 'Read profile'; pending = 'unfinished profile !'; await userEvent.click(screen.getByRole('link', {name: tab})); await userEvent.click(screen.getByRole('button', {name: 'Edit runtime policy draft'})) }
       if (kind === 'contract' || kind === 'grant') {
         tab = 'Contracts'; await userEvent.click(screen.getByRole('tab', {name: tab}))
         if (kind === 'contract') { pending = 'Pending contract'; await userEvent.click(screen.getByRole('button', {name: 'Add contract'})) }
@@ -383,8 +461,8 @@ describe('native account with the established Admin presentation', () => {
     }
     fireEvent.change(screen.getByLabelText(field), {target: {value: pending}})
     // Browser history can leave an unfinished editor without discarding it.
-    fireEvent.mouseDown(screen.getByTestId('tab-configuration'), {button: 0, ctrlKey: false})
-    await userEvent.click(screen.getByRole('button', {name: 'Inspect proposal'})); await userEvent.click(screen.getByRole('tab', {name: tab}))
+    fireEvent.click(screen.getByTestId('review-export-action'))
+    await userEvent.click(screen.getByRole('button', {name: 'Inspect proposal'})); if (kind === 'settings') await userEvent.click(screen.getByRole('link', {name: tab})); else await selectRBACPage(tab)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(screen.queryByLabelText(field)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', {name: /Save.*draft/})).not.toBeInTheDocument()
@@ -424,7 +502,7 @@ describe('native account with the established Admin presentation', () => {
     expect(screen.getByLabelText(field)).toBeEnabled()
   })
   it('does not accept a delayed referenced-document import or raw-text input after switching to Inspect', async () => {
-    harness(); await importFiles(); await userEvent.click(screen.getByRole('button', {name: 'Edit local proposal'})); await userEvent.click(screen.getByRole('tab', {name: 'Configuration'}))
+    harness(); await importFiles(); await userEvent.click(screen.getByRole('button', {name: 'Edit local proposal'})); await userEvent.click(screen.getByRole('button', {name: 'Review & export'}))
     const editor = screen.getByLabelText('Proposed source') as HTMLTextAreaElement, draft = JSON.parse(editor.value)
     draft.documents.push({kind: 'execution-rules', organizationId: org, path: 'extra.json'})
     const proposed = JSON.stringify(draft)
@@ -475,7 +553,7 @@ describe('native account with the established Admin presentation', () => {
     expect(screen.getByTestId('account-session').querySelector('time')).toHaveAttribute('datetime', new Date(selected.self!.expiresAt * 1000).toISOString())
     expect(screen.queryByTestId('admin-nav')).not.toBeInTheDocument()
   })
-  it.each(['/admin', '/admin/rbac', '/admin/rbac/organizations', '/admin/rbac/configuration', '/admin/compliance', '/admin/disclosure', '/disclosures', '/admin/logs', '/admin/diagnostics'])('denies a member direct console entry at %s without mounting protected content', async path => {
+  it.each(['/admin', '/admin/rbac', '/admin/rbac/organizations', '/admin/rbac/configuration', '/admin/configuration', '/admin/identity/profiles', '/admin/identity/claim-mappings', '/admin/settings', '/admin/disclosure/rules', '/admin/compliance/policy', '/admin/compliance', '/admin/disclosure', '/disclosures', '/admin/logs', '/admin/diagnostics'])('denies a member direct console entry at %s without mounting protected content', async path => {
     const request = vi.fn(); vi.stubGlobal('fetch', request)
     harness(path, member)
     expect(screen.getByRole('heading', { name: 'Access Denied' })).toBeInTheDocument()
@@ -506,7 +584,7 @@ describe('native account with the established Admin presentation', () => {
     expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument()
     page.transition(selected)
     expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument()
-    expect(screen.getByText('Open your policy source to view organizations and groups')).toBeInTheDocument()
+    expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument()
   })
   it('offers no console link to a signed-in member at login', () => {
     harness('/login', member)
@@ -556,7 +634,7 @@ describe('native account with the established Admin presentation', () => {
     vi.stubGlobal('URL', class extends URL { static createObjectURL(value: Blob) { blob = value; return 'blob:source-package' }; static revokeObjectURL() {} })
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     try {
-      harness(); await importFiles(); await userEvent.click(screen.getByRole('button', { name: 'Edit local proposal' })); await userEvent.click(screen.getByRole('tab', { name: 'Configuration' }))
+      harness(); await importFiles(); await userEvent.click(screen.getByRole('button', { name: 'Edit local proposal' })); await userEvent.click(screen.getByRole('button', { name: 'Review & export' }))
       const raw = String((screen.getByLabelText('Proposed source') as HTMLTextAreaElement).value).slice(0, -1) + '\n unfinished proposal'
       fireEvent.change(screen.getByLabelText('Proposed source'), { target: { value: raw } })
       expect(screen.getByText('Changed local draft')).toBeInTheDocument()
@@ -577,16 +655,16 @@ describe('native account with the established Admin presentation', () => {
     files.push(jsonFile('execution.json', { apiVersion: 'ops.policy-document/v1alpha1', kind: 'execution-rules', organizationId: org, spec: { policy: { apiVersion: 'privacy.gateway.fm/v1alpha4', kind: 'ContractExecutionPolicy', org, nestedCalls: 'requireOwnRule', bindings: [] } } }).file)
     harness(); await importFiles(files); await userEvent.click(screen.getByRole('button', { name: 'Edit local proposal' }))
     await userEvent.click(within(screen.getByRole('table')).getByText('Imported Bank'))
-    await userEvent.click(screen.getByRole('tab', { name: 'Execution Policy' })); await userEvent.click(screen.getByRole('button', { name: 'Candidate source' }))
+    await selectRBACPage('Execution Policy'); await userEvent.click(screen.getByRole('button', { name: 'Candidate source' }))
     const editor = screen.getByLabelText('Proposed source') as HTMLTextAreaElement
     expect(editor.value).toContain('"kind":"execution-rules"')
     const raw = editor.value + '\n incomplete candidate'
     fireEvent.change(editor, { target: { value: raw } })
-    await userEvent.click(screen.getByRole('tab', { name: 'Organizations' })); await userEvent.click(screen.getByRole('button', { name: 'Open source for repair' }))
+    await selectRBACPage('Organizations'); await userEvent.click(screen.getByRole('button', { name: 'Open source for repair' }))
     expect(screen.getByLabelText('Proposed source')).toHaveValue(raw)
   })
   it.each(['Sign Out', 'Switch account', 'Refresh session', 'Download wallet token'])('guards Account-page %s after a typed source edit', async action => {
-    const page = harness(); await importFiles(); await userEvent.click(screen.getByRole('button', { name: 'Edit local proposal' })); await userEvent.click(screen.getByRole('tab', { name: 'Configuration' }))
+    const page = harness(); await importFiles(); await userEvent.click(screen.getByRole('button', { name: 'Edit local proposal' })); await userEvent.click(screen.getByRole('button', { name: 'Review & export' }))
     const editor = screen.getByLabelText('Proposed source') as HTMLTextAreaElement
     fireEvent.change(editor, { target: { value: editor.value + '\n ' } })
     await userEvent.click(screen.getByTestId('account-dropdown-trigger')); await userEvent.click(screen.getByRole('menuitem', { name: 'Account' }))

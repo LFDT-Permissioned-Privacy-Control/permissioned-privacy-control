@@ -331,7 +331,7 @@ function CreateCase({
         OPS checks this complete scope against one approved standing rule. Case creation does not
         grant permission beyond that rule.
       </p>
-      <Link className="text-sm text-primary" to="/admin/rbac/disclosure-source">
+      <Link className="text-sm text-primary" to="/admin/disclosure/rules">
         Inspect or propose standing rules
       </Link>
       {!submitted && (

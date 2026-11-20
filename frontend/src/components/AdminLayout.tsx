@@ -1,8 +1,9 @@
 import { ErrorInfo, Component, ReactNode } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Tabs, TabsList, TabsTrigger } from './ui/tabs';
 import { Shield, Activity, ScrollText, Users, FileKey, Scale } from 'lucide-react';
 import { TooltipProvider } from './ui/tooltip';
+import { cn } from '../lib/utils';
 
 export type AdminTab = 'rbac' | 'compliance' | 'disclosure' | 'logs' | 'diagnostics' | 'none';
 
@@ -53,19 +54,36 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
   }
 }
 
+export interface AdminNavigationItem {
+  id: string;
+  label: string;
+  // The caller owns the exact destination, including any permitted query.
+  path: string;
+  icon?: ReactNode;
+  disabled?: boolean;
+  secondary?: boolean;
+}
+export interface AdminNavigation {
+  items: readonly AdminNavigationItem[];
+  activeId: string | null;
+  action?: ReactNode;
+}
 interface AdminLayoutProps {
   accountMenu: ReactNode;
   children: ReactNode;
   disabledTabs?: AdminTab[];
   showNavigation?: boolean;
   notice?: ReactNode;
+  navigation?: AdminNavigation;
 }
 
 // The established product shell is shared without importing any authentication
 // provider or data client. Each runtime owns its account/session boundary.
-export function AdminLayout({ accountMenu, children, disabledTabs = [], showNavigation = true, notice }: AdminLayoutProps) {
+export function AdminLayout({ accountMenu, children, disabledTabs = [], showNavigation = true, notice, navigation }: AdminLayoutProps) {
   const location = useLocation();
   const navigate = useNavigate();
+  const primaryItems = navigation?.items.filter(item => !item.secondary) ?? [];
+  const secondaryItems = navigation?.items.filter(item => item.secondary) ?? [];
 
   // Derive active tab from URL
   const getActiveTab = (): AdminTab => {
@@ -132,7 +150,17 @@ export function AdminLayout({ accountMenu, children, disabledTabs = [], showNavi
                   the prior "Dashboard" landing tab; its content (system
                   status + test request panel + demo deploy) is dev / ops
                   tooling, not where admins start their day. */}
-              {showNavigation && <Tabs value={activeTab} onValueChange={handleTabChange} className="order-last w-full lg:order-none lg:w-auto" data-testid="admin-nav">
+              {showNavigation && (navigation ? primaryItems.length > 0 && <Tabs value={navigation.activeId ?? ''} onValueChange={value => {
+                const item = primaryItems.find(item => item.id === value);
+                if (item && !item.disabled) navigate(item.path);
+              }} className="order-last w-full lg:order-none lg:w-auto" data-testid="admin-nav">
+                <TabsList aria-label="Primary administration" className="w-full justify-around lg:w-auto">
+                  {primaryItems.map(item => <TabsTrigger key={item.id} value={item.id} disabled={item.disabled} aria-label={item.label} className="gap-2" data-testid={`nav-${item.id}`}>
+                    {item.icon && <span aria-hidden="true" className="shrink-0 [&>svg]:w-4 [&>svg]:h-4">{item.icon}</span>}
+                    <span className="hidden sm:inline">{item.label}</span>
+                  </TabsTrigger>)}
+                </TabsList>
+              </Tabs> : <Tabs value={activeTab} onValueChange={handleTabChange} className="order-last w-full lg:order-none lg:w-auto" data-testid="admin-nav">
                 <TabsList className="w-full justify-around lg:w-auto">
                   <TabsTrigger disabled={disabledTabs.includes('rbac')} title={disabledTabs.includes('rbac') ? 'Not yet available in this UI preview' : undefined} aria-label="RBAC" value="rbac" className="gap-2" data-testid="nav-rbac">
                     <Users className="w-4 h-4" />
@@ -155,11 +183,24 @@ export function AdminLayout({ accountMenu, children, disabledTabs = [], showNavi
                     <span className="hidden sm:inline">Diagnostics</span>
                   </TabsTrigger>
                 </TabsList>
-              </Tabs>}
+              </Tabs>)}
 
               {/* Account Menu */}
               {accountMenu}
             </div>
+            {showNavigation && navigation && (secondaryItems.length > 0 || navigation.action) && <div className="mt-3 flex flex-wrap items-center justify-end gap-3" data-testid="admin-secondary-row">
+              {secondaryItems.length > 0 && <nav aria-label="More administration" className="flex flex-wrap items-center gap-1 rounded-lg bg-neutral-100 p-1">
+                {secondaryItems.map(item => {
+                  const selected = navigation.activeId === item.id;
+                  const className = cn('inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+                    selected ? 'bg-white text-primary shadow-sm' : 'text-neutral-500 hover:text-neutral-700 hover:bg-white/50', item.disabled && 'pointer-events-none opacity-50');
+                  const content = <>{item.icon && <span aria-hidden="true" className="shrink-0 [&>svg]:w-4 [&>svg]:h-4">{item.icon}</span>}<span>{item.label}</span></>;
+                  return item.disabled ? <span key={item.id} role="link" aria-disabled="true" className={className} data-testid={`nav-${item.id}`}>{content}</span>
+                    : <Link key={item.id} to={item.path} aria-current={selected ? 'page' : undefined} className={className} data-testid={`nav-${item.id}`}>{content}</Link>;
+                })}
+              </nav>}
+              {navigation.action && <div className="flex shrink-0 items-center gap-2">{navigation.action}</div>}
+            </div>}
           </div>
         </header>
 

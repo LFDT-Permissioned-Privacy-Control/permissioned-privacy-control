@@ -62,7 +62,7 @@ function SourceRecordsContent({ title, description, records, fields, defaults, e
   const [pendingModal, setModal] = useAuthoringState<{ kind: 'edit' | 'delete'; index: number; value?: JSONObject } | null>('modal', null), [search, setSearch] = useAuthoringState('search', ''), [error, setError] = useState<string | null>(null)
   const [inspection, setInspection] = useState<{ kind: 'inspect'; index: number } | null>(null)
   const modal = inspection ?? (editing ? pendingModal : null)
-  if (!Array.isArray(records)) throw Error(`${title} has an unsupported source shape. Open Configuration source to repair it.`)
+  if (!Array.isArray(records)) throw Error(`${title} has an unsupported source shape. Open Review & export to repair it.`)
   const rows = records.map(object), selected = modal && modal.index >= 0 ? rows[modal.index] : undefined
   const close = () => { if (inspection) setInspection(null); else { clear('form'); setModal(null) } setError(null) }
   return <section className="space-y-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-medium text-neutral-700">{title}</h3>{description && <p className="text-xs text-neutral-500 mt-1 max-w-3xl">{description}</p>}</div>{editing && <Button size="sm" onClick={() => setModal({ kind: 'edit', index: -1, value: defaults() })}><Plus className="w-4 h-4 mr-2" />Add {title.toLowerCase().replace(/s$/, '')}</Button>}</div>

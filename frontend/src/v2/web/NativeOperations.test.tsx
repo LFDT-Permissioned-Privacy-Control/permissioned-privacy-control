@@ -96,7 +96,7 @@ it('readonly administration sees approved settings and cannot create travel-rule
   expect(await screen.findByText('1000 USD')).toBeInTheDocument()
   expect(screen.getByRole('link', { name: 'Edit a local source proposal' })).toHaveAttribute(
     'href',
-    `/admin/rbac/compliance-source?org=${org}`,
+    `/admin/compliance/policy?org=${org}`,
   )
   await userEvent.click(screen.getByRole('button', { name: 'Travel rules' }))
   await screen.findByText('No records in this scope.')

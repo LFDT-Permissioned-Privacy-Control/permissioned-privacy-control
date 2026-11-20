@@ -143,6 +143,12 @@ function demoCommand(args, label) {
   const result = spawnSync(path.join(root, 'scripts/v2-demo.sh'), args, { env: process.env, encoding: 'utf8', timeout: 120_000, maxBuffer: 1 << 20 });
   assert.equal(result.status, 0, label);
 }
+function navigationSource() {
+  const output = path.join(directory, 'navigation-source-' + Date.now());
+  const result = spawnSync(process.execPath, [path.join(root, 'scripts/v2-demo/export-config.mjs'), output], { env: process.env, encoding: 'utf8', timeout: 40_000, maxBuffer: 1 << 20 });
+  assert.equal(result.status, 0, 'Export the owned demo public source for navigation checks');
+  return path.join(output, 'core');
+}
 async function checkDisclosure(admin, deployer, reader, hash) {
   stage = 'disclosure-open-form';
   await admin.page.goto(runtime.explorerOrigin + '/disclosures');
@@ -369,7 +375,7 @@ async function checkUIPreview(user) {
   passed('Admin checks the actual selected Core artifact separately from local source');
   stage = 'ui-preview-admin-access-logs';
   const logsResponse = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/access-logs'));
-  await page.getByRole('tab', { name: 'Access Logs', exact: true }).click();
+  await page.getByRole('link', { name: 'Access Logs', exact: true }).click();
   const logs = await logsResponse;
   const logPage = await json(logs);
   assert.match(logs.headers()['x-ops-request-reference'] ?? '', /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
@@ -479,7 +485,7 @@ try {
     assert.match(previous.transaction ?? '', /^0x[0-9a-f]{64}$/); assert.match(previous.sharedTransaction ?? '', /^0x[0-9a-f]{64}$/);
     for (const persona of ['admin', 'deployer', 'reader', 'outsider']) await login(persona);
     stage = 'native-ui-parity';
-    const parity = await checkNativeUIParity({ users, runtime, privateHash: previous.transaction, sharedHash: previous.sharedTransaction, outputDirectory: directory, nodeRPC, rpc, bff, passed });
+    const parity = await checkNativeUIParity({ users, runtime, privateHash: previous.transaction, sharedHash: previous.sharedTransaction, outputDirectory: directory, sourceDirectory: navigationSource(), nodeRPC, rpc, bff, passed });
     await writeFile(resultsFile, JSON.stringify({ passed: true, cases: count, ...parity }, null, 2) + '\n', { mode: 0o600 });
     return;
   }
@@ -630,7 +636,7 @@ try {
   assert.equal((await bff(users.get('outsider'), '/transactions/' + sharedHash)).status, 403);
   passed('explicit visibleTo sharing reveals only the new transaction to Reader; old private transaction and outsider remain restricted');
   stage = 'native-ui-parity';
-  const parity = await checkNativeUIParity({ users, runtime, privateHash: hash, sharedHash, outputDirectory: directory, nodeRPC, rpc, bff, passed });
+  const parity = await checkNativeUIParity({ users, runtime, privateHash: hash, sharedHash, outputDirectory: directory, sourceDirectory: navigationSource(), nodeRPC, rpc, bff, passed });
   await writeFile(path.join(directory, 'ui-parity-results.json'), JSON.stringify({ passed: true, ...parity }, null, 2) + '\n', { mode: 0o600 });
   const caseUrl = await checkDisclosure(admin, deployer, reader, hash);
   stage = 'immutable-config-revision-restart';

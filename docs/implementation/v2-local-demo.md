@@ -148,8 +148,11 @@ are reported explicitly; matching labels still do not compare file contents.
 This checks one OPS instance, not the broker or the whole deployment.
 
 Choose **Edit local proposal** to create organizations/groups or edit their
-permissions, contracts, read grants, execution rules, identity mappings and
-selected platform sources. **Configuration** compares and exports the complete
+permissions, contracts, read grants and execution rules under **RBAC**.
+**Identity** contains **Profiles** (Azure and Privado) and **Claim mappings**.
+Use **Disclosure → Rules draft**, **Compliance → Policy draft** and **Settings**
+for their configuration documents. Imported files and unfinished form fields
+stay in the same local draft as you move between these sections. **Review & export** compares and exports the complete
 proposal; **Open saved draft** restores those files later without changing the
 running configuration. Run the actual Go
 `policy unpack`, `prepare`, `check` and optional `simulate` commands from the

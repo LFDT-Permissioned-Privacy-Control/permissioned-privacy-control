@@ -153,7 +153,7 @@ function ComplianceSection({
       {!['travel-rule-records', 'events', 'quotes'].includes(tab) && (
         <Link
           className="text-sm text-primary self-center"
-          to={`/admin/rbac/compliance-source?org=${org}`}
+          to={`/admin/compliance/policy?org=${org}`}
         >
           Edit a local source proposal
         </Link>

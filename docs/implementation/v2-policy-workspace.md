@@ -5,7 +5,7 @@ separate named Core and broker folders. It reads the documents referenced by the
 drafts and broker public-context pins. Adjacent secret files are not imported.
 Files remain in the selected page's memory and are removed on account replacement,
 sign-out or expiry. Export before leaving the session; a saved package can be
-opened again with **Open saved package**.
+opened again with **Open saved draft**.
 
 **Edit local proposal** enables organization/group, contract/read-grant,
 execution, identity-profile/fact-mapping, standing-disclosure and platform source
@@ -13,8 +13,13 @@ editing. These controls edit files only. They do not create Core users, contact
 providers, resolve environment credentials, update a running policy, or grant a
 live role. The current account's organization roles are shown separately.
 Complex execution and source fields retain their native JSON representation.
-The Configuration tab includes original/proposed source comparison and complete
+The shared **Review & export** action opens original/proposed source comparison and complete
 source export, including unchanged referenced files.
+RBAC contains Organizations, Groups, Contracts and Execution Policy. Identity
+contains Profiles (Azure and Privado) and Claim mappings. Disclosure → Rules
+draft and Compliance → Policy draft edit those source documents. Settings holds
+platform and authentication configuration. Importing and exporting use the same
+local draft across all these sections; Git approval and deployment activate it.
 
 Raw source text immediately joins the local proposal and its export, including
 unfinished JSON. Switching files does not discard it. Execution candidate source

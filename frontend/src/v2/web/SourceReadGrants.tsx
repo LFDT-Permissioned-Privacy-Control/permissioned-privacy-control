@@ -68,7 +68,7 @@ function nativeLiteral(raw: string, type: string): string {
 }
 function rulesOf(value: JSONObject): JSONObject[] {
   const rules = object(value.eventRules).rules
-  if (!Array.isArray(rules)) throw Error('Read grants need an eventRules.rules array. Repair this grant in Configuration source.')
+  if (!Array.isArray(rules)) throw Error('Read grants need an eventRules.rules array. Repair this grant in Review & export.')
   return rules.map(object)
 }
 function paramsOf(value: JSONObject): JSONObject[] {
@@ -84,7 +84,7 @@ function SourceReadGrantsContent({ contract, groups, editing, onChange }: {
   const [inspection, setInspection] = useState<{ index: number; remove?: boolean; value?: JSONObject } | null>(null)
   const modal = inspection ?? (editing ? pendingModal : null), activeEditing = editing && !inspection
   const [search, setSearch] = useAuthoringState('search', ''), [error, setError] = useState<string | null>(null)
-  if (!Array.isArray(contract.readGrants)) throw Error('Read grants must be an array. Repair the contract in Configuration source.')
+  if (!Array.isArray(contract.readGrants)) throw Error('Read grants must be an array. Repair the contract in Review & export.')
   const grants = contract.readGrants.map(object), parsed = useMemo(() => eventsFromABI(contract.abi), [contract.abi])
   const groupName = (id: unknown) => groups.find(group => group.id === id)?.name ?? `Unknown group (${String(id)})`
   const close = () => { if (inspection) setInspection(null); else { clear('form'); setModal(null) } setError(null) }

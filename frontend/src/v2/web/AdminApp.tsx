@@ -19,6 +19,9 @@ import { SourceDraftMemory } from './sourceDraftMemory'
 import { SourceAuthoringProvider } from './SourceAuthoringScope'
 import { hasAdminRole } from './adminAccess'
 import { AdminAccessDenied } from '../../components/auth/AdminAccessDenied'
+import { Tabs, TabsList, TabsTrigger } from '../../components/ui/tabs'
+import { Users, KeyRound, Scale, FileKey, ScrollText, Activity, Settings, FileCheck } from 'lucide-react'
+import { getSourcePage, sourcePagePath } from './navigation'
 import './style.css'
 
 const LocalDemoHost = import.meta.env.VITE_OPS_LOCAL_DEMO === '1' ? lazy(() => import('./LocalDemoHost')) : null
@@ -38,6 +41,24 @@ function SelectedAccount({ controller, state, draft }: { controller: Controller;
   const profile = state.profiles.find(p => p.id === self.sourceProfile)
   const provider = profile?.provider === 'azure' ? 'Microsoft Entra ID' : profile?.provider === 'privado' ? 'Privado ID' : 'Verified OPS account'
   const section = location.pathname === '/admin/compliance' ? 'compliance' : ['/admin/disclosure', '/admin/disclosures', '/disclosures'].includes(location.pathname) ? 'disclosures' : location.pathname === '/admin/logs' ? 'logs' : location.pathname === '/admin/diagnostics' ? 'diagnostics' : null
+  const sourcePage = getSourcePage(location.pathname)
+  const activeSection = account ? null : sourcePage?.section === 'configuration' ? null : sourcePage?.section ?? (section === 'disclosures' ? 'disclosure' : section)
+  const withScope = (path: string) => path + location.search
+  const navigation = {
+    activeId: activeSection,
+    items: [
+      { id: 'rbac', label: 'RBAC', path: withScope('/admin/rbac/organizations'), icon: <Users className="h-4 w-4" /> },
+      { id: 'identity', label: 'Identity', path: withScope('/admin/identity/profiles'), icon: <KeyRound className="h-4 w-4" /> },
+      { id: 'compliance', label: 'Compliance', path: withScope('/admin/compliance'), icon: <Scale className="h-4 w-4" /> },
+      { id: 'disclosure', label: 'Disclosure', path: withScope('/admin/disclosure'), icon: <FileKey className="h-4 w-4" /> },
+      { id: 'logs', label: 'Access Logs', path: withScope('/admin/logs'), icon: <ScrollText className="h-4 w-4" />, secondary: true },
+      { id: 'diagnostics', label: 'Diagnostics', path: withScope('/admin/diagnostics'), icon: <Activity className="h-4 w-4" />, secondary: true },
+      { id: 'settings', label: 'Settings', path: withScope('/admin/settings'), icon: <Settings className="h-4 w-4" />, secondary: true },
+    ],
+    action: <Button variant={sourcePage?.id === 'configuration' ? 'secondary' : 'outline'} size="sm" data-testid="review-export-action" onClick={() => navigate(withScope(sourcePagePath('configuration')))}><FileCheck className="h-4 w-4 mr-2" />Review &amp; export</Button>,
+  }
+  const policySection = activeSection === 'compliance' || activeSection === 'disclosure' ? activeSection : null
+  const policyDraft = sourcePage?.id === 'compliance-source' || sourcePage?.id === 'disclosure-source'
   async function runAccountAction(action: AccountAction) {
     if (!controller.ownsScope(controller.scopeRevision, self.actorId)) return
     if (action === 'sign-out') await controller.logout()
@@ -51,12 +72,16 @@ function SelectedAccount({ controller, state, draft }: { controller: Controller;
   const menu = <AccountMenu userDID={self.actorId} providerLabel={provider} busy={state.busy} isAccountPage={account}
     onAccount={() => navigate('/admin/account')} onDashboard={admin ? () => navigate('/admin/rbac/organizations') : undefined} dashboardLabel="Configuration workspace"
     onSignOut={signOut} />
-  return <AdminLayout accountMenu={menu} showNavigation={admin}>
+  return <AdminLayout accountMenu={menu} showNavigation={admin} navigation={navigation}>
+    <SourceAuthoringProvider project={project} state={authoring} update={(key, entry) => draft.writeAuthoring(key, entry, scope, self.actorId, epoch)} clear={prefix => draft.clearAuthoring(prefix, scope, self.actorId, epoch)}>
+    {admin && policySection && <Tabs value={policyDraft ? 'draft' : 'live'} onValueChange={value => navigate(withScope(value === 'draft' ? sourcePagePath(policySection === 'compliance' ? 'compliance-source' : 'disclosure-source') : '/admin/' + policySection))} aria-label={policySection === 'compliance' ? 'Compliance pages' : 'Disclosure pages'}>
+      <TabsList className="mb-5"><TabsTrigger value="live">{policySection === 'compliance' ? 'Live data' : 'Cases'}</TabsTrigger><TabsTrigger value="draft">{policySection === 'compliance' ? 'Policy draft' : 'Rules draft'}</TabsTrigger></TabsList>
+    </Tabs>}
     {account ? <NativeAccountPage controller={controller} state={state} onSignOut={signOut} onSwitchAccount={switchAccount} onRefreshSession={() => { void requestAccountAction('refresh-session') }} onDownloadWalletToken={() => { void requestAccountAction('download-wallet-token') }} />
       : !admin ? <AdminAccessDenied onAccount={() => navigate('/admin/account', { replace: true })} accountLabel="Go to your account" />
-      : section ? <NativeOperationsPage controller={controller} state={state} section={section} />
+      : !sourcePage && section ? <NativeOperationsPage controller={controller} state={state} section={section} />
       : <>
-        {locked ? <p className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-500" role="status">Your source draft is kept in this tab while your session is checked.</p> : <SourceAuthoringProvider project={project} state={authoring} update={(key, entry) => draft.writeAuthoring(key, entry, scope, self.actorId, epoch)} clear={prefix => draft.clearAuthoring(prefix, scope, self.actorId, epoch)}><SourceWorkspacePage key={epoch} controller={controller} project={project} onProject={setProject} unfinished={unfinished} /></SourceAuthoringProvider>}
+        {locked ? <p className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-500" role="status">Your source draft is kept in this tab while your session is checked.</p> : <SourceWorkspacePage key={epoch} controller={controller} project={project} onProject={setProject} unfinished={unfinished} />}
         <section className="mt-5 text-xs text-neutral-500" aria-label="Current verified organization roles">
           <p className="font-medium text-neutral-700 mb-2">Your current verified organization roles</p>
           {self.organizations.length ? <ul className="space-y-2">{self.organizations.map(org => <li key={org.id} className="flex flex-wrap items-center gap-2">
@@ -65,6 +90,7 @@ function SelectedAccount({ controller, state, draft }: { controller: Controller;
           <p className="mt-2">These roles describe your live session. Imported source files are a local proposal; Git review and deployment control whether a policy change takes effect.</p>
         </section>
       </>}
+    </SourceAuthoringProvider>
     <Dialog open={leaving !== null} onOpenChange={open => { if (!open) setLeaving(null) }}><DialogContent><DialogHeader><DialogTitle>Keep your changed source before continuing</DialogTitle></DialogHeader><p className="text-sm text-neutral-500">This action may replace or renew the account context. Export the source first or explicitly discard the local draft before continuing.</p>{unfinished && <p className="text-sm text-warning-dark">Unfinished form fields are not part of a source export. Cancel this action, then save or cancel those fields first.</p>}<div className="flex justify-end flex-wrap gap-2"><Button variant="ghost" onClick={() => setLeaving(null)}>Cancel</Button><Button variant="outline" disabled={unfinished} onClick={() => { if (project && !unfinished && controller.ownsScope(controller.scopeRevision, self.actorId)) download('ops-source-package.json', JSON.stringify(sourcePackage(project))) }}>Export source</Button><Button variant="destructive" onClick={() => { const action = leaving; setProject(null); setLeaving(null); if (action) void runAccountAction(action) }}>{leaving ? 'Discard and ' + actionLabels[leaving] : 'Discard and continue'}</Button></div></DialogContent></Dialog>
   </AdminLayout>
 }

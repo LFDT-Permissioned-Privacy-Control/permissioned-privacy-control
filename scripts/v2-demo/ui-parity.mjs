@@ -31,6 +31,12 @@ export async function checkAdminEntry({ users, runtime, outputDirectory, passed 
     await user.page.goto(runtime.opsOrigin + '/admin/rbac/organizations');
     if (admin) await user.page.getByRole('button', { name: 'Open saved draft', exact: true }).waitFor();
     else {
+      for (const target of ['/admin/identity/profiles', '/admin/identity/claim-mappings', '/admin/disclosure/rules', '/admin/compliance/policy', '/admin/settings', '/admin/configuration']) {
+        await user.page.goto(runtime.opsOrigin + target);
+        await user.page.getByRole('heading', { name: 'Access Denied', exact: true }).waitFor();
+        assert.equal(await user.page.getByTestId('admin-nav').count(), 0);
+        assert.equal(await user.page.getByTestId('admin-secondary-row').count(), 0);
+      }
       await user.page.getByRole('heading', { name: 'Access Denied', exact: true }).waitFor();
       assert.equal(await user.page.getByTestId('admin-nav').count(), 0);
       assert.equal(await user.page.getByTestId('rbac-manager').count(), 0);
@@ -52,6 +58,59 @@ export async function checkAdminEntry({ users, runtime, outputDirectory, passed 
   }
   passed('verified admin console gate; Reader, execution-admin Deployer and unmapped accounts retain own account/Explorer but are denied protected API access');
   return results;
+}
+
+async function checkAdminNavigation({ user, runtime, sourceDirectory, outputDirectory, passed }) {
+  const page = user.page, output = path.join(outputDirectory, 'admin-navigation');
+  await mkdir(output, { recursive: true, mode: 0o700 });
+  await page.goto(runtime.opsOrigin + '/admin/rbac/organizations');
+  await page.getByLabel('Policy source folder', { exact: true }).setInputFiles(sourceDirectory);
+  await page.getByTestId('workspace-source').waitFor();
+  assert.deepEqual(await page.getByTestId('rbac-tabs').getByRole('tab').allTextContents(), ['Organizations', 'Groups', 'Contracts', 'Execution Policy']);
+  assert.deepEqual(await page.getByTestId('admin-nav').getByRole('tab').allTextContents(), ['RBAC', 'Identity', 'Compliance', 'Disclosure']);
+  await page.screenshot({ path: path.join(output, 'rbac-desktop.png'), fullPage: true, animations: 'disabled' });
+  await page.getByRole('tab', { name: 'Identity', exact: true }).click();
+  assert.deepEqual(await page.getByTestId('identity-tabs').getByRole('tab').allTextContents(), ['Profiles', 'Claim mappings']);
+  assert.equal(await page.getByRole('tab', { name: 'Azure Tenants', exact: true }).count(), 0);
+  await page.getByRole('tab', { name: 'Claim mappings', exact: true }).click();
+  await page.screenshot({ path: path.join(output, 'identity-desktop.png'), fullPage: true, animations: 'disabled' });
+  await page.getByRole('button', { name: 'Edit local proposal', exact: true }).click();
+  await page.getByRole('tab', { name: 'RBAC', exact: true }).click();
+  await page.getByRole('button', { name: 'New organization', exact: true }).click();
+  await page.getByLabel('Name', { exact: true }).fill('Unfinished navigation test');
+  await page.goBack(); // Leave an open editor by browser history, without canceling it.
+  await page.getByTestId('identity-tabs').waitFor();
+  for (const [section, child] of [['Compliance', 'Policy draft'], ['Disclosure', 'Rules draft']]) {
+    await page.getByRole('tab', { name: section, exact: true }).click();
+    await page.getByRole('tab', { name: child, exact: true }).click();
+    await page.getByTestId('workspace-source').waitFor();
+    assert.equal(await page.getByRole('tab', { name: child, exact: true }).getAttribute('aria-selected'), 'true');
+    await page.screenshot({ path: path.join(output, section.toLowerCase() + '-draft.png'), fullPage: true, animations: 'disabled' });
+  }
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  assert.equal(await page.getByRole('link', { name: 'Settings', exact: true }).getAttribute('aria-current'), 'page');
+  await page.screenshot({ path: path.join(output, 'settings.png'), fullPage: true, animations: 'disabled' });
+  await page.getByRole('button', { name: 'Review & export', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: 'Export configuration draft', exact: true }).isDisabled(), true);
+  await page.getByRole('tab', { name: 'RBAC', exact: true }).click();
+  assert.equal(await page.getByLabel('Name', { exact: true }).inputValue(), 'Unfinished navigation test');
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.screenshot({ path: path.join(output, 'rbac-' + width + '.png'), fullPage: true, animations: 'disabled' });
+    const layout = await page.evaluate(() => ({ width: innerWidth, content: document.documentElement.scrollWidth }));
+    assert.ok(layout.content <= layout.width, 'Navigation must wrap without horizontal page overflow at ' + width);
+    for (const name of ['RBAC', 'Identity', 'Compliance', 'Disclosure', 'Organizations', 'Groups', 'Contracts', 'Execution Policy']) assert.equal(await page.getByRole('tab', { name, exact: true }).isVisible(), true);
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.getByRole('button', { name: 'Review & export', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: 'Export configuration draft', exact: true }).isEnabled(), true);
+  await page.screenshot({ path: path.join(output, 'review-export.png'), fullPage: true, animations: 'disabled' });
+  await page.getByRole('button', { name: 'Close source', exact: true }).click();
+  await page.goto(runtime.explorerOrigin);
+  await page.locator('[data-field=app-actor]').waitFor();
+  passed('regrouped navigation preserves the imported source and unfinished fields across business sections; desktop/mobile navigation wraps');
+  return { rbacTabs: 4, identityTabs: 2, widths: [1280, 390], unfinishedFormRecovered: true, sourceActivated: false, screenshots: output };
 }
 
 async function copyVisibleAddress(page, row, expected) {
@@ -203,7 +262,7 @@ async function caseIsolation({ users, runtime, hash, nodeRPC, rpc, bff, screensh
     const revokedResponse = admin.page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/disclosure/cases/' + caseId + '/revoke'));
     await admin.page.getByRole('button', { name: 'Revoke case', exact: true }).click();
     assert.equal((await revokedResponse).status(), 200); revoked = true;
-    await admin.page.getByText('revoked', { exact: true }).waitFor();
+    await admin.page.locator('[data-testid="info-row"][data-label="Status"]').getByText('revoked', { exact: true }).waitFor();
     assert.equal(await admin.page.getByTestId('disclosure-transaction-row').count(), 0);
     for (const [name, user] of [['admin', admin], ['reader', reader]]) assert.deepEqual(await ordinarySnapshot({ user, bff, rpc, runtime, hash, blockNumber: tx.blockNumber }), before.get(name), 'Revoked case must not change ordinary ' + name + ' outputs');
     return { caseId, persistedCreateReadRevoke: true, transactionsAndEventsRead: true, otherPrincipalEventCanaryRemainedPrivate: true, ordinaryRPCAndExplorerUnchanged: true };
@@ -216,11 +275,13 @@ async function caseIsolation({ users, runtime, hash, nodeRPC, rpc, bff, screensh
   }
 }
 
-export async function checkNativeUIParity({ users, runtime, privateHash, sharedHash, outputDirectory, nodeRPC, rpc, bff, passed }) {
+export async function checkNativeUIParity({ users, runtime, privateHash, sharedHash, outputDirectory, sourceDirectory, nodeRPC, rpc, bff, passed }) {
+  assert.ok(sourceDirectory, 'Export the owned demo public source for navigation checks');
   assert.notEqual(privateHash, sharedHash, 'Private and explicitly shared scenarios require different transactions');
   assert.equal(new Set(['admin', 'deployer', 'reader', 'outsider'].map(name => users.get(name).access.actorId)).size, 4, 'Proof personas must remain different principals');
   const screenshots = path.join(outputDirectory, 'ui-parity'); await mkdir(screenshots, { recursive: true, mode: 0o700 });
   const adminEntry = await checkAdminEntry({ users, runtime, outputDirectory, passed });
+  const navigation = await checkAdminNavigation({ user: users.get('admin'), runtime, sourceDirectory, outputDirectory, passed });
   const cases = [];
   await transactionView(users.get('deployer'), runtime, privateHash, [['From', 'own_address', 'Mine', true], ['To', 'rbac_group_member', 'My Org', true]], screenshots, 'owner'); cases.push('owner-Mine');
   await transactionView(users.get('admin'), runtime, sharedHash, [['From', 'participant_override', 'Counterparty', false], ['To', 'rbac_group_member', 'My Org', true]], screenshots, 'same-org-counterparty'); cases.push('same-org-Counterparty');
@@ -232,5 +293,5 @@ export async function checkNativeUIParity({ users, runtime, privateHash, sharedH
   passed('native V2 API-to-page Mine/My Org/Counterparty/Shared and denied persona matrix');
   const isolation = await caseIsolation({ users, runtime, hash: privateHash, nodeRPC, rpc, bff, screenshots });
   passed('persisted case create/read/revoke leaves ordinary RPC and Explorer unchanged for the recipient and another principal');
-  return { cases, screenshots, isolation, adminEntry, clipboard: 'Real rendered CopyButton with a page-local Clipboard API substitute; OS clipboard untouched', limits: ['The unmapped outsider has no organization; a second-organization browser fixture is not claimed.', 'The Admin case recipient already has ordinary emitter authority. The full-case canary check establishes isolation from another principal (Reader), not an otherwise deprived case recipient.', 'Server reorg acquisition/delivery regressions are separate; this browser run does not mutate chain canonicality.'] };
+  return { cases, screenshots, isolation, adminEntry, navigation, clipboard: 'Real rendered CopyButton with a page-local Clipboard API substitute; OS clipboard untouched', limits: ['The unmapped outsider has no organization; a second-organization browser fixture is not claimed.', 'The Admin case recipient already has ordinary emitter authority. The full-case canary check establishes isolation from another principal (Reader), not an otherwise deprived case recipient.', 'Server reorg acquisition/delivery regressions are separate; this browser run does not mutate chain canonicality.'] };
 }

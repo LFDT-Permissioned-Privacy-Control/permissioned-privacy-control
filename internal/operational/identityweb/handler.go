@@ -132,6 +132,8 @@ var adminPages = []string{
 	"/admin/rbac/contracts", "/admin/rbac/execution-policy", "/admin/rbac/configuration",
 	"/admin/rbac/identity-profiles", "/admin/rbac/claim-mappings", "/admin/rbac/azure-tenants", "/admin/rbac/platform-configuration",
 	"/admin/rbac/disclosure-source", "/admin/rbac/compliance-source",
+	"/admin/identity/profiles", "/admin/identity/claim-mappings", "/admin/settings",
+	"/admin/disclosure/rules", "/admin/compliance/policy", "/admin/configuration",
 	"/admin/compliance", "/admin/disclosure", "/admin/disclosures", "/admin/logs", "/admin/diagnostics", "/disclosures",
 }
 
@@ -182,7 +184,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	if r.URL.RawPath != "" && r.URL.RawPath != r.URL.Path || r.ContentLength > 0 || len(r.URL.RawQuery) > 32768 {
+	if r.URL.RawPath != "" && r.URL.RawPath != r.URL.Path || r.ContentLength > 0 || r.URL.Fragment != "" || r.URL.RawFragment != "" || len(r.URL.RawQuery) > 32768 {
 		http.Error(w, "invalid request", 400)
 		return
 	}

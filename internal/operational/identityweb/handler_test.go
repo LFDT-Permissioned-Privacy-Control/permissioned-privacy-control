@@ -92,3 +92,105 @@ func TestBuildRejectsUnexpectedFilesSymlinksAndCaps(t *testing.T) {
 		}
 	}
 }
+
+func TestRegroupedAdminSourcePagesUseExactRoutesAndCanonicalOrganizationQuery(t *testing.T) {
+	h, err := New(Config{f.MultiSnapshot(t, nil), buildFS()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	h.Register(mux)
+	server := httptest.NewTLSServer(mux)
+	defer server.Close()
+	pages := []string{
+		"/admin/identity/profiles", "/admin/identity/claim-mappings", "/admin/settings",
+		"/admin/disclosure/rules", "/admin/compliance/policy", "/admin/configuration",
+	}
+	for _, page := range pages {
+		for _, query := range []struct {
+			suffix string
+			status int
+		}{
+			{"", http.StatusOK}, {"?org=11111111-1111-4111-8111-111111111111", http.StatusOK},
+			{"?", http.StatusBadRequest}, {"?org=", http.StatusBadRequest}, {"?org=00000000-0000-0000-0000-000000000000", http.StatusBadRequest},
+			{"?org=AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA", http.StatusBadRequest},
+			{"?org=11111111-1111-4111-8111-111111111111&org=11111111-1111-4111-8111-111111111111", http.StatusBadRequest},
+			{"?%6frg=11111111-1111-4111-8111-111111111111", http.StatusBadRequest},
+			{"?org=%311111111-1111-4111-8111-111111111111", http.StatusBadRequest},
+			{"?org=11111111-1111-4111-8111-111111111111&return=/admin", http.StatusBadRequest}, {"?return=/admin", http.StatusBadRequest},
+		} {
+			t.Run(page+query.suffix, func(t *testing.T) {
+				req, err := http.NewRequest(http.MethodGet, server.URL+page+query.suffix, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Host = "ops.test"
+				res, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer res.Body.Close()
+				body, _ := io.ReadAll(res.Body)
+				if res.StatusCode != query.status || strings.Contains(string(body), "<!doctype html>") != (query.status == http.StatusOK) {
+					t.Fatalf("wrong static source page/query boundary: %d", res.StatusCode)
+				}
+				if res.Header.Get("Cache-Control") != "no-store" {
+					t.Fatal("source response may be cached")
+				}
+			})
+		}
+	}
+	for _, page := range []string{
+		"/admin/rbac/contracts", "/admin/rbac/execution-policy", "/admin/rbac/configuration", "/admin/rbac/identity-profiles", "/admin/rbac/claim-mappings", "/admin/rbac/azure-tenants", "/admin/rbac/platform-configuration", "/admin/rbac/disclosure-source", "/admin/rbac/compliance-source",
+	} {
+		t.Run("compatibility"+page, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodGet, server.URL+page, nil)
+			req.Host = "ops.test"
+			res, err := server.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer res.Body.Close()
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("existing exact source alias unavailable: %d", res.StatusCode)
+			}
+		})
+	}
+	for _, page := range []string{"/admin/identity", "/admin/identity/azure-tenants", "/admin/identity/profiles/", "/admin/identity/profiles/deeper", "/admin/settings/runtime", "/admin/configuration/groups", "/admin/disclosure/rules/", "/admin/compliance/policy/deeper"} {
+		t.Run("unknown"+page, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodGet, server.URL+page, nil)
+			req.Host = "ops.test"
+			res, err := server.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer res.Body.Close()
+			body, _ := io.ReadAll(res.Body)
+			if res.StatusCode != http.StatusNotFound || strings.Contains(string(body), "<!doctype html>") {
+				t.Fatal("unknown Admin prefix became a static page", res.StatusCode)
+			}
+		})
+	}
+}
+
+func TestAdminStaticHandlerRejectsFragmentsAndEncodedPathAliases(t *testing.T) {
+	h, err := New(Config{f.MultiSnapshot(t, nil), buildFS()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Browsers do not transmit fragments over HTTP. Still reject a fragment if
+	// an adapter supplies one directly; the browser route gate also rejects '#'.
+	for _, change := range []func(*http.Request){
+		func(r *http.Request) { r.URL.Fragment = "ignored" },
+		func(r *http.Request) { r.URL.RawFragment = "ignored" },
+		func(r *http.Request) { r.URL.RawPath = "/admin/%73ettings" },
+	} {
+		req := httptest.NewRequest(http.MethodGet, "https://ops.test/admin/settings", nil)
+		change(req)
+		recorder := httptest.NewRecorder()
+		h.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusBadRequest || strings.Contains(recorder.Body.String(), "<!doctype html>") {
+			t.Fatal("unexpected fragment or encoded path reached the static entry", recorder.Code)
+		}
+	}
+}
