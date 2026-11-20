@@ -7,6 +7,7 @@ export default defineConfig({
   resolve: { alias: { '@': resolve(__dirname, 'src') } },
   test: {
     include: ['src/v2/**/*.test.{ts,tsx}'], environment: 'jsdom',
+    setupFiles: ['./src/v2/testSetup.ts'],
     environmentOptions: { jsdom: { url: 'https://ops.test' } },
   },
 })

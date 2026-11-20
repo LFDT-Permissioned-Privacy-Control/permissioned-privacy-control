@@ -15,17 +15,18 @@ interface OrganizationTableProps {
   onSelect(id: string): void;
   canEdit?(id: string): boolean;
   onEdit?(id: string): void;
+  showCreated?: boolean;
 }
 
 // Shared presentation from the established organization list. Data ownership
 // and mutation permissions remain with the runtime-specific container.
-export function OrganizationTable({ organizations, onSelect, canEdit, onEdit }: OrganizationTableProps) {
+export function OrganizationTable({ organizations, onSelect, canEdit, onEdit, showCreated = true }: OrganizationTableProps) {
   return <Table>
     <TableHeader>
       <TableRow>
         <TableHead>Name</TableHead>
         <TableHead>Slug</TableHead>
-        <TableHead>Created</TableHead>
+        {showCreated && <TableHead>Created</TableHead>}
         <TableHead className="text-right">Actions</TableHead>
       </TableRow>
     </TableHeader>
@@ -39,10 +40,10 @@ export function OrganizationTable({ organizations, onSelect, canEdit, onEdit }: 
           </div>
         </TableCell>
         <TableCell><Badge variant="outline" className="font-mono text-xs">{org.slug}</Badge></TableCell>
-        <TableCell className="text-neutral-500 text-sm">
+        {showCreated && <TableCell className="text-neutral-500 text-sm">
           {org.createdAt ? new Date(org.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
             : <span title="Creation time is not recorded in this policy source">—</span>}
-        </TableCell>
+        </TableCell>}
         <TableCell>
           <div className="flex items-center justify-end gap-2">
             {canEdit?.(org.id) && onEdit && <Button variant="ghost" size="sm" title="Edit organization"

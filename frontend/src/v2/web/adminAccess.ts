@@ -5,3 +5,9 @@ import type { Self } from './protocol'
 export function hasAdminRole(self: Self | null): boolean {
   return self?.principalKind === 'human' && self.organizations.some(org => org.isOrgAdmin === true || org.isOrgReadonlyAdmin === true)
 }
+
+// Local proposal editing follows the familiar full-admin UI role. This grants
+// no live policy authority; Git approval and deployment remain separate.
+export function canEditSource(self: Self | null): boolean {
+  return self?.principalKind === 'human' && self.organizations.some(org => org.isOrgAdmin === true)
+}

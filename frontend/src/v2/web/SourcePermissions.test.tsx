@@ -92,7 +92,7 @@ it('retains the selected source preset and declared flags through pane suspensio
     return <SourceAuthoringProvider project={project} state={state} update={(key, entry) => setState(s => ({ ...s, [key]: entry }))} clear={prefix => setState(s => Object.fromEntries(Object.entries(s).filter(([key]) => !key.startsWith(prefix))))}><SourceAuthoringScope id="groups" root="source" path="groups.json">{visible && <SourceOrganizations project={project} root="source" organization={org} groupsPage editing onChange={change} onOrganization={() => {}} />}</SourceAuthoringScope></SourceAuthoringProvider>
   }
   const pane = render(<Retained visible />)
-  await userEvent.click(screen.getByTitle('Edit group draft')); await userEvent.click(screen.getByRole('button', { name: 'Network reader' })); await userEvent.click(screen.getByRole('checkbox', { name: 'Execution administrator' })); await userEvent.click(screen.getByRole('checkbox', { name: 'Verbose error policy' }))
+  await userEvent.click(screen.getByTitle('Edit access settings')); await userEvent.click(screen.getByRole('button', { name: 'Network reader' })); await userEvent.click(screen.getByRole('checkbox', { name: 'Execution administrator' })); await userEvent.click(screen.getByRole('checkbox', { name: 'Verbose error policy' }))
   pane.rerender(<Retained visible={false} />); pane.rerender(<Retained visible />)
   expect(screen.getByRole('button', { name: 'Network reader' })).toHaveAttribute('aria-pressed', 'true'); expect(screen.getByRole('checkbox', { name: 'eth_chainId' })).toBeChecked(); expect(screen.getByRole('checkbox', { name: 'Upgrade contracts' })).toBeDisabled(); expect(screen.getByRole('checkbox', { name: 'Verbose error policy' })).toBeChecked()
   fireEvent.change(screen.getByLabelText('Additional method names'), { target: { value: 'custom_pending' } })
@@ -100,7 +100,7 @@ it('retains the selected source preset and declared flags through pane suspensio
   expect(screen.getByText(/Additional method names are pending/)).toBeInTheDocument()
   pane.rerender(<Retained visible={false} />); pane.rerender(<Retained visible />)
   expect(screen.getByLabelText('Additional method names')).toHaveValue('custom_pending'); expect(screen.getByRole('button', { name: 'Network reader' })).toHaveAttribute('aria-pressed', 'false')
-  await userEvent.click(screen.getByRole('button', { name: 'Save group draft' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Save access draft' }))
   expect(change).toHaveBeenCalledTimes(1)
   const saved = (object(documentValue(change.mock.calls[0][0], 'source', 'groups.json').spec).groups as JSONObject[])[0]
   expect(saved.allowedMethods).toEqual([...networkReader, 'custom_rpc', 'eth_newFilter', 'custom_pending'].sort())

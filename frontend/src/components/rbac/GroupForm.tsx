@@ -1,10 +1,7 @@
 import { useState } from 'react';
 import { rbacApi } from '@/api/rbac';
 import type { Group } from '@/types/rbac';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
-import { AlertCircle, Save, X, Loader2, Shield, Check } from 'lucide-react';
+import { GroupFormView } from './GroupFormView';
 
 interface GroupFormProps {
   orgId: string;
@@ -101,146 +98,9 @@ export default function GroupForm({
     }
   };
 
-  return (
-    <form onSubmit={handleSubmit} className="space-y-5">
-      {error && (
-        <div className="p-4 rounded-lg bg-error-light border border-error/30 flex items-start gap-3">
-          <AlertCircle className="w-5 h-5 text-error-dark flex-shrink-0 mt-0.5" />
-          <span className="text-error-dark text-sm">{error}</span>
-        </div>
-      )}
-
-      <div className="space-y-2">
-        <label className="block text-sm font-medium text-neutral-700">Name</label>
-        <Input
-          type="text"
-          value={name}
-          onChange={e => handleNameChange(e.target.value)}
-          placeholder="e.g., Engineering, DevOps, Auditors"
-          required
-          aria-invalid={nameConflict}
-          className={nameConflict ? 'border-error ring-1 ring-error/20' : ''}
-        />
-        {nameConflict && (
-          <p className="text-xs text-error-dark">
-            A group named &quot;{trimmedName}&quot; already exists in this organization (names are case-insensitive). Pick a different name.
-          </p>
-        )}
-      </div>
-
-      {!isEditing && (
-        <div className="space-y-2">
-          <label className="block text-sm font-medium text-neutral-700">Slug</label>
-          <Input
-            type="text"
-            value={slug}
-            onChange={e => setSlug(e.target.value)}
-            placeholder="e.g., engineering"
-            required
-            pattern="^[a-z0-9]+(_[a-z0-9]+)*$"
-            title="Lowercase letters, numbers, and underscores only"
-            aria-invalid={slugConflict}
-            className={slugConflict ? 'border-error ring-1 ring-error/20' : ''}
-          />
-          {slugConflict ? (
-            <p className="text-xs text-error-dark">
-              A group with slug &quot;{slug}&quot; already exists in this organization.
-            </p>
-          ) : (
-            <p className="text-xs text-neutral-400">
-              URL-friendly identifier (lowercase, underscores allowed)
-            </p>
-          )}
-        </div>
-      )}
-
-      <div className="space-y-2">
-        <label className="block text-sm font-medium text-neutral-700">
-          Description (optional)
-        </label>
-        <Textarea
-          value={description}
-          onChange={e => setDescription(e.target.value)}
-          placeholder="Describe the purpose of this group..."
-          className="h-20"
-        />
-      </div>
-
-      {/* Admin role. A full org-admin group cannot also be a read-only org
-          admin (RD-968 Gap 2) — when editing one, show a banner instead of the
-          toggle. Otherwise show the read-only admin toggle. */}
-      {isOrgAdminGroup ? (
-        <div className="flex items-start gap-3 p-3 rounded-lg bg-primary-50 border border-primary-200">
-          <Shield className="w-4 h-4 text-primary-700 flex-shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <span className="text-sm font-medium text-primary-700">Full Org Admin</span>
-            <p className="text-xs text-neutral-500 mt-1">
-              Members have full admin access to this organization — all claims on every
-              contract, automatically. The read-only admin role does not apply and cannot
-              be combined with it.
-            </p>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          <label
-            className="flex items-start gap-3 p-3 rounded-lg bg-primary-50 border border-primary-200 cursor-pointer hover:bg-primary-100 transition-colors"
-            onClick={() => {
-              setIsOrgReadonlyAdmin(!isOrgReadonlyAdmin);
-            }}
-          >
-            <div className={`w-5 h-5 rounded border flex items-center justify-center flex-shrink-0 mt-0.5 transition-colors ${
-              isOrgReadonlyAdmin
-                ? 'bg-primary border-primary'
-                : 'border-neutral-300 bg-white'
-            }`}>
-              {isOrgReadonlyAdmin && <Check className="w-3 h-3 text-white" />}
-            </div>
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
-                <Shield className="w-4 h-4 text-primary-700" />
-                <span className="text-sm font-medium text-primary-700">Read-only Org Admin</span>
-              </div>
-              <p className="text-xs text-neutral-500 mt-1">
-                Members get read-only access to the admin dashboard (auditor role). They cannot modify settings or resources.
-              </p>
-            </div>
-          </label>
-        </div>
-      )}
-
-      <div className="p-3 rounded-lg bg-neutral-50 border border-neutral-200">
-        <p className="text-sm text-neutral-600">
-          <strong>Tip:</strong> After creating the group, use the settings icon to configure
-          allowed RPC methods, claims, and rate limits.
-        </p>
-      </div>
-
-      <div className="flex justify-end gap-3 pt-2">
-        <Button
-          type="button"
-          variant="ghost"
-          onClick={onClose}
-          disabled={saving}
-          className="gap-2"
-        >
-          <X className="w-4 h-4" />
-          Cancel
-        </Button>
-        <Button type="submit" disabled={saving || nameConflict || slugConflict} className="gap-2">
-          {saving ? (
-            <>
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Saving...
-            </>
-          ) : (
-            <>
-              <Save className="w-4 h-4" />
-              {isEditing ? 'Update' : 'Create'} Group
-            </>
-          )}
-        </Button>
-      </div>
-    </form>
-  );
+  return <GroupFormView name={name} slug={slug} description={description} saving={saving} error={error}
+    isEditing={isEditing} isOrgAdminGroup={isOrgAdminGroup} isOrgReadonlyAdmin={isOrgReadonlyAdmin}
+    nameConflict={nameConflict} slugConflict={slugConflict} trimmedName={trimmedName}
+    onNameChange={handleNameChange} onSlugChange={setSlug} onDescriptionChange={setDescription} onReadonlyChange={setIsOrgReadonlyAdmin}
+    onClose={onClose} onSubmit={handleSubmit} />;
 }

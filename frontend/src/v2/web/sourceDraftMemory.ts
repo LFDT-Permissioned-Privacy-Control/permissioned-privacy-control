@@ -4,10 +4,10 @@ import type { SourceProject } from './sourceProject'
 import { multiPair, readMultiMarker, type MultiMarker } from '../auth/multiContext'
 import { sameSession, type MultiSession } from '../auth/multiProtocol'
 import { retainAuthoring, type AuthoringEntry, type AuthoringState } from './sourceAuthoring'
-import { hasAdminRole } from './adminAccess'
+import { canEditSource, hasAdminRole } from './adminAccess'
 
 interface Owner extends MultiSession {
-  digest: string; kind: Self['principalKind']; scope: number; expiresAt: number
+  digest: string; kind: Self['principalKind']; scope: number; expiresAt: number; mayEdit: boolean
 }
 export interface DraftMemoryView { project: SourceProject | null; authoring: AuthoringState; epoch: number; locked: boolean; dirty: boolean; unfinished: boolean }
 const noAuthoring: AuthoringState = {}
@@ -40,6 +40,16 @@ export class SourceDraftMemory {
     return self.actorId === owner.actorId && self.sourceProfile === owner.sourceProfile &&
       self.sourceProfileDigest === owner.digest && self.principalKind === owner.kind
   }
+  private updateAuthoringRole(self: Self) {
+    const mayEdit = canEditSource(self)
+    if (this.owner?.mayEdit && !mayEdit) {
+      // Keep the owned source copy, but retire hidden unfinished forms and all
+      // captured callbacks. A later role grant requires explicit Edit again.
+      this.authoring = noAuthoring; this.epoch++; this.owner.mayEdit = false
+      this.publish(this.view.locked)
+    }
+    return mayEdit
+  }
   observe = (): void => {
     const owner = this.owner
     if (!owner || !this.project) return
@@ -70,13 +80,14 @@ export class SourceDraftMemory {
       return
     }
     if (!this.sameIdentity(state.self, owner)) { this.clear(); return }
+    owner.mayEdit = this.updateAuthoringRole(state.self)
     if (state.busy || marker?.phase !== 'active' || state.self.expiresAt * 1000 <= this.clock()) { this.publish(true); return }
     if (owner.scope !== this.controller.scopeRevision && !this.view.locked) { this.clear(); return }
     if (!this.controller.ownsScope(this.controller.scopeRevision, owner.actorId)) { this.clear(); return }
     owner.scope = this.controller.scopeRevision; owner.expiresAt = state.self.expiresAt
     this.publish(false)
   }
-  write(next: SourceProject | null, scope: number, actor: string, replace = false): void {
+  write(next: SourceProject | null, scope: number, actor: string, replace = false, expected?: SourceProject | null): void {
     if (this.view.locked || !this.controller.ownsScope(scope, actor)) throw Error('The source editor is locked while your account is checked.')
     const state = this.controller.snapshot(), self = state.self
     let marker: MultiMarker | null
@@ -85,8 +96,13 @@ export class SourceDraftMemory {
     if (!self || !hasAdminRole(self) || self.actorId !== actor || state.busy || state.flow || state.pending || self.expiresAt * 1000 <= this.clock() ||
       marker?.phase !== 'active' || !pair || pair.actorId !== actor || pair.sourceProfile !== self.sourceProfile) throw Error('The selected account changed. Import the source again.')
     if (this.owner && (!sameSession(pair, this.owner) || !this.sameIdentity(self, this.owner))) throw Error('The selected account changed. Import the source again.')
+    // A retained form may still belong to this account/epoch while another
+    // editor has changed the files. Never overwrite that newer proposal.
+    if (!replace && expected !== undefined && expected !== this.project) throw Error('The configuration draft changed. Reopen the form before saving.')
     if (!next) { this.clear(); return }
-    this.owner = {...pair, digest: self.sourceProfileDigest, kind: self.principalKind, scope, expiresAt: self.expiresAt}
+    const mayEdit = this.updateAuthoringRole(self)
+    if (!replace && next !== this.project && !mayEdit) throw Error('This account has read-only configuration access.')
+    this.owner = {...pair, digest: self.sourceProfileDigest, kind: self.principalKind, scope, expiresAt: self.expiresAt, mayEdit}
     if (replace) { this.authoring = noAuthoring; this.epoch++ }
     else if (this.project !== next) this.authoring = retainAuthoring(this.authoring, next)
     this.project = next; this.publish(false)
@@ -95,6 +111,8 @@ export class SourceDraftMemory {
     if (epoch !== this.epoch) return
     if (!this.project) throw Error('Import source before editing a proposal.')
     this.write(this.project, scope, actor)
+    if (epoch !== this.epoch) return
+    if (entry.dirty && !canEditSource(this.controller.snapshot().self)) throw Error('This account has read-only configuration access.')
     if (!retainAuthoring({ [key]: entry }, this.project)[key]) return
     this.authoring = { ...this.authoring, [key]: entry }; this.publish(false)
   }
@@ -102,6 +120,7 @@ export class SourceDraftMemory {
     if (epoch !== this.epoch) return
     if (!this.project) return
     this.write(this.project, scope, actor)
+    if (epoch !== this.epoch) return
     this.authoring = Object.fromEntries(Object.entries(this.authoring).filter(([key]) => !key.startsWith(prefix))); this.publish(false)
   }
 }

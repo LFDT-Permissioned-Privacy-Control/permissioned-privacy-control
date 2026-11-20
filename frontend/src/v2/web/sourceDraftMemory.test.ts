@@ -19,6 +19,19 @@ async function fixture() {
 }
 afterEach(() => localStorage.clear())
 
+it('rejects a retained save or discard based on older files without losing the newer proposal', async () => {
+  const { memory, project } = await fixture()
+  const first = updateSourceText(project, 'source', 'groups.json', documentText(project, 'source', 'groups.json') + '\n')
+  const stale = updateSourceText(project, 'source', 'draft.json', documentText(project, 'source', 'draft.json') + '\n')
+  memory.write(first, 0, actor, false, project)
+  expect(() => memory.write(stale, 0, actor, false, project)).toThrow(/draft changed/)
+  expect(() => memory.write(null, 0, actor, false, project)).toThrow(/draft changed/)
+  expect(memory.snapshot().project).toBe(first)
+  const current = updateSourceText(first, 'source', 'draft.json', documentText(first, 'source', 'draft.json') + '\n')
+  memory.write(current, 0, actor, false, first)
+  expect(memory.snapshot().project).toBe(current)
+})
+
 it('invalidates unfinished fields only for changed source documents and rejects callbacks from their old versions', async () => {
   const { memory, project } = await fixture(), epoch = memory.snapshot().epoch
   const groupEntry = { value: 'unfinished input', base: 'group-node', dirty: true, source: { root: 'source', path: 'groups.json', text: documentText(project, 'source', 'groups.json') } }
@@ -57,5 +70,27 @@ it('clears a same-account draft on loss of console roles and refuses stale write
   memory.observe()
   expect(memory.snapshot().project).toBeNull()
   memory.writeAuthoring('/form', { value: 'stale input', base: 'node', dirty: true }, 0, actor, epoch)
+  expect(memory.snapshot().authoring).toEqual({})
+})
+
+it('keeps the owned source but retires unfinished authoring and stale mutations on a readonly downgrade', async () => {
+  const { memory, project, state } = await fixture(), epoch = memory.snapshot().epoch
+  memory.writeAuthoring('/editing', { value: true, base: 'null', dirty: false }, 0, actor, epoch)
+  memory.writeAuthoring('/form', { value: 'unfinished metadata', base: 'node', dirty: true }, 0, actor, epoch)
+  const changed = updateSourceText(project, 'source', 'groups.json', documentText(project, 'source', 'groups.json') + '\n')
+  state.self = { ...state.self!, organizations: state.self!.organizations.map(org => ({ ...org, isOrgAdmin: false, isOrgReadonlyAdmin: true })) }
+  memory.observe()
+  expect(memory.snapshot().project).toBe(project)
+  expect(memory.snapshot().authoring).toEqual({})
+  expect(memory.snapshot().unfinished).toBe(false)
+  expect(() => memory.write(changed, 0, actor)).toThrow(/read-only/)
+  memory.writeAuthoring('/form', { value: 'stale edit', base: 'node', dirty: true }, 0, actor, epoch)
+  expect(memory.snapshot().authoring).toEqual({})
+  expect(() => memory.writeAuthoring('/form', { value: 'new edit', base: 'node', dirty: true }, 0, actor, memory.snapshot().epoch)).toThrow(/read-only/)
+  // Readonly operators may inspect another explicitly imported local copy.
+  memory.write(changed, 0, actor, true)
+  expect(memory.snapshot().project).toBe(changed)
+  state.self = { ...state.self, organizations: state.self.organizations.map(org => ({ ...org, isOrgAdmin: true, isOrgReadonlyAdmin: false })) }
+  memory.observe()
   expect(memory.snapshot().authoring).toEqual({})
 })
