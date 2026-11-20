@@ -94,25 +94,35 @@ async function homeRowBounds(page) {
   assert.deepEqual(result.failures, [], 'Native Home hashes/party badges stay inside their own rows');
   return result;
 }
-async function homeAverage(page, blockPages) {
+async function homeAverage(page, blockPages, blockStatuses, expectedStatus) {
   await page.getByText('Avg Block Time', { exact:true }).waitFor();
   // Capture the rendered page and its derived value atomically: a later5s
   // poll may replace both while count tooltip checks continue.
   const rendered=await page.evaluate(()=>{const card=[...document.querySelectorAll('[data-testid="stat-card"]')].find(card=>card.textContent.includes('Avg Block Time'));return{heights:[...document.querySelectorAll('[data-testid="block-row"] a[href^="/block/"]')].map(link=>link.getAttribute('href').split('/').at(-1)),value:card.querySelector('button').textContent,note:card.querySelector('[data-testid="block-time-sample"]').textContent};});
-  const heights=rendered.heights;
+  const heights=rendered.heights,status=blockStatuses.at(-1);
+  assert.equal(status,expectedStatus,'Known persona keeps its actual block-read permission');
+  if(status===403) {
+    assert.deepEqual(heights,[],'Denied blocks never create a rendered header sample');
+    assert.equal(rendered.value,'Unavailable');
+    assert.equal(rendered.note,'0 usable intervals · page range unavailable');
+    const trigger=page.getByTestId('stat-card').filter({has:page.getByText('Avg Block Time',{exact:true})}).getByRole('button');
+    await trigger.focus();await trigger.click();const tooltip=page.getByRole('tooltip');await tooltip.waitFor();assert.ok((await tooltip.textContent()).includes('No authorized block-page range is available.'));await page.keyboard.press('Escape');await tooltip.waitFor({state:'hidden'});
+    return {value:'Unavailable',usablePairs:'0',blockStatus:status,source:'Actual403 block read; no authorized block-page range'};
+  }
   const body=[...blockPages].reverse().find(body=>JSON.stringify(body.items.map(row=>row.number))===JSON.stringify(heights));
   assert.ok(body,'Average oracle must use one actual response matching the rendered block page');
   assert.equal(new Set(body.items.map(row=>row.number)).size,body.items.length);assert.equal(new Set(body.items.map(row=>row.hash)).size,body.items.length);
   const headers=body.items.filter(row=>row.number!=='0').map(row=>({height:BigInt(row.number),time:BigInt(row.timestamp)})).sort((a,b)=>a.height<b.height?-1:1);
   let seconds=0n,pairs=0n;
   for(let i=1;i<headers.length;i++)if(headers[i].height===headers[i-1].height+1n&&headers[i].time>headers[i-1].time){seconds+=headers[i].time-headers[i-1].time;pairs++;}
+  assert.ok(pairs>0n,'Known block-authorized demo sample must contain a positive interval; no all-unavailable pass');
   const rounded=pairs?(seconds*200n+pairs)/(2n*pairs):undefined;
   const value=rounded===undefined?'Unavailable':(rounded/100n).toLocaleString('en-US')+'.'+String(rounded%100n).padStart(2,'0')+'s';
   const card=page.getByTestId('stat-card').filter({has:page.getByText('Avg Block Time',{exact:true})}),button=card.getByRole('button');
   await button.waitFor();assert.equal(rendered.value,value);
   if(headers.length)assert.equal(rendered.note,`${pairs} usable interval${pairs===1n?'':'s'} · page blocks ${headers[0].height}–${headers.at(-1).height}`);
   await button.focus();await button.click();const tooltip=page.getByRole('tooltip');await tooltip.waitFor();assert.ok((await tooltip.textContent()).includes('not a whole-chain or last-100-block average'));await page.keyboard.press('Escape');await tooltip.waitFor({state:'hidden'});
-  return {value,usablePairs:String(pairs),fromBlock:headers[0]?.height.toString(),throughBlock:headers.at(-1)?.height.toString(),source:'Single actual authorized rendered block-page response'};
+  return {value,usablePairs:String(pairs),blockStatus:status,fromBlock:headers[0]?.height.toString(),throughBlock:headers.at(-1)?.height.toString(),source:'Single actual authorized rendered block-page response'};
 }
 function exactFlatFields(item, mapping) {
   for (const [flat, metric] of Object.entries(mapping)) if (Object.hasOwn(item, flat)) {
@@ -124,8 +134,8 @@ export async function checkViewerCountRendering({ users, runtime, screenshots, p
   const results = [], exactCurrentAccounts = [], numericHistory = []; let tokenDetails = 0, accountDetails = 0;
   for (const name of ['admin', 'deployer', 'reader']) {
     const page = users.get(name).page; await page.setViewportSize({ width: 1280, height: 900 });
-    const blockPages=[],blockReads=[];
-    const collectBlocks=response=>{const url=new URL(response.url());if(url.origin===runtime.explorerOrigin&&url.pathname==='/api/v2/explorer/blocks'&&response.status()===200)blockReads.push(response.json().then(body=>blockPages.push(body)).catch(()=>{/* Canceled old response is not an oracle. */}));};
+    const blockPages=[],blockReads=[],blockStatuses=[];
+    const collectBlocks=response=>{const url=new URL(response.url());if(url.origin!==runtime.explorerOrigin||url.pathname!=='/api/v2/explorer/blocks'||response.request().method()!=='GET'||url.searchParams.get('limit')!=='10')return;blockStatuses.push(response.status());if(response.status()===200)blockReads.push(response.json().then(body=>blockPages.push(body)).catch(()=>{/* Canceled old response is not an oracle. */}));};
     page.on('response',collectBlocks);
     let stats,average;
     try {
@@ -133,7 +143,7 @@ export async function checkViewerCountRendering({ users, runtime, screenshots, p
       await page.getByRole('heading',{name:'Latest Blocks',exact:true}).waitFor();
       await page.getByText('Avg Block Time',{exact:true}).waitFor();
       await Promise.all(blockReads);
-      average = await homeAverage(page,blockPages);
+      average = await homeAverage(page,blockPages,blockStatuses,name==='reader'?403:200);
     } finally {page.off('response',collectBlocks);}
     assert.equal(await page.getByTestId('stat-card').count(),5,'Tokens remains beside the restored fifth average card');
     let mobileRows;
