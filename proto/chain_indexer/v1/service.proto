@@ -39,6 +39,8 @@ service IndexerService {
   // ----- Transactions -----
   rpc GetTransaction(GetTransactionRequest) returns (Transaction);
   rpc ListTransactions(ListTransactionsRequest) returns (ListTransactionsResponse);
+  // Offset-paginated global feed with a true total_items (for browse-style UIs).
+  rpc ListTransactionsPaginated(ListTransactionsPaginatedRequest) returns (ListTransactionsPaginatedResponse);
   rpc BatchGetAddressTransactionCounts(BatchGetAddressTransactionCountsRequest) returns (BatchGetAddressTransactionCountsResponse);
 
   // ----- Logs -----
@@ -48,7 +50,9 @@ service IndexerService {
   rpc GetToken(GetTokenRequest) returns (Token);
   rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);
   rpc ListTokenTransfers(ListTokenTransfersRequest) returns (ListTokenTransfersResponse);
+  rpc ListAllTokenTransfers(ListAllTokenTransfersRequest) returns (ListAllTokenTransfersResponse);
   rpc ListTokenHolders(ListTokenHoldersRequest) returns (ListTokenHoldersResponse);
+  rpc ListTokenInventory(ListTokenInventoryRequest) returns (ListTokenInventoryResponse);
   rpc ListTokenBalances(ListTokenBalancesRequest) returns (ListTokenBalancesResponse);
   rpc BatchGetTokenBalances(BatchGetTokenBalancesRequest) returns (BatchGetTokenBalancesResponse);
 

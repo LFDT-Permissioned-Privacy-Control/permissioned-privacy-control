@@ -423,9 +423,12 @@ func (x *GetTokenRequest) GetAddress() string {
 }
 
 type ListTokensRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Page          *OffsetPageRequest     `protobuf:"bytes,1,opt,name=page,proto3" json:"page,omitempty"`
-	TokenType     TokenType              `protobuf:"varint,2,opt,name=token_type,json=tokenType,proto3,enum=chain_indexer.v1.TokenType" json:"token_type,omitempty"` // UNSPECIFIED = all
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Page      *OffsetPageRequest     `protobuf:"bytes,1,opt,name=page,proto3" json:"page,omitempty"`
+	TokenType TokenType              `protobuf:"varint,2,opt,name=token_type,json=tokenType,proto3,enum=chain_indexer.v1.TokenType" json:"token_type,omitempty"` // UNSPECIFIED = all
+	// Optional. Case-insensitive substring match against the token's name,
+	// symbol, or address (raw 0x-prefixed form). Empty = no filter.
+	Search        string `protobuf:"bytes,3,opt,name=search,proto3" json:"search,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -472,6 +475,13 @@ func (x *ListTokensRequest) GetTokenType() TokenType {
 		return x.TokenType
 	}
 	return TokenType_TOKEN_TYPE_UNSPECIFIED
+}
+
+func (x *ListTokensRequest) GetSearch() string {
+	if x != nil {
+		return x.Search
+	}
+	return ""
 }
 
 type ListTokensResponse struct {
@@ -604,9 +614,12 @@ func (x *ListTokenTransfersRequest) GetBlockRange() *BlockRange {
 }
 
 type ListTokenTransfersResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Transfers     []*TokenTransfer       `protobuf:"bytes,1,rep,name=transfers,proto3" json:"transfers,omitempty"`
-	Page          *PageResponse          `protobuf:"bytes,2,opt,name=page,proto3" json:"page,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Transfers []*TokenTransfer       `protobuf:"bytes,1,rep,name=transfers,proto3" json:"transfers,omitempty"`
+	Page      *PageResponse          `protobuf:"bytes,2,opt,name=page,proto3" json:"page,omitempty"`
+	// Total number of transfers matching the request filter (ignoring
+	// pagination), so consumers can render a true "of N" count.
+	TotalCount    int64 `protobuf:"varint,3,opt,name=total_count,json=totalCount,proto3" json:"total_count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -655,6 +668,121 @@ func (x *ListTokenTransfersResponse) GetPage() *PageResponse {
 	return nil
 }
 
+func (x *ListTokenTransfersResponse) GetTotalCount() int64 {
+	if x != nil {
+		return x.TotalCount
+	}
+	return 0
+}
+
+// Global, unfiltered transfer feed for the explorer's "Token Transfers" page.
+// Unlike ListTokenTransfers (which requires a tx/address/token filter and uses
+// cursor pagination), this returns every transfer chain-wide with offset
+// pagination and an accurate total, plus an optional token-standard filter.
+type ListAllTokenTransfersRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Page          *OffsetPageRequest     `protobuf:"bytes,1,opt,name=page,proto3" json:"page,omitempty"`
+	TokenType     TokenType              `protobuf:"varint,2,opt,name=token_type,json=tokenType,proto3,enum=chain_indexer.v1.TokenType" json:"token_type,omitempty"` // UNSPECIFIED = all standards
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListAllTokenTransfersRequest) Reset() {
+	*x = ListAllTokenTransfersRequest{}
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListAllTokenTransfersRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListAllTokenTransfersRequest) ProtoMessage() {}
+
+func (x *ListAllTokenTransfersRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListAllTokenTransfersRequest.ProtoReflect.Descriptor instead.
+func (*ListAllTokenTransfersRequest) Descriptor() ([]byte, []int) {
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ListAllTokenTransfersRequest) GetPage() *OffsetPageRequest {
+	if x != nil {
+		return x.Page
+	}
+	return nil
+}
+
+func (x *ListAllTokenTransfersRequest) GetTokenType() TokenType {
+	if x != nil {
+		return x.TokenType
+	}
+	return TokenType_TOKEN_TYPE_UNSPECIFIED
+}
+
+type ListAllTokenTransfersResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Transfers     []*TokenTransfer       `protobuf:"bytes,1,rep,name=transfers,proto3" json:"transfers,omitempty"`
+	Page          *OffsetPageResponse    `protobuf:"bytes,2,opt,name=page,proto3" json:"page,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListAllTokenTransfersResponse) Reset() {
+	*x = ListAllTokenTransfersResponse{}
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListAllTokenTransfersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListAllTokenTransfersResponse) ProtoMessage() {}
+
+func (x *ListAllTokenTransfersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListAllTokenTransfersResponse.ProtoReflect.Descriptor instead.
+func (*ListAllTokenTransfersResponse) Descriptor() ([]byte, []int) {
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ListAllTokenTransfersResponse) GetTransfers() []*TokenTransfer {
+	if x != nil {
+		return x.Transfers
+	}
+	return nil
+}
+
+func (x *ListAllTokenTransfersResponse) GetPage() *OffsetPageResponse {
+	if x != nil {
+		return x.Page
+	}
+	return nil
+}
+
 type ListTokenHoldersRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Page          *OffsetPageRequest     `protobuf:"bytes,1,opt,name=page,proto3" json:"page,omitempty"`
@@ -665,7 +793,7 @@ type ListTokenHoldersRequest struct {
 
 func (x *ListTokenHoldersRequest) Reset() {
 	*x = ListTokenHoldersRequest{}
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[8]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -677,7 +805,7 @@ func (x *ListTokenHoldersRequest) String() string {
 func (*ListTokenHoldersRequest) ProtoMessage() {}
 
 func (x *ListTokenHoldersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[8]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -690,7 +818,7 @@ func (x *ListTokenHoldersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTokenHoldersRequest.ProtoReflect.Descriptor instead.
 func (*ListTokenHoldersRequest) Descriptor() ([]byte, []int) {
-	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{8}
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ListTokenHoldersRequest) GetPage() *OffsetPageRequest {
@@ -717,7 +845,7 @@ type ListTokenHoldersResponse struct {
 
 func (x *ListTokenHoldersResponse) Reset() {
 	*x = ListTokenHoldersResponse{}
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[9]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -729,7 +857,7 @@ func (x *ListTokenHoldersResponse) String() string {
 func (*ListTokenHoldersResponse) ProtoMessage() {}
 
 func (x *ListTokenHoldersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[9]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -742,7 +870,7 @@ func (x *ListTokenHoldersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTokenHoldersResponse.ProtoReflect.Descriptor instead.
 func (*ListTokenHoldersResponse) Descriptor() ([]byte, []int) {
-	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{9}
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ListTokenHoldersResponse) GetHolders() []*TokenBalance {
@@ -771,7 +899,7 @@ type ListTokenBalancesRequest struct {
 
 func (x *ListTokenBalancesRequest) Reset() {
 	*x = ListTokenBalancesRequest{}
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[10]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -783,7 +911,7 @@ func (x *ListTokenBalancesRequest) String() string {
 func (*ListTokenBalancesRequest) ProtoMessage() {}
 
 func (x *ListTokenBalancesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[10]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -796,7 +924,7 @@ func (x *ListTokenBalancesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTokenBalancesRequest.ProtoReflect.Descriptor instead.
 func (*ListTokenBalancesRequest) Descriptor() ([]byte, []int) {
-	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{10}
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ListTokenBalancesRequest) GetPage() *PageRequest {
@@ -830,7 +958,7 @@ type ListTokenBalancesResponse struct {
 
 func (x *ListTokenBalancesResponse) Reset() {
 	*x = ListTokenBalancesResponse{}
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[11]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -842,7 +970,7 @@ func (x *ListTokenBalancesResponse) String() string {
 func (*ListTokenBalancesResponse) ProtoMessage() {}
 
 func (x *ListTokenBalancesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[11]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -855,7 +983,7 @@ func (x *ListTokenBalancesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTokenBalancesResponse.ProtoReflect.Descriptor instead.
 func (*ListTokenBalancesResponse) Descriptor() ([]byte, []int) {
-	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{11}
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ListTokenBalancesResponse) GetBalances() []*TokenBalance {
@@ -884,7 +1012,7 @@ type BatchGetTokenBalancesRequest struct {
 
 func (x *BatchGetTokenBalancesRequest) Reset() {
 	*x = BatchGetTokenBalancesRequest{}
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[12]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -896,7 +1024,7 @@ func (x *BatchGetTokenBalancesRequest) String() string {
 func (*BatchGetTokenBalancesRequest) ProtoMessage() {}
 
 func (x *BatchGetTokenBalancesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[12]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -909,7 +1037,7 @@ func (x *BatchGetTokenBalancesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchGetTokenBalancesRequest.ProtoReflect.Descriptor instead.
 func (*BatchGetTokenBalancesRequest) Descriptor() ([]byte, []int) {
-	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{12}
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *BatchGetTokenBalancesRequest) GetAddresses() []string {
@@ -936,7 +1064,7 @@ type BatchGetTokenBalancesResponse struct {
 
 func (x *BatchGetTokenBalancesResponse) Reset() {
 	*x = BatchGetTokenBalancesResponse{}
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[13]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -948,7 +1076,7 @@ func (x *BatchGetTokenBalancesResponse) String() string {
 func (*BatchGetTokenBalancesResponse) ProtoMessage() {}
 
 func (x *BatchGetTokenBalancesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[13]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -961,12 +1089,186 @@ func (x *BatchGetTokenBalancesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchGetTokenBalancesResponse.ProtoReflect.Descriptor instead.
 func (*BatchGetTokenBalancesResponse) Descriptor() ([]byte, []int) {
-	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{13}
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *BatchGetTokenBalancesResponse) GetBalances() map[string]*BatchGetTokenBalancesResponse_TokenBalanceList {
 	if x != nil {
 		return x.Balances
+	}
+	return nil
+}
+
+// One NFT instance in a collection's inventory: a token id, its current owner,
+// and the raw tokenURI captured at mint.
+type TokenInventoryItem struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TokenId       *BigInt                `protobuf:"bytes,1,opt,name=token_id,json=tokenId,proto3" json:"token_id,omitempty"`
+	Owner         string                 `protobuf:"bytes,2,opt,name=owner,proto3" json:"owner,omitempty"`
+	TokenUri      string                 `protobuf:"bytes,3,opt,name=token_uri,json=tokenUri,proto3" json:"token_uri,omitempty"` // raw tokenURI(); empty if unknown
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TokenInventoryItem) Reset() {
+	*x = TokenInventoryItem{}
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TokenInventoryItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TokenInventoryItem) ProtoMessage() {}
+
+func (x *TokenInventoryItem) ProtoReflect() protoreflect.Message {
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TokenInventoryItem.ProtoReflect.Descriptor instead.
+func (*TokenInventoryItem) Descriptor() ([]byte, []int) {
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *TokenInventoryItem) GetTokenId() *BigInt {
+	if x != nil {
+		return x.TokenId
+	}
+	return nil
+}
+
+func (x *TokenInventoryItem) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *TokenInventoryItem) GetTokenUri() string {
+	if x != nil {
+		return x.TokenUri
+	}
+	return ""
+}
+
+type ListTokenInventoryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Page          *OffsetPageRequest     `protobuf:"bytes,1,opt,name=page,proto3" json:"page,omitempty"`
+	TokenAddress  string                 `protobuf:"bytes,2,opt,name=token_address,json=tokenAddress,proto3" json:"token_address,omitempty"`
+	TokenId       string                 `protobuf:"bytes,3,opt,name=token_id,json=tokenId,proto3" json:"token_id,omitempty"` // optional: filter to a single token id (decimal string)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListTokenInventoryRequest) Reset() {
+	*x = ListTokenInventoryRequest{}
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListTokenInventoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListTokenInventoryRequest) ProtoMessage() {}
+
+func (x *ListTokenInventoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListTokenInventoryRequest.ProtoReflect.Descriptor instead.
+func (*ListTokenInventoryRequest) Descriptor() ([]byte, []int) {
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ListTokenInventoryRequest) GetPage() *OffsetPageRequest {
+	if x != nil {
+		return x.Page
+	}
+	return nil
+}
+
+func (x *ListTokenInventoryRequest) GetTokenAddress() string {
+	if x != nil {
+		return x.TokenAddress
+	}
+	return ""
+}
+
+func (x *ListTokenInventoryRequest) GetTokenId() string {
+	if x != nil {
+		return x.TokenId
+	}
+	return ""
+}
+
+type ListTokenInventoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Items         []*TokenInventoryItem  `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
+	Page          *OffsetPageResponse    `protobuf:"bytes,2,opt,name=page,proto3" json:"page,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListTokenInventoryResponse) Reset() {
+	*x = ListTokenInventoryResponse{}
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListTokenInventoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListTokenInventoryResponse) ProtoMessage() {}
+
+func (x *ListTokenInventoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListTokenInventoryResponse.ProtoReflect.Descriptor instead.
+func (*ListTokenInventoryResponse) Descriptor() ([]byte, []int) {
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ListTokenInventoryResponse) GetItems() []*TokenInventoryItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+func (x *ListTokenInventoryResponse) GetPage() *OffsetPageResponse {
+	if x != nil {
+		return x.Page
 	}
 	return nil
 }
@@ -980,7 +1282,7 @@ type BatchGetTokenBalancesResponse_TokenBalanceList struct {
 
 func (x *BatchGetTokenBalancesResponse_TokenBalanceList) Reset() {
 	*x = BatchGetTokenBalancesResponse_TokenBalanceList{}
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[15]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -992,7 +1294,7 @@ func (x *BatchGetTokenBalancesResponse_TokenBalanceList) String() string {
 func (*BatchGetTokenBalancesResponse_TokenBalanceList) ProtoMessage() {}
 
 func (x *BatchGetTokenBalancesResponse_TokenBalanceList) ProtoReflect() protoreflect.Message {
-	mi := &file_chain_indexer_v1_token_proto_msgTypes[15]
+	mi := &file_chain_indexer_v1_token_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1005,7 +1307,7 @@ func (x *BatchGetTokenBalancesResponse_TokenBalanceList) ProtoReflect() protoref
 
 // Deprecated: Use BatchGetTokenBalancesResponse_TokenBalanceList.ProtoReflect.Descriptor instead.
 func (*BatchGetTokenBalancesResponse_TokenBalanceList) Descriptor() ([]byte, []int) {
-	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{13, 1}
+	return file_chain_indexer_v1_token_proto_rawDescGZIP(), []int{15, 1}
 }
 
 func (x *BatchGetTokenBalancesResponse_TokenBalanceList) GetItems() []*TokenBalance {
@@ -1053,11 +1355,12 @@ const file_chain_indexer_v1_token_proto_rawDesc = "" +
 	"\n" +
 	"token_type\x18\x04 \x01(\x0e2\x1b.chain_indexer.v1.TokenTypeR\ttokenType\"+\n" +
 	"\x0fGetTokenRequest\x12\x18\n" +
-	"\aaddress\x18\x01 \x01(\tR\aaddress\"\x88\x01\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\"\xa0\x01\n" +
 	"\x11ListTokensRequest\x127\n" +
 	"\x04page\x18\x01 \x01(\v2#.chain_indexer.v1.OffsetPageRequestR\x04page\x12:\n" +
 	"\n" +
-	"token_type\x18\x02 \x01(\x0e2\x1b.chain_indexer.v1.TokenTypeR\ttokenType\"\x7f\n" +
+	"token_type\x18\x02 \x01(\x0e2\x1b.chain_indexer.v1.TokenTypeR\ttokenType\x12\x16\n" +
+	"\x06search\x18\x03 \x01(\tR\x06search\"\x7f\n" +
 	"\x12ListTokensResponse\x12/\n" +
 	"\x06tokens\x18\x01 \x03(\v2\x17.chain_indexer.v1.TokenR\x06tokens\x128\n" +
 	"\x04page\x18\x02 \x01(\v2$.chain_indexer.v1.OffsetPageResponseR\x04page\"\xe5\x01\n" +
@@ -1069,10 +1372,19 @@ const file_chain_indexer_v1_token_proto_rawDesc = "" +
 	"by_address\x18\x03 \x01(\tR\tbyAddress\x12\x19\n" +
 	"\bby_token\x18\x04 \x01(\tR\abyToken\x12=\n" +
 	"\vblock_range\x18\x05 \x01(\v2\x1c.chain_indexer.v1.BlockRangeR\n" +
-	"blockRange\"\x8f\x01\n" +
+	"blockRange\"\xb0\x01\n" +
 	"\x1aListTokenTransfersResponse\x12=\n" +
 	"\ttransfers\x18\x01 \x03(\v2\x1f.chain_indexer.v1.TokenTransferR\ttransfers\x122\n" +
-	"\x04page\x18\x02 \x01(\v2\x1e.chain_indexer.v1.PageResponseR\x04page\"w\n" +
+	"\x04page\x18\x02 \x01(\v2\x1e.chain_indexer.v1.PageResponseR\x04page\x12\x1f\n" +
+	"\vtotal_count\x18\x03 \x01(\x03R\n" +
+	"totalCount\"\x93\x01\n" +
+	"\x1cListAllTokenTransfersRequest\x127\n" +
+	"\x04page\x18\x01 \x01(\v2#.chain_indexer.v1.OffsetPageRequestR\x04page\x12:\n" +
+	"\n" +
+	"token_type\x18\x02 \x01(\x0e2\x1b.chain_indexer.v1.TokenTypeR\ttokenType\"\x98\x01\n" +
+	"\x1dListAllTokenTransfersResponse\x12=\n" +
+	"\ttransfers\x18\x01 \x03(\v2\x1f.chain_indexer.v1.TokenTransferR\ttransfers\x128\n" +
+	"\x04page\x18\x02 \x01(\v2$.chain_indexer.v1.OffsetPageResponseR\x04page\"w\n" +
 	"\x17ListTokenHoldersRequest\x127\n" +
 	"\x04page\x18\x01 \x01(\v2#.chain_indexer.v1.OffsetPageRequestR\x04page\x12#\n" +
 	"\rtoken_address\x18\x02 \x01(\tR\ftokenAddress\"\x8e\x01\n" +
@@ -1095,7 +1407,18 @@ const file_chain_indexer_v1_token_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12V\n" +
 	"\x05value\x18\x02 \x01(\v2@.chain_indexer.v1.BatchGetTokenBalancesResponse.TokenBalanceListR\x05value:\x028\x01\x1aH\n" +
 	"\x10TokenBalanceList\x124\n" +
-	"\x05items\x18\x01 \x03(\v2\x1e.chain_indexer.v1.TokenBalanceR\x05items*l\n" +
+	"\x05items\x18\x01 \x03(\v2\x1e.chain_indexer.v1.TokenBalanceR\x05items\"|\n" +
+	"\x12TokenInventoryItem\x123\n" +
+	"\btoken_id\x18\x01 \x01(\v2\x18.chain_indexer.v1.BigIntR\atokenId\x12\x14\n" +
+	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x1b\n" +
+	"\ttoken_uri\x18\x03 \x01(\tR\btokenUri\"\x94\x01\n" +
+	"\x19ListTokenInventoryRequest\x127\n" +
+	"\x04page\x18\x01 \x01(\v2#.chain_indexer.v1.OffsetPageRequestR\x04page\x12#\n" +
+	"\rtoken_address\x18\x02 \x01(\tR\ftokenAddress\x12\x19\n" +
+	"\btoken_id\x18\x03 \x01(\tR\atokenId\"\x92\x01\n" +
+	"\x1aListTokenInventoryResponse\x12:\n" +
+	"\x05items\x18\x01 \x03(\v2$.chain_indexer.v1.TokenInventoryItemR\x05items\x128\n" +
+	"\x04page\x18\x02 \x01(\v2$.chain_indexer.v1.OffsetPageResponseR\x04page*l\n" +
 	"\tTokenType\x12\x1a\n" +
 	"\x16TOKEN_TYPE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TOKEN_TYPE_ERC20\x10\x01\x12\x15\n" +
@@ -1115,7 +1438,7 @@ func file_chain_indexer_v1_token_proto_rawDescGZIP() []byte {
 }
 
 var file_chain_indexer_v1_token_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_chain_indexer_v1_token_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_chain_indexer_v1_token_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_chain_indexer_v1_token_proto_goTypes = []any{
 	(TokenType)(0),                                         // 0: chain_indexer.v1.TokenType
 	(*Token)(nil),                                          // 1: chain_indexer.v1.Token
@@ -1126,53 +1449,66 @@ var file_chain_indexer_v1_token_proto_goTypes = []any{
 	(*ListTokensResponse)(nil),                             // 6: chain_indexer.v1.ListTokensResponse
 	(*ListTokenTransfersRequest)(nil),                      // 7: chain_indexer.v1.ListTokenTransfersRequest
 	(*ListTokenTransfersResponse)(nil),                     // 8: chain_indexer.v1.ListTokenTransfersResponse
-	(*ListTokenHoldersRequest)(nil),                        // 9: chain_indexer.v1.ListTokenHoldersRequest
-	(*ListTokenHoldersResponse)(nil),                       // 10: chain_indexer.v1.ListTokenHoldersResponse
-	(*ListTokenBalancesRequest)(nil),                       // 11: chain_indexer.v1.ListTokenBalancesRequest
-	(*ListTokenBalancesResponse)(nil),                      // 12: chain_indexer.v1.ListTokenBalancesResponse
-	(*BatchGetTokenBalancesRequest)(nil),                   // 13: chain_indexer.v1.BatchGetTokenBalancesRequest
-	(*BatchGetTokenBalancesResponse)(nil),                  // 14: chain_indexer.v1.BatchGetTokenBalancesResponse
-	nil,                                                    // 15: chain_indexer.v1.BatchGetTokenBalancesResponse.BalancesEntry
-	(*BatchGetTokenBalancesResponse_TokenBalanceList)(nil), // 16: chain_indexer.v1.BatchGetTokenBalancesResponse.TokenBalanceList
-	(*BigInt)(nil),                                         // 17: chain_indexer.v1.BigInt
-	(*timestamppb.Timestamp)(nil),                          // 18: google.protobuf.Timestamp
-	(*OffsetPageRequest)(nil),                              // 19: chain_indexer.v1.OffsetPageRequest
-	(*OffsetPageResponse)(nil),                             // 20: chain_indexer.v1.OffsetPageResponse
-	(*PageRequest)(nil),                                    // 21: chain_indexer.v1.PageRequest
-	(*BlockRange)(nil),                                     // 22: chain_indexer.v1.BlockRange
-	(*PageResponse)(nil),                                   // 23: chain_indexer.v1.PageResponse
+	(*ListAllTokenTransfersRequest)(nil),                   // 9: chain_indexer.v1.ListAllTokenTransfersRequest
+	(*ListAllTokenTransfersResponse)(nil),                  // 10: chain_indexer.v1.ListAllTokenTransfersResponse
+	(*ListTokenHoldersRequest)(nil),                        // 11: chain_indexer.v1.ListTokenHoldersRequest
+	(*ListTokenHoldersResponse)(nil),                       // 12: chain_indexer.v1.ListTokenHoldersResponse
+	(*ListTokenBalancesRequest)(nil),                       // 13: chain_indexer.v1.ListTokenBalancesRequest
+	(*ListTokenBalancesResponse)(nil),                      // 14: chain_indexer.v1.ListTokenBalancesResponse
+	(*BatchGetTokenBalancesRequest)(nil),                   // 15: chain_indexer.v1.BatchGetTokenBalancesRequest
+	(*BatchGetTokenBalancesResponse)(nil),                  // 16: chain_indexer.v1.BatchGetTokenBalancesResponse
+	(*TokenInventoryItem)(nil),                             // 17: chain_indexer.v1.TokenInventoryItem
+	(*ListTokenInventoryRequest)(nil),                      // 18: chain_indexer.v1.ListTokenInventoryRequest
+	(*ListTokenInventoryResponse)(nil),                     // 19: chain_indexer.v1.ListTokenInventoryResponse
+	nil,                                                    // 20: chain_indexer.v1.BatchGetTokenBalancesResponse.BalancesEntry
+	(*BatchGetTokenBalancesResponse_TokenBalanceList)(nil), // 21: chain_indexer.v1.BatchGetTokenBalancesResponse.TokenBalanceList
+	(*BigInt)(nil),                                         // 22: chain_indexer.v1.BigInt
+	(*timestamppb.Timestamp)(nil),                          // 23: google.protobuf.Timestamp
+	(*OffsetPageRequest)(nil),                              // 24: chain_indexer.v1.OffsetPageRequest
+	(*OffsetPageResponse)(nil),                             // 25: chain_indexer.v1.OffsetPageResponse
+	(*PageRequest)(nil),                                    // 26: chain_indexer.v1.PageRequest
+	(*BlockRange)(nil),                                     // 27: chain_indexer.v1.BlockRange
+	(*PageResponse)(nil),                                   // 28: chain_indexer.v1.PageResponse
 }
 var file_chain_indexer_v1_token_proto_depIdxs = []int32{
-	17, // 0: chain_indexer.v1.Token.total_supply:type_name -> chain_indexer.v1.BigInt
+	22, // 0: chain_indexer.v1.Token.total_supply:type_name -> chain_indexer.v1.BigInt
 	0,  // 1: chain_indexer.v1.Token.token_type:type_name -> chain_indexer.v1.TokenType
-	18, // 2: chain_indexer.v1.TokenTransfer.block_timestamp:type_name -> google.protobuf.Timestamp
+	23, // 2: chain_indexer.v1.TokenTransfer.block_timestamp:type_name -> google.protobuf.Timestamp
 	0,  // 3: chain_indexer.v1.TokenTransfer.token_type:type_name -> chain_indexer.v1.TokenType
-	17, // 4: chain_indexer.v1.TokenTransfer.value:type_name -> chain_indexer.v1.BigInt
-	17, // 5: chain_indexer.v1.TokenTransfer.token_id:type_name -> chain_indexer.v1.BigInt
-	17, // 6: chain_indexer.v1.TokenBalance.balance:type_name -> chain_indexer.v1.BigInt
+	22, // 4: chain_indexer.v1.TokenTransfer.value:type_name -> chain_indexer.v1.BigInt
+	22, // 5: chain_indexer.v1.TokenTransfer.token_id:type_name -> chain_indexer.v1.BigInt
+	22, // 6: chain_indexer.v1.TokenBalance.balance:type_name -> chain_indexer.v1.BigInt
 	0,  // 7: chain_indexer.v1.TokenBalance.token_type:type_name -> chain_indexer.v1.TokenType
-	19, // 8: chain_indexer.v1.ListTokensRequest.page:type_name -> chain_indexer.v1.OffsetPageRequest
+	24, // 8: chain_indexer.v1.ListTokensRequest.page:type_name -> chain_indexer.v1.OffsetPageRequest
 	0,  // 9: chain_indexer.v1.ListTokensRequest.token_type:type_name -> chain_indexer.v1.TokenType
 	1,  // 10: chain_indexer.v1.ListTokensResponse.tokens:type_name -> chain_indexer.v1.Token
-	20, // 11: chain_indexer.v1.ListTokensResponse.page:type_name -> chain_indexer.v1.OffsetPageResponse
-	21, // 12: chain_indexer.v1.ListTokenTransfersRequest.page:type_name -> chain_indexer.v1.PageRequest
-	22, // 13: chain_indexer.v1.ListTokenTransfersRequest.block_range:type_name -> chain_indexer.v1.BlockRange
+	25, // 11: chain_indexer.v1.ListTokensResponse.page:type_name -> chain_indexer.v1.OffsetPageResponse
+	26, // 12: chain_indexer.v1.ListTokenTransfersRequest.page:type_name -> chain_indexer.v1.PageRequest
+	27, // 13: chain_indexer.v1.ListTokenTransfersRequest.block_range:type_name -> chain_indexer.v1.BlockRange
 	2,  // 14: chain_indexer.v1.ListTokenTransfersResponse.transfers:type_name -> chain_indexer.v1.TokenTransfer
-	23, // 15: chain_indexer.v1.ListTokenTransfersResponse.page:type_name -> chain_indexer.v1.PageResponse
-	19, // 16: chain_indexer.v1.ListTokenHoldersRequest.page:type_name -> chain_indexer.v1.OffsetPageRequest
-	3,  // 17: chain_indexer.v1.ListTokenHoldersResponse.holders:type_name -> chain_indexer.v1.TokenBalance
-	20, // 18: chain_indexer.v1.ListTokenHoldersResponse.page:type_name -> chain_indexer.v1.OffsetPageResponse
-	21, // 19: chain_indexer.v1.ListTokenBalancesRequest.page:type_name -> chain_indexer.v1.PageRequest
-	3,  // 20: chain_indexer.v1.ListTokenBalancesResponse.balances:type_name -> chain_indexer.v1.TokenBalance
-	23, // 21: chain_indexer.v1.ListTokenBalancesResponse.page:type_name -> chain_indexer.v1.PageResponse
-	15, // 22: chain_indexer.v1.BatchGetTokenBalancesResponse.balances:type_name -> chain_indexer.v1.BatchGetTokenBalancesResponse.BalancesEntry
-	16, // 23: chain_indexer.v1.BatchGetTokenBalancesResponse.BalancesEntry.value:type_name -> chain_indexer.v1.BatchGetTokenBalancesResponse.TokenBalanceList
-	3,  // 24: chain_indexer.v1.BatchGetTokenBalancesResponse.TokenBalanceList.items:type_name -> chain_indexer.v1.TokenBalance
-	25, // [25:25] is the sub-list for method output_type
-	25, // [25:25] is the sub-list for method input_type
-	25, // [25:25] is the sub-list for extension type_name
-	25, // [25:25] is the sub-list for extension extendee
-	0,  // [0:25] is the sub-list for field type_name
+	28, // 15: chain_indexer.v1.ListTokenTransfersResponse.page:type_name -> chain_indexer.v1.PageResponse
+	24, // 16: chain_indexer.v1.ListAllTokenTransfersRequest.page:type_name -> chain_indexer.v1.OffsetPageRequest
+	0,  // 17: chain_indexer.v1.ListAllTokenTransfersRequest.token_type:type_name -> chain_indexer.v1.TokenType
+	2,  // 18: chain_indexer.v1.ListAllTokenTransfersResponse.transfers:type_name -> chain_indexer.v1.TokenTransfer
+	25, // 19: chain_indexer.v1.ListAllTokenTransfersResponse.page:type_name -> chain_indexer.v1.OffsetPageResponse
+	24, // 20: chain_indexer.v1.ListTokenHoldersRequest.page:type_name -> chain_indexer.v1.OffsetPageRequest
+	3,  // 21: chain_indexer.v1.ListTokenHoldersResponse.holders:type_name -> chain_indexer.v1.TokenBalance
+	25, // 22: chain_indexer.v1.ListTokenHoldersResponse.page:type_name -> chain_indexer.v1.OffsetPageResponse
+	26, // 23: chain_indexer.v1.ListTokenBalancesRequest.page:type_name -> chain_indexer.v1.PageRequest
+	3,  // 24: chain_indexer.v1.ListTokenBalancesResponse.balances:type_name -> chain_indexer.v1.TokenBalance
+	28, // 25: chain_indexer.v1.ListTokenBalancesResponse.page:type_name -> chain_indexer.v1.PageResponse
+	20, // 26: chain_indexer.v1.BatchGetTokenBalancesResponse.balances:type_name -> chain_indexer.v1.BatchGetTokenBalancesResponse.BalancesEntry
+	22, // 27: chain_indexer.v1.TokenInventoryItem.token_id:type_name -> chain_indexer.v1.BigInt
+	24, // 28: chain_indexer.v1.ListTokenInventoryRequest.page:type_name -> chain_indexer.v1.OffsetPageRequest
+	17, // 29: chain_indexer.v1.ListTokenInventoryResponse.items:type_name -> chain_indexer.v1.TokenInventoryItem
+	25, // 30: chain_indexer.v1.ListTokenInventoryResponse.page:type_name -> chain_indexer.v1.OffsetPageResponse
+	21, // 31: chain_indexer.v1.BatchGetTokenBalancesResponse.BalancesEntry.value:type_name -> chain_indexer.v1.BatchGetTokenBalancesResponse.TokenBalanceList
+	3,  // 32: chain_indexer.v1.BatchGetTokenBalancesResponse.TokenBalanceList.items:type_name -> chain_indexer.v1.TokenBalance
+	33, // [33:33] is the sub-list for method output_type
+	33, // [33:33] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_chain_indexer_v1_token_proto_init() }
@@ -1187,7 +1523,7 @@ func file_chain_indexer_v1_token_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chain_indexer_v1_token_proto_rawDesc), len(file_chain_indexer_v1_token_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   16,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

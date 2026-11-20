@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -2525,8 +2526,19 @@ func (s *Server) getExplorerTokenTransfers(c *gin.Context) {
 // @Success      200 {object} apimodels.ExplorerListResponse{data=[]explorer.TokenTransfer}
 // @Failure      500 {object} apimodels.APIError "lookup or redaction failed"
 // @Failure      503 {object} apimodels.APIError "explorer store not configured"
+// @Param        type query string false "Token standard (ERC20, ERC721, ERC1155; omitted for all)"
 // @Router       /api/v1/explorer/transfers [get]
 func (s *Server) getExplorerAllTransfers(c *gin.Context) {
+	values, queryErr := url.ParseQuery(c.Request.URL.RawQuery)
+	standards := values["type"]
+	tokenType := ""
+	if len(standards) == 1 {
+		tokenType = strings.ToUpper(strings.TrimSpace(standards[0]))
+	}
+	if queryErr != nil || len(standards) > 1 || len(standards) == 1 && standards[0] != "" && tokenType != "ERC20" && tokenType != "ERC721" && tokenType != "ERC1155" {
+		respondBadRequest(c, "invalid token-standard filter")
+		return
+	}
 	if s.explorerStore == nil {
 		respondServiceUnavailable(c, "explorer store not configured")
 		return
@@ -2541,8 +2553,23 @@ func (s *Server) getExplorerAllTransfers(c *gin.Context) {
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	offset = clampExplorerOffset(offset)
 
-	transfers, _, err := s.explorerStore.GetAllTransfers(c.Request.Context(), limit, offset)
+	var transfers []explorer.TokenTransfer
+	var err error
+	if tokenType != "" {
+		typed, ok := s.explorerStore.(explorer.TypedTransferBackend)
+		if !ok {
+			respondBadRequest(c, explorer.ErrTransferTypeUnsupported.Error())
+			return
+		}
+		transfers, _, err = typed.GetAllTransfersByType(c.Request.Context(), limit, offset, tokenType)
+	} else {
+		transfers, _, err = s.explorerStore.GetAllTransfers(c.Request.Context(), limit, offset)
+	}
 	if err != nil {
+		if errors.Is(err, explorer.ErrTransferTypeUnsupported) || grpcstatus.Code(err) == grpccodes.InvalidArgument || tokenType != "" && grpcstatus.Code(err) == grpccodes.Unimplemented {
+			respondBadRequest(c, "selected legacy transfer provider cannot apply this typed page")
+			return
+		}
 		respondInternalErrorAndLog(c, "failed to get transfers",
 			"explorer: GetAllTransfers failed",
 			"limit", limit, "offset", offset, "err", err)

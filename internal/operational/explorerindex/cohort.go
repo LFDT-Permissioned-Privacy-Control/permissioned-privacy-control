@@ -53,6 +53,20 @@ func hashFilter(s string) []byte {
 	b, _ := unhex(s, 32)
 	return b
 }
+func transferKind(kind q.TokenKind) *pb.TokenKind {
+	switch kind {
+	case "":
+		return nil
+	case q.TokenKindERC20:
+		return pb.TokenKind_TOKEN_KIND_ERC20.Enum()
+	case q.TokenKindERC721:
+		return pb.TokenKind_TOKEN_KIND_ERC721.Enum()
+	case q.TokenKindERC1155:
+		return pb.TokenKind_TOKEN_KIND_ERC1155.Enum()
+	default:
+		return pb.TokenKind_TOKEN_KIND_UNSPECIFIED.Enum()
+	}
+}
 func expectedConsistency(f q.Family) pb.Consistency {
 	switch f {
 	case q.Tokens, q.Contracts, q.Addresses, q.Balances, q.Holders, q.Search:
@@ -176,7 +190,7 @@ func (o *operation) list(ctx context.Context, v q.Query, page *pb.PageRequest) (
 			}
 		}
 	case q.Transfers:
-		req := &pb.ListTokenTransfersRequest{Read: read, Page: page, Filter: &pb.TransferFilter{AnyParty: addrSet(v.Address), Tokens: addrSet(v.Token), BlockRange: blockRange(v), TransactionHash: hashFilter(v.Hash), BlockNumber: v.Block}}
+		req := &pb.ListTokenTransfersRequest{Read: read, Page: page, Filter: &pb.TransferFilter{AnyParty: addrSet(v.Address), Tokens: addrSet(v.Token), BlockRange: blockRange(v), TransactionHash: hashFilter(v.Hash), BlockNumber: v.Block, TokenKind: transferKind(v.TokenKind)}}
 		r, e := call(req, func(c context.Context) (proto.Message, error) { return o.owner.client.ListTokenTransfers(c, req) })
 		if e != nil {
 			return nil, nil, e
@@ -184,6 +198,9 @@ func (o *operation) list(ctx context.Context, v q.Query, page *pb.PageRequest) (
 		x := r.(*pb.ListTokenTransfersResponse)
 		info = x.Page
 		for _, b := range x.Transfers {
+			if v.TokenKind != "" && (b == nil || b.TokenType != string(v.TokenKind)) {
+				return nil, nil, ErrInvalid
+			}
 			if e = add(transferRecord(b)); e != nil {
 				return nil, nil, e
 			}

@@ -56,7 +56,19 @@ type Query struct {
 	DatasetEpoch                         string
 	RunFloor                             *uint64
 	RawLimit                             int
+	TokenKind                            TokenKind                `json:"tokenKind,omitempty"`
 	Fence                                admissionsharedata.Fence `json:"-"`
+}
+type TokenKind string
+
+const (
+	TokenKindERC20   TokenKind = "ERC20"
+	TokenKindERC721  TokenKind = "ERC721"
+	TokenKindERC1155 TokenKind = "ERC1155"
+)
+
+func (k TokenKind) Valid() bool {
+	return k == TokenKindERC20 || k == TokenKindERC721 || k == TokenKindERC1155
 }
 
 var addressPattern = regexp.MustCompile(`^0x[0-9a-f]{40}$`)
@@ -68,6 +80,9 @@ func Normalize(q Query) (Query, error) {
 	switch q.Family {
 	case Blocks, Transactions, Transfers, Internals, Logs, Tokens, Balances, Holders, Contracts, Addresses, Sync, Progress, Search:
 	default:
+		return Query{}, ErrInvalid
+	}
+	if q.TokenKind != "" && (q.Family != Transfers || !q.TokenKind.Valid()) {
 		return Query{}, ErrInvalid
 	}
 	if q.RawLimit < 1 || q.RawLimit > 1024 || q.Address != "" && !ValidAddress(q.Address) || q.Token != "" && !ValidAddress(q.Token) || q.Hash != "" && !ValidHash(q.Hash) || q.Topic0 != "" && !ValidHash(q.Topic0) || len(q.Search) > 128 {

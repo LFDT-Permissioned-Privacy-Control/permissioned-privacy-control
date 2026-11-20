@@ -2,6 +2,7 @@ package explorer
 
 import (
 	"context"
+	"errors"
 )
 
 // ExplorerBackend is the abstract surface the explorer API handlers and
@@ -25,6 +26,14 @@ import (
 type AddressPage struct {
 	Cursor      string
 	BeforeBlock *uint64
+}
+
+var ErrTransferTypeUnsupported = errors.New("selected legacy transfer provider cannot apply this typed page")
+
+// Optional typed capability: a provider must apply the standard before its
+// page boundary or explicitly reject it, never return an unfiltered page.
+type TypedTransferBackend interface {
+	GetAllTransfersByType(context.Context, int, int, string) ([]TokenTransfer, int64, error)
 }
 
 type ExplorerBackend interface {

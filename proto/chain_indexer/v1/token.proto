@@ -69,6 +69,10 @@ message GetTokenRequest {
 message ListTokensRequest {
   OffsetPageRequest page = 1;
   TokenType token_type = 2;  // UNSPECIFIED = all
+
+  // Optional. Case-insensitive substring match against the token's name,
+  // symbol, or address (raw 0x-prefixed form). Empty = no filter.
+  string search = 3;
 }
 
 message ListTokensResponse {
@@ -90,6 +94,24 @@ message ListTokenTransfersRequest {
 message ListTokenTransfersResponse {
   repeated TokenTransfer transfers = 1;
   PageResponse page = 2;
+
+  // Total number of transfers matching the request filter (ignoring
+  // pagination), so consumers can render a true "of N" count.
+  int64 total_count = 3;
+}
+
+// Global, unfiltered transfer feed for the explorer's "Token Transfers" page.
+// Unlike ListTokenTransfers (which requires a tx/address/token filter and uses
+// cursor pagination), this returns every transfer chain-wide with offset
+// pagination and an accurate total, plus an optional token-standard filter.
+message ListAllTokenTransfersRequest {
+  OffsetPageRequest page = 1;
+  TokenType token_type = 2;  // UNSPECIFIED = all standards
+}
+
+message ListAllTokenTransfersResponse {
+  repeated TokenTransfer transfers = 1;
+  OffsetPageResponse page = 2;
 }
 
 message ListTokenHoldersRequest {
@@ -130,4 +152,23 @@ message BatchGetTokenBalancesResponse {
   message TokenBalanceList {
     repeated TokenBalance items = 1;
   }
+}
+
+// One NFT instance in a collection's inventory: a token id, its current owner,
+// and the raw tokenURI captured at mint.
+message TokenInventoryItem {
+  BigInt token_id = 1;
+  string owner = 2;
+  string token_uri = 3;  // raw tokenURI(); empty if unknown
+}
+
+message ListTokenInventoryRequest {
+  OffsetPageRequest page = 1;
+  string token_address = 2;
+  string token_id = 3;  // optional: filter to a single token id (decimal string)
+}
+
+message ListTokenInventoryResponse {
+  repeated TokenInventoryItem items = 1;
+  OffsetPageResponse page = 2;
 }

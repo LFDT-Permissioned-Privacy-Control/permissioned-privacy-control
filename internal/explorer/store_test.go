@@ -442,3 +442,38 @@ func assertCategories(t *testing.T, label string, got, want []string) {
 		}
 	}
 }
+
+func TestLegacyAllTransferTypeFiltersBeforeOffset(t *testing.T) {
+	dsn, cleanup := setupTestContainer(t)
+	defer cleanup()
+	store, e := NewStore(dsn)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer store.Close()
+	setupExplorerSchema(t, store.db)
+	insertTestFixtures(t, store.db)
+	_, e = store.db.Exec(`INSERT INTO token_transfers(tx_hash,log_index,token_address,from_address,to_address,value,block_number,token_type) SELECT (SELECT hash FROM transactions LIMIT 1),n,'0x1111111111111111111111111111111111111111','0x1111111111111111111111111111111111111111','0x2222222222222222222222222222222222222222',1,1,CASE WHEN n%2=0 THEN 'ERC20' ELSE 'ERC721' END FROM generate_series(10,19)n`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	a, total, e := store.GetAllTransfersByType(t.Context(), 2, 0, "ERC721")
+	if e != nil || total != 5 || len(a) != 2 {
+		t.Fatal(a, total, e)
+	}
+	b, total, e := store.GetAllTransfersByType(t.Context(), 2, 2, "ERC721")
+	if e != nil || total != 5 || len(b) != 2 {
+		t.Fatal(b, total, e)
+	}
+	for _, r := range append(a, b...) {
+		if r.TokenType != "ERC721" {
+			t.Fatal("page-local filter leaked other standard", r)
+		}
+	}
+	if a[0].LogIndex != 19 || b[0].LogIndex != 15 {
+		t.Fatal("offset applied before type", a, b)
+	}
+	if _, _, e = store.GetAllTransfersByType(t.Context(), 2, 0, "ERC777"); e == nil {
+		t.Fatal("unknown type became unfiltered")
+	}
+}

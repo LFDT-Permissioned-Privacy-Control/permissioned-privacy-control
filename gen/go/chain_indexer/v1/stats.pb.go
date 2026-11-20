@@ -85,8 +85,19 @@ type ChainStats struct {
 	// Moving average over the last N blocks (N is indexer config).
 	AvgBlockTimeSeconds float32 `protobuf:"fixed32,7,opt,name=avg_block_time_seconds,json=avgBlockTimeSeconds,proto3" json:"avg_block_time_seconds,omitempty"`
 	AvgTxPerBlock       float32 `protobuf:"fixed32,8,opt,name=avg_tx_per_block,json=avgTxPerBlock,proto3" json:"avg_tx_per_block,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Every block at or below it was pruned by the retention window (0: nothing pruned); history reads at or below it answer OUT_OF_RANGE, or with PRUNED_LOOKUP on, blocks and transactions are served from the node; totals still count it.
+	PrunedThroughBlock uint64 `protobuf:"varint,9,opt,name=pruned_through_block,json=prunedThroughBlock,proto3" json:"pruned_through_block,omitempty"`
+	// Timestamp of pruned_through_block (unset: nothing pruned).
+	PrunedThroughTimestamp *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=pruned_through_timestamp,json=prunedThroughTimestamp,proto3" json:"pruned_through_timestamp,omitempty"`
+	// True while the stats backfill of a deployment started at START_BLOCK > 0 is still counting the blocks below it
+	// or reading the balances they touched: totals are partial until it completes (docs/API.md "Stats backfill").
+	StatsIncomplete bool `protobuf:"varint,11,opt,name=stats_incomplete,json=statsIncomplete,proto3" json:"stats_incomplete,omitempty"`
+	// Every block at or below this is counted by the stats backfill (0 with no backfill).
+	StatsBackfilledThroughBlock uint64 `protobuf:"varint,12,opt,name=stats_backfilled_through_block,json=statsBackfilledThroughBlock,proto3" json:"stats_backfilled_through_block,omitempty"`
+	// Tokens the indexer has discovered (chain_counters tokens_total).
+	TotalTokens   uint64 `protobuf:"varint,13,opt,name=total_tokens,json=totalTokens,proto3" json:"total_tokens,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ChainStats) Reset() {
@@ -171,6 +182,41 @@ func (x *ChainStats) GetAvgBlockTimeSeconds() float32 {
 func (x *ChainStats) GetAvgTxPerBlock() float32 {
 	if x != nil {
 		return x.AvgTxPerBlock
+	}
+	return 0
+}
+
+func (x *ChainStats) GetPrunedThroughBlock() uint64 {
+	if x != nil {
+		return x.PrunedThroughBlock
+	}
+	return 0
+}
+
+func (x *ChainStats) GetPrunedThroughTimestamp() *timestamppb.Timestamp {
+	if x != nil {
+		return x.PrunedThroughTimestamp
+	}
+	return nil
+}
+
+func (x *ChainStats) GetStatsIncomplete() bool {
+	if x != nil {
+		return x.StatsIncomplete
+	}
+	return false
+}
+
+func (x *ChainStats) GetStatsBackfilledThroughBlock() uint64 {
+	if x != nil {
+		return x.StatsBackfilledThroughBlock
+	}
+	return 0
+}
+
+func (x *ChainStats) GetTotalTokens() uint64 {
+	if x != nil {
+		return x.TotalTokens
 	}
 	return 0
 }
@@ -456,6 +502,10 @@ func (x *GetGasPricesRequest) GetSampleBlockCount() uint32 {
 }
 
 // DailyStats is a pre-aggregated row for one UTC day.
+//
+// The cumulative_* fields are running totals as of the end of this day
+// (inclusive), so charts can plot growth without summing on the client.
+// success_count + failed_count partition `transactions` by receipt status.
 type DailyStats struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Date            string                 `protobuf:"bytes,1,opt,name=date,proto3" json:"date,omitempty"` // "YYYY-MM-DD" in UTC
@@ -465,8 +515,19 @@ type DailyStats struct {
 	Blocks          uint64                 `protobuf:"varint,5,opt,name=blocks,proto3" json:"blocks,omitempty"`
 	GasUsed         uint64                 `protobuf:"varint,6,opt,name=gas_used,json=gasUsed,proto3" json:"gas_used,omitempty"`
 	TotalFees       *BigInt                `protobuf:"bytes,7,opt,name=total_fees,json=totalFees,proto3" json:"total_fees,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Running totals through the end of this day (inclusive).
+	CumulativeTransactions uint64 `protobuf:"varint,8,opt,name=cumulative_transactions,json=cumulativeTransactions,proto3" json:"cumulative_transactions,omitempty"`
+	CumulativeAddresses    uint64 `protobuf:"varint,9,opt,name=cumulative_addresses,json=cumulativeAddresses,proto3" json:"cumulative_addresses,omitempty"`
+	CumulativeContracts    uint64 `protobuf:"varint,10,opt,name=cumulative_contracts,json=cumulativeContracts,proto3" json:"cumulative_contracts,omitempty"`
+	// Receipt-status partition of `transactions`.
+	SuccessCount       uint64  `protobuf:"varint,11,opt,name=success_count,json=successCount,proto3" json:"success_count,omitempty"`
+	FailedCount        uint64  `protobuf:"varint,12,opt,name=failed_count,json=failedCount,proto3" json:"failed_count,omitempty"`
+	NewContracts       uint64  `protobuf:"varint,13,opt,name=new_contracts,json=newContracts,proto3" json:"new_contracts,omitempty"`
+	TokenTransferCount uint64  `protobuf:"varint,14,opt,name=token_transfer_count,json=tokenTransferCount,proto3" json:"token_transfer_count,omitempty"`
+	AvgBlockTime       float64 `protobuf:"fixed64,15,opt,name=avg_block_time,json=avgBlockTime,proto3" json:"avg_block_time,omitempty"` // mean inter-block gap in seconds for this day
+	AvgBlockSize       uint64  `protobuf:"varint,16,opt,name=avg_block_size,json=avgBlockSize,proto3" json:"avg_block_size,omitempty"`  // mean block size in bytes for this day
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *DailyStats) Reset() {
@@ -546,6 +607,69 @@ func (x *DailyStats) GetTotalFees() *BigInt {
 		return x.TotalFees
 	}
 	return nil
+}
+
+func (x *DailyStats) GetCumulativeTransactions() uint64 {
+	if x != nil {
+		return x.CumulativeTransactions
+	}
+	return 0
+}
+
+func (x *DailyStats) GetCumulativeAddresses() uint64 {
+	if x != nil {
+		return x.CumulativeAddresses
+	}
+	return 0
+}
+
+func (x *DailyStats) GetCumulativeContracts() uint64 {
+	if x != nil {
+		return x.CumulativeContracts
+	}
+	return 0
+}
+
+func (x *DailyStats) GetSuccessCount() uint64 {
+	if x != nil {
+		return x.SuccessCount
+	}
+	return 0
+}
+
+func (x *DailyStats) GetFailedCount() uint64 {
+	if x != nil {
+		return x.FailedCount
+	}
+	return 0
+}
+
+func (x *DailyStats) GetNewContracts() uint64 {
+	if x != nil {
+		return x.NewContracts
+	}
+	return 0
+}
+
+func (x *DailyStats) GetTokenTransferCount() uint64 {
+	if x != nil {
+		return x.TokenTransferCount
+	}
+	return 0
+}
+
+func (x *DailyStats) GetAvgBlockTime() float64 {
+	if x != nil {
+		return x.AvgBlockTime
+	}
+	return 0
+}
+
+func (x *DailyStats) GetAvgBlockSize() uint64 {
+	if x != nil {
+		return x.AvgBlockSize
+	}
+	return 0
 }
 
 type GetDailyStatsRequest struct {
@@ -725,7 +849,7 @@ var File_chain_indexer_v1_stats_proto protoreflect.FileDescriptor
 
 const file_chain_indexer_v1_stats_proto_rawDesc = "" +
 	"\n" +
-	"\x1cchain_indexer/v1/stats.proto\x12\x10chain_indexer.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1dchain_indexer/v1/common.proto\"\x90\x03\n" +
+	"\x1cchain_indexer/v1/stats.proto\x12\x10chain_indexer.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1dchain_indexer/v1/common.proto\"\xab\x05\n" +
 	"\n" +
 	"ChainStats\x12.\n" +
 	"\x13latest_block_number\x18\x01 \x01(\x04R\x11latestBlockNumber\x12P\n" +
@@ -735,7 +859,13 @@ const file_chain_indexer_v1_stats_proto_rawDesc = "" +
 	"\x0ftotal_addresses\x18\x05 \x01(\x04R\x0etotalAddresses\x12'\n" +
 	"\x0ftotal_contracts\x18\x06 \x01(\x04R\x0etotalContracts\x123\n" +
 	"\x16avg_block_time_seconds\x18\a \x01(\x02R\x13avgBlockTimeSeconds\x12'\n" +
-	"\x10avg_tx_per_block\x18\b \x01(\x02R\ravgTxPerBlock\"\xc1\x01\n" +
+	"\x10avg_tx_per_block\x18\b \x01(\x02R\ravgTxPerBlock\x120\n" +
+	"\x14pruned_through_block\x18\t \x01(\x04R\x12prunedThroughBlock\x12T\n" +
+	"\x18pruned_through_timestamp\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\x16prunedThroughTimestamp\x12)\n" +
+	"\x10stats_incomplete\x18\v \x01(\bR\x0fstatsIncomplete\x12C\n" +
+	"\x1estats_backfilled_through_block\x18\f \x01(\x04R\x1bstatsBackfilledThroughBlock\x12!\n" +
+	"\ftotal_tokens\x18\r \x01(\x04R\vtotalTokens\"\xc1\x01\n" +
 	"\x18TransactionHistoryBucket\x12=\n" +
 	"\fbucket_start\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\vbucketStart\x129\n" +
 	"\n" +
@@ -753,7 +883,7 @@ const file_chain_indexer_v1_stats_proto_rawDesc = "" +
 	"\bbase_fee\x18\x04 \x01(\v2\x18.chain_indexer.v1.BigIntR\abaseFee\x12,\n" +
 	"\x12sample_block_count\x18\x05 \x01(\x04R\x10sampleBlockCount\"C\n" +
 	"\x13GetGasPricesRequest\x12,\n" +
-	"\x12sample_block_count\x18\x01 \x01(\rR\x10sampleBlockCount\"\x80\x02\n" +
+	"\x12sample_block_count\x18\x01 \x01(\rR\x10sampleBlockCount\"\x8a\x05\n" +
 	"\n" +
 	"DailyStats\x12\x12\n" +
 	"\x04date\x18\x01 \x01(\tR\x04date\x12\"\n" +
@@ -763,7 +893,17 @@ const file_chain_indexer_v1_stats_proto_rawDesc = "" +
 	"\x06blocks\x18\x05 \x01(\x04R\x06blocks\x12\x19\n" +
 	"\bgas_used\x18\x06 \x01(\x04R\agasUsed\x127\n" +
 	"\n" +
-	"total_fees\x18\a \x01(\v2\x18.chain_indexer.v1.BigIntR\ttotalFees\"L\n" +
+	"total_fees\x18\a \x01(\v2\x18.chain_indexer.v1.BigIntR\ttotalFees\x127\n" +
+	"\x17cumulative_transactions\x18\b \x01(\x04R\x16cumulativeTransactions\x121\n" +
+	"\x14cumulative_addresses\x18\t \x01(\x04R\x13cumulativeAddresses\x121\n" +
+	"\x14cumulative_contracts\x18\n" +
+	" \x01(\x04R\x13cumulativeContracts\x12#\n" +
+	"\rsuccess_count\x18\v \x01(\x04R\fsuccessCount\x12!\n" +
+	"\ffailed_count\x18\f \x01(\x04R\vfailedCount\x12#\n" +
+	"\rnew_contracts\x18\r \x01(\x04R\fnewContracts\x120\n" +
+	"\x14token_transfer_count\x18\x0e \x01(\x04R\x12tokenTransferCount\x12$\n" +
+	"\x0eavg_block_time\x18\x0f \x01(\x01R\favgBlockTime\x12$\n" +
+	"\x0eavg_block_size\x18\x10 \x01(\x04R\favgBlockSize\"L\n" +
 	"\x14GetDailyStatsRequest\x12\x1b\n" +
 	"\tfrom_date\x18\x01 \x01(\tR\bfromDate\x12\x17\n" +
 	"\ato_date\x18\x02 \x01(\tR\x06toDate\"I\n" +
@@ -816,23 +956,24 @@ var file_chain_indexer_v1_stats_proto_goTypes = []any{
 }
 var file_chain_indexer_v1_stats_proto_depIdxs = []int32{
 	11, // 0: chain_indexer.v1.ChainStats.latest_block_timestamp:type_name -> google.protobuf.Timestamp
-	11, // 1: chain_indexer.v1.TransactionHistoryBucket.bucket_start:type_name -> google.protobuf.Timestamp
-	11, // 2: chain_indexer.v1.TransactionHistoryBucket.bucket_end:type_name -> google.protobuf.Timestamp
-	12, // 3: chain_indexer.v1.GetTransactionHistoryRequest.range:type_name -> chain_indexer.v1.TimeRange
-	0,  // 4: chain_indexer.v1.GetTransactionHistoryRequest.bucket:type_name -> chain_indexer.v1.TimeBucket
-	2,  // 5: chain_indexer.v1.TransactionHistory.buckets:type_name -> chain_indexer.v1.TransactionHistoryBucket
-	13, // 6: chain_indexer.v1.GasPrices.slow:type_name -> chain_indexer.v1.BigInt
-	13, // 7: chain_indexer.v1.GasPrices.normal:type_name -> chain_indexer.v1.BigInt
-	13, // 8: chain_indexer.v1.GasPrices.fast:type_name -> chain_indexer.v1.BigInt
-	13, // 9: chain_indexer.v1.GasPrices.base_fee:type_name -> chain_indexer.v1.BigInt
-	13, // 10: chain_indexer.v1.DailyStats.total_fees:type_name -> chain_indexer.v1.BigInt
-	7,  // 11: chain_indexer.v1.GetDailyStatsResponse.days:type_name -> chain_indexer.v1.DailyStats
-	11, // 12: chain_indexer.v1.SyncStatus.last_updated_at:type_name -> google.protobuf.Timestamp
-	13, // [13:13] is the sub-list for method output_type
-	13, // [13:13] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	11, // 1: chain_indexer.v1.ChainStats.pruned_through_timestamp:type_name -> google.protobuf.Timestamp
+	11, // 2: chain_indexer.v1.TransactionHistoryBucket.bucket_start:type_name -> google.protobuf.Timestamp
+	11, // 3: chain_indexer.v1.TransactionHistoryBucket.bucket_end:type_name -> google.protobuf.Timestamp
+	12, // 4: chain_indexer.v1.GetTransactionHistoryRequest.range:type_name -> chain_indexer.v1.TimeRange
+	0,  // 5: chain_indexer.v1.GetTransactionHistoryRequest.bucket:type_name -> chain_indexer.v1.TimeBucket
+	2,  // 6: chain_indexer.v1.TransactionHistory.buckets:type_name -> chain_indexer.v1.TransactionHistoryBucket
+	13, // 7: chain_indexer.v1.GasPrices.slow:type_name -> chain_indexer.v1.BigInt
+	13, // 8: chain_indexer.v1.GasPrices.normal:type_name -> chain_indexer.v1.BigInt
+	13, // 9: chain_indexer.v1.GasPrices.fast:type_name -> chain_indexer.v1.BigInt
+	13, // 10: chain_indexer.v1.GasPrices.base_fee:type_name -> chain_indexer.v1.BigInt
+	13, // 11: chain_indexer.v1.DailyStats.total_fees:type_name -> chain_indexer.v1.BigInt
+	7,  // 12: chain_indexer.v1.GetDailyStatsResponse.days:type_name -> chain_indexer.v1.DailyStats
+	11, // 13: chain_indexer.v1.SyncStatus.last_updated_at:type_name -> google.protobuf.Timestamp
+	14, // [14:14] is the sub-list for method output_type
+	14, // [14:14] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_chain_indexer_v1_stats_proto_init() }

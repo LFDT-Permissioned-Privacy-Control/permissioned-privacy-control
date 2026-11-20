@@ -1479,18 +1479,26 @@ func (s *Store) GetTransfersByToken(ctx context.Context, tokenAddress string, li
 
 // GetAllTransfers returns all token transfers with pagination.
 func (s *Store) GetAllTransfers(ctx context.Context, limit int, offset int) ([]TokenTransfer, int64, error) {
+	return s.GetAllTransfersByType(ctx, limit, offset, "")
+}
+func (s *Store) GetAllTransfersByType(ctx context.Context, limit int, offset int, tokenType string) ([]TokenTransfer, int64, error) {
+	if tokenType != "" && tokenType != "ERC20" && tokenType != "ERC721" && tokenType != "ERC1155" {
+		return nil, 0, ErrTransferTypeUnsupported
+	}
+	where, args := "", []any{}
+	if tokenType != "" {
+		where = " WHERE token_type = $1"
+		args = append(args, tokenType)
+	}
 	var total int64
-	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM token_transfers").Scan(&total)
-	if err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM token_transfers"+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, tx_hash, log_index, token_address, from_address, to_address, value::text,
-			block_number, timestamp, transfer_type, token_type, token_id, is_internal
-		FROM token_transfers
-		ORDER BY block_number DESC, log_index DESC
-		LIMIT $1 OFFSET $2`, limit, offset)
+	query := `SELECT id, tx_hash, log_index, token_address, from_address, to_address, value::text,
+  block_number, timestamp, transfer_type, token_type, token_id, is_internal
+  FROM token_transfers` + where + fmt.Sprintf(" ORDER BY block_number DESC, log_index DESC LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+	args = append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}

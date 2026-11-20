@@ -3,7 +3,10 @@ package activitylog_test
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -43,7 +46,11 @@ func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
 func TestExplorerActualPrunedNodePointsPrivacyAndFinalReorgHTTP(t *testing.T) {
 	testExplorerActualHTTP(t, true)
 }
-func testExplorerActualHTTP(t *testing.T, nodeFallback bool) {
+func TestExplorerActualTransferKindFilterCursorAndCurrentRightsHTTP(t *testing.T) {
+	testExplorerActualHTTP(t, false, true)
+}
+func testExplorerActualHTTP(t *testing.T, nodeFallback bool, transferKinds ...bool) {
+	typed := len(transferKinds) > 0 && transferKinds[0]
 	indexertest.Require(t)
 	d := rawPostgres(t)
 	ctx := t.Context()
@@ -66,7 +73,11 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool) {
 	ownerAddress := crypto.PubkeyToAddress(f.HistoryKey(1).PublicKey)
 	transfer := &types.Log{Address: target, Topics: []common.Hash{crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)")), common.BytesToHash(ownerAddress.Bytes()), common.BytesToHash(target.Bytes())}, Data: common.LeftPadBytes([]byte{0xab}, 32)}
 	ping := &types.Log{Address: target, Topics: []common.Hash{crypto.Keccak256Hash([]byte("Ping()"))}, Data: []byte{}}
-	node := f.NewHistoryNode(t, txs, [][]*types.Log{{transfer, ping}, {}, {}})
+	sourceEvents := []*types.Log{transfer, ping}
+	if typed {
+		sourceEvents = append(sourceEvents, transfer, transfer, transfer)
+	}
+	node := f.NewHistoryNode(t, txs, [][]*types.Log{sourceEvents, {}, {}})
 	network := node.Network()
 	var instant atomic.Int64
 	instant.Store(f.Now)
@@ -178,7 +189,7 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool) {
 			t.Fatal(err)
 		}
 	}
-	for i, event := range []*types.Log{transfer, ping} {
+	for i, event := range sourceEvents {
 		topics := make([]any, 4)
 		for j, topic := range event.Topics {
 			topics[j] = strings.ToLower(topic.Hex())
@@ -186,6 +197,20 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool) {
 		_, err = indexOwner.Exec(ctx, `INSERT INTO logs(tx_hash,log_index,address,topic0,topic1,topic2,topic3,data,block_number,timestamp,removed) VALUES($1,$2,$3,$4,$5,$6,$7,$8,1,$9,false)`, strings.ToLower(coin.Hash().Hex()), i, strings.ToLower(target.Hex()), topics[0], topics[1], topics[2], topics[3], common.Bytes2Hex(event.Data), f.Now)
 		if err != nil {
 			t.Fatal("writer-shaped event row", err)
+		}
+	}
+	if typed {
+		for _, i := range []int{0, 2, 3, 4} {
+			_, err = indexOwner.Exec(ctx, `INSERT INTO token_transfers(tx_hash,log_index,token_address,from_address,to_address,value,block_number,timestamp,token_type,transfer_type) VALUES($1,$2,$3,$4,$3,171,1,$5,'ERC20','transfer')`, strings.ToLower(coin.Hash().Hex()), i, strings.ToLower(target.Hex()), strings.ToLower(ownerAddress.Hex()), f.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		// A non-owned transaction remains hidden, independently of a matching
+		// source type. Its presence cannot create a visible transfer.
+		_, err = indexOwner.Exec(ctx, `INSERT INTO token_transfers(tx_hash,log_index,token_address,from_address,to_address,value,block_number,timestamp,token_type,transfer_type) VALUES($1,5,$2,$3,$2,1,1,$4,'ERC721','transfer')`, strings.ToLower(hidden.Hash().Hex()), strings.ToLower(target.Hex()), strings.ToLower(hidden.To().Hex()), f.Now)
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 	explorer, err := rpcengine.NewExplorer(rpcengine.ExplorerConfig{Snapshot: snapshot, History: history, State: stateEngine, Metadata: metadata, Index: index, IndexExpected: binding, CursorKey: bytes.Repeat([]byte{13}, 32), PseudonymKey: bytes.Repeat([]byte{14}, 32)})
@@ -258,6 +283,94 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool) {
 	first := <-pending
 	if first.err != nil || first.status != 200 {
 		t.Fatal("actual Explorer flow", first.err, first.status, string(first.body))
+	}
+	if typed {
+		type transferPage struct {
+			Items []struct {
+				LogIndex          uint32
+				TokenType, TxHash string
+			}
+			Page struct{ Next string }
+		}
+		read := func(path string) transferPage {
+			t.Helper()
+			r := <-get(path)
+			var p transferPage
+			if r.status != 200 || json.Unmarshal(r.body, &p) != nil {
+				t.Fatalf("transfer request %s: %d %s", path, r.status, r.body)
+			}
+			return p
+		}
+		const path = "/api/v2/explorer/transfers?limit=1&type=ERC20"
+		first := read(path)
+		if len(first.Items) != 1 || first.Page.Next == "" {
+			t.Fatalf("missing first typed page: %+v", first)
+		}
+		seen := map[uint32]bool{}
+		p := first
+		for n := 0; n < 10; n++ {
+			for _, item := range p.Items {
+				if item.TokenType != "ERC20" || item.TxHash != strings.ToLower(coin.Hash().Hex()) || seen[item.LogIndex] {
+					t.Fatalf("wrong/hidden/repeated row: %+v", item)
+				}
+				seen[item.LogIndex] = true
+			}
+			if p.Page.Next == "" {
+				break
+			}
+			p = read(path + "&cursor=" + url.QueryEscape(p.Page.Next))
+		}
+		if len(seen) != 4 {
+			t.Fatalf("filtered matches beyond first page missing: %v", seen)
+		}
+		for _, changed := range []string{"", "&type=ERC721", "&type=ERC1155"} {
+			r := <-get("/api/v2/explorer/transfers?limit=1" + changed + "&cursor=" + url.QueryEscape(first.Page.Next))
+			if r.status == 200 {
+				t.Fatal("changed filter accepted sealed cursor", string(r.body))
+			}
+		}
+		hiddenOnly := read("/api/v2/explorer/transfers?type=ERC721&limit=1")
+		if len(hiddenOnly.Items) != 0 {
+			t.Fatal("type selection widened current rights", hiddenOnly)
+		}
+		// The legacy unfiltered digest fixture is pinned in rpcengine. The
+		// unfiltered cursor retains its old shape and continues unchanged.
+		unfiltered := read("/api/v2/explorer/transfers?limit=1")
+		if unfiltered.Page.Next == "" {
+			t.Fatal("unfiltered cursor missing")
+		}
+		// Replay a cursor through the pre-change AEAD writer contract. Its
+		// exact old digest excludes the new optional tokenKind field.
+		const legacyQuery = `{"Route":"/transfers","Query":{"Family":"transfers","Address":"","Hash":"","Token":"","Topic0":"","Search":"","Block":null,"From":null,"Through":null,"Upper":null,"After":null,"DatasetEpoch":"","RunFloor":null,"RawLimit":4},"Limit":1,"Category":"","TokenType":"","Interval":""}`
+		legacyDigest := sha256.Sum256([]byte(legacyQuery))
+		block, _ := aes.NewCipher(bytes.Repeat([]byte{13}, 32))
+		legacyAEAD, _ := cipher.NewGCM(block)
+		raw, e := base64.RawURLEncoding.DecodeString(unfiltered.Page.Next)
+		if e != nil {
+			t.Fatal(e)
+		}
+		plain, e := legacyAEAD.Open(nil, raw[:legacyAEAD.NonceSize()], raw[legacyAEAD.NonceSize():], legacyDigest[:])
+		if e != nil {
+			t.Fatal("unfiltered cursor no longer uses legacy binding", e)
+		}
+		nonce := bytes.Repeat([]byte{42}, legacyAEAD.NonceSize())
+		legacyCursor := base64.RawURLEncoding.EncodeToString(legacyAEAD.Seal(nonce, nonce, plain, legacyDigest[:]))
+		replay := read("/api/v2/explorer/transfers?limit=1&cursor=" + url.QueryEscape(legacyCursor))
+		if len(replay.Items) != 1 {
+			t.Fatal("old unfiltered writer cursor failed to continue", replay)
+		}
+		node.Reorg(true)
+		rejected := <-get(path + "&cursor=" + url.QueryEscape(first.Page.Next))
+		if rejected.status == 200 {
+			t.Fatal("typed continuation survived reorg")
+		}
+		node.Reorg(false)
+		tok = f.Token(t, snapshot, f.AdminSubject, "ReadOnly")
+		rejected = <-get(path + "&cursor=" + url.QueryEscape(first.Page.Next))
+		if rejected.status == 200 {
+			t.Fatal("typed continuation survived actor/auth capture change")
+		}
+		return
 	}
 	var page struct {
 		Items []struct {

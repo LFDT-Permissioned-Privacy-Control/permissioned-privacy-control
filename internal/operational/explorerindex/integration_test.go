@@ -290,3 +290,37 @@ func TestActualProtectedResultRowsShareOriginalLedger(t *testing.T) {
 		})
 	}
 }
+
+func TestActualTransferKindMatchesBeforePageAdmission(t *testing.T) {
+	reader, owner, _ := actualReader(t)
+	_, e := owner.Exec(t.Context(), `INSERT INTO token_transfers(tx_hash,log_index,token_address,from_address,to_address,value,block_number,token_type) SELECT '0x'||lpad(to_hex(1000),64,'0'),n,'0x1111111111111111111111111111111111111111','0x1111111111111111111111111111111111111111','0x2222222222222222222222222222222222222222',1,2,CASE WHEN n%2=0 THEN 'ERC20' ELSE 'ERC721' END FROM generate_series(0,9)n`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	query := typedQuery(t, q.Transfers)
+	query.TokenKind = q.TokenKindERC20
+	seen := map[uint32]bool{}
+	for n := 0; n < 10; n++ {
+		pass, e := reader.ReadCohort(t.Context(), query)
+		if e != nil {
+			t.Fatal(e)
+		}
+		d := pass.Data()
+		pass.Close()
+		for _, r := range d.Rows {
+			if r.Position.Index%2 != 0 || seen[r.Position.Index] {
+				t.Fatalf("wrong/repeated typed row: %s", r.JSON)
+			}
+			seen[r.Position.Index] = true
+		}
+		if d.Next == nil {
+			break
+		}
+		query.Upper, query.After, query.DatasetEpoch = d.Upper, d.Next, d.DatasetEpoch
+		floor := d.RunFloor
+		query.RunFloor = &floor
+	}
+	if len(seen) != 5 {
+		t.Fatalf("source filter lost later matches: %v", seen)
+	}
+}

@@ -143,7 +143,7 @@ func parseExplorerRequest(path, rawQuery string) (explorerRequest, error) {
 			allowed[name] = true
 		}
 	}
-	if r.query.Family == explorerquery.Tokens {
+	if r.query.Family == explorerquery.Tokens || label == "explorer.transfers" {
 		allowed["type"] = true
 	}
 	if label == "explorer.tokens" {
@@ -213,6 +213,9 @@ func parseExplorerRequest(path, rawQuery string) (explorerRequest, error) {
 			switch value {
 			case "ERC20", "ERC721", "ERC1155":
 				r.tokenType = value
+				if label == "explorer.transfers" {
+					r.query.TokenKind = explorerquery.TokenKind(value)
+				}
 			default:
 				return r, errExplorerRequest
 			}

@@ -10,6 +10,7 @@ package indexerclient
 
 import (
 	"context"
+	"math"
 
 	indexerv1 "privacy-proxy/gen/go/chain_indexer/v1"
 	"privacy-proxy/internal/explorer"
@@ -261,6 +262,29 @@ func (b *Backend) GetAllTransfers(ctx context.Context, limit int, offset int) ([
 	// transfers" isn't a supported indexer use case — legacy SQL behavior
 	// only; delegate to *Store.
 	return b.Store.GetAllTransfers(ctx, limit, offset)
+}
+
+// Typed legacy requests use the authoritative Indexer RPC, not SQL fallback.
+func (b *Backend) GetAllTransfersByType(ctx context.Context, limit, offset int, tokenType string) ([]explorer.TokenTransfer, int64, error) {
+	if limit < 1 || limit > 100 || offset < 0 || offset%limit != 0 || offset/limit >= math.MaxInt32 {
+		return nil, 0, explorer.ErrTransferTypeUnsupported
+	}
+	var kind indexerv1.TokenType
+	switch tokenType {
+	case "ERC20":
+		kind = indexerv1.TokenType_TOKEN_TYPE_ERC20
+	case "ERC721":
+		kind = indexerv1.TokenType_TOKEN_TYPE_ERC721
+	case "ERC1155":
+		kind = indexerv1.TokenType_TOKEN_TYPE_ERC1155
+	default:
+		return nil, 0, explorer.ErrTransferTypeUnsupported
+	}
+	response, err := b.client.ListAllTokenTransfers(ctx, &indexerv1.ListAllTokenTransfersRequest{Page: &indexerv1.OffsetPageRequest{PageSize: int32(limit), Page: int32(offset/limit + 1)}, TokenType: kind})
+	if err != nil {
+		return nil, 0, err
+	}
+	return mapTokenTransfers(response.GetTransfers()), response.GetPage().GetTotalItems(), nil
 }
 
 // ----- Internal transactions -----
