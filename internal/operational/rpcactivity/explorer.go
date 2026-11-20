@@ -115,8 +115,8 @@ func (s *Service) serveExplorer(w http.ResponseWriter, r *http.Request, org stri
 		write(w, 503, explorerBusy)
 		return
 	}
-	body, err := result.MarshalResponseFor(s.explorer)
-	if err != nil || s.recorder.Healthy() != nil || result.RequireDeliverable(ctx, s.explorer) != nil {
+	body, err := result.PrepareResponseFor(ctx, s.explorer)
+	if err != nil || s.recorder.Healthy() != nil {
 		write(w, 503, explorerBusy)
 		return
 	}

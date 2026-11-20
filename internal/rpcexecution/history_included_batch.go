@@ -32,6 +32,10 @@ func (c *HistoryReadClient) AcquireIncludedBatch(ctx context.Context, hashes []c
 // Header anchors are expected identities, not trusted header contents; the same
 // selected node supplies and canonically rechecks every full typed header.
 func (c *HistoryReadClient) AcquireExplorerBatch(ctx context.Context, hashes []common.Hash, anchor *HistoryHeader, anchors []HistoryHeader, fence HistoryOperationFence, reserved int) (*IncludedHistoryBatch, error) {
+	return c.AcquireExplorerBatchShared(ctx, hashes, anchor, anchors, fence, reserved, nil)
+}
+
+func (c *HistoryReadClient) AcquireExplorerBatchShared(ctx context.Context, hashes []common.Hash, anchor *HistoryHeader, anchors []HistoryHeader, fence HistoryOperationFence, reserved int, shared *HistorySharedBudget) (*IncludedHistoryBatch, error) {
 
 	if c == nil || len(hashes) > min(256, c.limits.MaxParents) || len(anchors) > min(256, c.limits.MaxHeaders-1) {
 		return nil, failure(EvidenceLimit)
@@ -44,7 +48,15 @@ func (c *HistoryReadClient) AcquireExplorerBatch(ctx context.Context, hashes []c
 		return nil, err
 	}
 	defer cancel()
-	budget := &historyReadBudget{base: c.transport, limits: c.limits}
+	if shared != nil {
+		if e := shared.lower(c.limits); e != nil {
+			return nil, e
+		}
+		if e := shared.charge(0, 0, len(hashes), 0, 0); e != nil {
+			return nil, e
+		}
+	}
+	budget := &historyReadBudget{base: c.transport, limits: c.limits, shared: shared}
 	if err = budget.reserveOwned(reserved + 1024 + 64*len(hashes)); err != nil {
 		return nil, err
 	}
@@ -110,6 +122,11 @@ func (c *HistoryReadClient) AcquireExplorerBatch(ctx context.Context, hashes []c
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
 	if len(ordered) > c.limits.MaxHeaders {
 		return nil, failure(EvidenceLimit)
+	}
+	if shared != nil {
+		if e := shared.charge(0, 0, 0, len(ordered), 0); e != nil {
+			return nil, e
+		}
 	}
 	items = items[:0]
 	for _, n := range ordered {
@@ -210,6 +227,11 @@ func (c *HistoryReadClient) AcquireExplorerBatch(ctx context.Context, hashes []c
 	if !fence.live() || bound.Err() != nil {
 		return nil, failure(NodeFailure)
 	}
+	if shared != nil {
+		if err = shared.reserveFinal(budget, len(o.headers)); err != nil {
+			return nil, err
+		}
+	}
 	b.digest, err = b.computeDigest()
 	if err != nil {
 		return nil, err
@@ -252,6 +274,9 @@ func (b *IncludedHistoryBatch) Recheck(ctx context.Context) error {
 		return err
 	}
 	defer cancel()
+	if b.staged.budget.shared != nil {
+		b.staged.budget.shared.releaseFinal(b.staged.budget)
+	}
 	if err = b.owner.checkObservation(bound, b.staged); err != nil {
 		return err
 	}
@@ -312,4 +337,25 @@ func (b *IncludedHistoryBatch) Header(number uint64, hash common.Hash) (*types.H
 		return nil, false
 	}
 	return types.CopyHeader(h), true
+}
+
+// Close releases only the request's unused final-probe reservation.
+func (b *IncludedHistoryBatch) Close() {
+	if b != nil && b.staged != nil && b.staged.budget != nil && b.staged.budget.shared != nil {
+		b.staged.budget.shared.releaseFinal(b.staged.budget)
+	}
+}
+
+func (b *IncludedHistoryBatch) Deadline() time.Time {
+	if b == nil || b.staged == nil {
+		return time.Time{}
+	}
+	return b.staged.fence.Deadline
+}
+
+func (b *IncludedHistoryBatch) RequireLive() error {
+	if b == nil || b.owner == nil || b.staged == nil || b.digest == (common.Hash{}) || !b.staged.fence.live() {
+		return failure(InvalidEvidence)
+	}
+	return nil
 }

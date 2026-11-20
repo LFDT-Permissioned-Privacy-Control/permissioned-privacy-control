@@ -41,15 +41,34 @@ import (
 )
 
 func TestExplorerActualWalletShareIndexNodeAndOneRecorderHTTP(t *testing.T) {
-	testExplorerActualHTTP(t, false)
+	testExplorerActualHTTP(t, false, "standard")
 }
 func TestExplorerActualPrunedNodePointsPrivacyAndFinalReorgHTTP(t *testing.T) {
-	testExplorerActualHTTP(t, true)
+	testExplorerActualHTTP(t, true, "standard")
 }
 func TestExplorerActualTransferKindFilterCursorAndCurrentRightsHTTP(t *testing.T) {
-	testExplorerActualHTTP(t, false, true)
+	testExplorerActualHTTP(t, false, "standard", true)
 }
-func testExplorerActualHTTP(t *testing.T, nodeFallback bool, transferKinds ...bool) {
+func TestExplorerActualStrictCountPopulations(t *testing.T) {
+	testExplorerActualHTTP(t, false, "strict")
+}
+func TestExplorerActualCountBudgetPastOneSourcePage(t *testing.T) {
+	testExplorerActualHTTP(t, false, "large")
+}
+func TestExplorerActualCountsKeepOriginalMethodGates(t *testing.T) {
+	testExplorerActualHTTP(t, false, "no-logs")
+}
+func TestExplorerActualSlowOptionalCountKeepsShortBasePurpose(t *testing.T) {
+	testExplorerActualHTTP(t, false, "slow")
+}
+func TestExplorerActualExpiredIdentityNeverPublishesCounts(t *testing.T) {
+	testExplorerActualHTTP(t, false, "expiry")
+}
+func TestExplorerActualFailedOptionalCountRecheckKeepsPage(t *testing.T) {
+	testExplorerActualHTTP(t, false, "recheck")
+}
+func testExplorerActualHTTP(t *testing.T, nodeFallback bool, countMode string, transferKinds ...bool) {
+	strictCounts := countMode == "strict"
 	typed := len(transferKinds) > 0 && transferKinds[0]
 	indexertest.Require(t)
 	d := rawPostgres(t)
@@ -70,6 +89,11 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, transferKinds ...bo
 	listed := f.HistoryTransaction(t, 2, 1, target)
 	hidden := f.HistoryTransaction(t, 3, 2, common.HexToAddress("0x987654"))
 	txs := []*types.Transaction{coin, hidden, listed}
+	if countMode == "large" {
+		for n := 3; n < 220; n++ {
+			txs = append(txs, f.HistoryTransaction(t, 1, uint64(n), target))
+		}
+	}
 	ownerAddress := crypto.PubkeyToAddress(f.HistoryKey(1).PublicKey)
 	transfer := &types.Log{Address: target, Topics: []common.Hash{crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)")), common.BytesToHash(ownerAddress.Bytes()), common.BytesToHash(target.Bytes())}, Data: common.LeftPadBytes([]byte{0xab}, 32)}
 	ping := &types.Log{Address: target, Topics: []common.Hash{crypto.Keccak256Hash([]byte("Ping()"))}, Data: []byte{}}
@@ -77,17 +101,33 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, transferKinds ...bo
 	if typed {
 		sourceEvents = append(sourceEvents, transfer, transfer, transfer)
 	}
-	node := f.NewHistoryNode(t, txs, [][]*types.Log{sourceEvents, {}, {}})
+	logsByTx := make([][]*types.Log, len(txs))
+	logsByTx[0] = sourceEvents
+	node := f.NewHistoryNode(t, txs, logsByTx)
 	network := node.Network()
 	var instant atomic.Int64
 	instant.Store(f.Now)
 	clock := func() time.Time { return time.Unix(instant.Load(), 0) }
 	src := f.DefaultStateFixture(t)
 	src.HistoryConsumer = true
+	if strictCounts {
+		src.ReadProfile = "strict"
+	}
 	contract := f.ReadContract(target.Hex())
 	contract.ABI = json.RawMessage(`[{"anonymous":false,"type":"event","name":"Transfer","inputs":[{"name":"from","type":"address","indexed":true},{"name":"to","type":"address","indexed":true},{"name":"value","type":"uint256","indexed":false}]},{"anonymous":false,"type":"event","name":"Ping","inputs":[]}]`)
 	contract.ReadGrants[0].EventRules = policybundle.EventRules{Mode: "all", Rules: []policybundle.EventRule{}}
 	src.Contracts[f.Org] = []policybundle.Contract{contract}
+	if countMode == "no-logs" {
+		for i := range src.Groups[f.Org] {
+			methods := []string{}
+			for _, method := range src.Groups[f.Org][i].AllowedMethods {
+				if method != "eth_getLogs" {
+					methods = append(methods, method)
+				}
+			}
+			src.Groups[f.Org][i].AllowedMethods = methods
+		}
+	}
 	snapshot := f.StateSnapshot(t, src)
 	tok := f.Token(t, snapshot, f.Subject, "Auditor")
 	if _, err := d.owner.Exec(ctx, `CREATE DATABASE history_wallet_test`); err != nil {
@@ -175,7 +215,12 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, transferKinds ...bo
 	if nodeFallback {
 		fallbackNode = node
 	}
-	index, indexOwner, binding := actualExplorerIndex(t, d.owner, d.ownerDSN, network, fallbackNode)
+	index, indexOwner, binding := actualExplorerIndex(t, d.owner, d.ownerDSN, network, fallbackNode, countMode == "slow")
+	var selectedIndex explorerquery.Source = index
+	failCountRecheck := &atomic.Bool{}
+	if countMode == "slow" || countMode == "recheck" {
+		selectedIndex = &optionalCountIndex{Reader: index, slow: countMode == "slow", fail: failCountRecheck}
+	}
 	if _, err = indexOwner.Exec(ctx, `UPDATE blocks SET hash=$1,gas_used=$2,transaction_count=$3 WHERE number=1`, strings.ToLower(node.Hash().Hex()), 21000*len(txs), len(txs)); err != nil {
 		t.Fatal(err)
 	}
@@ -199,8 +244,23 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, transferKinds ...bo
 			t.Fatal("writer-shaped event row", err)
 		}
 	}
+
+	seeds := []struct {
+		sql  string
+		args []any
+	}{
+		{`INSERT INTO tokens(address,symbol,name,decimals,token_type,total_supply,holder_count,transfer_count,block_number)VALUES($1,'TOK','Visible token',18,'ERC20',1000,999,999,1)`, []any{strings.ToLower(target.Hex())}},
+		{`INSERT INTO address_stats(address,tx_count,token_transfer_count,internal_tx_count)VALUES($1,999,999,999),($2,999,999,999),($3,999,999,999)`, []any{strings.ToLower(target.Hex()), strings.ToLower(ownerAddress.Hex()), "0x0000000000000000000000000000000000009999"}},
+		{`INSERT INTO token_balances_current(token_address,address,balance,block_number)VALUES($1,$2,10,1),($1,$3,20,1)`, []any{strings.ToLower(target.Hex()), strings.ToLower(ownerAddress.Hex()), "0x0000000000000000000000000000000000009999"}},
+		{`INSERT INTO token_transfers(tx_hash,log_index,token_address,from_address,to_address,value,block_number,timestamp)VALUES($1,0,$2,$3,$2,171,1,$4)`, []any{strings.ToLower(coin.Hash().Hex()), strings.ToLower(target.Hex()), strings.ToLower(ownerAddress.Hex()), f.Now}},
+	}
+	for _, seed := range seeds {
+		if _, err = indexOwner.Exec(ctx, seed.sql, seed.args...); err != nil {
+			t.Fatal("count source facts", err)
+		}
+	}
 	if typed {
-		for _, i := range []int{0, 2, 3, 4} {
+		for _, i := range []int{2, 3, 4} {
 			_, err = indexOwner.Exec(ctx, `INSERT INTO token_transfers(tx_hash,log_index,token_address,from_address,to_address,value,block_number,timestamp,token_type,transfer_type) VALUES($1,$2,$3,$4,$3,171,1,$5,'ERC20','transfer')`, strings.ToLower(coin.Hash().Hex()), i, strings.ToLower(target.Hex()), strings.ToLower(ownerAddress.Hex()), f.Now)
 			if err != nil {
 				t.Fatal(err)
@@ -213,7 +273,7 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, transferKinds ...bo
 			t.Fatal(err)
 		}
 	}
-	explorer, err := rpcengine.NewExplorer(rpcengine.ExplorerConfig{Snapshot: snapshot, History: history, State: stateEngine, Metadata: metadata, Index: index, IndexExpected: binding, CursorKey: bytes.Repeat([]byte{13}, 32), PseudonymKey: bytes.Repeat([]byte{14}, 32)})
+	explorer, err := rpcengine.NewExplorer(rpcengine.ExplorerConfig{Snapshot: snapshot, History: history, State: stateEngine, Metadata: metadata, Index: selectedIndex, IndexExpected: binding, CursorKey: bytes.Repeat([]byte{13}, 32), PseudonymKey: bytes.Repeat([]byte{14}, 32)})
 	if err != nil {
 		t.Fatal("concrete Explorer constructor", err)
 	}
@@ -224,6 +284,12 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, transferKinds ...bo
 	var sealCount atomic.Int32
 	var reorgAtSeal atomic.Bool
 	recorder := rpcRecorder(t, activity, clock, func(uint64) error {
+		if countMode == "expiry" {
+			instant.Add(600)
+		}
+		if countMode == "recheck" {
+			failCountRecheck.Store(true)
+		}
 		if reorgAtSeal.Swap(false) {
 			node.Reorg(true)
 		}
@@ -267,6 +333,62 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, transferKinds ...bo
 			done <- result{response.StatusCode, raw, err}
 		}()
 		return done
+	}
+
+	if countMode != "standard" {
+		close(release)
+	}
+
+	if countMode != "standard" && countMode != "strict" {
+		response := <-get("/api/v2/explorer/stats?limit=1")
+		if countMode == "expiry" {
+			if response.status == 200 || bytes.Contains(response.body, []byte("observedTransactions")) {
+				t.Fatal("expired identity published counts", response.status, string(response.body))
+			}
+			return
+		}
+		var stats struct {
+			ObservedTransactions string
+			TotalTransactions    *string
+			Counts               map[string]struct {
+				Status                        string
+				Value, LowerBound, ObservedAt *string
+			}
+		}
+		if response.status != 200 || json.Unmarshal(response.body, &stats) != nil || stats.ObservedTransactions != "1" {
+			t.Fatal("optional count broke ordinary page", response.status, string(response.body))
+		}
+		switch countMode {
+		case "large":
+			if stats.Counts["transactions"].Status != "at_least" || stats.Counts["transactions"].LowerBound == nil || stats.TotalTransactions != nil {
+				t.Fatal("cutoff pretended exact or lost safe bound", string(response.body))
+			}
+		case "no-logs":
+			if stats.Counts["tokens"].Status != "unavailable" || stats.Counts["tokens"].Value != nil || stats.Counts["tokens"].ObservedAt != nil {
+				t.Fatal("parent tx gate granted log population", string(response.body))
+			}
+		case "slow", "recheck":
+			for _, count := range stats.Counts {
+				if count.Status != "unavailable" || count.Value != nil || count.LowerBound != nil || count.ObservedAt != nil {
+					t.Fatal("failed count released stale numeric facts", string(response.body))
+				}
+			}
+		}
+		t.Logf("countsfixture:%s", response.body)
+		return
+	}
+	if strictCounts {
+		response := <-get("/api/v2/explorer/stats?limit=1")
+		var value struct {
+			Counts map[string]struct {
+				Status string
+				Value  *string
+			}
+		}
+		if response.status != 200 || json.Unmarshal(response.body, &value) != nil || value.Counts["transactions"].Status != "exact" || value.Counts["transactions"].Value == nil || *value.Counts["transactions"].Value != "1" {
+			t.Fatal("strict ordinary transaction population (listed row excluded)", response.status, string(response.body))
+		}
+		return
 	}
 	pending := get("/api/v2/explorer/transactions?limit=1")
 	await(t, entered)
@@ -500,9 +622,32 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, transferKinds ...bo
 		}
 	}
 	firstStats := <-get("/api/v2/explorer/stats?limit=1")
-	if firstStats.status != 200 || json.Unmarshal(firstStats.body, &stats) != nil || stats.ObservedTransactions != "1" || stats.ObservedBlocks != "1" || stats.Page.Coverage != "OBSERVED_VISIBLE_PAGE" || stats.Page.Next == "" || bytes.Contains(firstStats.body, []byte("totalTransactions")) {
+	if firstStats.status != 200 || json.Unmarshal(firstStats.body, &stats) != nil || stats.ObservedTransactions != "1" || stats.ObservedBlocks != "1" || stats.Page.Coverage != "OBSERVED_VISIBLE_PAGE" || stats.Page.Next == "" {
 		t.Fatal("checked observed page stats", firstStats.status, string(firstStats.body))
 	}
+
+	var totals struct {
+		Counts map[string]struct {
+			Status string
+			Value  *string
+		}
+		TotalTransactions *string
+		TotalAddresses    *string
+	}
+	if json.Unmarshal(firstStats.body, &totals) != nil || totals.Counts["transactions"].Status != "exact" || totals.TotalTransactions == nil || *totals.TotalTransactions != "2" || totals.TotalAddresses == nil || *totals.TotalAddresses != "2" {
+		t.Fatal("permitted totals differ from emitted ordinary populations", string(firstStats.body))
+	}
+	accountCounts := <-get("/api/v2/explorer/addresses/" + strings.ToLower(ownerAddress.Hex()) + "/stats")
+	var account struct{ TxCount, TokenTransferCount, InternalTxCount *string }
+	if accountCounts.status != 200 || json.Unmarshal(accountCounts.body, &account) != nil || account.TxCount == nil || *account.TxCount != "1" || account.TokenTransferCount == nil || *account.TokenTransferCount != "1" || account.InternalTxCount == nil || *account.InternalTxCount != "0" {
+		t.Fatal("actual address counts copied raw or lost permitted rows", accountCounts.status, string(accountCounts.body))
+	}
+	tokenCounts := <-get("/api/v2/explorer/tokens/" + strings.ToLower(target.Hex()))
+	var token struct{ HolderCount, TransferCount *string }
+	if tokenCounts.status != 200 || json.Unmarshal(tokenCounts.body, &token) != nil || token.HolderCount == nil || *token.HolderCount != "1" || token.TransferCount == nil || *token.TransferCount != "1" {
+		t.Fatal("actual token count population", tokenCounts.status, string(tokenCounts.body))
+	}
+	t.Logf("countsfixture:%s", firstStats.body)
 	statsCursor := stats.Page.Next
 	nextStats := <-get("/api/v2/explorer/stats?limit=1&cursor=" + url.QueryEscape(statsCursor))
 	stats = struct {
@@ -602,7 +747,7 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, transferKinds ...bo
 	}
 }
 
-func actualExplorerIndex(t *testing.T, root *pgx.Conn, ownerDSN string, network networkidentity.Binding, node *f.HistoryNode) (*explorerindex.Reader, *pgx.Conn, explorerquery.Binding) {
+func actualExplorerIndex(t *testing.T, root *pgx.Conn, ownerDSN string, network networkidentity.Binding, node *f.HistoryNode, shortPurpose bool) (*explorerindex.Reader, *pgx.Conn, explorerquery.Binding) {
 	t.Helper()
 	ctx := t.Context()
 	if _, err := root.Exec(ctx, `CREATE DATABASE explorer_http_test`); err != nil {
@@ -629,6 +774,34 @@ func actualExplorerIndex(t *testing.T, root *pgx.Conn, ownerDSN string, network 
 		reader, binding := indexertest.OpenWithNode(t, u.String(), network, node.Source("").URL, node.CertificatePEM())
 		return reader, owner, binding
 	}
+	if shortPurpose {
+		limits := explorerindex.DefaultLimits()
+		limits.Timeout = 400 * time.Millisecond
+		reader, binding := indexertest.OpenWithLimits(t, u.String(), network, limits)
+		return reader, owner, binding
+	}
 	reader, binding := indexertest.Open(t, u.String(), network)
 	return reader, owner, binding
+}
+
+// The ordinary reader remains real; these two failures exercise optional
+// enhancement acquisition/final delivery without replacing source facts.
+type optionalCountIndex struct {
+	*explorerindex.Reader
+	slow bool
+	fail *atomic.Bool
+}
+
+func (s *optionalCountIndex) ReadCurrentCounts(ctx context.Context, q explorerquery.CurrentCountQuery) (*explorerquery.CurrentCountPass, error) {
+	if s.slow {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return s.Reader.ReadCurrentCounts(ctx, q)
+}
+func (s *optionalCountIndex) RecheckCurrentCounts(ctx context.Context, p *explorerquery.CurrentCountPass) error {
+	if s.fail.Load() {
+		return explorerquery.ErrUnavailable
+	}
+	return s.Reader.RecheckCurrentCounts(ctx, p)
 }

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"privacy-proxy/internal/activitymethoddata"
@@ -17,6 +18,7 @@ import (
 	"privacy-proxy/internal/explorerquery"
 	"privacy-proxy/internal/historyfacts"
 	"privacy-proxy/internal/policybundle"
+	"privacy-proxy/internal/readprivacyabi"
 	"privacy-proxy/internal/rpcexecution"
 )
 
@@ -106,15 +108,25 @@ type ExplorerOperationMetadata struct {
 	Reason                          activityreasondata.Code
 }
 type ExplorerOperationResult struct {
-	owner    *ExplorerEngine
-	request  explorerRequest
-	current  *historyfacts.Current
-	pass     *explorerquery.ReadPass
-	batch    *rpcexecution.IncludedHistoryBatch
-	state    *StateOperationResult
-	metadata *MetadataOperationResult
-	captured ExplorerOperationMetadata
-	body     []byte
+	owner             *ExplorerEngine
+	request           explorerRequest
+	current           *historyfacts.Current
+	pass              *explorerquery.ReadPass
+	batch             *rpcexecution.IncludedHistoryBatch
+	state             *StateOperationResult
+	metadata          *MetadataOperationResult
+	captured          ExplorerOperationMetadata
+	body              []byte
+	layoutMatcher     *readprivacyabi.EventLayoutMatcher
+	payload           any
+	scanPosition      *explorerquery.Position
+	scanExhausted     bool
+	readBudget        *explorerquery.ReadBudget
+	nodeBudget        *rpcexecution.HistorySharedBudget
+	countHardDeadline time.Time
+	countStarted      time.Time
+	countPages        []*ExplorerOperationResult
+	currentCounts     []*explorerCurrentCountEvidence
 }
 
 func (r *ExplorerOperationResult) fail(status int, code string, class CompletionClass, why ...activityreasondata.Code) *ExplorerOperationResult {
@@ -162,11 +174,39 @@ func (e *ExplorerEngine) QueryHTTPObserved(ctx context.Context, assertion Metada
 		}
 		return r.fail(409, "cursor_stale", InvalidCompletion)
 	}
+	if wantsExplorerCounts(request.operation.Label) {
+		r.readBudget = explorerquery.NewReadBudget()
+		r.nodeBudget = rpcexecution.NewHistorySharedBudget(r.readBudget.Bytes)
+		r.countStarted = time.Now()
+	}
+	e.readExplorerPage(ctx, r)
+	if r.captured.HTTPStatus == 200 && r.readBudget != nil {
+		e.enrichExplorerCounts(ctx, r)
+	}
+	return r
+}
+
+func (e *ExplorerEngine) readExplorerPage(ctx context.Context, r *ExplorerOperationResult) *ExplorerOperationResult {
+	current := r.current
 	fence, err := newExplorerQueryFence(ctx, current)
 	if err != nil {
 		return r.fail(503, "unavailable", UnavailableCompletion)
 	}
 	r.request.query.Fence = fence
+	if !r.countStarted.IsZero() {
+		fence, err = fence.Shortened(r.countStarted.Add(5 * time.Second))
+		if err != nil {
+			return r.fail(503, "unavailable", UnavailableCompletion)
+		}
+		if !r.countHardDeadline.IsZero() {
+			fence, err = fence.Shortened(r.countHardDeadline)
+			if err != nil {
+				return r.fail(503, "unavailable", UnavailableCompletion)
+			}
+		}
+		r.request.query.Fence = fence
+	}
+	r.request.query.Budget = r.readBudget
 	pass, err := e.config.Index.ReadCohort(ctx, r.request.query)
 	if err != nil {
 		return explorerSourceFailure(r, err)
@@ -228,7 +268,7 @@ func (e *ExplorerEngine) QueryHTTPObserved(ctx context.Context, assertion Metada
 			}
 		}
 	}
-	batch, err := client.AcquireExplorerBatch(ctx, hashes, anchor, anchors, rpcexecution.HistoryOperationFence{Deadline: d, Done: done}, current.ChargedBytes()+2*pass.ChargedBytes())
+	batch, err := client.AcquireExplorerBatchShared(ctx, hashes, anchor, anchors, rpcexecution.HistoryOperationFence{Deadline: d, Done: done}, current.ChargedBytes()+2*pass.ChargedBytes(), r.nodeBudget)
 	if err != nil {
 		return r.fail(503, "unavailable", UnavailableCompletion)
 	}
@@ -241,7 +281,10 @@ func (e *ExplorerEngine) QueryHTTPObserved(ctx context.Context, assertion Metada
 		return r.fail(503, "unavailable", UnavailableCompletion)
 	}
 	if !current.Profile().Strict() && len(hashes) > 0 {
-		allowance := batch.RemainingWorkingBytes() / 2
+		allowance := min(batch.RemainingWorkingBytes()/2, 256+len(hashes)*(64+512+4*8192))
+		if r.readBudget != nil {
+			allowance = min(allowance, max(0, r.readBudget.RemainingBytes()-(1<<20))/2)
+		}
 		if allowance < 256 || batch.ReserveWorkingBytes(2*allowance) != nil {
 			return r.fail(422, "too_broad", UnavailableCompletion)
 		}
@@ -346,6 +389,15 @@ func (r *ExplorerOperationResult) RequireDeliverable(ctx context.Context, e *Exp
 	if r == nil || e == nil || r.owner != e || ctx == nil || ctx.Err() != nil {
 		return errExplorer
 	}
+	if r.checkCountEvidence(ctx, e) != nil {
+		return errExplorer
+	}
+	return r.requireBaseDeliverable(ctx, e)
+}
+func (r *ExplorerOperationResult) requireBaseDeliverable(ctx context.Context, e *ExplorerEngine) error {
+	if r == nil || e == nil || r.owner != e || ctx == nil || ctx.Err() != nil {
+		return errExplorer
+	}
 	if r.pass != nil && e.config.Index.Recheck(ctx, r.pass) != nil {
 		return errExplorer
 	}
@@ -423,6 +475,18 @@ func newExplorerQueryFence(ctx context.Context, current *historyfacts.Current) (
 
 // Close retires a borrowed indexed purpose after delivery or a failed attempt.
 func (r *ExplorerOperationResult) Close() {
+	if r != nil {
+		for _, child := range r.countPages {
+			child.Close()
+		}
+		for _, count := range r.currentCounts {
+			count.pass.Close()
+			count.batch.Close()
+		}
+	}
+	if r != nil && r.batch != nil {
+		r.batch.Close()
+	}
 	if r != nil && r.pass != nil {
 		r.pass.Close()
 	}

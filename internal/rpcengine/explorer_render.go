@@ -174,17 +174,18 @@ func newExplorerRender(r *ExplorerOperationResult, data explorerquery.Data) (*ex
 			x.fields[f.text("hash")] = f
 		}
 	}
-	limits := readprivacyabi.DefaultLayoutLimits()
-	// This reservation covers the parser, retained prepared ABI copies, and metadata
-	// before any emitter acquisition; it shares the node/SQL operation ceiling.
-	if err := r.batch.ReserveWorkingBytes(limits.MaxBytes); err != nil {
-		return nil, err
+	if r.layoutMatcher == nil {
+		limits := readprivacyabi.DefaultLayoutLimits()
+		if err := r.batch.ReserveWorkingBytes(limits.MaxBytes); err != nil {
+			return nil, err
+		}
+		var err error
+		r.layoutMatcher, err = readprivacyabi.NewEventLayoutMatcher(limits)
+		if err != nil {
+			return nil, err
+		}
 	}
-	var err error
-	x.matcher, err = readprivacyabi.NewEventLayoutMatcher(limits)
-	if err != nil {
-		return nil, err
-	}
+	x.matcher = r.layoutMatcher
 	for _, l := range r.batch.Logs() {
 		m, ok, e := x.match(l)
 		if e != nil {
@@ -929,6 +930,7 @@ func (x *explorerRender) render(data explorerquery.Data, count int) ([]byte, err
 		if len(items) == 0 {
 			return []byte("null"), nil
 		}
+		x.result.payload = items[0]
 		return json.Marshal(items[0])
 	}
 	page := wire.PageInfo{Population: wire.Population, Consistency: data.Consistency, EndedAt: data.EndedAt, HistoryFrom: qptr(data.HistoryFrom)}
@@ -958,6 +960,8 @@ func (x *explorerRender) render(data explorerquery.Data, count int) ([]byte, err
 		// stopped at an earlier visible row. This continuation still has work.
 		page.EndedAt = "ENDED_AT_UNSPECIFIED"
 	}
+	x.result.scanPosition = last
+	x.result.scanExhausted = exhausted
 	if request.operation.Label == "explorer.stats" || request.operation.Label == "explorer.tx_history" {
 		page.Coverage = wire.ObservedVisiblePage
 		if request.operation.Label == "explorer.stats" {
@@ -965,6 +969,7 @@ func (x *explorerRender) render(data explorerquery.Data, count int) ([]byte, err
 			if err != nil {
 				return nil, err
 			}
+			x.result.payload = stats
 			return json.Marshal(stats)
 		}
 		points, err := observedExplorerHistory(items, request.interval)
@@ -973,7 +978,8 @@ func (x *explorerRender) render(data explorerquery.Data, count int) ([]byte, err
 		}
 		return json.Marshal(wire.Page[wire.TxHistoryPoint]{Items: points, Page: page})
 	}
-	return json.Marshal(wire.Page[any]{Items: items, Page: page})
+	x.result.payload = wire.Page[any]{Items: items, Page: page}
+	return json.Marshal(x.result.payload)
 }
 
 // Aggregates describe only the emitted visible transaction page, after its

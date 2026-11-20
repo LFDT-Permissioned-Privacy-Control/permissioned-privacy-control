@@ -6,7 +6,6 @@ import (
 	"errors"
 	"google.golang.org/protobuf/proto"
 	pb "privacy-proxy/gen/go/chain_indexer/v2"
-	"privacy-proxy/internal/admissionsharedata"
 	q "privacy-proxy/internal/explorerquery"
 	"strings"
 	"sync"
@@ -29,6 +28,17 @@ func addrSet(s string) *pb.AddressSet {
 	}
 	a, _ := unhex(s, 20)
 	return &pb.AddressSet{Addresses: [][]byte{a}}
+}
+func queryAddressSet(s string, set []string) *pb.AddressSet {
+	if len(set) == 0 {
+		return addrSet(s)
+	}
+	out := &pb.AddressSet{}
+	for _, a := range set {
+		b, _ := unhex(a, 20)
+		out.Addresses = append(out.Addresses, b)
+	}
+	return out
 }
 func hashSet(s string) *pb.HashSet {
 	if s == "" {
@@ -163,7 +173,7 @@ func (o *operation) list(ctx context.Context, v q.Query, page *pb.PageRequest) (
 			}
 			rows[len(rows)-1].Source = strings.TrimPrefix(x.Source.String(), "SOURCE_")
 		} else {
-			req := &pb.ListTransactionsRequest{Read: read, Page: page, Filter: &pb.TransactionFilter{AnyParty: addrSet(v.Address), BlockRange: blockRange(v)}}
+			req := &pb.ListTransactionsRequest{Read: read, Page: page, Filter: &pb.TransactionFilter{AnyParty: queryAddressSet(v.Address, v.AddressSet), BlockRange: blockRange(v)}}
 			r, e := call(req, func(c context.Context) (proto.Message, error) { return o.owner.client.ListTransactions(c, req) })
 			if e != nil {
 				return nil, nil, e
@@ -190,7 +200,7 @@ func (o *operation) list(ctx context.Context, v q.Query, page *pb.PageRequest) (
 			}
 		}
 	case q.Transfers:
-		req := &pb.ListTokenTransfersRequest{Read: read, Page: page, Filter: &pb.TransferFilter{AnyParty: addrSet(v.Address), Tokens: addrSet(v.Token), BlockRange: blockRange(v), TransactionHash: hashFilter(v.Hash), BlockNumber: v.Block, TokenKind: transferKind(v.TokenKind)}}
+		req := &pb.ListTokenTransfersRequest{Read: read, Page: page, Filter: &pb.TransferFilter{AnyParty: queryAddressSet(v.Address, v.AddressSet), Tokens: queryAddressSet(v.Token, v.TokenSet), BlockRange: blockRange(v), TransactionHash: hashFilter(v.Hash), BlockNumber: v.Block, TokenKind: transferKind(v.TokenKind)}}
 		r, e := call(req, func(c context.Context) (proto.Message, error) { return o.owner.client.ListTokenTransfers(c, req) })
 		if e != nil {
 			return nil, nil, e
@@ -206,7 +216,7 @@ func (o *operation) list(ctx context.Context, v q.Query, page *pb.PageRequest) (
 			}
 		}
 	case q.Internals:
-		req := &pb.ListInternalTransactionsRequest{Read: read, Page: page, Filter: &pb.InternalFilter{AnyParty: addrSet(v.Address), BlockRange: blockRange(v), TransactionHash: hashFilter(v.Hash), BlockNumber: v.Block}}
+		req := &pb.ListInternalTransactionsRequest{Read: read, Page: page, Filter: &pb.InternalFilter{AnyParty: queryAddressSet(v.Address, v.AddressSet), BlockRange: blockRange(v), TransactionHash: hashFilter(v.Hash), BlockNumber: v.Block}}
 		r, e := call(req, func(c context.Context) (proto.Message, error) { return o.owner.client.ListInternalTransactions(c, req) })
 		if e != nil {
 			return nil, nil, e
@@ -468,18 +478,14 @@ func (r *Reader) ReadCohort(ctx context.Context, v q.Query) (*q.ReadPass, error)
 		return nil, ErrUnavailable
 	}
 	defer cancel()
-	o, e := r.newOperation(ctx)
+	if !r.valid() {
+		return nil, ErrUnavailable
+	}
+	sourceFence, e := normalized.Fence.Shortened(time.Now().Add(r.limits.Timeout))
 	if e != nil {
-		return nil, e
+		return nil, ErrUnavailable
 	}
-	// The local indexed deadline also bounds later node qualification and delivery.
-	if normalized.Deadline().Before(func() time.Time { d, _ := o.fence.Original(); return d }()) {
-		f, e := admissionsharedata.NewFence(ctx, time.Until(normalized.Deadline()))
-		if e != nil {
-			return nil, ErrUnavailable
-		}
-		o.fence = f
-	}
+	o := &operation{owner: r, fence: sourceFence, budget: normalized.Budget}
 	state := &cohortState{owner: r, operation: o}
 	complete := false
 	defer func() {
@@ -574,9 +580,15 @@ func (r *Reader) Recheck(ctx context.Context, pass *q.ReadPass) error {
 		return ErrUnavailable
 	}
 	defer cancel()
-	_, e = s.operation.chain(bound)
+	current, e := s.operation.chain(bound)
 	if e != nil {
 		return e
+	}
+	if current.Page.HistoryFromBlock != pass.Data().HistoryFrom {
+		return ErrConflict
+	}
+	if s.query.From != nil && current.Page.HistoryFromBlock > *s.query.From {
+		return ErrPruned
 	}
 	return pass.ValidateFor(r.metadata)
 }

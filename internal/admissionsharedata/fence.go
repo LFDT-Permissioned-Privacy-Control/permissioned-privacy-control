@@ -73,3 +73,17 @@ func (f Fence) Bind(parent context.Context) (context.Context, context.CancelFunc
 // Original returns only the existing absolute deadline and caller cancellation
 // channel. It retains no context values and never renews the owning lifetime.
 func (f Fence) Original() (time.Time, <-chan struct{}) { return f.deadline, f.done }
+
+// Shortened keeps the original cancellation and can only reduce its lifetime.
+func (f Fence) Shortened(deadline time.Time) (Fence, error) {
+	if deadline.IsZero() {
+		return Fence{}, ErrInvalid
+	}
+	if deadline.Before(f.deadline) {
+		f.deadline = deadline
+	}
+	if err := f.Check(); err != nil {
+		return Fence{}, err
+	}
+	return f, nil
+}

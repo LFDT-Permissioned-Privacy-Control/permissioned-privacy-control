@@ -65,9 +65,15 @@ type historyReadBudget struct {
 	physical, items, charged int
 	wire                     int64
 	exceeded                 bool
+	shared                   *HistorySharedBudget
 }
 
 func (b *historyReadBudget) reserveItems(n int) error {
+	if b.shared != nil {
+		if e := b.shared.charge(0, n, 0, 0, 0); e != nil {
+			return e
+		}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if n < 0 || n > b.limits.MaxRPCItems-b.items {
@@ -78,6 +84,11 @@ func (b *historyReadBudget) reserveItems(n int) error {
 	return nil
 }
 func (b *historyReadBudget) reserveOwned(n int) error {
+	if b.shared != nil {
+		if e := b.shared.reserveOwned(n); e != nil {
+			return failure(EvidenceLimit)
+		}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if n < 0 || n > b.limits.MaxChargedBytes-b.charged {
@@ -88,6 +99,11 @@ func (b *historyReadBudget) reserveOwned(n int) error {
 	return nil
 }
 func (b *historyReadBudget) RoundTrip(r *http.Request) (*http.Response, error) {
+	if b.shared != nil {
+		if e := b.shared.charge(1, 0, 0, 0, 0); e != nil {
+			return nil, e
+		}
+	}
 	b.mu.Lock()
 	if b.physical >= b.limits.MaxHTTPAttempts || b.wire >= b.limits.MaxWireBytes {
 		b.exceeded = true
@@ -114,6 +130,9 @@ func (r *historyReadCountedBody) Read(p []byte) (int, error) {
 	b := r.budget
 	b.mu.Lock()
 	left := b.limits.MaxWireBytes - b.wire
+	if b.shared != nil {
+		left = min(left, b.shared.wireAllowance())
+	}
 	if left < 0 {
 		b.mu.Unlock()
 		return 0, failure(EvidenceLimit)
@@ -124,6 +143,11 @@ func (r *historyReadCountedBody) Read(p []byte) (int, error) {
 	// Serialize body reads with the shared wire counter. Even an accidental
 	// concurrent consumer cannot spend the same remaining bytes twice.
 	n, err := r.body.Read(p)
+	if b.shared != nil {
+		if e := b.shared.charge(0, 0, 0, 0, int64(n)); e != nil {
+			err = e
+		}
+	}
 	b.wire += int64(n)
 	if b.wire > b.limits.MaxWireBytes {
 		b.exceeded = true

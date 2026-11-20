@@ -133,6 +133,7 @@ type Log struct {
 }
 
 type Token struct {
+	Counts            Counts    `json:"counts,omitempty"`
 	Address           Address   `json:"address"`
 	Symbol            string    `json:"symbol"`
 	Name              *string   `json:"name,omitempty"`
@@ -165,6 +166,7 @@ type Balance struct {
 }
 
 type AddressStats struct {
+	Counts             Counts    `json:"counts,omitempty"`
 	Address            Address   `json:"address"`
 	TxCount            *Quantity `json:"txCount,omitempty"`
 	InternalTxCount    *Quantity `json:"internalTxCount,omitempty"`
@@ -176,6 +178,7 @@ type AddressStats struct {
 }
 
 type ChainStats struct {
+	Counts                       Counts    `json:"counts,omitempty"`
 	TotalBlocks                  *Quantity `json:"totalBlocks,omitempty"`
 	TotalTransactions            *Quantity `json:"totalTransactions,omitempty"`
 	TotalAddresses               *Quantity `json:"totalAddresses,omitempty"`

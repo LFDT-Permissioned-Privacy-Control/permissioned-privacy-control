@@ -178,6 +178,7 @@ type operation struct {
 	read                 *pb.ReadContext
 	charged, calls, rows int
 	closed               bool
+	budget               *q.ReadBudget
 }
 
 func (r *Reader) newOperation(ctx context.Context) (*operation, error) {
@@ -191,6 +192,11 @@ func (r *Reader) newOperation(ctx context.Context) (*operation, error) {
 	return &operation{owner: r, fence: f}, nil
 }
 func (o *operation) call(ctx context.Context, request proto.Message, fn func(context.Context) (proto.Message, error)) (proto.Message, error) {
+	if o.budget != nil {
+		if e := o.budget.Call(); e != nil {
+			return nil, e
+		}
+	}
 	if o.closed || !o.owner.valid() || o.fence.Check() != nil || o.calls >= o.owner.limits.MaxCalls {
 		return nil, ErrUnavailable
 	}
@@ -219,6 +225,11 @@ func (o *operation) call(ctx context.Context, request proto.Message, fn func(con
 // chargeRows belongs to the original operation, including protected CURRENT
 // rechecks. Exhaustion retires the purpose; no later call can renew the ledger.
 func (o *operation) chargeRows(n int) error {
+	if o.budget != nil {
+		if e := o.budget.Rows(n); e != nil {
+			return e
+		}
+	}
 	if n < 0 || n > o.owner.limits.MaxResultRows-o.rows {
 		o.closed = true
 		return ErrTooBroad
@@ -227,6 +238,11 @@ func (o *operation) chargeRows(n int) error {
 	return nil
 }
 func (o *operation) retain(n int) error {
+	if o.budget != nil {
+		if e := o.budget.Bytes(n); e != nil {
+			return e
+		}
+	}
 	if n < 0 || n > o.owner.limits.MaxChargedBytes-o.charged {
 		return ErrTooBroad
 	}

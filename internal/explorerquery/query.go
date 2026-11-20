@@ -50,6 +50,8 @@ type Position struct {
 type Query struct {
 	Family                               Family
 	Address, Hash, Token, Topic0, Search string
+	AddressSet                           []string `json:",omitempty"`
+	TokenSet                             []string `json:",omitempty"`
 	Block, From, Through                 *uint64
 	Upper                                *Anchor
 	After                                *Position
@@ -58,6 +60,7 @@ type Query struct {
 	RawLimit                             int
 	TokenKind                            TokenKind                `json:"tokenKind,omitempty"`
 	Fence                                admissionsharedata.Fence `json:"-"`
+	Budget                               *ReadBudget              `json:"-"`
 }
 type TokenKind string
 
@@ -77,6 +80,21 @@ var hashPattern = regexp.MustCompile(`^0x[0-9a-f]{64}$`)
 func ValidAddress(s string) bool { return addressPattern.MatchString(s) }
 func ValidHash(s string) bool    { return hashPattern.MatchString(s) }
 func Normalize(q Query) (Query, error) {
+	for _, set := range [][]string{q.AddressSet, q.TokenSet} {
+		if len(set) > 25 {
+			return Query{}, ErrTooBroad
+		}
+		for i, a := range set {
+			if !ValidAddress(a) || i > 0 && set[i-1] >= a {
+				return Query{}, ErrInvalid
+			}
+		}
+	}
+	if len(q.AddressSet) > 0 && q.Address != "" || len(q.TokenSet) > 0 && q.Token != "" {
+		return Query{}, ErrInvalid
+	}
+	q.AddressSet = append([]string(nil), q.AddressSet...)
+	q.TokenSet = append([]string(nil), q.TokenSet...)
 	switch q.Family {
 	case Blocks, Transactions, Transfers, Internals, Logs, Tokens, Balances, Holders, Contracts, Addresses, Sync, Progress, Search:
 	default:
