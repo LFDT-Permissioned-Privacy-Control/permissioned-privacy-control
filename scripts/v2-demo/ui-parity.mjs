@@ -172,11 +172,20 @@ async function checkSourceAuthoringParity({ user, runtime, sourceDirectory, outp
     assert.ok(layout.content <= layout.width, name + ': no horizontal page overflow at ' + width);
   }
   async function editMode(editing) {
+    // Radix keeps the closing dialog mounted during its exit transition and
+    // temporarily hides the underlying controls from the accessibility tree.
+    await page.getByRole('dialog').waitFor({ state: 'hidden' });
     const button = page.getByRole('button', { name: editing ? 'Edit local proposal' : 'Inspect proposal', exact: true });
     if (await button.count()) await button.click();
-    assert.equal(await page.getByRole('button', { name: editing ? 'Inspect proposal' : 'Edit local proposal', exact: true }).count(), 1);
+    await page.getByRole('button', { name: editing ? 'Inspect proposal' : 'Edit local proposal', exact: true }).waitFor({ state: 'visible' });
   }
-  const closeDialog = async () => page.getByRole('dialog').last().getByRole('button', { name: 'Close', exact: true }).first().click();
+  const closeDialog = async () => {
+    const dialog = page.getByRole('dialog').last(), closing = await dialog.elementHandle();
+    assert.ok(closing);
+    await dialog.getByRole('button', { name: 'Close', exact: true }).first().click();
+    await closing.waitForElementState('hidden'); // Keep the inner dialog identity after its parent becomes visible.
+    await closing.dispose();
+  };
   async function palette(label, locator) {
     // Shared V1 Tailwind tokens: primary #8950FA, primary-50 #F5F3FF,
     // primary-200 #C4A8FD. Poll through transitions before comparing colours.
