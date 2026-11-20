@@ -674,8 +674,9 @@ try {
   }
   // Never print request headers, token bodies, cookies, DSNs or SDK internals.
   const location = /(check|ui-parity|explorer-data-parity)\.mjs:(\d+):(\d+)/.exec(error?.stack ?? '');
+  const operator = error?.name === 'AssertionError' && ['strictEqual', '==', 'deepStrictEqual', 'match'].includes(error.operator) ? ' operator=' + error.operator : '';
   const status = error?.name === 'AssertionError' && typeof error.actual === 'number' && typeof error.expected === 'number' ? ' actual=' + error.actual + ' expected=' + error.expected : '';
-  console.error('FAIL native V2 walkthrough stage=' + stage + ' category=' + (error?.name ?? 'Error') + (location ? ' source=' + location[1] + ' line=' + location[2] : '') + status);
+  console.error('FAIL native V2 walkthrough stage=' + stage + ' category=' + (error?.name ?? 'Error') + (location ? ' source=' + location[1] + ' line=' + location[2] : '') + operator + status);
   process.exitCode = 1;
 } finally {
   if (readerRevoked) {
