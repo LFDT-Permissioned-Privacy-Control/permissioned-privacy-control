@@ -33,6 +33,7 @@ type PageInfo struct {
 }
 
 type Block struct {
+	Counts           Counts    `json:"counts,omitempty"`
 	Source           string    `json:"source,omitempty"`
 	Number           Quantity  `json:"number"`
 	Hash             Hash      `json:"hash"`

@@ -22,6 +22,7 @@ import (
 	a "privacy-proxy/internal/admission"
 	f "privacy-proxy/internal/disclosuretest"
 	"privacy-proxy/internal/explorerquery"
+	wire "privacy-proxy/internal/explorerv2data"
 	"privacy-proxy/internal/historyfacts"
 	"privacy-proxy/internal/indexertest"
 	"privacy-proxy/internal/networkidentity"
@@ -67,8 +68,21 @@ func TestExplorerActualExpiredIdentityNeverPublishesCounts(t *testing.T) {
 func TestExplorerActualFailedOptionalCountRecheckKeepsPage(t *testing.T) {
 	testExplorerActualHTTP(t, false, "recheck")
 }
+func TestExplorerActualBlockCountsStandardAndEmptyGroup(t *testing.T) {
+	testExplorerActualHTTP(t, false, "block-standard")
+}
+func TestExplorerActualBlockCountsStrict(t *testing.T) {
+	testExplorerActualHTTP(t, false, "block-strict")
+}
+func TestExplorerActualBlockCountsMethodGate(t *testing.T) {
+	testExplorerActualHTTP(t, false, "block-no-tx")
+}
+func TestExplorerActualBlockCountsBudgetCutoff(t *testing.T) {
+	testExplorerActualHTTP(t, false, "block-large")
+}
 func testExplorerActualHTTP(t *testing.T, nodeFallback bool, countMode string, transferKinds ...bool) {
-	strictCounts := countMode == "strict"
+	strictCounts := countMode == "strict" || countMode == "block-strict"
+	blockMode := strings.HasPrefix(countMode, "block-")
 	typed := len(transferKinds) > 0 && transferKinds[0]
 	indexertest.Require(t)
 	d := rawPostgres(t)
@@ -89,7 +103,7 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, countMode string, t
 	listed := f.HistoryTransaction(t, 2, 1, target)
 	hidden := f.HistoryTransaction(t, 3, 2, common.HexToAddress("0x987654"))
 	txs := []*types.Transaction{coin, hidden, listed}
-	if countMode == "large" {
+	if countMode == "large" || countMode == "block-large" {
 		for n := 3; n < 220; n++ {
 			txs = append(txs, f.HistoryTransaction(t, 1, uint64(n), target))
 		}
@@ -122,6 +136,17 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, countMode string, t
 			methods := []string{}
 			for _, method := range src.Groups[f.Org][i].AllowedMethods {
 				if method != "eth_getLogs" {
+					methods = append(methods, method)
+				}
+			}
+			src.Groups[f.Org][i].AllowedMethods = methods
+		}
+	}
+	if countMode == "block-no-tx" {
+		for i := range src.Groups[f.Org] {
+			methods := []string{}
+			for _, method := range src.Groups[f.Org][i].AllowedMethods {
+				if method != "eth_getTransactionByHash" {
 					methods = append(methods, method)
 				}
 			}
@@ -216,6 +241,11 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, countMode string, t
 		fallbackNode = node
 	}
 	index, indexOwner, binding := actualExplorerIndex(t, d.owner, d.ownerDSN, network, fallbackNode, countMode == "slow")
+	if blockMode {
+		if _, err = indexOwner.Exec(ctx, `UPDATE blocks SET transaction_count=999 WHERE number=1`); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var selectedIndex explorerquery.Source = index
 	failCountRecheck := &atomic.Bool{}
 	if countMode == "slow" || countMode == "recheck" {
@@ -273,6 +303,10 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, countMode string, t
 			t.Fatal(err)
 		}
 	}
+	blockFailRead, blockFailRecheck := &atomic.Bool{}, &atomic.Bool{}
+	if blockMode {
+		selectedIndex = &optionalBlockCountIndex{Reader: index, failRead: blockFailRead, failRecheck: blockFailRecheck}
+	}
 	explorer, err := rpcengine.NewExplorer(rpcengine.ExplorerConfig{Snapshot: snapshot, History: history, State: stateEngine, Metadata: metadata, Index: selectedIndex, IndexExpected: binding, CursorKey: bytes.Repeat([]byte{13}, 32), PseudonymKey: bytes.Repeat([]byte{14}, 32)})
 	if err != nil {
 		t.Fatal("concrete Explorer constructor", err)
@@ -283,8 +317,9 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, countMode string, t
 	entered, release := make(chan struct{}), make(chan struct{})
 	var sealCount atomic.Int32
 	var reorgAtSeal atomic.Bool
+	var expireBlockAtSeal atomic.Bool
 	recorder := rpcRecorder(t, activity, clock, func(uint64) error {
-		if countMode == "expiry" {
+		if countMode == "expiry" || expireBlockAtSeal.Swap(false) {
 			instant.Add(600)
 		}
 		if countMode == "recheck" {
@@ -339,6 +374,90 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, countMode string, t
 		close(release)
 	}
 
+	if blockMode {
+		decode := func(response result) wire.Block {
+			t.Helper()
+			var block wire.Block
+			if response.status != 200 || json.Unmarshal(response.body, &block) != nil || block.Hash == "" {
+				t.Fatal("block response", response.status, string(response.body))
+			}
+			return block
+		}
+		assertCount := func(block wire.Block, want string) {
+			t.Helper()
+			count := block.Counts["transactions"]
+			if count.Status != "exact" || count.Value == nil || string(*count.Value) != want || block.TransactionCount == nil || string(*block.TransactionCount) != want || count.Range == nil || count.Range.FromBlock != block.Number || count.Range.ThroughBlock != block.Number || count.Range.HeadHash != block.Hash {
+				t.Fatal("count/scalar/selected canonical range", block, count)
+			}
+		}
+		first := decode(<-get("/api/v2/explorer/blocks/1"))
+		if countMode == "block-no-tx" {
+			if first.TransactionCount != nil || first.Counts["transactions"].Status != "unavailable" || first.Counts["transactions"].ObservedAt != nil || node.Calls()["eth_getTransactionByHash"] != 0 {
+				t.Fatal("header permission granted transaction facts", first, node.Calls())
+			}
+			return
+		}
+		if countMode == "block-large" {
+			count := first.Counts["transactions"]
+			if count.Status != "at_least" || count.LowerBound == nil || first.TransactionCount != nil || count.Range == nil || count.Range.HeadHash != first.Hash {
+				t.Fatal("large block fabricated exact total", first)
+			}
+			bound, ok := new(big.Int).SetString(string(*count.LowerBound), 10)
+			if !ok || bound.Cmp(big.NewInt(25)) <= 0 {
+				t.Fatal("block count did not qualify rows beyond the ordinary first page", first)
+			}
+			return
+		}
+		want := "2"
+		if strictCounts {
+			want = "1"
+		}
+		assertCount(first, want)
+		assertCount(decode(<-get("/api/v2/explorer/blocks/hash/"+first.Hash)), want)
+		head := node.AdvanceEmptyHead2()
+		if _, err = indexOwner.Exec(ctx, `INSERT INTO blocks(number,hash,parent_hash,timestamp,gas_used,gas_limit,transaction_count)VALUES(2,$1,$2,$3,0,30000000,999);UPDATE sync_status SET last_indexed_block=2`, pgx.QueryExecModeSimpleProtocol, strings.ToLower(head.Hash().Hex()), strings.ToLower(node.Hash().Hex()), head.Time); err != nil {
+			t.Fatal(err)
+		}
+		assertCount(decode(<-get("/api/v2/explorer/blocks/2")), "0")
+		grouped := <-get("/api/v2/explorer/blocks?limit=25")
+		var page wire.Page[wire.Block]
+		if grouped.status != 200 || json.Unmarshal(grouped.body, &page) != nil || len(page.Items) != 2 {
+			t.Fatal("block group", grouped.status, string(grouped.body))
+		}
+		for _, block := range page.Items {
+			if block.Number == "1" {
+				assertCount(block, want)
+			} else if block.Number == "2" {
+				assertCount(block, "0")
+			} else {
+				t.Fatal("unexpected group target", block)
+			}
+		}
+		blockFailRead.Store(true)
+		failed := decode(<-get("/api/v2/explorer/blocks/1"))
+		blockFailRead.Store(false)
+		if failed.TransactionCount != nil || failed.Counts["transactions"].Status != "unavailable" {
+			t.Fatal("source failure fabricated zero or broke header", failed)
+		}
+		blockFailRecheck.Store(true)
+		failed = decode(<-get("/api/v2/explorer/blocks/1"))
+		blockFailRecheck.Store(false)
+		if failed.TransactionCount != nil || failed.Counts["transactions"].Status != "unavailable" {
+			t.Fatal("final count failure released stale facts", failed)
+		}
+		reorgAtSeal.Store(true)
+		reorg := <-get("/api/v2/explorer/blocks/1")
+		node.Reorg(false)
+		if reorg.status == 200 {
+			t.Fatal("parent reorg released header/count", string(reorg.body))
+		}
+		expireBlockAtSeal.Store(true)
+		expired := <-get("/api/v2/explorer/blocks/1")
+		if expired.status == 200 {
+			t.Fatal("parent expiry released header/count", string(expired.body))
+		}
+		return
+	}
 	if countMode != "standard" && countMode != "strict" {
 		response := <-get("/api/v2/explorer/stats?limit=1")
 		if countMode == "expiry" {
@@ -720,6 +839,13 @@ func testExplorerActualHTTP(t *testing.T, nodeFallback bool, countMode string, t
 			if response.status != 200 || json.Unmarshal(response.body, &object) != nil || object.Hash != point.hash || object.Source != "NODE" {
 				t.Fatal("authorized actual NODE point failed", point.path, response.status, string(response.body))
 			}
+			if strings.Contains(point.path, "/blocks/") {
+				block := wire.Block{}
+				if json.Unmarshal(response.body, &block) != nil || block.TransactionCount != nil || block.Counts["transactions"].Status != "unavailable" {
+					t.Fatal("NODE-only/pruned point pretended a known transaction total", string(response.body))
+				}
+			}
+
 		}
 		var opaque []byte
 		for _, hash := range []string{strings.ToLower(hidden.Hash().Hex()), ghost, absent} {
@@ -804,4 +930,22 @@ func (s *optionalCountIndex) RecheckCurrentCounts(ctx context.Context, p *explor
 		return explorerquery.ErrUnavailable
 	}
 	return s.Reader.RecheckCurrentCounts(ctx, p)
+}
+
+type optionalBlockCountIndex struct {
+	*explorerindex.Reader
+	failRead, failRecheck *atomic.Bool
+}
+
+func (s *optionalBlockCountIndex) ReadCohort(ctx context.Context, q explorerquery.Query) (*explorerquery.ReadPass, error) {
+	if q.Family == explorerquery.Transactions && s.failRead.Load() {
+		return nil, explorerquery.ErrUnavailable
+	}
+	return s.Reader.ReadCohort(ctx, q)
+}
+func (s *optionalBlockCountIndex) Recheck(ctx context.Context, p *explorerquery.ReadPass) error {
+	if p.Query().Family == explorerquery.Transactions && s.failRecheck.Load() {
+		return explorerquery.ErrUnavailable
+	}
+	return s.Reader.Recheck(ctx, p)
 }

@@ -126,6 +126,7 @@ type ExplorerOperationResult struct {
 	countHardDeadline time.Time
 	countStarted      time.Time
 	countPages        []*ExplorerOperationResult
+	countAnchors      []rpcexecution.HistoryHeader
 	currentCounts     []*explorerCurrentCountEvidence
 }
 
@@ -238,7 +239,7 @@ func (e *ExplorerEngine) readExplorerPage(ctx context.Context, r *ExplorerOperat
 	if indexedDeadline := pass.Query().Deadline(); indexedDeadline.Before(d) {
 		d = indexedDeadline
 	}
-	anchors := []rpcexecution.HistoryHeader{}
+	anchors := append([]rpcexecution.HistoryHeader{}, r.countAnchors...)
 	if r.request.query.Family == explorerquery.Blocks {
 		count = min(count, explorerCapacity(client.Bounds()))
 		for _, row := range data.Rows[:count] {

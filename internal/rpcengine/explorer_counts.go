@@ -29,7 +29,7 @@ func (p *explorerCurrentCountEvidence) recheck(ctx context.Context, e *ExplorerE
 }
 func wantsExplorerCounts(label string) bool {
 	switch label {
-	case "explorer.stats", "explorer.tokens", "explorer.token", "explorer.accounts", "explorer.address_stats":
+	case "explorer.stats", "explorer.tokens", "explorer.token", "explorer.accounts", "explorer.address_stats", "explorer.blocks", "explorer.block_number", "explorer.block_hash":
 		return true
 	}
 	return false
@@ -51,6 +51,7 @@ func exactCurrentCount(n uint64, observed time.Time) wire.ScopedCount {
 type countTarget struct {
 	address string
 	counts  wire.Counts
+	block   *explorerquery.Anchor
 }
 
 func (e *ExplorerEngine) currentCountBatch(ctx context.Context, r *ExplorerOperationResult, scope *historyfacts.Current, selectors []explorerquery.CurrentCountSelector) []wire.ScopedCount {
@@ -166,16 +167,39 @@ func (e *ExplorerEngine) enrichExplorerCounts(ctx context.Context, r *ExplorerOp
 	if r.payload == nil || r.pass == nil || len(r.body) > MaxExplorerResponseBytes-(256<<10) {
 		return
 	}
-	var tokens, accounts []countTarget
+	var tokens, accounts, blocks []countTarget
+	data := r.pass.Data()
+	blockTargets := map[uint64]bool{}
 	visit := func(value any) any {
 		switch item := value.(type) {
+		case wire.Block:
+			item.Counts = wire.Counts{"transactions": unavailableCount("SNAPSHOT")}
+			n, err := explorerNumber(string(item.Number))
+			if err != nil {
+				return item
+			}
+			count := item.Counts["transactions"]
+			count.Range = &wire.CountRange{FromBlock: item.Number, ThroughBlock: item.Number, HeadHash: item.Hash}
+			if n < data.HistoryFrom {
+				count.Coverage = "history_pruned"
+			} else if n < data.RunFloor || item.Source != "INDEXER" {
+				count.Coverage = "index_floor"
+			}
+			item.Counts["transactions"] = count
+			if item.Source == "INDEXER" && data.Upper != nil && n >= max(data.HistoryFrom, data.RunFloor) && n <= data.Upper.Number && len(blocks) < 25 && !blockTargets[n] {
+				if _, ok := r.batch.Header(n, common.HexToHash(item.Hash)); ok {
+					blockTargets[n] = true
+					blocks = append(blocks, countTarget{counts: item.Counts, block: &explorerquery.Anchor{Number: n, Hash: item.Hash}})
+				}
+			}
+			return item
 		case wire.Token:
 			item.Counts = wire.Counts{"holders": unavailableCount("CURRENT"), "tokenTransfers": unavailableCount("SNAPSHOT")}
-			tokens = append(tokens, countTarget{item.Address, item.Counts})
+			tokens = append(tokens, countTarget{address: item.Address, counts: item.Counts})
 			return item
 		case wire.AddressStats:
 			item.Counts = wire.Counts{"transactions": unavailableCount("SNAPSHOT"), "tokenTransfers": unavailableCount("SNAPSHOT"), "internalTransactions": unavailableCount("SNAPSHOT")}
-			accounts = append(accounts, countTarget{item.Address, item.Counts})
+			accounts = append(accounts, countTarget{address: item.Address, counts: item.Counts})
 			return item
 		}
 		return value
@@ -188,6 +212,8 @@ func (e *ExplorerEngine) enrichExplorerCounts(ctx context.Context, r *ExplorerOp
 		}
 		r.payload = payload
 	case wire.Token:
+		r.payload = visit(payload)
+	case wire.Block:
 		r.payload = visit(payload)
 	case wire.AddressStats:
 		r.payload = visit(payload)
@@ -234,6 +260,9 @@ func (e *ExplorerEngine) enrichExplorerCounts(ctx context.Context, r *ExplorerOp
 	if len(tokens) > 0 {
 		e.countHistory(ctx, r, tokens, "tokenTransfers", "eth_getLogs", "/tokens/"+tokens[0].address+"/transfers", explorerquery.Transfers, true)
 	}
+	if len(blocks) > 0 {
+		e.countHistory(ctx, r, blocks, "transactions", "eth_getTransactionByHash", "/blocks/"+string(decimal(blocks[0].block.Number))+"/transactions", explorerquery.Transactions, false)
+	}
 	if stats != nil {
 		targets := []countTarget{{counts: stats.Counts}}
 		e.countHistory(ctx, r, targets, "transactions", "eth_getTransactionByHash", "/transactions", explorerquery.Transactions, false)
@@ -273,6 +302,28 @@ func (e *ExplorerEngine) countHistory(ctx context.Context, parent *ExplorerOpera
 	data := parent.pass.Data()
 	floor := data.RunFloor
 	from := max(data.RunFloor, data.HistoryFrom)
+	byBlock := targets[0].block != nil
+	var requiredAnchors []rpcexecution.HistoryHeader
+	if byBlock {
+		if len(targets) > 25 {
+			return
+		}
+		from = targets[0].block.Number
+		through := from
+		for _, target := range targets {
+			if target.block == nil {
+				return
+			}
+			from = min(from, target.block.Number)
+			through = max(through, target.block.Number)
+			requiredAnchors = append(requiredAnchors, rpcexecution.HistoryHeader{Number: target.block.Number, Hash: common.HexToHash(target.block.Hash)})
+		}
+		// Parsing a point block route installs Query.Block. A grouped range must
+		// clear it, or later selected blocks could falsely become exact zero.
+		request.query.Block = nil
+		request.query.Hash = ""
+		request.query.Through = &through
+	}
 	request.query.Upper = data.Upper
 	request.query.DatasetEpoch = data.DatasetEpoch
 	request.query.RunFloor = &floor
@@ -288,7 +339,7 @@ func (e *ExplorerEngine) countHistory(ctx context.Context, parent *ExplorerOpera
 		}
 	}()
 	for parent.canCountMore() {
-		page := &ExplorerOperationResult{owner: e, current: scope, request: request, readBudget: parent.readBudget, nodeBudget: parent.nodeBudget, countStarted: parent.countStarted, layoutMatcher: parent.layoutMatcher, countHardDeadline: parent.countDeadline()}
+		page := &ExplorerOperationResult{owner: e, current: scope, request: request, readBudget: parent.readBudget, nodeBudget: parent.nodeBudget, countStarted: parent.countStarted, layoutMatcher: parent.layoutMatcher, countHardDeadline: parent.countDeadline(), countAnchors: requiredAnchors}
 		acquire, cancel, ok := parent.optionalCountContext(ctx, true)
 		if !ok {
 			break
@@ -353,7 +404,18 @@ func (e *ExplorerEngine) countHistory(ctx context.Context, parent *ExplorerOpera
 					return
 				}
 				matches := target.address == ""
-				if byToken {
+				if byBlock {
+					tx, found := renderer.transactions[fields.text("hash")]
+					if !found {
+						page.Close()
+						return
+					}
+					matches = tx.Location.BlockNumber == target.block.Number
+					if matches && strings.ToLower(tx.Location.BlockHash.Hex()) != target.block.Hash {
+						page.Close()
+						return
+					}
+				} else if byToken {
 					matches = fields.text("token_address") == target.address
 				} else if target.address != "" {
 					matches = fields.text("from_address") == target.address || fields.text("to_address") == target.address || family == explorerquery.Transactions && fields.text("contract_address") == target.address
@@ -384,14 +446,17 @@ func (e *ExplorerEngine) countHistory(ctx context.Context, parent *ExplorerOpera
 	for i, target := range targets {
 		value := decimal(totals[i])
 		count := wire.ScopedCount{Status: "at_least", LowerBound: &value, Population: "ORDINARY_VISIBLE_ROWS", Consistency: "SNAPSHOT", ObservedAt: &stamp, Range: &wire.CountRange{FromBlock: decimal(from), ThroughBlock: decimal(data.Upper.Number), HeadHash: data.Upper.Hash}, Coverage: "scan_limited"}
+		if byBlock {
+			count.Range = &wire.CountRange{FromBlock: decimal(target.block.Number), ThroughBlock: decimal(target.block.Number), HeadHash: target.block.Hash}
+		}
 		if complete {
 			count.Status = "exact"
 			count.Value = &value
 			count.LowerBound = nil
 			count.Coverage = "complete_range"
-			if data.HistoryFrom > 0 && data.HistoryFrom >= data.RunFloor {
+			if !byBlock && data.HistoryFrom > 0 && data.HistoryFrom >= data.RunFloor {
 				count.Coverage = "history_pruned"
-			} else if data.RunFloor > 0 {
+			} else if !byBlock && data.RunFloor > 0 {
 				count.Coverage = "index_floor"
 			}
 		}
@@ -413,6 +478,9 @@ func (r *ExplorerOperationResult) setExactCountFields() {
 		case wire.Token:
 			x.HolderCount = exact(x.Counts, "holders")
 			x.TransferCount = exact(x.Counts, "tokenTransfers")
+			return x
+		case wire.Block:
+			x.TransactionCount = exact(x.Counts, "transactions")
 			return x
 		case wire.AddressStats:
 			x.TxCount = exact(x.Counts, "transactions")
@@ -531,6 +599,8 @@ func (r *ExplorerOperationResult) dropCounts() {
 		var counts wire.Counts
 		switch x := value.(type) {
 		case wire.Token:
+			counts = x.Counts
+		case wire.Block:
 			counts = x.Counts
 		case wire.AddressStats:
 			counts = x.Counts
