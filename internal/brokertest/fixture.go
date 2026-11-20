@@ -41,7 +41,18 @@ func Snapshot(t testing.TB, change func(*identity.SourceCatalog, *brokerpolicy.S
 	}
 	return snapshot(t, identities, broker, policybundle.BrokerProfileID, nil)
 }
-func snapshot(t testing.TB, identities identity.SourceCatalog, broker any, profile string, extra map[string][]byte) *policybundle.CatalogSnapshot {
+
+// SnapshotWithGroups exercises real selected metadata and identity mappings
+// with a caller-owned group fixture; production code never imports this package.
+func SnapshotWithGroups(t testing.TB, groups []policybundle.Group, change func(*identity.SourceCatalog)) *policybundle.CatalogSnapshot {
+	t.Helper()
+	identities := IdentitySource()
+	if change != nil {
+		change(&identities)
+	}
+	return snapshot(t, identities, BrokerSource(), policybundle.BrokerProfileID, nil, groups)
+}
+func snapshot(t testing.TB, identities identity.SourceCatalog, broker any, profile string, extra map[string][]byte, selectedGroups ...[]policybundle.Group) *policybundle.CatalogSnapshot {
 	t.Helper()
 	draft := policybundle.Draft{APIVersion: policybundle.DraftAPIVersion, Kind: policybundle.DraftKind, Environment: "test", ChainID: "1", EvaluatorVersion: policybundle.NativeV2EvaluatorVersion, Profile: profile, SourceRevision: "broker-fixture", Organizations: []policybundle.Organization{{ID: f.Org, Slug: "bank", Name: "Bank"}}, Documents: []policybundle.DraftDocument{}, IdentityCatalog: &policybundle.DraftIdentity{Path: "identity.json"}, AuthCatalog: &policybundle.DraftIdentity{Path: "auth.json"}}
 	dir := t.TempDir()
@@ -55,6 +66,9 @@ func snapshot(t testing.TB, identities identity.SourceCatalog, broker any, profi
 		}
 	}
 	groups := []policybundle.Group{{ID: f.AuditorGroup, Slug: "reader", Name: "Reader", Claims: []string{}, AllowedMethods: []string{"eth_call"}}, {ID: f.AdminGroup, Slug: "admin", Name: "Admin", IsOrgAdmin: true, Claims: []string{}, AllowedMethods: []string{"eth_getCode"}}}
+	if len(selectedGroups) != 0 {
+		groups = selectedGroups[0]
+	}
 	for _, row := range []struct {
 		kind policybundle.Kind
 		file string

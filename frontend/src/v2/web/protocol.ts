@@ -2,10 +2,12 @@ import { AuthError, canonicalState, closedJSON, liveExpiry, object, session, tex
 import { MultiSession } from '../auth/multiProtocol'
 import { MultiAccess } from '../auth/multiProtocol'
 
+export interface OwnGroup { id: string; name: string; slug: string }
+export interface OwnGroups { groups?: OwnGroup[]; groupCount?: number; groupsTruncated?: boolean }
 export interface Self {
   actorId: string; principalKind: 'human' | 'service'; sourceProfile: string
   sourceProfileDigest: string; expiresAt: number
-  organizations: { id: string; slug: string; name: string; isOrgAdmin: boolean; isOrgReadonlyAdmin: boolean }[]
+  organizations: ({ id: string; slug: string; name: string; isOrgAdmin: boolean; isOrgReadonlyAdmin: boolean } & OwnGroups)[]
 }
 export interface Flow { id: string; clientId: string; expiresAt: number; displayName: string }
 export const FLOW_KEY = 'ops-v2.sso-continuation'
@@ -47,12 +49,26 @@ export async function ownSelf(access: MultiAccess, signal: AbortSignal): Promise
   if (v.actorId !== access.actorId || v.principalKind !== 'human' || v.sourceProfile !== access.sourceProfile ||
     v.expiresAt !== access.expiresAt || !liveExpiry(v.expiresAt) || typeof v.sourceProfileDigest !== 'string' ||
     !/^sha256:[0-9a-f]{64}$/.test(v.sourceProfileDigest) || !Array.isArray(v.organizations) || v.organizations.length > 256) throw new AuthError('invalid_response')
-  let previous = ''
+  let previous = '', displayedGroups = 0
   for (const entry of v.organizations) {
-    const o = object(entry, ['id', 'slug', 'name', 'isOrgAdmin', 'isOrgReadonlyAdmin'])
+    const groupFields = ['groups', 'groupCount', 'groupsTruncated']
+    const projected = !!entry && typeof entry === 'object' && groupFields.some(key => Object.prototype.hasOwnProperty.call(entry, key))
+    const o = object(entry, ['id', 'slug', 'name', 'isOrgAdmin', 'isOrgReadonlyAdmin', ...(projected ? groupFields : [])])
     if (!session(o.id) || o.id <= previous || !text(o.slug, 100) || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(o.slug) ||
       typeof o.name !== 'string' || new TextEncoder().encode(o.name).length < 1 || new TextEncoder().encode(o.name).length > 256 ||
       /[\u0000\r\n\t]/.test(o.name) || typeof o.isOrgAdmin !== 'boolean' || typeof o.isOrgReadonlyAdmin !== 'boolean') throw new AuthError('invalid_response')
+    if (projected) {
+      if (!Array.isArray(o.groups) || o.groups.length > 256 || !Number.isSafeInteger(o.groupCount) || (o.groupCount as number) < o.groups.length || (o.groupCount as number) > 0xffffffff || o.groupsTruncated !== ((o.groupCount as number) > o.groups.length)) throw new AuthError('invalid_response')
+      displayedGroups += o.groups.length
+      if (displayedGroups > 256) throw new AuthError('invalid_response')
+      let lastGroup = ''
+      const names = new Set<string>(), slugs = new Set<string>()
+      for (const item of o.groups) {
+        const group = object(item, ['id', 'name', 'slug'])
+        if (!session(group.id) || group.id <= lastGroup || typeof group.name !== 'string' || /^\p{White_Space}|\p{White_Space}$/u.test(group.name) || new TextEncoder().encode(group.name).length < 1 || new TextEncoder().encode(group.name).length > 256 || group.name.includes('\0') || group.name.includes('\r') || group.name.includes('\n') || group.name.includes('\t') || names.has(group.name) || !text(group.slug, 100) || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(group.slug) || slugs.has(group.slug)) throw new AuthError('invalid_response')
+        lastGroup = group.id; names.add(group.name); slugs.add(group.slug)
+      }
+    }
     previous = o.id
   }
   return v as unknown as Self

@@ -3,16 +3,20 @@ package selfhttp
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"privacy-proxy/internal/brokerpolicy"
 	f "privacy-proxy/internal/brokertest"
+	df "privacy-proxy/internal/disclosuretest"
 	"privacy-proxy/internal/identity"
 	"privacy-proxy/internal/policybundle"
 )
@@ -134,7 +138,7 @@ func TestActualVerifiedOwnSelfHumanServiceAndStrictIngress(t *testing.T) {
 				if tc.name == "human admin" && (len(dto.Organizations) != 1 || !dto.Organizations[0].IsOrgAdmin) {
 					t.Fatal("View admin flag missing")
 				}
-				for _, forbidden := range []string{"accessToken", "groups", "source_subject", "userId", "principal_kind"} {
+				for _, forbidden := range []string{"accessToken", "source_subject", "userId", "principal_kind", "allowedMethods", "rpcCredential", "verboseErrors", "claims"} {
 					if bytes.Contains(raw, []byte(forbidden)) {
 						t.Fatal("unexpected identity/directory data", forbidden)
 					}
@@ -175,10 +179,10 @@ func TestOriginalExpiryGateBeforeFirstSelfBytes(t *testing.T) {
 func TestSelfMaximumUnicodeJSONAndCanonicalOrigins(t *testing.T) {
 	response := Response{ActorID: "ops:p1:" + strings.Repeat("a", 43), PrincipalKind: identity.Service, SourceProfile: strings.Repeat("<", 128), SourceProfileDigest: "sha256:" + strings.Repeat("f", 64), ExpiresAt: 999999999999, Organizations: []Organization{}}
 	for i := 0; i < 256; i++ {
-		response.Organizations = append(response.Organizations, Organization{ID: strings.Repeat("a", 36), Slug: strings.Repeat("a", 100), Name: strings.Repeat("<", 256)})
+		response.Organizations = append(response.Organizations, Organization{ID: strings.Repeat("a", 36), Slug: strings.Repeat("a", 100), Name: strings.Repeat("<", 256), Groups: []Group{}})
 	}
 	var b bytes.Buffer
-	if json.NewEncoder(&b).Encode(response) != nil || b.Len() != 448505 || b.Len() > MaxResponseBytes {
+	if json.NewEncoder(&b).Encode(response) != nil || b.Len() != 461561 || b.Len() > MaxResponseBytes {
 		t.Fatal("maximum supported JSON bound", b.Len())
 	}
 	response.Organizations[0].Name = "<>&\"\\\u2028\u2029Банк🏦"
@@ -197,5 +201,125 @@ func TestSelfMaximumUnicodeJSONAndCanonicalOrigins(t *testing.T) {
 		if _, e := New(Config{Snapshot: snapshot, Origin: origin, Clock: time.Now}); e != nil {
 			t.Fatal("canonical origin rejected", origin)
 		}
+	}
+}
+
+func ownResponse(t *testing.T, h *Handler, token string) (Response, int, []byte) {
+	t.Helper()
+	server := httptest.NewTLSServer(h)
+	defer server.Close()
+	request, _ := http.NewRequest("GET", server.URL+Path, nil)
+	request.Host = "ops.test"
+	request.Header.Set("Authorization", "Bearer "+token)
+	result, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Body.Close()
+	raw, _ := io.ReadAll(result.Body)
+	var dto Response
+	if result.StatusCode == 200 && json.Unmarshal(raw, &dto) != nil {
+		t.Fatal("invalid own response")
+	}
+	return dto, result.StatusCode, raw
+}
+func ownHandler(t *testing.T, snapshot *policybundle.CatalogSnapshot) *Handler {
+	t.Helper()
+	h, err := New(Config{Snapshot: snapshot, Origin: "https://ops.test", Clock: func() time.Time { return time.Unix(testNow, 0) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+func TestOwnMappedGroupsFollowSelectedMappingAndFreshEvidence(t *testing.T) {
+	original := f.Snapshot(t, nil)
+	before, status, raw := ownResponse(t, ownHandler(t, original), signed(t, original, false, "Reader"))
+	if status != 200 || len(before.Organizations) != 1 {
+		t.Fatal(status, string(raw))
+	}
+	org := before.Organizations[0]
+	if org.GroupCount != 1 || org.GroupsTruncated || !slices.Equal(org.Groups, []Group{{ID: df.AuditorGroup, Name: "Reader", Slug: "reader"}}) || org.IsOrgAdmin {
+		t.Fatal("incorrect own group projection", org)
+	}
+	if bytes.Contains(raw, []byte(df.AdminGroup)) || bytes.Contains(raw, []byte("allowedMethods")) {
+		t.Fatal("foreign membership or private group data exposed")
+	}
+	changed := f.Snapshot(t, func(c *identity.SourceCatalog, _ *brokerpolicy.Source) {
+		c.Mappings[0].GroupIDs = []string{df.AdminGroup}
+	})
+	current := ownHandler(t, changed)
+	after, status, _ := ownResponse(t, current, signed(t, changed, false, "Reader"))
+	if status != 200 || after.ActorID != before.ActorID || after.ExpiresAt != before.ExpiresAt || !after.Organizations[0].IsOrgAdmin || after.Organizations[0].Groups[0].ID != df.AdminGroup {
+		t.Fatal("fresh mapped own projection missing")
+	}
+	remapped, status, _ := ownResponse(t, current, signed(t, original, false, "Reader"))
+	if status != 200 || remapped.Organizations[0].Groups[0].ID != df.AdminGroup {
+		t.Fatal("still-live verified facts did not use current selected mapping", status)
+	}
+	lost, status, _ := ownResponse(t, current, signed(t, changed, false))
+	if status != 200 || lost.ActorID != before.ActorID || len(lost.Organizations) != 0 {
+		t.Fatal("removed verified role retained own groups")
+	}
+	unchanged, status, _ := ownResponse(t, ownHandler(t, original), signed(t, original, false, "Reader"))
+	if status != 200 || unchanged.Organizations[0].Groups[0].ID != df.AuditorGroup {
+		t.Fatal("selected snapshot was mutated")
+	}
+}
+func TestOwnGroupProjectionBoundsAndEscapedEnvelope(t *testing.T) {
+	groups := []policybundle.Group{{ID: df.AuditorGroup, Slug: "reader", Name: "Reader", AllowedMethods: []string{"eth_call"}, Claims: []string{}}, {ID: df.AdminGroup, Slug: "admin", Name: "Admin", AllowedMethods: []string{"eth_getCode"}, IsOrgAdmin: true, Claims: []string{}}}
+	ids := []string{}
+	for i := 1; i <= 300; i++ {
+		id := fmt.Sprintf("%08x-1111-1111-1111-111111111111", i)
+		ids = append(ids, id)
+		groups = append(groups, policybundle.Group{ID: id, Slug: fmt.Sprintf("g%03d", i) + strings.Repeat("g", 96), Name: fmt.Sprintf("%03d", i) + strings.Repeat("<", 253), AllowedMethods: []string{"eth_call"}, Claims: []string{}})
+	}
+	snapshot := f.SnapshotWithGroups(t, groups, func(c *identity.SourceCatalog) { c.Mappings[0].GroupIDs = ids })
+	h := ownHandler(t, snapshot)
+	dto, status, raw := ownResponse(t, h, signed(t, snapshot, false, "Reader"))
+	if status != 200 || len(dto.Organizations) != 1 || dto.Organizations[0].GroupCount != 300 || !dto.Organizations[0].GroupsTruncated || len(dto.Organizations[0].Groups) != MaxDisplayedGroups || len(raw) > MaxResponseBytes {
+		t.Fatal("high own membership broke display bounds", status, len(raw))
+	}
+	if !slices.Equal(dto.Organizations[0].Groups[:2], []Group{{ID: ids[0], Name: groups[2].Name, Slug: groups[2].Slug}, {ID: ids[1], Name: groups[3].Name, Slug: groups[3].Slug}}) {
+		t.Fatal("projection is not stable selected metadata")
+	}
+	// Reserve worst-case organization text and the exact count frame before
+	// rows. Escaped group names must trigger measured-byte truncation, not 503.
+	projected := Response{ActorID: dto.ActorID, PrincipalKind: dto.PrincipalKind, SourceProfile: dto.SourceProfile, SourceProfileDigest: dto.SourceProfileDigest, ExpiresAt: dto.ExpiresAt, Organizations: []Organization{}}
+	memberships := make([][]string, MaxOrganizations)
+	for i := 0; i < MaxOrganizations; i++ {
+		projected.Organizations = append(projected.Organizations, Organization{ID: fmt.Sprintf("%08x-2222-2222-2222-222222222222", i+1), Name: strings.Repeat("<", 256), Slug: strings.Repeat("a", 100), Groups: []Group{}})
+	}
+	projected.Organizations[0].ID = df.Org
+	projected.Organizations[0].GroupCount = len(ids)
+	projected.Organizations[0].GroupsTruncated = true
+	memberships[0] = ids
+	if h.projectGroups(&projected, memberships) != nil {
+		t.Fatal("display bytes caused invalid baseline self")
+	}
+	encoded, _ := json.Marshal(projected)
+	if len(encoded) > MaxResponseBytes || len(projected.Organizations[0].Groups) == 0 || len(projected.Organizations[0].Groups) >= MaxDisplayedGroups || !projected.Organizations[0].GroupsTruncated || projected.Organizations[0].GroupCount != 300 {
+		t.Fatal("encoded-byte projection failed", len(encoded), len(projected.Organizations[0].Groups))
+	}
+	again, status, second := ownResponse(t, h, signed(t, snapshot, false, "Reader"))
+	if status != 200 || !bytes.Equal(raw, second) || again.Organizations[0].GroupCount != 300 {
+		t.Fatal("nondeterministic own projection")
+	}
+}
+
+// U+FEFF is not Go Unicode whitespace. ECMAScript String.trim removes it,
+// so the browser must use the source's White_Space contract for these names.
+func TestOwnGroupNameGoWhitespaceFixture(t *testing.T) {
+	name := "\ufeffReader\ufeff"
+	if strings.TrimSpace(name) != name || strings.TrimSpace("\u0085Reader\u0085") != "Reader" {
+		t.Fatal("unexpected Go whitespace contract")
+	}
+	original := f.Snapshot(t, nil)
+	reader, _ := original.Group(df.Org, df.AuditorGroup)
+	admin, _ := original.Group(df.Org, df.AdminGroup)
+	reader.Name = name
+	selected := f.SnapshotWithGroups(t, []policybundle.Group{reader, admin}, nil)
+	dto, status, _ := ownResponse(t, ownHandler(t, selected), signed(t, selected, false, "Reader"))
+	if status != 200 || len(dto.Organizations) != 1 || len(dto.Organizations[0].Groups) != 1 || dto.Organizations[0].Groups[0].Name != name {
+		t.Fatal("approved U+FEFF display name changed or rejected", status)
 	}
 }
