@@ -673,7 +673,7 @@ try {
     await users.get('deployer')?.page.screenshot({ path: path.join(directory, 'failed-explorer-reads.png'), fullPage: true });
   }
   // Never print request headers, token bodies, cookies, DSNs or SDK internals.
-  const location = /(check|ui-parity)\.mjs:(\d+):(\d+)/.exec(error?.stack ?? '');
+  const location = /(check|ui-parity|explorer-data-parity)\.mjs:(\d+):(\d+)/.exec(error?.stack ?? '');
   const status = error?.name === 'AssertionError' && typeof error.actual === 'number' && typeof error.expected === 'number' ? ' actual=' + error.actual + ' expected=' + error.expected : '';
   console.error('FAIL native V2 walkthrough stage=' + stage + ' category=' + (error?.name ?? 'Error') + (location ? ' source=' + location[1] + ' line=' + location[2] : '') + status);
   process.exitCode = 1;
