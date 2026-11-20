@@ -81,6 +81,13 @@ structured ABI and read-grant views, and Identity details at desktop and mobile
 widths. These edits are canceled, and re-exported source must match the imported
 files exactly. Screenshots are also saved in `source-authoring/`.
 
+The parity check also compares the scoped count cards with their actual API
+observation and checks that transfer-type tabs filter at the source and restart
+paging. It requires real numeric counts; an all-unavailable result does not pass.
+An empty token feed is recorded as empty, without claiming a populated token
+metadata check. Populated-token authority and long-price layout have separate
+Go integration and component-browser checks.
+
 In Groups, the pencil edits the name, description and organization role; the
 gear opens RPC methods, execution claims and connection references. These are
 local proposals. Git approval and deployment still control live permissions.
