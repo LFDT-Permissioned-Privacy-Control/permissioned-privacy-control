@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { demoAccount } from '../../tools/v2-demo-wallet/accounts.mjs';
+import { checkViewerCountRendering, checkTransferTypeRendering } from './explorer-data-parity.mjs';
 
 export async function checkAdminEntry({ users, runtime, outputDirectory, passed }) {
   const results = [];
@@ -533,6 +534,8 @@ export async function checkNativeUIParity({ users, runtime, privateHash, sharedH
   const adminEntry = await checkAdminEntry({ users, runtime, outputDirectory, passed });
   const navigation = await checkAdminNavigation({ user: users.get('admin'), runtime, sourceDirectory, outputDirectory, passed });
   const authoring = await checkSourceAuthoringParity({ user: users.get('admin'), runtime, sourceDirectory, outputDirectory, passed });
+  const viewerCounts = await checkViewerCountRendering({ users, runtime, screenshots, passed });
+  const transferTypes = await checkTransferTypeRendering({ users, runtime, screenshots, passed });
   const cases = [];
   await transactionView(users.get('deployer'), runtime, privateHash, [['From', 'own_address', 'Mine', true], ['To', 'rbac_group_member', 'My Org', true]], screenshots, 'owner'); cases.push('owner-Mine');
   await transactionView(users.get('admin'), runtime, sharedHash, [['From', 'participant_override', 'Counterparty', false], ['To', 'rbac_group_member', 'My Org', true]], screenshots, 'same-org-counterparty'); cases.push('same-org-Counterparty');
@@ -544,5 +547,5 @@ export async function checkNativeUIParity({ users, runtime, privateHash, sharedH
   passed('native V2 API-to-page Mine/My Org/Counterparty/Shared and denied persona matrix');
   const isolation = await caseIsolation({ users, runtime, hash: privateHash, nodeRPC, rpc, bff, screenshots });
   passed('persisted case create/read/revoke leaves ordinary RPC and Explorer unchanged for the recipient and another principal');
-  return { cases, screenshots, isolation, adminEntry, navigation, authoring, clipboard: 'Real rendered CopyButton with a page-local Clipboard API substitute; OS clipboard untouched', limits: ['The unmapped outsider has no organization; a second-organization browser fixture is not claimed.', 'The Admin case recipient already has ordinary emitter authority. The full-case canary check establishes isolation from another principal (Reader), not an otherwise deprived case recipient.', 'Server reorg acquisition/delivery regressions are separate; this browser run does not mutate chain canonicality.'] };
+  return { cases, screenshots, isolation, adminEntry, navigation, authoring, viewerCounts, transferTypes, clipboard: 'Real rendered CopyButton with a page-local Clipboard API substitute; OS clipboard untouched', limits: ['The unmapped outsider has no organization; a second-organization browser fixture is not claimed.', 'The Admin case recipient already has ordinary emitter authority. The full-case canary check establishes isolation from another principal (Reader), not an otherwise deprived case recipient.', 'Server reorg acquisition/delivery regressions are separate; this browser run does not mutate chain canonicality.'] };
 }
