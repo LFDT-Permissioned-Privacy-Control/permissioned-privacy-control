@@ -98,3 +98,13 @@ consecutive-height neighbours, excludes genesis and gaps, and shows the usable
 interval count and sampled page range. Fewer than two usable headers gives no
 value. This is a sampled display, not the legacy last-100-row SQL average. It
 adds no endpoint or permission and never combines separate polls or pages.
+
+Block list and number/hash detail responses also provide `counts.transactions`
+for the ordinary permitted transactions in that block. Numeric results bind
+`range.fromBlock` and `throughBlock` to its number and `headHash` to its actual
+canonical hash. They require transaction-read permission independently of header
+permission. `transactionCount` is present only for a matching exact result;
+a bounded scan may instead return a lower bound. A proven empty indexed block
+can show zero. Node-only, missing/pruned or unqualified counts stay unavailable.
+At most 25 original indexed block targets share the existing request budget.
+The UI uses this same-response result, never a separately fetched page length.
