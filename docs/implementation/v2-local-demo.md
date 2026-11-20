@@ -75,6 +75,16 @@ functional walkthrough also runs these checks. The unmapped outsider is not a
 second-organization fixture; server canonicality tests cover reorg fences,
 while this UI check does not change the chain's canonical history.
 
+The same command imports the demo's actual public configuration into Admin and
+checks the Group metadata and access dialogs, selected permission colours,
+structured ABI and read-grant views, and Identity details at desktop and mobile
+widths. These edits are canceled, and re-exported source must match the imported
+files exactly. Screenshots are also saved in `source-authoring/`.
+
+In Groups, the pencil edits the name, description and organization role; the
+gear opens RPC methods, execution claims and connection references. These are
+local proposals. Git approval and deployment still control live permissions.
+
 Prepared commands use installed Chrome by default. An already installed
 Playwright Chromium can be selected with `OPS_TEST_BROWSER_CHANNEL=chromium`.
 They do not install a browser. `make demo-v2-check` performs initial setup and is

@@ -158,11 +158,32 @@ async function checkSourceAuthoringParity({ user, runtime, sourceDirectory, outp
   }
   const closeDialog = async () => page.getByRole('dialog').last().getByRole('button', { name: 'Close', exact: true }).first().click();
   async function palette(label, locator) {
+    // Shared V1 Tailwind tokens: primary #8950FA, primary-50 #F5F3FF,
+    // primary-200 #C4A8FD. Poll through transitions before comparing colours.
+    const primary = 'rgb(137, 80, 250)', pale = 'rgb(245, 243, 255)', border = 'rgb(196, 168, 253)';
+    const selected = !label.includes('unselected');
+    const expected = !selected ? {} : label.startsWith('group-access-preset') ? { border: primary, background: pale }
+      : label.startsWith('group-metadata-role') || label.startsWith('mapping-') ? { border, background: pale }
+        : label.startsWith('read-grant-') || label.startsWith('group-readonly-') ? { border: primary } : {};
+    await locator.evaluate(async (element, expected) => {
+      const deadline = performance.now() + 2500;
+      while (performance.now() < deadline) {
+        const style = getComputedStyle(element);
+        if ((!expected.border || style.borderColor === expected.border) && (!expected.background || style.backgroundColor === expected.background)) return;
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
+    }, expected);
     const style = await locator.evaluate(element => { const style = getComputedStyle(element); return { background: style.backgroundColor, border: style.borderColor, color: style.color }; });
+    if (expected.border) assert.equal(style.border, expected.border, label + ': V1 selected border');
+    if (expected.background) assert.equal(style.background, expected.background, label + ': V1 selected background');
     const marker = locator.locator('[data-state="checked"]').first();
     if (await marker.count()) {
+      await marker.evaluate(async (element, primary) => {
+        const deadline = performance.now() + 2500;
+        while (getComputedStyle(element).backgroundColor !== primary && performance.now() < deadline) await new Promise(resolve => requestAnimationFrame(resolve));
+      }, primary);
       style.checkedBackground = await marker.evaluate(element => getComputedStyle(element).backgroundColor);
-      assert.ok(!['rgb(255, 255, 255)', 'rgb(0, 0, 0)', 'rgba(0, 0, 0, 0)'].includes(style.checkedBackground), label + ': selected marker retains the V1 accent color');
+      assert.equal(style.checkedBackground, primary, label + ': selected marker retains the exact V1 accent color');
     }
     palettes.push({ label, ...style });
     return style;
