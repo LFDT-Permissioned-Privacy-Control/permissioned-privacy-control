@@ -130,7 +130,7 @@ describe('native account with the established Admin presentation', () => {
     expect(screen.queryByTestId('rbac-tabs')).not.toBeInTheDocument()
   })
   it('keeps unfinished fields across all business sections, operational pages and review', async () => {
-    harness(); await importFiles()
+    const page = harness(); await importFiles()
     await userEvent.click(screen.getByRole('button', { name: 'Edit local proposal' }))
     await userEvent.click(screen.getByRole('button', { name: 'New organization' }))
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Unfinished bank' } })
@@ -147,6 +147,7 @@ describe('native account with the established Admin presentation', () => {
     await userEvent.click(screen.getByRole('link', { name: 'Settings' }))
     await userEvent.click(screen.getByRole('button', { name: 'Review & export' }))
     expect(screen.getByRole('button', { name: 'Export configuration draft' })).toBeDisabled()
+    page.navigate('/admin/configuration?org=' + org)
     await userEvent.click(screen.getByRole('tab', { name: 'RBAC' }))
     expect(screen.getByLabelText('Name')).toHaveValue('Unfinished bank')
     await userEvent.click(screen.getByRole('button', { name: 'Save organization draft' }))

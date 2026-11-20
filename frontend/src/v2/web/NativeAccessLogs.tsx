@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLiveOrganizationScope } from './useLiveOrganizationScope'
 import { Loader2, RefreshCw, ScrollText } from 'lucide-react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
@@ -32,15 +32,13 @@ function LogIdentifier({ value, label }: { value: string; label: string }) {
 }
 
 export function NativeAccessLogs({ scope }: { scope: OperationScope }) {
-  const location = useLocation(), orgs = scope.self.organizations.filter(org => org.isOrgAdmin || org.isOrgReadonlyAdmin)
-  const selected = new URLSearchParams(location.search).get('org')
-  const [chosen, setChosen] = useState(orgs.find(org => org.id === selected)?.id ?? (orgs.length === 1 ? orgs[0].id : ''))
-  const org = orgs.some(org => org.id === chosen) ? chosen : ''
+  const orgs = scope.self.organizations.filter(org => org.isOrgAdmin || org.isOrgReadonlyAdmin)
+  const [org, setChosen] = useLiveOrganizationScope(orgs)
   const owner = `${scope.self.actorId}:${scope.self.expiresAt}:${scope.self.sourceProfileDigest}:${org}`
   return <section className="space-y-6">
     <div className="flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary-50"><ScrollText className="h-5 w-5 text-primary" /></div><div><h2 className="text-2xl font-semibold">Access Logs</h2><p className="mt-1 text-sm text-neutral-500">Investigate your organization’s recorded requests</p></div></div>
     {!orgs.length ? <p className="py-8 text-neutral-500">Your identity has no organization access-log administration role.</p> : <>
-      <div className="max-w-md"><SelectField label="Organization" value={org} onChange={setChosen} disabled={orgs.length === 1} options={[{ value: '', label: 'Select an organization' }, ...orgs.map(value => ({ value: value.id, label: value.name }))]} /></div>
+      <div className="max-w-md"><SelectField label="Organization" value={org} onChange={setChosen} disabled={orgs.length === 1 && !!org} options={[{ value: '', label: 'Select an organization' }, ...orgs.map(value => ({ value: value.id, label: value.name }))]} /></div>
       {org && <AccessLogSearch key={owner} scope={scope} org={org} />}
     </>}
   </section>

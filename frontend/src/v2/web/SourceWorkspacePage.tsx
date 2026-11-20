@@ -31,7 +31,7 @@ export function SourceWorkspacePage({ controller, project, onProject, unfinished
   const page = view.id, presentation = sourceSections[view.section]
   const tabs = view.section === 'rbac' || view.section === 'identity' ? sourcePages.filter(p => p.section === view.section) : []
   const showScope = view.section === 'rbac' || page === 'claim-mappings' || view.section === 'disclosure' || view.section === 'compliance'
-  const authoringOrg = showScope ? orgID : ''
+  const authoringOrg = ['organizations', 'identity-profiles', 'platform-configuration', 'configuration'].includes(page) ? '' : orgID
   const sourceIssue = useMemo(() => project && root ? semanticEditingIssue(project, root.id) : null, [project, root])
   const scope = controller.scopeRevision, actor = controller.snapshot().self?.actorId
   const check = () => { if (!actor || !controller.ownsScope(scope, actor)) throw Error('The selected account changed. Import the source again.') }

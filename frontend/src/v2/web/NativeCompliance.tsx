@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useLocation } from 'react-router-dom'
+import { Link } from 'react-router-dom'
+import { useLiveOrganizationScope } from './useLiveOrganizationScope'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
@@ -40,13 +41,8 @@ const tabs = [
   ['preview', 'Preview'],
 ] as const
 export function NativeCompliance({ scope }: { scope: OperationScope }) {
-  const location = useLocation(),
-    orgs = scope.self.organizations.filter((o) => o.isOrgAdmin || o.isOrgReadonlyAdmin)
-  const selected = new URLSearchParams(location.search).get('org')
-  const [org, setOrg] = useState(
-      orgs.find((o) => o.id === selected)?.id ?? (orgs.length === 1 ? orgs[0].id : ''),
-    ),
-    [tab, setTab] = useState('config')
+  const orgs = scope.self.organizations.filter((o) => o.isOrgAdmin || o.isOrgReadonlyAdmin)
+  const [org, setOrg] = useLiveOrganizationScope(orgs), [tab, setTab] = useState('config')
   return (
     <section className="space-y-6">
       <div>
@@ -66,7 +62,7 @@ export function NativeCompliance({ scope }: { scope: OperationScope }) {
               label="Organization"
               value={org}
               onChange={setOrg}
-              disabled={orgs.length === 1}
+              disabled={orgs.length === 1 && !!org}
               options={[
                 { value: '', label: 'Select an organization' },
                 ...orgs.map((o) => ({ value: o.id, label: o.name })),

@@ -1,3 +1,4 @@
+import { useLiveOrganizationScope } from './useLiveOrganizationScope'
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import { Link } from 'react-router-dom'
 import { Badge } from '../../components/ui/badge'
@@ -56,7 +57,7 @@ export function NativeDisclosures({
   const task = useNativeTask(scope),
     admins = scope.self.organizations.filter((o) => o.isOrgAdmin)
   const [role, setRole] = useState('recipient'),
-    [org, setOrg] = useState(admins.length === 1 ? admins[0].id : ''),
+    [org, setOrg] = useLiveOrganizationScope(admins),
     [items, setItems] = useState<NativeCase[]>([]),
     [cursor, setCursor] = useState(''),
     [scanComplete, setScanComplete] = useState(true),

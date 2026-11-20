@@ -107,6 +107,16 @@ it('readonly administration sees approved settings and cannot create travel-rule
     s.request.mock.calls.every(([, options]) => !options?.method || options.method === 'GET'),
   ).toBe(true)
 })
+
+it('keeps a live organization selection in the policy-draft destination', async () => {
+  const s = scope('admin'), other = '33333333-3333-4333-8333-333333333333'
+  s.self.organizations.push({ ...s.self.organizations[0], id: other, name: 'Bank B', slug: 'bank-b' })
+  render(<MemoryRouter initialEntries={['/admin/compliance?org=' + org]}><NativeCompliance scope={s} /></MemoryRouter>)
+  await screen.findByText('1000 USD')
+  await userEvent.selectOptions(screen.getByLabelText('Organization'), other)
+  await waitFor(() => expect(s.request.mock.calls.some(([path]) => path.startsWith(`/api/v2/orgs/${other}/compliance/`))).toBe(true))
+  expect(screen.getByRole('link', { name: 'Edit a local source proposal' })).toHaveAttribute('href', `/admin/compliance/policy?org=${other}`)
+})
 it('members do not issue organization compliance administration reads', () => {
   const s = scope('member')
   render(
