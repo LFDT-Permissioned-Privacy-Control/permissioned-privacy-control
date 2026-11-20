@@ -1,4 +1,5 @@
 import { useLiveOrganizationScope } from './useLiveOrganizationScope'
+import { useOperationContext } from './useOperationContext'
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import { Link } from 'react-router-dom'
 import { Badge } from '../../components/ui/badge'
@@ -54,11 +55,17 @@ export function NativeDisclosures({
   scope: OperationScope
   logsOnly?: boolean
 }) {
-  const task = useNativeTask(scope),
-    admins = scope.self.organizations.filter((o) => o.isOrgAdmin)
-  const [role, setRole] = useState('recipient'),
-    [org, setOrg] = useLiveOrganizationScope(admins),
-    [items, setItems] = useState<NativeCase[]>([]),
+  const admins = scope.self.organizations.filter(o => o.isOrgAdmin)
+  const [role, setRole] = useState('recipient'), [org, setOrg] = useLiveOrganizationScope(admins)
+  return <DisclosureContext key={`${role}:${org}`} scope={scope} logsOnly={logsOnly} role={role} org={org} setRole={setRole} setOrg={setOrg} />
+}
+function DisclosureContext(props: { scope: OperationScope; logsOnly: boolean; role: string; org: string; setRole(value: string): void; setOrg(value: string): void }) {
+  const owned = useOperationContext(props.scope)
+  return owned ? <DisclosureView {...props} scope={owned} /> : <p role="status" className="py-8 text-neutral-500">Preparing the selected disclosure view…</p>
+}
+function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg }: Parameters<typeof DisclosureContext>[0]) {
+  const task = useNativeTask(scope), admins = scope.self.organizations.filter(o => o.isOrgAdmin)
+  const [items, setItems] = useState<NativeCase[]>([]),
     [cursor, setCursor] = useState(''),
     [scanComplete, setScanComplete] = useState(true),
     [creating, setCreating] = useState(false),

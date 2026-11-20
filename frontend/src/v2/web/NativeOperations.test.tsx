@@ -1,7 +1,8 @@
 import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { Link, MemoryRouter } from 'react-router-dom'
+import { StrictMode } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { OperationScope } from './controller'
 import { NativeCompliance } from './NativeCompliance'
@@ -116,6 +117,36 @@ it('keeps a live organization selection in the policy-draft destination', async 
   await userEvent.selectOptions(screen.getByLabelText('Organization'), other)
   await waitFor(() => expect(s.request.mock.calls.some(([path]) => path.startsWith(`/api/v2/orgs/${other}/compliance/`))).toBe(true))
   expect(screen.getByRole('link', { name: 'Edit a local source proposal' })).toHaveAttribute('href', `/admin/compliance/policy?org=${other}`)
+})
+
+it.each(['authorized', 'unauthorized'] as const)('retires a pending disclosure list on history navigation to an %s scope', async target => {
+  const s = scope('admin'), other = '33333333-3333-4333-8333-333333333333', unknown = '44444444-4444-4444-8444-444444444444'
+  s.self.organizations.push({ ...s.self.organizations[0], id: other, name: 'Bank B', slug: 'bank-b' })
+  let finish!: (value: unknown) => void, oldSignal: AbortSignal | undefined
+  const pending = new Promise<unknown>(resolve => { finish = resolve })
+  s.request.mockImplementation(async (path, options) => {
+    const query = new URL(path, 'https://ops.test').searchParams
+    if (query.get('role') !== 'data-org-admin') return { items: [], nextCursor: '', scanComplete: true }
+    if (query.get('organizationId') === org) { oldSignal = options?.signal ?? undefined; return pending }
+    if (query.get('organizationId') === other) return { items: [{ ...currentCase, caseId: other, dataOrganizationId: other, caseReference: 'CURRENT-B' }], nextCursor: '', scanComplete: true }
+    throw Error('Unauthorized organization request')
+  })
+  render(<MemoryRouter initialEntries={['/admin/disclosure?org=' + org]}><StrictMode>
+    <Link to={'/admin/disclosure?org=' + (target === 'authorized' ? other : unknown)}>History navigation</Link>
+    <NativeDisclosures scope={s} />
+  </StrictMode></MemoryRouter>)
+  await userEvent.selectOptions(await screen.findByLabelText('Case view'), 'data-org-admin')
+  await waitFor(() => expect(oldSignal).toBeDefined())
+  await userEvent.click(screen.getByRole('link', { name: 'History navigation' }))
+  await waitFor(() => expect(oldSignal!.aborted).toBe(true))
+  if (target === 'authorized') await screen.findByText('CURRENT-B')
+  else {
+    expect(await screen.findByLabelText('Data organization')).toHaveValue('')
+    expect(s.request.mock.calls.some(([path]) => path.includes(unknown))).toBe(false)
+  }
+  await act(async () => { finish({ items: [{ ...currentCase, caseReference: 'STALE-A' }], nextCursor: '', scanComplete: true }); await pending })
+  expect(screen.queryByText('STALE-A')).not.toBeInTheDocument()
+  expect(screen.getByLabelText('Data organization')).toHaveValue(target === 'authorized' ? other : '')
 })
 it('members do not issue organization compliance administration reads', () => {
   const s = scope('member')
@@ -279,7 +310,7 @@ it('shows the recorded resource and view in the case audit without inventing mis
   expect(legacy.getAllByText('Not recorded')).toHaveLength(2)
   expect(exposure.queryByText('Not recorded')).not.toBeInTheDocument()
   expect(screen.queryByText('queryDigest')).not.toBeInTheDocument()
-  expect(s.request).toHaveBeenCalledWith(baseID() + '/audit?limit=25')
+  expect(s.request).toHaveBeenCalledWith(baseID() + '/audit?limit=25', expect.objectContaining({ signal: expect.any(AbortSignal) }))
 })
 it('case revocation collects its reason inside the actual confirmation dialog', async () => {
   const s = scope()
@@ -302,10 +333,11 @@ it('case revocation collects its reason inside the actual confirmation dialog', 
   })
   await userEvent.click(within(dialog).getByRole('button', { name: 'Revoke case' }))
   await waitFor(() =>
-    expect(s.request).toHaveBeenCalledWith(baseID() + '/revoke', {
+    expect(s.request).toHaveBeenCalledWith(baseID() + '/revoke', expect.objectContaining({
       method: 'POST',
       body: JSON.stringify({ reason: 'Audit completed' }),
-    }),
+      signal: expect.any(AbortSignal),
+    })),
   )
 })
 it('closing a nested revocation dialog keeps its parent case open', async () => {
