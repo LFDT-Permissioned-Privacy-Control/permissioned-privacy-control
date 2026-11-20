@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math/big"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,21 @@ import (
 )
 
 type explorerFields map[string]json.RawMessage
+
+var indexedPricePattern = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]+)?$`)
+
+func (f explorerFields) indexedPrice() (*wire.Decimal, error) {
+	value, ok := f["usd_price"]
+	if !ok || string(value) == "null" {
+		return nil, nil
+	}
+	var price string
+	if json.Unmarshal(value, &price) != nil || len(price) > 128 || !indexedPricePattern.MatchString(price) {
+		return nil, errExplorer
+	}
+	out := wire.Decimal(price)
+	return &out, nil
+}
 
 func fieldsOf(row explorerquery.Record) (explorerFields, error) {
 	var f explorerFields
@@ -792,6 +808,17 @@ func (x *explorerRender) other(row explorerquery.Record) (any, bool, error) {
 			return nil, false, errExplorer
 		}
 		out := wire.Token{Address: address, Symbol: f.text("symbol"), Name: f.nullable("name"), Decimals: uint32(n), TokenType: f.text("token_type"), BlockNumber: *bn, CreatedAt: f.text("created_at"), OffChainUpdatedAt: f.nullable("off_chain_updated_at"), CreationTx: f.nullable("creation_tx"), L1Address: f.nullable("l1_address")}
+		// These are optional current indexed metadata, available only after the
+		// ordinary Full check above. Supply is the indexed mint/burn ledger;
+		// neither field certifies an on-chain value at a historical block.
+		out.TotalSupply, e = f.quantity("total_supply")
+		if e != nil {
+			return nil, false, e
+		}
+		out.USDPrice, e = f.indexedPrice()
+		if e != nil {
+			return nil, false, e
+		}
 		return out, true, nil
 	case explorerquery.Balances:
 		if !full(address) || !full(f.text("token_address")) {

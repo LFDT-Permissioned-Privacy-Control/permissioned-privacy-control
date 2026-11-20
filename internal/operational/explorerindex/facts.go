@@ -208,7 +208,7 @@ func tokenRecord(v *pb.Token) (q.Record, error) {
 	if v == nil || v.Key == nil || v.Decimals > 255 {
 		return q.Record{}, ErrUnavailable
 	}
-	return record(q.Tokens, &pb.Key{Value: &pb.Key_Creation{Creation: v.Key}}, map[string]any{"address": hexBytes(v.Key.Address), "block_number": decimal(v.Key.BlockNumber), "symbol": v.Symbol, "name": v.Name, "decimals": v.Decimals, "token_type": v.TokenType, "total_supply": v.TotalSupply, "holder_count": v.HolderCount, "transfer_count": v.TransferCount, "creation_tx": nullableHex(v.CreationTransaction), "l1_address": nullableHex(v.L1Address), "off_chain_updated_at": stamp(v.OffChainUpdatedAt), "created_at": stamp(v.CreatedAt)})
+	return record(q.Tokens, &pb.Key{Value: &pb.Key_Creation{Creation: v.Key}}, map[string]any{"address": hexBytes(v.Key.Address), "block_number": decimal(v.Key.BlockNumber), "symbol": v.Symbol, "name": v.Name, "decimals": v.Decimals, "token_type": v.TokenType, "total_supply": v.TotalSupply, "holder_count": v.HolderCount, "transfer_count": v.TransferCount, "usd_price": v.UsdPrice, "creation_tx": nullableHex(v.CreationTransaction), "l1_address": nullableHex(v.L1Address), "off_chain_updated_at": stamp(v.OffChainUpdatedAt), "created_at": stamp(v.CreatedAt)})
 }
 func addressRecord(v *pb.Address) (q.Record, error) {
 	if v == nil || v.Key == nil || !quantity(v.Balance) {
