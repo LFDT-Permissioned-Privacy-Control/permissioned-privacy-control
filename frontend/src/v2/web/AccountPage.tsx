@@ -10,6 +10,7 @@ import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
 import { Controller, State } from './controller'
 import { WalletPanel } from './WalletPanel'
+import { RPCOnboarding } from './RPCOnboarding'
 
 export function NativeAccountPage({
   controller,
@@ -18,6 +19,7 @@ export function NativeAccountPage({
   onSwitchAccount,
   onRefreshSession,
   onDownloadWalletToken,
+  onCopyRPCCredential,
 }: {
   controller: Controller
   state: State
@@ -25,6 +27,7 @@ export function NativeAccountPage({
   onSwitchAccount?: () => void
   onRefreshSession?: () => void
   onDownloadWalletToken?: () => void
+  onCopyRPCCredential?: (format: 'token' | 'header' | 'foundry') => Promise<boolean>
 }) {
   const navigate = useNavigate(),
     self = state.self!
@@ -90,6 +93,7 @@ export function NativeAccountPage({
       />
       <OrganizationsCard organizations={self.organizations} />
       <WalletPanel wallet={controller.wallet} sessionBusy={state.busy} />
+      <RPCOnboarding key={`${self.actorId}:${self.expiresAt}:${self.sourceProfileDigest}`} controller={controller} onCopy={onCopyRPCCredential} organizations={self.organizations} busy={state.busy} expiresAt={self.expiresAt} />
       <Card data-testid="wallet-helper-handoff">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">

@@ -184,8 +184,12 @@ func query(r *http.Request, allowed ...string) (url.Values, error) {
 	}
 	return values, nil
 }
-func options(r *http.Request) (a.ListOptions, error) {
-	q, err := query(r, "limit", "cursor")
+func options(r *http.Request, events bool) (a.ListOptions, error) {
+	allowed := []string{"limit", "cursor"}
+	if events {
+		allowed = append(allowed, "decision", "transferType", "actorId")
+	}
+	q, err := query(r, allowed...)
 	if err != nil {
 		return a.ListOptions{}, err
 	}
@@ -193,6 +197,12 @@ func options(r *http.Request) (a.ListOptions, error) {
 		return a.ListOptions{}, err
 	}
 	out := a.ListOptions{Cursor: q.Get("cursor")}
+	if events {
+		out.Filters = a.EventFilters{Decision: q.Get("decision"), TransferType: q.Get("transferType"), ActorID: q.Get("actorId")}
+		if !out.Filters.Valid() {
+			return out, a.ErrInvalid
+		}
+	}
 	if raw := q.Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 || n > 100 || strconv.Itoa(n) != raw {
@@ -231,14 +241,14 @@ func (h *Handler) delete(ctx context.Context, token string, r *http.Request) (*a
 	return h.service.DeleteUnused(ctx, token, r.PathValue("orgId"), r.PathValue("recordId"))
 }
 func (h *Handler) listRecords(ctx context.Context, token string, r *http.Request) (*a.Response, error) {
-	opts, err := options(r)
+	opts, err := options(r, false)
 	if err != nil {
 		return nil, err
 	}
 	return h.service.ListRecords(ctx, token, r.PathValue("orgId"), opts)
 }
 func (h *Handler) listEvents(ctx context.Context, token string, r *http.Request) (*a.Response, error) {
-	opts, err := options(r)
+	opts, err := options(r, true)
 	if err != nil {
 		return nil, err
 	}

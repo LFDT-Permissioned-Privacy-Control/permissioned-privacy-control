@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { StatusCard } from '../../components/dashboard/StatusCard'
 import { Button } from '../../components/ui/button'
 import type { OperationScope } from './controller'
@@ -64,6 +65,7 @@ export function NativeDiagnostics({ scope }: { scope: OperationScope }) {
         exposed here.
       </p>
       <Panel title="Test request">
+        <p className="mb-4 text-sm text-neutral-500">For a signed transaction, <Link to="/admin/account" className="font-medium text-primary hover:underline">set up your wallet and RPC connection</Link>. This tester checks reads and estimates with your own verified identity.</p>
         <form
           className="space-y-4"
           onSubmit={(e) => {
@@ -133,6 +135,8 @@ export function NativeDiagnostics({ scope }: { scope: OperationScope }) {
               'net_version',
               'eth_syncing',
               'eth_blockNumber',
+              'eth_getBalance',
+              'web3_clientVersion',
               'eth_call',
               'eth_estimateGas',
               'eth_getTransactionReceipt',
@@ -140,6 +144,7 @@ export function NativeDiagnostics({ scope }: { scope: OperationScope }) {
           />
           <Field
             label="JSON parameters"
+            multiline
             value={params}
             disabled={task.busy}
             onChange={(value) => {

@@ -293,18 +293,22 @@ func (s *Service) DeleteUnused(ctx context.Context, token, org, id string) (*Res
 }
 
 type ListOptions struct {
-	Limit  int
-	Cursor string
+	Limit   int
+	Cursor  string
+	Filters EventFilters
 }
 
 func (s *Service) page(v *runtimepolicy.View, org, purpose string, opts ListOptions) (int, pageCursor, error) {
 	if opts.Limit == 0 {
 		opts.Limit = 50
 	}
-	if opts.Limit < 1 || opts.Limit > 100 || s.cursors == nil {
+	if opts.Limit < 1 || opts.Limit > 100 || s.cursors == nil || !opts.Filters.Valid() || purpose != "events" && opts.Filters != (EventFilters{}) {
 		return 0, pageCursor{}, ErrInvalid
 	}
 	c := pageCursor{Version: 1, Purpose: purpose, Network: s.networkKey.String(), Generation: s.state.Generation, Coverage: s.state.Coverage.String(), Org: org, Viewer: v.ActorID(), Manifest: s.manifestDigest.String(), Query: strconv.Itoa(opts.Limit)}
+	if opts.Filters != (EventFilters{}) {
+		c.Query = HashParts("ops-compliance-event-query/v1", []byte(c.Query), []byte(opts.Filters.Decision), []byte(opts.Filters.TransferType), []byte(opts.Filters.ActorID)).String()
+	}
 	if opts.Cursor != "" {
 		opened, err := s.cursors.open(opts.Cursor, c, s.clock())
 		return opts.Limit, opened, err

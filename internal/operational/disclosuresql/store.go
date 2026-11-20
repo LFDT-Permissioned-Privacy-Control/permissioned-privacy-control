@@ -261,7 +261,7 @@ func (s *Store) Revoke(ctx context.Context, id, epoch, actor, reason string, aut
 }
 
 func (s *Store) Candidates(ctx context.Context, q c.CandidateQuery) ([]c.Case, error) {
-	if q.Limit < 1 || q.Limit > 500 || !c.ValidEpoch(q.Epoch) || (q.Recipient == "") == (q.Organization == "") {
+	if q.Limit < 1 || q.Limit > 500 || !c.ValidEpoch(q.Epoch) || (q.Recipient == "") == (q.Organization == "") || !q.Filters.Valid() || q.Filters.Status != "" && q.At.IsZero() {
 		return nil, c.ErrInvalid
 	}
 	ctx, cancel := bounded(ctx)
@@ -272,7 +272,14 @@ func (s *Store) Candidates(ctx context.Context, q c.CandidateQuery) ([]c.Case, e
 		afterTime = q.After.Time
 		afterID = q.After.ID
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+caseColumns+` FROM ops_v2.disclosure_cases WHERE store_epoch=$1 AND (($2<>'' AND recipient_actor=$2) OR ($3<>'' AND data_org=$3)) AND ($4::timestamptz IS NULL OR (created_at,case_id)<($4::timestamptz,$5::uuid)) ORDER BY created_at DESC,case_id DESC LIMIT $6`, q.Epoch, q.Recipient, q.Organization, afterTime, afterID, q.Limit)
+	var createdFrom, createdTo any
+	if q.Filters.CreatedFrom != 0 {
+		createdFrom = time.Unix(q.Filters.CreatedFrom, 0).UTC()
+	}
+	if q.Filters.CreatedTo != 0 {
+		createdTo = time.Unix(q.Filters.CreatedTo, 0).UTC()
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+caseColumns+` FROM ops_v2.disclosure_cases WHERE store_epoch=$1 AND (($2<>'' AND recipient_actor=$2) OR ($3<>'' AND data_org=$3)) AND ($4::timestamptz IS NULL OR (created_at,case_id)<($4::timestamptz,$5::uuid)) AND ($7='' OR ($7='revoked' AND status='revoked') OR ($7='active' AND status='open' AND expires_at>$8::timestamptz) OR ($7='expired' AND status='open' AND expires_at<=$8::timestamptz)) AND ($9='' OR immutable_scope->>'level'=$9) AND ($10='' OR recipient_actor=$10) AND ($11::timestamptz IS NULL OR created_at>=$11::timestamptz) AND ($12::timestamptz IS NULL OR created_at<$12::timestamptz) ORDER BY created_at DESC,case_id DESC LIMIT $6`, q.Epoch, q.Recipient, q.Organization, afterTime, afterID, q.Limit, q.Filters.Status, q.At, q.Filters.PrivacyLevel, q.Filters.RecipientActorID, createdFrom, createdTo)
 	if err != nil {
 		return nil, c.ErrUnavailable
 	}
@@ -282,6 +289,9 @@ func (s *Store) Candidates(ctx context.Context, q c.CandidateQuery) ([]c.Case, e
 		row, err := scanCase(rows)
 		if err != nil {
 			return nil, err
+		}
+		if !q.Filters.Matches(row, q.At) {
+			return nil, c.ErrUnavailable
 		}
 		out = append(out, row)
 	}

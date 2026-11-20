@@ -13,6 +13,7 @@ import (
 type ListOptions struct {
 	Role, Organization, Cursor string
 	Limit                      int
+	Filters                    CaseFilters
 }
 type casePage struct {
 	Items        []CaseResponse `json:"items"`
@@ -64,7 +65,7 @@ func normalizeList(options ListOptions) (ListOptions, error) {
 	if options.Limit == 0 {
 		options.Limit = 50
 	}
-	if options.Limit < 1 || options.Limit > 100 {
+	if options.Limit < 1 || options.Limit > 100 || !options.Filters.Valid() {
 		return options, ErrInvalid
 	}
 	if options.Role == "recipient" {
@@ -88,10 +89,16 @@ func (s *Service) List(ctx context.Context, token string, options ListOptions) (
 	if err != nil {
 		return nil, err
 	}
-	if options.Role == "data-org-admin" && !s.admin(v, options.Organization) {
+	if options.Role == "data-org-admin" && !s.canInspectDataOrg(v, options.Organization) {
 		return nil, ErrNotFound
 	}
 	payload := s.cursorContext(v, options.Role, options.Organization, "case-list", "", options.Limit)
+	if options.Filters != (CaseFilters{}) {
+		payload.Query = disclosurepolicy.Digest(struct {
+			Base    string
+			Filters CaseFilters
+		}{payload.Query, options.Filters})
+	}
 	var after *Position
 	if options.Cursor != "" {
 		after, err = s.cursors.open(options.Cursor, payload, s.clock())
@@ -99,7 +106,8 @@ func (s *Service) List(ctx context.Context, token string, options ListOptions) (
 			return nil, err
 		}
 	}
-	query := CandidateQuery{Epoch: s.epoch, After: after, Limit: 500}
+	at := s.clock().UTC()
+	query := CandidateQuery{Epoch: s.epoch, After: after, Limit: 500, Filters: options.Filters, At: at}
 	if options.Role == "recipient" {
 		query.Recipient = v.ActorID()
 	} else {
@@ -122,7 +130,7 @@ func (s *Service) List(ctx context.Context, token string, options ListOptions) (
 		position := Position{c.CreatedAt, c.ID}
 		last = &position
 		matches := options.Role == "recipient" && c.RecipientActor == v.ActorID() || options.Role == "data-org-admin" && c.DataOrg == options.Organization
-		if matches && s.metadata(v, c) == nil {
+		if matches && options.Filters.Matches(c, at) && s.metadata(v, c) == nil {
 			page.Items = append(page.Items, c.Response())
 			selected = append(selected, c)
 		}
@@ -141,7 +149,7 @@ func (s *Service) List(ctx context.Context, token string, options ListOptions) (
 		if v.RequireLive() != nil {
 			return ErrUnauthorized
 		}
-		if options.Role == "data-org-admin" && !s.admin(v, options.Organization) {
+		if options.Role == "data-org-admin" && !s.canInspectDataOrg(v, options.Organization) {
 			return ErrNotFound
 		}
 		for _, c := range selected {
@@ -200,7 +208,7 @@ func (s *Service) Audit(ctx context.Context, token, id, cursor string, limit int
 		return nil, err
 	}
 	role := "recipient"
-	if s.admin(v, c.DataOrg) {
+	if s.canInspectDataOrg(v, c.DataOrg) {
 		role = "data-org-admin"
 	}
 	payload := s.cursorContext(v, role, c.DataOrg, "case-audit", id, limit)

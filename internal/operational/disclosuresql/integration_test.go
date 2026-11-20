@@ -207,7 +207,7 @@ func TestCaseHTTPAndPostgresSecurityProtocol(t *testing.T) {
 		if code, _ := request(t, s, token, "HEAD", path, nil); code != 405 || count(t, owner, "disclosure_events") != before {
 			t.Fatal("implicit HEAD executed a GET operation", code)
 		}
-		for _, roles := range [][]string{{}, {"Readonly"}, {"Local"}, {"Foreign"}} {
+		for _, roles := range [][]string{{}, {"Local"}, {"Foreign"}} {
 			bad := f.Token(t, snapshot, f.AdminSubject, roles...)
 			if code, raw := request(t, s, bad, "GET", path, nil); code != 404 || bytes.Contains(raw, []byte(req.Purpose)) {
 				t.Fatalf("metadata leak %v %d %s", roles, code, raw)
@@ -215,6 +215,23 @@ func TestCaseHTTPAndPostgresSecurityProtocol(t *testing.T) {
 		}
 		if code, _ := request(t, s, admin, "GET", path, nil); code != 200 {
 			t.Fatal("true own-org admin history", code)
+		}
+		// V1's read-only organization audit role retains metadata inspection.
+		// It remains distinct from recipient/delegation/management authority.
+		readonly := f.Token(t, snapshot, f.AdminSubject, "Readonly")
+		for _, target := range []string{path, path + "/audit", "/api/v1/disclosure/cases?role=data-org-admin&organizationId=" + f.Org} {
+			if code, _ := request(t, s, readonly, "GET", target, nil); code != 200 {
+				t.Fatal("read-only own-org metadata denied", target, code)
+			}
+		}
+		if code, _ := request(t, s, readonly, "GET", "/api/v1/disclosure/cases?role=data-org-admin&organizationId="+f.OtherOrg, nil); code != 404 {
+			t.Fatal("read-only crossed organization boundary", code)
+		}
+		if code, _ := request(t, s, readonly, "POST", path+"/revoke", map[string]any{"reason": "must not revoke"}); code != 404 {
+			t.Fatal("read-only metadata role revoked a case", code)
+		}
+		if code, _ := request(t, s, readonly, "POST", "/api/v1/disclosure/cases", createRequest()); code != 404 {
+			t.Fatal("read-only metadata role created/delegated a case", code)
 		}
 		if code, _ := request(t, s, "", "GET", path, nil); code != 401 {
 			t.Fatal("unauthenticated case read", code)

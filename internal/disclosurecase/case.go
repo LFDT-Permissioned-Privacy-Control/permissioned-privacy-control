@@ -89,6 +89,8 @@ type CandidateQuery struct {
 	Epoch, Recipient, Organization string
 	After                          *Position
 	Limit                          int
+	Filters                        CaseFilters
+	At                             time.Time
 }
 
 // A receipt exists only after Commit succeeds. The store must call authorize

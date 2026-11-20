@@ -1,6 +1,9 @@
 import { useLiveOrganizationScope } from './useLiveOrganizationScope'
 import { useOperationContext } from './useOperationContext'
-import { useEffect, useRef, useState, type MutableRefObject } from 'react'
+import { useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
+import { CaseFilters, emptyCaseFilters } from './CaseFilters'
+import { CopyValue } from '../../components/auth/AccountPresentation'
+import { Checkbox } from '../../components/ui/checkbox'
 import { Link } from 'react-router-dom'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
@@ -55,19 +58,23 @@ export function NativeDisclosures({
   scope: OperationScope
   logsOnly?: boolean
 }) {
-  const admins = scope.self.organizations.filter(o => o.isOrgAdmin)
+  const admins = scope.self.organizations.filter(o => o.isOrgAdmin || o.isOrgReadonlyAdmin)
   const [role, setRole] = useState('recipient'), [org, setOrg] = useLiveOrganizationScope(admins)
-  return <DisclosureContext key={`${role}:${org}`} scope={scope} logsOnly={logsOnly} role={role} org={org} setRole={setRole} setOrg={setOrg} />
+  const [draft, setDraft] = useState(emptyCaseFilters), [filters, setFilters] = useState<Record<string, string>>({})
+  return <DisclosureContext key={JSON.stringify([role, org, filters])} scope={scope} logsOnly={logsOnly} role={role} org={org} setRole={setRole} setOrg={setOrg} filters={filters} filterForm={<CaseFilters value={draft} onChange={setDraft} onSearch={setFilters} />} />
 }
-function DisclosureContext(props: { scope: OperationScope; logsOnly: boolean; role: string; org: string; setRole(value: string): void; setOrg(value: string): void }) {
+function DisclosureContext(props: { scope: OperationScope; logsOnly: boolean; role: string; org: string; setRole(value: string): void; setOrg(value: string): void; filters: Record<string, string>; filterForm: ReactNode }) {
   const owned = useOperationContext(props.scope)
   return owned ? <DisclosureView {...props} scope={owned} /> : <p role="status" className="py-8 text-neutral-500">Preparing the selected disclosure view…</p>
 }
-function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg }: Parameters<typeof DisclosureContext>[0]) {
-  const task = useNativeTask(scope), admins = scope.self.organizations.filter(o => o.isOrgAdmin)
+function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg, filters, filterForm }: Parameters<typeof DisclosureContext>[0]) {
+  const task = useNativeTask(scope), admins = scope.self.organizations.filter(o => o.isOrgAdmin || o.isOrgReadonlyAdmin)
   const [items, setItems] = useState<NativeCase[]>([]),
     [cursor, setCursor] = useState(''),
+    [visited, setVisited] = useState<{ cursor: string; number: number }[]>([]),
+    [pageNumber, setPageNumber] = useState(1),
     [scanComplete, setScanComplete] = useState(true),
+    [loadingList, setLoadingList] = useState(false),
     [creating, setCreating] = useState(false),
     [selected, setSelected] = useState<NativeCase>()
   const statusNow = useCaseDisplayClock(selected ? [...items, selected] : items, scope.identity.expires)
@@ -83,15 +90,21 @@ function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg }: Paramet
       listError.current?.scrollIntoView?.({ block: 'center' })
     }
   }, [task.error, selected, creating])
-  const list = async (next = '') => {
+  const list = async (next = '', number = 1) => {
     const query = new URLSearchParams({ role, limit: '25' })
     if (role === 'data-org-admin') query.set('organizationId', org)
     if (next) query.set('cursor', next)
-    const page = casePage(await scope.request(base + '?' + query.toString()))
-    scope.check()
-    setItems(page.items)
-    setCursor(page.nextCursor)
-    setScanComplete(page.scanComplete)
+    for (const [key, value] of Object.entries(filters)) query.set(key, value)
+    setLoadingList(true)
+    try {
+      const page = casePage(await scope.request(base + '?' + query.toString()))
+      scope.check()
+      setItems(page.items)
+      setCursor(page.nextCursor)
+      setScanComplete(page.scanComplete)
+      setPageNumber(number)
+      setVisited(previous => number === 1 ? [{ cursor: next, number }] : previous.some(value => value.number === number) ? previous : [...previous, { cursor: next, number }].slice(-10))
+    } finally { if (!scope.signal.aborted) setLoadingList(false) }
   }
   useEffect(() => {
     setItems([])
@@ -118,9 +131,9 @@ function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg }: Paramet
           >
             Refresh
           </Button>
-          <Button onClick={(event) => { detailTrigger.current = event.currentTarget; setCreating(true) }} disabled={task.busy}>
+          {(role !== 'data-org-admin' || admins.some(value => value.id === org && value.isOrgAdmin)) && <Button onClick={(event) => { detailTrigger.current = event.currentTarget; setCreating(true) }} disabled={task.busy}>
             Create case
-          </Button>
+          </Button>}
         </div>
       </div>
       {!logsOnly && admins.length > 0 && (
@@ -150,13 +163,16 @@ function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg }: Paramet
         </div>
       )}
       {task.error && <div ref={listError} tabIndex={-1}><TaskError message={task.error} /></div>}
+      {filterForm}
       <Panel title={logsOnly ? 'Choose an access-log case' : 'Disclosure cases'}>
         <DataTable
+          loading={loadingList}
+          empty={scanComplete ? 'No disclosure cases match this view and these filters.' : 'No eligible cases on this scanned page. Continue scanning before concluding that no cases match.'}
           items={items as unknown as ObjectValue[]}
           columns={[
             { key: 'caseReference', label: 'Reference' },
             { key: 'purpose', label: 'Purpose' },
-            { key: 'recipientActorId', label: 'Recipient' },
+            { key: 'recipientActorId', label: 'Recipient', render: row => <div className="flex items-center gap-1"><code className="max-w-40 truncate text-xs" title={text(row.recipientActorId)}>{text(row.recipientActorId)}</code><CopyValue value={text(row.recipientActorId)} label="Copy recipient ID" /></div> },
             {
               key: 'status',
               label: 'Status',
@@ -195,7 +211,7 @@ function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg }: Paramet
             This scan is incomplete. Refresh before concluding that no other cases exist.
           </p>
         )}
-        <More cursor={cursor} busy={task.busy} onNext={() => void task.run(() => list(cursor))} />
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-neutral-500">Page {pageNumber}{!scanComplete ? ' · Continue scanning for more cases' : ' · End of the available cases'}</p><div className="flex gap-2"><Button variant="outline" disabled={task.busy || !visited.some(value => value.number === pageNumber - 1)} onClick={() => { const previous = visited.find(value => value.number === pageNumber - 1); if (previous) void task.run(() => list(previous.cursor, previous.number)) }}>Previous page</Button><Button variant="outline" disabled={task.busy || !cursor} onClick={() => void task.run(() => list(cursor, pageNumber + 1))}>Next page</Button></div>{visited[0]?.number > 1 && <p className="w-full text-xs text-neutral-500">Up to 10 visited page positions are kept in this tab. Refresh starts again at page 1.</p>}</div>
       </Panel>
       <Dialog open={!!selected} onOpenChange={(open) => { if (!open) setSelected(undefined) }}>
         <DialogContent className="max-w-4xl" onOpenAutoFocus={(event) => {
@@ -244,6 +260,7 @@ function DisclosureView({ scope, logsOnly, role, org, setRole, setOrg }: Paramet
               setSelected(value)
               await task.run(() => list())
             }}
+            onCancel={() => setCreating(false)}
           />
         </DialogContent>
       </Dialog>
@@ -255,11 +272,13 @@ function CreateCase({
   pending,
   onPending,
   onCreated,
+  onCancel,
 }: {
   scope: OperationScope
   pending: MutableRefObject<string | undefined>
   onPending: (value: boolean) => void
   onCreated: (value: NativeCase) => Promise<void>
+  onCancel: () => void
 }) {
   const task = useNativeTask(scope),
     [rule, setRule] = useState(''),
@@ -390,12 +409,11 @@ function CreateCase({
             <div className="grid gap-2 sm:grid-cols-2">
               {resourceOptions.map((option) => (
                 <label key={option.value} className="flex gap-2 text-sm">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={resources.includes(option.value)}
-                    onChange={(e) =>
+                    onCheckedChange={(checked) =>
                       setResources((old) =>
-                        e.target.checked
+                        checked === true
                           ? [...old, option.value]
                           : old.filter((v) => v !== option.value),
                       )
@@ -440,9 +458,9 @@ function CreateCase({
         </p>
       )}
       <TaskError message={task.error} />
-      <Button type="submit" disabled={task.busy}>
+      <div className="flex justify-end gap-2"><Button type="button" variant="outline" disabled={task.busy} onClick={onCancel}>Cancel</Button><Button type="submit" disabled={task.busy}>
         {task.busy ? 'Checking…' : submitted ? 'Check same submitted case' : 'Create case'}
-      </Button>
+      </Button></div>
     </form>
   )
 }
@@ -519,6 +537,7 @@ function CaseDetail({
     task.clearError()
   }
   const recipient = selected.recipientActorId === scope.identity.actor
+  const canManage = recipient || scope.self.organizations.some(value => value.id === selected.dataOrganizationId && value.isOrgAdmin)
   const read = async (next = '', view = readView) => {
     const revision = queryRevision.current
     setData(undefined)
@@ -604,7 +623,7 @@ function CaseDetail({
           ].map(([label, value]) => (
             <div key={label}>
               <dt className="text-xs text-neutral-500">{label}</dt>
-              <dd className="mt-1 break-all">{value}</dd>
+              <dd className="mt-1 flex items-center gap-1 break-all">{value}{(label === 'Case ID' || label === 'Recipient') && <CopyValue value={value} label={'Copy ' + label.toLowerCase()} />}</dd>
             </div>
           ))}
         </dl>
@@ -640,7 +659,7 @@ function CaseDetail({
           >
             Audit trail
           </Button>
-          {selected.status === 'open' && (
+          {selected.status === 'open' && canManage && (
             <Button variant="destructive" disabled={task.busy} onClick={() => setRevoking(true)}>
               Revoke case
             </Button>

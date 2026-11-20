@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useLiveOrganizationScope } from './useLiveOrganizationScope'
+import { useOperationContext } from './useOperationContext'
+import { CopyValue } from '../../components/auth/AccountPresentation'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
@@ -23,7 +25,6 @@ import {
 import {
   DataTable,
   Field,
-  More,
   Panel,
   SelectField,
   TaskError,
@@ -95,37 +96,66 @@ export function NativeCompliance({ scope }: { scope: OperationScope }) {
     </section>
   )
 }
-function ComplianceSection({
+interface EventFilters { decision: string; transferType: string; actorId: string }
+const emptyFilters: EventFilters = { decision: '', transferType: '', actorId: '' }
+function ComplianceSection(props: { scope: OperationScope; org: string; tab: string; canWrite: boolean }) {
+  const [draft, setDraft] = useState(emptyFilters), [active, setActive] = useState(emptyFilters)
+  const edit = (key: keyof EventFilters, value: string) => setDraft(previous => ({ ...previous, [key]: value }))
+  return <div className="space-y-4">
+    {props.tab === 'events' && <Panel title="Find compliance decisions"><form aria-label="Compliance log filters" className="grid gap-3 sm:grid-cols-3" onSubmit={event => { event.preventDefault(); setActive({ ...draft, actorId: draft.actorId.trim() }) }}>
+      <SelectField label="Decision" value={draft.decision} onChange={value => edit('decision', value)} options={[{ value: '', label: 'All decisions' }, { value: 'allowed', label: 'Allowed' }, { value: 'denied', label: 'Denied' }, { value: 'monitored', label: 'Monitored' }]} />
+      <SelectField label="Transfer type" value={draft.transferType} onChange={value => edit('transferType', value)} options={[{ value: '', label: 'All transfer types' }, { value: 'eth', label: 'Native currency' }, { value: 'erc20', label: 'ERC-20 token' }]} />
+      <Field label="Originator OPS actor ID" value={draft.actorId} onChange={value => edit('actorId', value)} hint="Exact verified identity ID; blank includes every actor in this organization." />
+      <div className="flex gap-2 sm:col-span-3"><Button type="submit">Search</Button><Button type="button" variant="outline" onClick={() => { setDraft(emptyFilters); setActive(emptyFilters) }}>Reset filters</Button></div>
+      <p className="text-xs text-neutral-500 sm:col-span-3">Filters run on the server. Results below use the last submitted search.</p>
+    </form></Panel>}
+    <ComplianceContext key={JSON.stringify(active)} {...props} filters={active} />
+  </div>
+}
+function ComplianceContext(props: { scope: OperationScope; org: string; tab: string; canWrite: boolean; filters: EventFilters }) {
+  const owned = useOperationContext(props.scope)
+  return owned ? <ComplianceResults {...props} scope={owned} /> : <p role="status">Preparing the selected compliance view…</p>
+}
+function ComplianceResults({
   scope,
   org,
   tab,
   canWrite,
+  filters,
 }: {
   scope: OperationScope
   org: string
   tab: string
   canWrite: boolean
+  filters: EventFilters
 }) {
   const task = useNativeTask(scope),
     [data, setData] = useState<ObjectValue>(),
     [items, setItems] = useState<ObjectValue[]>([]),
     [cursor, setCursor] = useState(''),
+    [visited, setVisited] = useState<{ cursor: string; number: number }[]>([]),
+    [pageNumber, setPageNumber] = useState(1),
     [source, setSource] = useState(''),
     [eventDetail, setEventDetail] = useState<{ scope: OperationScope; value: ObjectValue }>()
   const base = `/api/v2/orgs/${org}/compliance/`
-  const load = async (next = '') => {
+  const load = async (next = '', number = 1) => {
     const page = tab === 'travel-rule-records' || tab === 'events'
+    const query = new URLSearchParams({ limit: '25' })
+    if (next) query.set('cursor', next)
+    if (tab === 'events') for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value)
     const result = record(
       await scope.request(
         base +
           tab +
-          (page ? '?limit=25' + (next ? '&cursor=' + encodeURIComponent(next) : '') : ''),
+          (page ? '?' + query.toString() : ''),
       ),
     )
     scope.check()
     if (page) {
       setItems(rows(result[tab === 'events' ? 'events' : 'records']))
       setCursor(optionalText(result.nextCursor))
+      setPageNumber(number)
+      setVisited(previous => number === 1 ? [{ cursor: next, number }] : previous.some(value => value.number === number) ? previous : [...previous, { cursor: next, number }].slice(-10))
     } else {
       setSource(text(result.sourceDigest))
       if (Array.isArray(result.data)) setItems(rows(result.data, 4096))
@@ -174,10 +204,11 @@ function ComplianceSection({
         {tab === 'config' && data && <Settings data={data} />}
         {tab === 'tokens' && (
           <DataTable
+            loading={task.busy}
             items={items}
             columns={[
               { key: 'symbol', label: 'Symbol' },
-              { key: 'tokenAddress', label: 'Token' },
+              { key: 'tokenAddress', label: 'Token', render: row => <Identifier value={text(row.tokenAddress)} label="Copy token address" /> },
               { key: 'decimals', label: 'Decimals', render: (r) => String(r.decimals) },
               {
                 key: 'pricesByCurrency',
@@ -193,9 +224,10 @@ function ComplianceSection({
         )}
         {tab === 'address-thresholds' && (
           <DataTable
+            loading={task.busy}
             items={items}
             columns={[
-              { key: 'address', label: 'Address' },
+              { key: 'address', label: 'Address', render: row => <Identifier value={text(row.address)} label="Copy threshold address" /> },
               { key: 'thresholdFiat', label: 'Threshold', render: (r) => String(r.thresholdFiat) },
               { key: 'note', label: 'Note' },
             ]}
@@ -203,9 +235,10 @@ function ComplianceSection({
         )}
         {tab === 'sanctions' && (
           <DataTable
+            loading={task.busy}
             items={items}
             columns={[
-              { key: 'address', label: 'Address' },
+              { key: 'address', label: 'Address', render: row => <Identifier value={text(row.address)} label="Copy sanctioned address" /> },
               { key: 'reason', label: 'Reason' },
               { key: 'source', label: 'Source' },
               { key: 'scope', label: 'Scope' },
@@ -219,6 +252,7 @@ function ComplianceSection({
               and maximum age.
             </p>
             <DataTable
+              loading={task.busy}
               items={items}
               columns={[
                 { key: 'id', label: 'Quote' },
@@ -251,11 +285,12 @@ function ComplianceSection({
         {tab === 'events' && (
           <>
             <DataTable
+              loading={task.busy}
               items={items}
               columns={[
                 { key: 'decisionAt', label: 'Time', render: (r) => instant(r.decisionAt) },
-                { key: 'transactionHash', label: 'Transaction' },
-                { key: 'actorId', label: 'Originator' },
+                { key: 'transactionHash', label: 'Transaction', render: row => <Identifier value={text(row.transactionHash)} label="Copy transaction hash" /> },
+                { key: 'actorId', label: 'Originator', render: row => <Identifier value={text(row.actorId)} label="Copy originator ID" /> },
                 {
                   key: 'decision',
                   label: 'Decision',
@@ -279,11 +314,12 @@ function ComplianceSection({
             </p>
           </>
         )}
-        <More cursor={cursor} busy={task.busy} onNext={() => void task.run(() => load(cursor))} />
+        {(tab === 'events' || tab === 'travel-rule-records') && <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-neutral-500">Page {pageNumber}{cursor ? ' · More records available' : ' · End of the available records'}</p><div className="flex gap-2"><Button variant="outline" disabled={task.busy || !visited.some(value => value.number === pageNumber - 1)} onClick={() => { const previous = visited.find(value => value.number === pageNumber - 1); if (previous) void task.run(() => load(previous.cursor, previous.number)) }}>Previous page</Button><Button variant="outline" disabled={task.busy || !cursor} onClick={() => void task.run(() => load(cursor, pageNumber + 1))}>Next page</Button></div>{visited[0]?.number > 1 && <p className="w-full text-xs text-neutral-500">Up to 10 visited page positions are kept in this tab. Refresh starts again at page 1.</p>}</div>}
       </Panel>
     </div>
   )
 }
+function Identifier({ value, label }: { value: string; label: string }) { return <div className="flex max-w-xs items-center gap-1"><code className="truncate text-xs" title={value}>{value}</code><CopyValue value={value} label={label} /></div> }
 function Settings({ data }: { data: ObjectValue }) {
   const spec = record(data.spec),
     settings = record(spec.settings)
@@ -410,9 +446,9 @@ function TravelRecords({
       <DataTable
         items={items}
         columns={[
-          { key: 'id', label: 'Record' },
-          { key: 'originatorActorId', label: 'Originator' },
-          { key: 'beneficiaryAddress', label: 'Beneficiary' },
+          { key: 'id', label: 'Record', render: row => <Identifier value={text(row.id)} label="Copy travel-rule record ID" /> },
+          { key: 'originatorActorId', label: 'Originator', render: row => <Identifier value={text(row.originatorActorId)} label="Copy originator ID" /> },
+          { key: 'beneficiaryAddress', label: 'Beneficiary', render: row => <Identifier value={text(row.beneficiaryAddress)} label="Copy beneficiary address" /> },
           { key: 'amountWei', label: 'Base units', render: (r) => quantity(r.amountWei) },
           {
             key: 'amountFiat',
@@ -557,9 +593,9 @@ function TravelRecords({
               </p>
             )}
             <TaskError message={task.error} />
-            <Button type="submit" disabled={task.busy || uncertain}>
+            <div className="flex justify-end gap-2"><Button type="button" variant="outline" disabled={task.busy} onClick={() => setForm(false)}>Cancel</Button><Button type="submit" disabled={task.busy || uncertain}>
               {task.busy ? 'Creating…' : 'Create record'}
-            </Button>
+            </Button></div>
           </form>
         </DialogContent>
       </Dialog>
@@ -611,6 +647,7 @@ function CompliancePreview({ scope, base }: { scope: OperationScope; base: strin
         />
         <Field
           label="Signed transaction"
+          multiline
           value={signed}
           disabled={task.busy}
           onChange={(value) => {

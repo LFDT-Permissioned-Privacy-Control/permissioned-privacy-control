@@ -42,7 +42,7 @@ function harness(path = '/admin/rbac/organizations', initial = selected) {
     get scopeRevision() { return revision },
     ownsScope: vi.fn((scope: number, actor: string) => scope === revision && state.phase === 'selected' && !state.pending && !state.flow && state.self?.actorId === actor && state.self.expiresAt * 1000 > Date.now()),
     logout: vi.fn(async () => { revision++; state = { ...state, phase: 'anonymous', self: null }; notify() }),
-    refresh: vi.fn(), forgetAppChoices: vi.fn(), downloadOwnWalletToken: vi.fn(),
+    refresh: vi.fn(), forgetAppChoices: vi.fn(), downloadOwnWalletToken: vi.fn(), copyOwnRPCCredential: vi.fn(async () => true),
     wallet: new WalletController(async () => { throw Error('no operation requested') }),
   }
   render(<MemoryRouter initialEntries={[path]}><NavigationProbe /><NativeAdminApp controller={mock as unknown as Controller} /></MemoryRouter>)
@@ -690,7 +690,7 @@ describe('native account with the established Admin presentation', () => {
     await selectRBACPage('Organizations'); await userEvent.click(screen.getByRole('button', { name: 'Open source for repair' }))
     expect(screen.getByLabelText('Proposed source')).toHaveValue(raw)
   })
-  it.each(['Sign Out', 'Switch account', 'Refresh session', 'Download wallet token'])('guards Account-page %s after a typed source edit', async action => {
+  it.each(['Sign Out', 'Switch account', 'Refresh session', 'Download wallet token', 'Copy access token', 'Copy Authorization header', 'Copy for Foundry'])('guards Account-page %s after a typed source edit', async action => {
     const page = harness(); await importFiles(); await userEvent.click(screen.getByRole('button', { name: 'Edit local proposal' })); await userEvent.click(screen.getByRole('button', { name: 'Review & export' }))
     const editor = screen.getByLabelText('Proposed source') as HTMLTextAreaElement
     fireEvent.change(editor, { target: { value: editor.value + '\n ' } })
@@ -701,8 +701,16 @@ describe('native account with the established Admin presentation', () => {
     expect(screen.getByRole('dialog')).toHaveTextContent('Keep your changed source')
     expect(page.mock.logout).not.toHaveBeenCalled()
     expect(page.mock.refresh).not.toHaveBeenCalled(); expect(page.mock.downloadOwnWalletToken).not.toHaveBeenCalled()
+    expect(page.mock.copyOwnRPCCredential).not.toHaveBeenCalled()
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     await userEvent.click(screen.getByTestId('account-dropdown-trigger')); await userEvent.click(screen.getByRole('menuitem', { name: 'Configuration workspace' }))
     expect(screen.getByText('Changed local draft')).toBeInTheDocument()
+  })
+  it.each([['Copy access token', 'token'], ['Copy Authorization header', 'header'], ['Copy for Foundry', 'foundry']] as const)('uses the explicit credential action for %s without a changed draft', async (label, format) => {
+    const page = harness('/admin/account')
+    expect(screen.getByTestId('rpc-onboarding')).toHaveTextContent('https://ops.test/rpc/' + org)
+    await userEvent.click(screen.getByRole('button', { name: label }))
+    expect(page.mock.copyOwnRPCCredential).toHaveBeenCalledWith(format)
+    expect(screen.getByRole('button', { name: 'Copied' })).toBeInTheDocument()
   })
 })

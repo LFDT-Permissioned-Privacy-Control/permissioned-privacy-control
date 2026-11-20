@@ -74,7 +74,7 @@ it('defaults approved units to human and clears same-symbol unit changes before 
 it('binds diagnostic calldata to verified org and retires response on input/org edits', async () => {
   const s = scope(), base = s.request.getMockImplementation()!
   s.request.mockImplementation(async (path, options) => path.startsWith('/rpc/') ? { result: '0x' + '0'.repeat(63) + '7' } : base(path, options))
-  render(<NativeDiagnostics scope={s} />)
+  render(<MemoryRouter><NativeDiagnostics scope={s} /></MemoryRouter>)
   fireEvent.change(screen.getByLabelText('Organization'), { target: { value: org } })
   await waitFor(() => expect(screen.getByRole('button', { name: 'Send test request' })).toBeEnabled())
   for (const [label, value] of [['Organization', org], ['Token address', one], ['Owner / account', two]]) fireEvent.change(screen.getByLabelText(label), { target: { value } })
@@ -114,7 +114,7 @@ it('shows expired unused record dates and honest unavailable usage/base-unit met
 })
 it('diagnostic estimates default approved units to human and clear token/mode/unknown changes', async () => {
   const s = scope()
-  render(<NativeDiagnostics scope={s} />)
+  render(<MemoryRouter><NativeDiagnostics scope={s} /></MemoryRouter>)
   fireEvent.change(screen.getByLabelText('Organization'), { target: { value: org } })
   await waitFor(() => expect(screen.getByRole('button', { name: 'Send test request' })).toBeEnabled())
   await waitFor(() => expect(screen.getByLabelText('Approved token')).toHaveTextContent(one))

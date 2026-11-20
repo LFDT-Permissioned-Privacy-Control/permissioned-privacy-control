@@ -301,10 +301,32 @@ export class Controller {
   // Explicit compatibility handoff to the local wallet helper. The credential
   // stays in this action and its download Blob; it is never a UI state value.
   downloadOwnWalletToken = async (): Promise<void> => {
+    await this.ownCredentialAction('wallet-token-download', (token, current) => {
+      const url = URL.createObjectURL(new Blob([token], { type: 'text/plain' }))
+      try {
+        const link = document.createElement('a')
+        link.href = url; link.download = 'ops-wallet-token.jwt'
+        current(); link.click()
+      } finally { URL.revokeObjectURL(url) }
+    })
+  }
+  copyOwnRPCCredential = async (format: 'token' | 'header' | 'foundry'): Promise<boolean> => {
+    if (!['token', 'header', 'foundry'].includes(format)) return false
+    return this.ownCredentialAction('rpc-credential-copy', async (token, current) => {
+    if (!navigator.clipboard?.writeText) throw Error('Clipboard access is unavailable. Download your wallet token instead.')
+    // Shell-ready text accepts only a compact JWT; no arbitrary credential can
+    // become shell syntax. No token is returned to a component or persisted.
+    if (format === 'foundry' && !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) throw Error('This credential cannot be copied as a shell command. Copy the token instead.')
+    const value = format === 'token' ? token : format === 'header' ? `Authorization: Bearer ${token}` : `export ETH_RPC_HEADERS="Authorization: Bearer ${token}"`
+    current(); await navigator.clipboard.writeText(value); current()
+    })
+  }
+  private async ownCredentialAction(kind: string, action: (token: string, current: () => void) => void | Promise<void>): Promise<boolean> {
     const pair = this.selected && { ...this.selected }, original = this.state.self
-    if (!pair || !original || this.state.busy || this.state.phase !== 'selected' || this.state.flow || this.state.pending) return
+    if (!pair || !original || this.state.busy || this.state.phase !== 'selected' || this.state.flow || this.state.pending) return false
     this.set({ busy: true, error: null })
-    await this.work('wallet-token-download', async op => {
+    let completed = false
+    await this.work(kind, async op => {
       const current = () => {
         this.check(op)
         if (this.state.phase !== 'selected' || this.state.flow || this.state.pending || this.state.self !== original ||
@@ -322,14 +344,10 @@ export class Controller {
         if (verified.actorId !== original.actorId || verified.sourceProfile !== original.sourceProfile ||
           verified.actorId !== access.actorId || verified.sourceProfile !== access.sourceProfile ||
           verified.expiresAt !== access.expiresAt || verified.expiresAt <= Date.now() / 1000) throw new AuthError('invalid_response')
-        const url = URL.createObjectURL(new Blob([access.accessToken], { type: 'text/plain' }))
-        try {
-          const link = document.createElement('a')
-          link.href = url; link.download = 'ops-wallet-token.jwt'
-          current(); link.click()
-        } finally { URL.revokeObjectURL(url) }
+        current(); await action(access.accessToken, current); current(); completed = true
       } finally { if (this.owns(op)) this.set({ busy: false }) }
     })
+    return completed
   }
   private schedulePoll(): void {
     clearTimeout(this.pollTimer)

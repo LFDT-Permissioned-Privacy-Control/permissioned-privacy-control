@@ -118,8 +118,8 @@ func scanEvent(row pgx.Row, network a.Digest, expected a.ExpectedState) (a.Event
 	}
 	return e, nil
 }
-func (s *Store) ListEvents(ctx context.Context, network a.Digest, expected a.ExpectedState, org string, position a.EventPosition, limit int) ([]a.Event, error) {
-	if s.mode == "retention" || !a.ValidUUID(org) || limit < 1 || limit > 101 || (!position.At.IsZero() && position.ID <= 0) {
+func (s *Store) ListEvents(ctx context.Context, network a.Digest, expected a.ExpectedState, org string, position a.EventPosition, limit int, filters a.EventFilters) ([]a.Event, error) {
+	if s.mode == "retention" || !a.ValidUUID(org) || limit < 1 || limit > 101 || (!position.At.IsZero() && position.ID <= 0) || !filters.Valid() {
 		return nil, a.ErrInvalid
 	}
 	hasPosition := !position.At.IsZero()
@@ -129,7 +129,7 @@ func (s *Store) ListEvents(ctx context.Context, network a.Digest, expected a.Exp
 	}
 	out := []a.Event{}
 	err := s.readReady(ctx, network, expected, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT `+eventColumns+` FROM ops_admission_v2.compliance_events WHERE network_key=$1 AND org_id=$2::uuid AND(NOT $3::boolean OR(decision_at,id)<($4,$5::bigint))ORDER BY decision_at DESC,id DESC LIMIT $6`, network[:], org, hasPosition, position.At, position.ID, limit)
+		rows, err := tx.Query(ctx, `SELECT `+eventColumns+` FROM ops_admission_v2.compliance_events WHERE network_key=$1 AND org_id=$2::uuid AND(NOT $3::boolean OR(decision_at,id)<($4,$5::bigint)) AND ($7='' OR decision=$7 OR ($7='monitored' AND monitored)) AND ($8='' OR kind=$8) AND ($9='' OR actor_id=$9) ORDER BY decision_at DESC,id DESC LIMIT $6`, network[:], org, hasPosition, position.At, position.ID, limit, filters.Decision, filters.Kind(), filters.ActorID)
 		if err != nil {
 			return a.ErrUnavailable
 		}
@@ -139,7 +139,7 @@ func (s *Store) ListEvents(ctx context.Context, network a.Digest, expected a.Exp
 			if err != nil {
 				return err
 			}
-			if e.Scope.Organization != org {
+			if e.Scope.Organization != org || !filters.Matches(e) {
 				return a.ErrUnavailable
 			}
 			out = append(out, e)

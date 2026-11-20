@@ -301,6 +301,66 @@ func check(t *testing.T, s *a.Service, input a.TrustedRawInput, allowed bool) *a
 
 func TestPostgresAdmissionProtocol(t *testing.T) {
 	d := setup(t)
+	t.Run("typed event filters precede keyset paging and remain organization scoped", func(t *testing.T) {
+		x := newFixture(t, d, source())
+		for nonce := uint64(910); nonce < 912; nonce++ {
+			check(t, x.one, x.input(t, nonce, big.NewInt(1e17), x.token, f.Org, false), true)
+		}
+		events, err := d.one.ListEvents(t.Context(), x.key, x.state, f.Org, a.EventPosition{}, 100, a.EventFilters{})
+		if err != nil || len(events) != 2 {
+			t.Fatal("seed events", err, len(events))
+		}
+		noise := events[0]
+		noise.ID = 0
+		noise.Scope.Actor = f.Actor(f.AdminSubject)
+		if _, err := d.one.WithRawTransaction(t.Context(), noise.Scope, func(tx a.RawTx) (a.CommitKind, error) {
+			for i := 0; i < 501; i++ {
+				if _, err := tx.AppendEvent(noise); err != nil {
+					return 0, err
+				}
+			}
+			return a.CommitDeny, nil
+		}); err != nil {
+			t.Fatal("seed unrelated organization actors", err)
+		}
+		foreign := events[0]
+		foreign.ID = 0
+		foreign.Scope.Organization = f.OtherOrg
+		foreign.Anchor.OrganizationID = f.OtherOrg
+		if _, err := d.one.WithRawTransaction(t.Context(), foreign.Scope, func(tx a.RawTx) (a.CommitKind, error) { _, err := tx.AppendEvent(foreign); return a.CommitDeny, err }); err != nil {
+			t.Fatal(err)
+		}
+		query := "?limit=1&decision=allowed&transferType=eth&actorId=" + url.QueryEscape(f.Actor(f.Subject))
+		status, body := request(t, x, x.admin, "GET", base+"events"+query, nil)
+		var page struct {
+			Events []a.EventDTO `json:"events"`
+			Next   string       `json:"nextCursor"`
+		}
+		if status != 200 || json.Unmarshal(body, &page) != nil || len(page.Events) != 1 || page.Next == "" || page.Events[0].ActorID != f.Actor(f.Subject) {
+			t.Fatalf("filtered page beyond 501 unrelated rows %d %s", status, body)
+		}
+		firstID, cursor := page.Events[0].ID, page.Next
+		status, body = request(t, x, x.admin, "GET", base+"events"+query+"&cursor="+url.QueryEscape(cursor), nil)
+		page.Next = ""
+		if status != 200 || json.Unmarshal(body, &page) != nil || len(page.Events) != 1 || page.Events[0].ID == firstID || page.Next != "" {
+			t.Fatalf("filtered keyset continuation %d %s", status, body)
+		}
+		if status, _ := request(t, x, x.admin, "GET", base+"events"+strings.Replace(query, "decision=allowed", "decision=denied", 1)+"&cursor="+url.QueryEscape(cursor), nil); status != 409 {
+			t.Fatal("changed-filter cursor accepted", status)
+		}
+		for _, bad := range []string{"?decision=approve", "?transferType=other", "?actorId=admin", "?decision=allowed&decision=denied", "?ignored=1"} {
+			if status, _ := request(t, x, x.admin, "GET", base+"events"+bad, nil); status != 400 {
+				t.Fatal("invalid filter ignored", bad, status)
+			}
+		}
+		if status, _ := request(t, x, x.admin, "GET", base+"travel-rule-records?decision=allowed", nil); status != 400 {
+			t.Fatal("filter ignored on another list", status)
+		}
+		status, body = request(t, x, f.Token(t, x.snapshot, f.AdminSubject, "Readonly"), "GET", base+"events?transferType=erc20", nil)
+		if status != 200 || json.Unmarshal(body, &page) != nil || len(page.Events) != 0 {
+			t.Fatalf("type filter ignored %d %s", status, body)
+		}
+	})
 	t.Run("actual admin HTTP and scoped used retry", func(t *testing.T) {
 		x := newFixture(t, d, source())
 		record := x.record(t, f.Actor(f.Subject))

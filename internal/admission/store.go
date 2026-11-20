@@ -15,7 +15,7 @@ type Store interface {
 	GetRecord(context.Context, Digest, ExpectedState, string, string) (Record, error)
 	ListRecords(context.Context, Digest, ExpectedState, string, Position, int) ([]Record, error)
 	DeleteUnused(context.Context, Digest, ExpectedState, string, string, func() error) (bool, error)
-	ListEvents(context.Context, Digest, ExpectedState, string, EventPosition, int) ([]Event, error)
+	ListEvents(context.Context, Digest, ExpectedState, string, EventPosition, int, EventFilters) ([]Event, error)
 }
 type ReadTx interface {
 	BoundRecord(TransferQuery) (Record, bool, error)

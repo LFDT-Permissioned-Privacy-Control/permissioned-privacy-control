@@ -10,6 +10,13 @@ import { NativeDisclosures } from './NativeDisclosures'
 import { NativeDiagnostics } from './NativeDiagnostics'
 import { protectedData, type NativeCase } from './operationsModels'
 
+// Radix Checkbox measures its hidden native form control; jsdom has no layout.
+if (!globalThis.ResizeObserver) globalThis.ResizeObserver = class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver
+
 const org = '11111111-1111-4111-8111-111111111111',
   id = '22222222-2222-4222-8222-222222222222',
   actor = 'ops:p1:' + 'A'.repeat(43)
@@ -87,6 +94,56 @@ function scope(role: 'admin' | 'readonly' | 'member' = 'admin') {
   } as unknown as OperationScope & { request: typeof request }
 }
 afterEach(() => cleanup())
+it('restores read-only organization case inspection without exposing management or recipient reads', async () => {
+  const s = scope('readonly'), anotherRecipient = 'ops:p1:' + 'B'.repeat(43)
+  s.request.mockImplementation(async path => path.endsWith('/audit?limit=25') ? { items: [], nextCursor: '', scanComplete: true } : path.includes('?') ? { items: [{ ...currentCase, recipientActorId: anotherRecipient }], nextCursor: '', scanComplete: true } : { ...currentCase, recipientActorId: anotherRecipient })
+  render(<MemoryRouter><NativeDisclosures scope={s} /></MemoryRouter>)
+  await userEvent.selectOptions(await screen.findByLabelText('Case view'), 'data-org-admin')
+  await screen.findByText('AUDIT-12')
+  expect(screen.queryByRole('button', { name: 'Create case' })).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Open case' }))
+  await screen.findByRole('heading', { name: 'Disclosure case details' })
+  expect(screen.queryByRole('button', { name: 'Revoke case' })).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Read permitted data' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Audit trail' })).toBeEnabled()
+  expect(s.request.mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true)
+})
+it('runs compliance filters on the server and revisits the previous keyset position', async () => {
+  const s = scope('admin'), original = s.request.getMockImplementation()!
+  const event = (hash: string) => ({ id: hash, decisionAt: new Date().toISOString(), transactionHash: hash, actorId: actor, decision: 'denied', monitored: false, coverage: 'root_transfer', reason: 'Record missing', amountWei: '2', currency: 'usd' })
+  s.request.mockImplementation(async (path, options) => path.includes('/events?') ? { events: [event(path.includes('cursor=next') ? '0xNEXT' : '0xFIRST')], nextCursor: path.includes('cursor=next') ? '' : 'next' } : original(path, options))
+  render(<MemoryRouter><NativeCompliance scope={s} /></MemoryRouter>)
+  await screen.findByText('1000 USD')
+  await userEvent.click(screen.getByRole('button', { name: 'Compliance logs' }))
+  await screen.findByText('0xFIRST')
+  await userEvent.selectOptions(screen.getByLabelText('Decision'), 'denied')
+  await userEvent.selectOptions(screen.getByLabelText('Transfer type'), 'eth')
+  await userEvent.type(screen.getByLabelText('Originator OPS actor ID'), actor)
+  await userEvent.click(screen.getByRole('button', { name: 'Search', exact: true }))
+  await waitFor(() => expect(s.request.mock.calls.some(([path]) => path.includes('decision=denied') && path.includes('transferType=eth') && new URL(path, 'https://ops.test').searchParams.get('actorId') === actor)).toBe(true))
+  await userEvent.click(await screen.findByRole('button', { name: 'Next page' }))
+  await screen.findByText('0xNEXT')
+  await userEvent.click(screen.getByRole('button', { name: 'Previous page' }))
+  await screen.findByText('0xFIRST')
+  expect(new URL(s.request.mock.calls.at(-1)![0], 'https://ops.test').searchParams.get('cursor')).toBeNull()
+})
+it('retires a pending compliance query when a different filter search takes ownership', async () => {
+  let finish!: (value: unknown) => void, oldSignal: AbortSignal | undefined
+  const s = scope('admin'), original = s.request.getMockImplementation()!, pending = new Promise<unknown>(resolve => { finish = resolve })
+  const event = (hash: string) => ({ id: hash, decisionAt: new Date().toISOString(), transactionHash: hash, actorId: actor, decision: 'denied', monitored: false, coverage: 'root_transfer', reason: '', amountWei: '2', currency: 'usd' })
+  s.request.mockImplementation(async (path, options) => {
+    if (!path.includes('/events?')) return original(path, options)
+    if (!path.includes('decision=denied')) { oldSignal = options?.signal ?? undefined; return pending }
+    return { events: [event('CURRENT-FILTER')], nextCursor: '' }
+  })
+  render(<MemoryRouter><StrictMode><NativeCompliance scope={s} /></StrictMode></MemoryRouter>)
+  await screen.findByText('1000 USD'); await userEvent.click(screen.getByRole('button', { name: 'Compliance logs' }))
+  await waitFor(() => expect(oldSignal).toBeDefined())
+  await userEvent.selectOptions(screen.getByLabelText('Decision'), 'denied'); await userEvent.click(screen.getByRole('button', { name: 'Search', exact: true }))
+  await screen.findByText('CURRENT-FILTER'); expect(oldSignal!.aborted).toBe(true)
+  await act(async () => { finish({ events: [event('STALE-FILTER')], nextCursor: '' }); await pending })
+  expect(screen.queryByText('STALE-FILTER')).not.toBeInTheDocument()
+})
 it('readonly administration sees approved settings and cannot create travel-rule records', async () => {
   const s = scope('readonly')
   render(
@@ -205,7 +262,7 @@ it('a disclosure recheck reuses the original whole scope and idempotency key wit
       <NativeDisclosures scope={s} />
     </MemoryRouter>,
   )
-  await screen.findByText('No records in this scope.')
+  await screen.findByText('No disclosure cases match this view and these filters.')
   await userEvent.click(screen.getByRole('button', { name: 'Create case' }))
   const dialog = screen.getByRole('dialog')
   for (const [label, value] of [
@@ -288,7 +345,7 @@ it('shows expired stored-open cases honestly in both list and detail while retai
   expect(within(screen.getByText('REVOKED-1').closest('tr')!).getByText('Revoked')).toBeInTheDocument()
   await userEvent.click(expiredRow.getByRole('button', { name: 'Open case' }))
   await screen.findByRole('heading', { name: 'Case: EXPIRED-1' })
-  expect(screen.getAllByText('Expired')).toHaveLength(2)
+  expect(within(screen.getByRole('dialog')).getByText('Expired')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Read permitted data' })).toBeDisabled()
   expect(expired.status).toBe('open')
 })
@@ -432,7 +489,7 @@ it('a disclosure dialog cannot close while its original create request is pendin
       <NativeDisclosures scope={s} />
     </MemoryRouter>,
   )
-  await screen.findByText('No records in this scope.')
+  await screen.findByText('No disclosure cases match this view and these filters.')
   await userEvent.click(screen.getByRole('button', { name: 'Create case' }))
   const dialog = screen.getByRole('dialog')
   for (const [label, value] of [

@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
 import actualDTO from './testdata/disclosure-events-go-dto.json'
@@ -68,7 +68,7 @@ it.each(['full', 'pseudonymous', 'redacted'] as const)('shows Events-only %s cas
   await screen.findByRole('article', { name: 'Disclosed event 7' })
   expect(screen.getByText('9007199254740993')).toBeInTheDocument()
   expect(screen.getByText('Disclosed')).toBeInTheDocument()
-  expect(screen.getByText(level === 'full' ? 'Full' : level === 'redacted' ? 'Redacted' : 'Pseudonymous')).toBeInTheDocument()
+  expect(within(screen.getByRole('article', { name: 'Disclosed event 7' })).getByText(level === 'full' ? 'Full' : level === 'redacted' ? 'Redacted' : 'Pseudonymous')).toBeInTheDocument()
   expect(fixtureValue.bodies).toEqual([{ v: 1, resource: 'events', view: 'list', limit: 25 }, { v: 1, resource: 'events', view: 'list', limit: 25, cursor: 'continue-opaque' }])
   expect(screen.queryByRole('link', { name: /Explorer|Details/ })).not.toBeInTheDocument()
   if (level === 'full') {

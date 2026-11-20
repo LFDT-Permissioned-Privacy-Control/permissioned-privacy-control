@@ -95,6 +95,36 @@ describe('document context and flow ownership', () => {
     held.resolve(kind === 'wrong-profile' ? { ...self(a), sourceProfile: 'another-profile' } : self(a)); await downloading
     expect(create).not.toHaveBeenCalled(); expect(controller.snapshot().busy).toBe(false)
   })
+  it('copies RPC credentials only after current identity verification without adding credentials to UI state', async () => {
+    const access = { ...a, accessToken: 'eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJjb3B5In0.c2ln' }, client = fake(access), writeText = vi.fn(async () => {})
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    expect(writeText).not.toHaveBeenCalled()
+    expect(await controller.copyOwnRPCCredential('header')).toBe(true)
+    expect(writeText).toHaveBeenLastCalledWith('Authorization: Bearer ' + access.accessToken)
+    expect(await controller.copyOwnRPCCredential('foundry')).toBe(true)
+    expect(writeText).toHaveBeenLastCalledWith('export ETH_RPC_HEADERS="Authorization: Bearer ' + access.accessToken + '"')
+    expect(JSON.stringify(controller.snapshot())).not.toContain(access.accessToken)
+    expect(JSON.stringify([...Object.values(localStorage), ...Object.values(sessionStorage)])).not.toContain(access.accessToken)
+  })
+  it('does not copy a delayed credential after another document switches the selected identity', async () => {
+    const client = fake(), held = deferred<ReturnType<typeof self>>(), writeText = vi.fn(async () => {})
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    mocks.own.mockReturnValueOnce(held.promise)
+    const copying = controller.copyOwnRPCCredential('token'); await flush()
+    writeMultiMarker(activeMulti(b)); held.resolve(self(a))
+    expect(await copying).toBe(false); expect(writeText).not.toHaveBeenCalled()
+  })
+  it('does not confirm clipboard completion after the original account is replaced', async () => {
+    const client = fake(), held = deferred<void>(), writeText = vi.fn(() => held.promise)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const copying = controller.copyOwnRPCCredential('header'); await flush()
+    expect(writeText).toHaveBeenCalledTimes(1)
+    writeMultiMarker(activeMulti(b)); held.resolve()
+    expect(await copying).toBe(false)
+  })
   it('forwards an explicit demo expected holder through the existing Privado helper only', async () => {
     const client = fake(); client.restore.mockRejectedValue(new AuthError('login_required'))
     const expected = 'did:iden3:polygon:mumbai:x3333333333'

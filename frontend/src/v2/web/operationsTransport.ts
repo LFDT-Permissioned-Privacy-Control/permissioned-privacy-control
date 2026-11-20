@@ -75,14 +75,14 @@ export function operationEndpoint(endpoint: string, method: string): boolean {
       if (method === 'GET') allowed = ['limit', 'cursor']
     } else {
       valid = method === 'GET'
-      if (section === 'events') allowed = ['limit', 'cursor']
+      if (section === 'events') allowed = ['limit', 'cursor', 'decision', 'transferType', 'actorId']
     }
   } else if (disclosure) {
     const [, id, action] = disclosure
     if (id && !canonicalUUID(id)) return false
     if (!id) {
       valid = method === 'GET' || method === 'POST'
-      if (method === 'GET') allowed = ['role', 'organizationId', 'limit', 'cursor']
+      if (method === 'GET') allowed = ['role', 'organizationId', 'limit', 'cursor', 'status', 'privacyLevel', 'recipientActorId', 'createdFrom', 'createdTo']
     } else if (action === 'read' || action === 'revoke') valid = method === 'POST'
     else {
       valid = method === 'GET'
@@ -99,6 +99,12 @@ export function operationEndpoint(endpoint: string, method: string): boolean {
     if (key === 'cursor' && (value.length > 8192 || /[^\x21-\x7e]/.test(value))) return false
     if (key === 'organizationId' && !canonicalUUID(value)) return false
     if (key === 'role' && value !== 'recipient' && value !== 'data-org-admin') return false
+    if (key === 'decision' && !['allowed', 'denied', 'monitored'].includes(value)) return false
+    if (key === 'transferType' && !['eth', 'erc20'].includes(value)) return false
+    if (key === 'status' && !['active', 'expired', 'revoked'].includes(value)) return false
+    if (key === 'privacyLevel' && !['redacted', 'pseudonymous', 'full'].includes(value)) return false
+    if (key === 'recipientActorId' && !/^ops:p1:[A-Za-z0-9_-]{43}$/.test(value)) return false
+    if ((key === 'createdFrom' || key === 'createdTo') && (!/^[1-9][0-9]{0,11}$/.test(value) || Number(value) > 253402300799)) return false
   }
   if (
     (query.get('role') === 'data-org-admin' && !query.has('organizationId')) ||
@@ -141,6 +147,8 @@ export async function operationRequest(
           'net_version',
           'eth_syncing',
           'eth_blockNumber',
+          'eth_getBalance',
+          'web3_clientVersion',
           'eth_call',
           'eth_estimateGas',
           'eth_getTransactionReceipt',

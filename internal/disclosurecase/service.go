@@ -92,6 +92,14 @@ func (s *Service) admin(v *runtimepolicy.View, org string) bool {
 	o, ok := v.Org(org)
 	return ok && o.IsOrgAdmin()
 }
+
+// Organization audit roles may inspect case metadata and recorded audit actors.
+// This is deliberately separate from admin: it grants no case creation,
+// delegation, revocation or protected-data authority.
+func (s *Service) canInspectDataOrg(v *runtimepolicy.View, org string) bool {
+	o, ok := v.Org(org)
+	return ok && (o.IsOrgAdmin() || o.IsOrgReadonlyAdmin())
+}
 func (s *Service) groups(v *runtimepolicy.View, r *disclosurepolicy.Rule) []disclosurepolicy.GroupRef {
 	refs := []disclosurepolicy.GroupRef{}
 	for _, ref := range r.Source().Viewers.Groups {
@@ -113,7 +121,7 @@ func (s *Service) metadata(v *runtimepolicy.View, c Case) error {
 	if c.Epoch != s.epoch || ValidateCase(c) != nil {
 		return ErrNotFound
 	}
-	if s.admin(v, c.DataOrg) {
+	if s.canInspectDataOrg(v, c.DataOrg) {
 		return nil
 	}
 	r, ok := s.catalog.Rule(c.RuleID)

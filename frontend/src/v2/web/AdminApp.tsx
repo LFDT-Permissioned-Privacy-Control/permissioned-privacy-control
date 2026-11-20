@@ -26,8 +26,8 @@ import './style.css'
 
 const LocalDemoHost = import.meta.env.VITE_OPS_LOCAL_DEMO === '1' ? lazy(() => import('./LocalDemoHost')) : null
 
-type AccountAction = 'sign-out' | 'switch-account' | 'refresh-session' | 'download-wallet-token'
-const actionLabels: Record<AccountAction, string> = { 'sign-out': 'sign out', 'switch-account': 'switch account', 'refresh-session': 'refresh session', 'download-wallet-token': 'download wallet token' }
+type AccountAction = 'sign-out' | 'switch-account' | 'refresh-session' | 'download-wallet-token' | 'copy-token' | 'copy-header' | 'copy-foundry'
+const actionLabels: Record<AccountAction, string> = { 'sign-out': 'sign out', 'switch-account': 'switch account', 'refresh-session': 'refresh session', 'download-wallet-token': 'download wallet token', 'copy-token': 'copy access token', 'copy-header': 'copy Authorization header', 'copy-foundry': 'copy for Foundry' }
 
 function SelectedAccount({ controller, state, draft }: { controller: Controller; state: State; draft: SourceDraftMemory }) {
   const location = useLocation(), navigate = useNavigate()
@@ -60,14 +60,16 @@ function SelectedAccount({ controller, state, draft }: { controller: Controller;
   const policySection = activeSection === 'compliance' || activeSection === 'disclosure' ? activeSection : null
   const policyDraft = sourcePage?.id === 'compliance-source' || sourcePage?.id === 'disclosure-source'
   async function runAccountAction(action: AccountAction) {
-    if (!controller.ownsScope(controller.scopeRevision, self.actorId)) return
+    if (!controller.ownsScope(controller.scopeRevision, self.actorId)) return false
     if (action === 'sign-out') await controller.logout()
     else if (action === 'switch-account') navigate('/login', { state: { switchAccount: true } })
     else if (action === 'refresh-session') await controller.refresh()
-    else await controller.downloadOwnWalletToken()
+    else if (action === 'download-wallet-token') await controller.downloadOwnWalletToken()
+    else return controller.copyOwnRPCCredential(action === 'copy-token' ? 'token' : action === 'copy-header' ? 'header' : 'foundry')
+    return false
   }
-  async function requestAccountAction(action: AccountAction) { if (dirty) setLeaving(action); else await runAccountAction(action) }
-  const signOut = () => requestAccountAction('sign-out')
+  async function requestAccountAction(action: AccountAction) { if (dirty) { setLeaving(action); return false }; return runAccountAction(action) }
+  const signOut = async () => { await requestAccountAction('sign-out') }
   const switchAccount = () => { void requestAccountAction('switch-account') }
   const menu = <AccountMenu userDID={self.actorId} providerLabel={provider} busy={state.busy} isAccountPage={account}
     onAccount={() => navigate('/admin/account')} onDashboard={admin ? () => navigate('/admin/rbac/organizations') : undefined} dashboardLabel="Configuration workspace"
@@ -77,7 +79,7 @@ function SelectedAccount({ controller, state, draft }: { controller: Controller;
     {admin && policySection && <Tabs value={policyDraft ? 'draft' : 'live'} onValueChange={value => navigate(withScope(value === 'draft' ? sourcePagePath(policySection === 'compliance' ? 'compliance-source' : 'disclosure-source') : '/admin/' + policySection))} aria-label={policySection === 'compliance' ? 'Compliance pages' : 'Disclosure pages'}>
       <TabsList className="mb-5"><TabsTrigger value="live">{policySection === 'compliance' ? 'Live data' : 'Cases'}</TabsTrigger><TabsTrigger value="draft">{policySection === 'compliance' ? 'Policy draft' : 'Rules draft'}</TabsTrigger></TabsList>
     </Tabs>}
-    {account ? <NativeAccountPage controller={controller} state={state} onSignOut={signOut} onSwitchAccount={switchAccount} onRefreshSession={() => { void requestAccountAction('refresh-session') }} onDownloadWalletToken={() => { void requestAccountAction('download-wallet-token') }} />
+    {account ? <NativeAccountPage controller={controller} state={state} onSignOut={signOut} onSwitchAccount={switchAccount} onRefreshSession={() => { void requestAccountAction('refresh-session') }} onDownloadWalletToken={() => { void requestAccountAction('download-wallet-token') }} onCopyRPCCredential={format => requestAccountAction(format === 'token' ? 'copy-token' : format === 'header' ? 'copy-header' : 'copy-foundry')} />
       : !admin ? <AdminAccessDenied onAccount={() => navigate('/admin/account', { replace: true })} accountLabel="Go to your account" />
       : !sourcePage && section ? <NativeOperationsPage controller={controller} state={state} section={section} />
       : <>

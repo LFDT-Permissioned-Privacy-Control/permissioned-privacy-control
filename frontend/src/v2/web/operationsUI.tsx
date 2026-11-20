@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
 import { Input } from '../../components/ui/input'
+import { Textarea } from '../../components/ui/textarea'
 import {
   Table,
   TableBody,
@@ -43,6 +44,7 @@ export function Field({
   disabled = false,
   hint,
   step,
+  multiline = false,
 }: {
   label: string
   value: string
@@ -52,11 +54,19 @@ export function Field({
   disabled?: boolean
   hint?: string
   step?: number
+  multiline?: boolean
 }) {
   return (
     <label className="block space-y-1 text-sm font-medium text-neutral-700">
       {label}
-      <Input
+      {multiline ? <Textarea
+        aria-label={label}
+        variant="code"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        required={required}
+        disabled={disabled}
+      /> : <Input
         aria-label={label}
         type={type}
         value={value}
@@ -64,7 +74,7 @@ export function Field({
         required={required}
         disabled={disabled}
         step={step}
-      />
+      />}
       {hint && <span className="block text-xs font-normal text-neutral-500">{hint}</span>}
     </label>
   )
@@ -110,11 +120,14 @@ export function DataTable({
   items,
   columns,
   empty = 'No records in this scope.',
+  loading = false,
 }: {
   items: ObjectValue[]
   columns: Column[]
   empty?: string
+  loading?: boolean
 }) {
+  if (loading) return <p role="status" className="py-8 text-center text-sm text-neutral-500">Loading…</p>
   return (
     <div className="overflow-x-auto">
       <Table>

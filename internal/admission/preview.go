@@ -140,7 +140,7 @@ func (s *Service) ListEvents(ctx context.Context, token, org string, opts ListOp
 		}
 		position.ID = id
 	}
-	rows, err := s.store.ListEvents(ctx, s.networkKey, s.state, org, position, limit+1)
+	rows, err := s.store.ListEvents(ctx, s.networkKey, s.state, org, position, limit+1, opts.Filters)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func (s *Service) ListEvents(ctx context.Context, token, org string, opts ListOp
 	}
 	out := make([]EventDTO, 0, len(rows))
 	for _, row := range rows {
-		if !row.Valid() || row.Scope.Organization != org || row.Scope.Network != s.networkKey {
+		if !row.Valid() || row.Scope.Organization != org || row.Scope.Network != s.networkKey || !opts.Filters.Matches(row) {
 			return nil, ErrUnavailable
 		}
 		out = append(out, eventDTO(row))

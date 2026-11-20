@@ -186,13 +186,15 @@ func TestActualProtectedExposureBeforeBytesAndCurrentWholeRule(t *testing.T) {
 		t.Fatal("wrong receipt or first-N aggregate", raw.String())
 	}
 	t.Run("metadata admin is not data recipient", func(t *testing.T) {
-		admin := f.Token(t, snapshot, f.AdminSubject, "Admin")
-		if _, e := service.Get(t.Context(), admin, opened.CaseID); e != nil {
-			t.Fatal("metadata denied", e)
-		}
-		before := sources.opens.Load()
-		if _, e := service.Read(t.Context(), admin, opened.CaseID, summaryQuery()); !errors.Is(e, c.ErrNotFound) || sources.opens.Load() != before {
-			t.Fatal("admin bypass reached data", e)
+		for _, role := range []string{"Admin", "Readonly"} {
+			admin := f.Token(t, snapshot, f.AdminSubject, role)
+			if _, e := service.Get(t.Context(), admin, opened.CaseID); e != nil {
+				t.Fatal("metadata denied", role, e)
+			}
+			before := sources.opens.Load()
+			if _, e := service.Read(t.Context(), admin, opened.CaseID, summaryQuery()); !errors.Is(e, c.ErrNotFound) || sources.opens.Load() != before {
+				t.Fatal("metadata admin bypass reached data", role, e)
+			}
 		}
 	})
 	t.Run("query narrowing cannot repair whole rule", func(t *testing.T) {

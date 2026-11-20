@@ -224,7 +224,7 @@ func limit(r *http.Request) (int, error) {
 	return n, nil
 }
 func (h *Handler) list(ctx context.Context, token string, r *http.Request) (*disclosurecase.Response, error) {
-	if query(r, "role", "organizationId", "limit", "cursor") != nil {
+	if query(r, "role", "organizationId", "limit", "cursor", "status", "privacyLevel", "recipientActorId", "createdFrom", "createdTo") != nil {
 		return nil, disclosurecase.ErrInvalid
 	}
 	n, err := limit(r)
@@ -232,7 +232,17 @@ func (h *Handler) list(ctx context.Context, token string, r *http.Request) (*dis
 		return nil, err
 	}
 	q := r.URL.Query()
-	return h.service.List(ctx, token, disclosurecase.ListOptions{Role: q.Get("role"), Organization: q.Get("organizationId"), Cursor: q.Get("cursor"), Limit: n})
+	filters := disclosurecase.CaseFilters{Status: q.Get("status"), PrivacyLevel: q.Get("privacyLevel"), RecipientActorID: q.Get("recipientActorId")}
+	for name, target := range map[string]*int64{"createdFrom": &filters.CreatedFrom, "createdTo": &filters.CreatedTo} {
+		if raw := q.Get(name); raw != "" {
+			v, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || strconv.FormatInt(v, 10) != raw || v <= 0 {
+				return nil, disclosurecase.ErrInvalid
+			}
+			*target = v
+		}
+	}
+	return h.service.List(ctx, token, disclosurecase.ListOptions{Role: q.Get("role"), Organization: q.Get("organizationId"), Cursor: q.Get("cursor"), Limit: n, Filters: filters})
 }
 func (h *Handler) audit(ctx context.Context, token string, r *http.Request) (*disclosurecase.Response, error) {
 	if query(r, "limit", "cursor") != nil {
