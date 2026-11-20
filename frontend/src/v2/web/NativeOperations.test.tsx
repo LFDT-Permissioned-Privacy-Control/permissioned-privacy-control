@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -187,6 +187,9 @@ it('a disclosure recheck reuses the original whole scope and idempotency key wit
   expect(created[0]).toBe(created[1])
   expect(JSON.parse(created[0]).scope.addresses.mode).toBe('all-target-addresses')
   expect(screen.queryByRole('button', { name: /approve/i })).not.toBeInTheDocument()
+  expect(screen.getByRole('dialog', { name: 'Disclosure case details' })).toBeInTheDocument()
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Disclosure case details' })).toHaveFocus())
+  await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close', exact: true }))
   await userEvent.click(screen.getByRole('button', { name: 'Create case' }))
   const next = screen.getByRole('dialog')
   expect(within(next).getByLabelText('Case reference')).toHaveValue('')
@@ -196,6 +199,42 @@ it('a disclosure recheck reuses the original whole scope and idempotency key wit
 function baseID() {
   return '/api/v1/disclosure/cases/' + id
 }
+it('opens case details in the V1 dialog pattern and returns focus to the unchanged case list', async () => {
+  const s = scope()
+  render(<MemoryRouter><NativeDisclosures scope={s} /></MemoryRouter>)
+  const opener = await screen.findByRole('button', { name: 'Open case' })
+  await userEvent.click(opener)
+  const dialog = await screen.findByRole('dialog', { name: 'Disclosure case details' })
+  expect(within(dialog).getByRole('heading', { name: 'Case: AUDIT-12' })).toBeInTheDocument()
+  await waitFor(() => expect(within(dialog).getByRole('heading', { name: 'Disclosure case details' })).toHaveFocus())
+  expect(screen.queryByRole('heading', { name: 'Disclosure cases' })).not.toBeInTheDocument()
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Close', exact: true }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  expect(screen.getByRole('heading', { name: 'Disclosure cases' })).toBeInTheDocument()
+  await waitFor(() => expect(opener).toHaveFocus())
+  expect(s.request.mock.calls.filter(([path]) => path.includes('/cases?'))).toHaveLength(1)
+  await userEvent.click(opener)
+  expect(await screen.findByRole('dialog', { name: 'Disclosure case details' })).toBeInTheDocument()
+})
+it('leaves a failed case open request visible in the list and allows retry', async () => {
+  const s = scope(), original = s.request.getMockImplementation()!
+  let fail = true
+  s.request.mockImplementation(async (path, options) => {
+    if (path === baseID() && fail) throw Error('Case could not be loaded. Try again.')
+    return original(path, options)
+  })
+  render(<MemoryRouter><NativeDisclosures scope={s} /></MemoryRouter>)
+  const opener = await screen.findByRole('button', { name: 'Open case' })
+  await userEvent.click(opener)
+  expect(await screen.findByRole('alert')).toHaveTextContent('Case could not be loaded. Try again.')
+  await waitFor(() => expect(screen.getByRole('alert').parentElement).toHaveFocus())
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(opener).toBeEnabled()
+  fail = false
+  await userEvent.click(opener)
+  expect(await screen.findByRole('dialog', { name: 'Disclosure case details' })).toBeInTheDocument()
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
 it('shows expired stored-open cases honestly in both list and detail while retaining revoked status', async () => {
   const s = scope(), expired = { ...currentCase, caseReference: 'EXPIRED-1', createdAt: now - 600, expiresAt: now - 1 }
   const revoked = { ...expired, caseId: '33333333-3333-4333-8333-333333333333', caseReference: 'REVOKED-1', status: 'revoked' }
@@ -257,6 +296,39 @@ it('case revocation collects its reason inside the actual confirmation dialog', 
       body: JSON.stringify({ reason: 'Audit completed' }),
     }),
   )
+})
+it('closing a nested revocation dialog keeps its parent case open', async () => {
+  const s = scope()
+  render(<MemoryRouter><NativeDisclosures scope={s} /></MemoryRouter>)
+  await userEvent.click(await screen.findByRole('button', { name: 'Open case' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Revoke case' }))
+  const confirmation = screen.getByRole('dialog', { name: 'Revoke this disclosure case?' })
+  await userEvent.click(within(confirmation).getByRole('button', { name: 'Cancel', exact: true }))
+  expect(screen.getByRole('dialog', { name: 'Disclosure case details' })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: 'Case: AUDIT-12' })).toBeInTheDocument()
+  expect(s.request.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false)
+})
+it('retires a pending case revocation callback when its view is replaced', async () => {
+  const s = scope(), original = s.request.getMockImplementation()!
+  let finish!: () => void
+  const pending = new Promise<void>(resolve => { finish = resolve })
+  s.request.mockImplementation(async (path, options) => {
+    if (path.endsWith('/revoke')) { await pending; return { caseId: id, status: 'revoked', version: 2 } }
+    return original(path, options)
+  })
+  const view = render(<MemoryRouter><NativeDisclosures key="first" scope={s} /></MemoryRouter>)
+  await userEvent.click(await screen.findByRole('button', { name: 'Open case' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Revoke case' }))
+  const confirmation = screen.getByRole('dialog', { name: 'Revoke this disclosure case?' })
+  fireEvent.change(within(confirmation).getByLabelText('Reason for revocation'), { target: { value: 'Complete the old case' } })
+  await userEvent.click(within(confirmation).getByRole('button', { name: 'Revoke case', exact: true }))
+  await waitFor(() => expect(s.request.mock.calls.some(([path]) => path.endsWith('/revoke'))).toBe(true))
+  view.rerender(<MemoryRouter><NativeDisclosures key="replacement" scope={s} /></MemoryRouter>)
+  await userEvent.click(await screen.findByRole('button', { name: 'Open case' }))
+  await screen.findByRole('dialog', { name: 'Disclosure case details' })
+  await act(async () => { finish(); await pending })
+  expect(screen.getByRole('dialog', { name: 'Disclosure case details' })).toBeInTheDocument()
+  expect(s.request.mock.calls.filter(([path]) => path.includes('/cases?'))).toHaveLength(2)
 })
 it('redacted access-log responses reject unexpected identity fields', () => {
   const response = {

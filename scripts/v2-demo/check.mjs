@@ -431,6 +431,7 @@ async function checkUIPreview(user) {
   await auditRow.getByRole('cell', { name: 'List', exact: true }).waitFor();
   await screenshot('admin-finance-evidence');
   passed('Admin creates a case, reads scoped admission evidence and checks its recorded resource/view in the case audit');
+  await page.getByRole('dialog', { name: 'Disclosure case details', exact: true }).getByRole('button', { name: 'Close', exact: true }).click();
   stage = 'ui-preview-account';
   await page.getByTestId('account-dropdown-trigger').click();
   await page.getByRole('menuitem', { name: 'Account', exact: true }).click();

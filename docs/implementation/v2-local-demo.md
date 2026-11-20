@@ -329,8 +329,8 @@ The walkthrough opens one case. To create another in **Explorer**, sign in as Ad
 | Detail level | Full |
 
 Choose **Open case**, **Transactions**, then a row's **Details** link. Return to
-the case and choose **Events** for the contract logs; expand **Raw payload** to
-inspect real topics and data. **Continue** can advance through a page containing
+the case and choose **Events** for the contract log cards. Topics and data are
+shown directly; **Transaction details** expands the hashes. **Continue** can advance through a page containing
 no eligible logs. **Download this page** saves only that page. These are events
 from transactions covered by the case, not all activity mentioning a customer.
 Full includes the whole event payload, possibly other parties in a batch;

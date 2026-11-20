@@ -64,7 +64,17 @@ export function NativeDisclosures({
     [selected, setSelected] = useState<NativeCase>()
   const statusNow = useCaseDisplayClock(selected ? [...items, selected] : items, scope.identity.expires)
   const createBody = useRef<string>(),
-    createInFlight = useRef(false)
+    createInFlight = useRef(false),
+    detailTrigger = useRef<HTMLButtonElement | null>(null),
+    detailTitle = useRef<HTMLHeadingElement | null>(null),
+    listError = useRef<HTMLDivElement | null>(null),
+    pageTitle = useRef<HTMLHeadingElement | null>(null)
+  useEffect(() => {
+    if (task.error && !selected && !creating) {
+      listError.current?.focus({ preventScroll: true })
+      listError.current?.scrollIntoView?.({ block: 'center' })
+    }
+  }, [task.error, selected, creating])
   const list = async (next = '') => {
     const query = new URLSearchParams({ role, limit: '25' })
     if (role === 'data-org-admin') query.set('organizationId', org)
@@ -85,7 +95,7 @@ export function NativeDisclosures({
     <section className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-2xl font-semibold">{logsOnly ? 'Access Logs' : 'Disclosure'}</h2>
+          <h2 ref={pageTitle} tabIndex={-1} className="text-2xl font-semibold">{logsOnly ? 'Access Logs' : 'Disclosure'}</h2>
           <p className="mt-1 text-sm text-neutral-500">
             {logsOnly
               ? 'Inspect recorded requests through an authorized disclosure case.'
@@ -100,7 +110,7 @@ export function NativeDisclosures({
           >
             Refresh
           </Button>
-          <Button onClick={() => setCreating(true)} disabled={task.busy}>
+          <Button onClick={(event) => { detailTrigger.current = event.currentTarget; setCreating(true) }} disabled={task.busy}>
             Create case
           </Button>
         </div>
@@ -131,7 +141,7 @@ export function NativeDisclosures({
           )}
         </div>
       )}
-      <TaskError message={task.error} />
+      {task.error && <div ref={listError} tabIndex={-1}><TaskError message={task.error} /></div>}
       <Panel title={logsOnly ? 'Choose an access-log case' : 'Disclosure cases'}>
         <DataTable
           items={items as unknown as ObjectValue[]}
@@ -156,13 +166,15 @@ export function NativeDisclosures({
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() =>
+                  disabled={task.busy}
+                  onClick={(event) => {
+                    detailTrigger.current = event.currentTarget
                     void task.run(async () => {
                       const value = caseRecord(await scope.request(base + '/' + text(r.caseId)))
                       scope.check()
                       setSelected(value)
                     })
-                  }
+                  }}
                 >
                   Open case
                 </Button>
@@ -177,26 +189,38 @@ export function NativeDisclosures({
         )}
         <More cursor={cursor} busy={task.busy} onNext={() => void task.run(() => list(cursor))} />
       </Panel>
-      {selected && (
-        <CaseDetail
-          key={`${selected.caseId}:${selected.version}`}
-          scope={scope}
-          selected={selected}
-          statusNow={statusNow}
-          logsOnly={logsOnly}
-          onChanged={async () => {
-            setSelected(undefined)
-            await list()
-          }}
-        />
-      )}
+      <Dialog open={!!selected} onOpenChange={(open) => { if (!open) setSelected(undefined) }}>
+        <DialogContent className="max-w-4xl" onOpenAutoFocus={(event) => {
+          event.preventDefault()
+          detailTitle.current?.focus()
+        }} onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          const trigger = detailTrigger.current
+          if (trigger?.isConnected && !trigger.disabled) trigger.focus()
+          else pageTitle.current?.focus()
+        }}>
+          <DialogHeader><DialogTitle ref={detailTitle} tabIndex={-1}>Disclosure case details</DialogTitle></DialogHeader>
+          <TaskError message={task.error} />
+          {selected && <CaseDetail
+            key={`${selected.caseId}:${selected.version}`}
+            scope={scope}
+            selected={selected}
+            statusNow={statusNow}
+            logsOnly={logsOnly}
+            onChanged={async () => {
+              setSelected(undefined)
+              await task.run(() => list())
+            }}
+          />}
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={creating}
         onOpenChange={(open) => {
           if (!createInFlight.current) setCreating(open)
         }}
       >
-        <DialogContent>
+        <DialogContent onCloseAutoFocus={(event) => { if (selected) event.preventDefault() }}>
           <DialogHeader>
             <DialogTitle>Create disclosure case</DialogTitle>
           </DialogHeader>
@@ -210,7 +234,7 @@ export function NativeDisclosures({
               createBody.current = undefined
               setCreating(false)
               setSelected(value)
-              await list()
+              await task.run(() => list())
             }}
           />
         </DialogContent>
@@ -717,6 +741,7 @@ function CaseDetail({
                   body: JSON.stringify({ reason }),
                 })
                 scope.check()
+                if (!alive.current) return
                 await onChanged()
               })
             }}
