@@ -160,6 +160,43 @@ describe('document context and flow ownership', () => {
     controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
     expect(controller.snapshot().phase).toBe('anonymous'); expect(controller.snapshot().self).toBeNull(); expect(controller.snapshot().error).toBeNull()
   })
+  it.each(['fresh', 'expired'] as const)('prepares one unconfirmed QR challenge for %s ordinary entry, with no retry after cancel', async prior => {
+    if (prior === 'expired') writeMultiMarker(deniedMulti(a))
+    const client = fake(); client.restore.mockRejectedValue(new AuthError('login_required')); mocks.next = client
+    const requestId = '44444444-4444-4444-4444-444444444444'
+    client.startPrivadoLogin.mockImplementation(async (_profile, _holder, current) => { current(); return { requestId, expiresAt: a.expiresAt, requestUri: location.origin + '/api/v2/auth/privado/requests/' + requestId } })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    expect(controller.snapshot().ordinaryEntry).toBe(true)
+    await Promise.all([controller.prepareLogin(), controller.prepareLogin()])
+    expect(client.startPrivadoLogin).toHaveBeenCalledTimes(1); expect(client.startPrivadoLogin.mock.calls[0][1]).toBeUndefined()
+    expect(controller.snapshot().pending?.requestId).toBe(requestId); expect(controller.snapshot().self).toBeNull()
+    expect(client.confirmPrivado).not.toHaveBeenCalled(); expect(mocks.own).not.toHaveBeenCalled()
+    await controller.cancel(); await controller.prepareLogin()
+    expect(client.startPrivadoLogin).toHaveBeenCalledTimes(1)
+  })
+  it.each(['active', 'denied'] as const)('does not prepare a QR for a %s context that replaced the bootstrap owner', async phase => {
+    const client = fake(); client.restore.mockRejectedValue(new AuthError('login_required')); mocks.next = client
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    writeMultiMarker(phase === 'active' ? activeMulti(b) : deniedMulti(b))
+    await controller.prepareLogin()
+    expect(client.startPrivadoLogin).not.toHaveBeenCalled(); expect(controller.snapshot().phase).toBe('context-changed')
+  })
+  it('rechecks the original entry context immediately before a queued automatic challenge writes anything', async () => {
+    const client = fake(), queued = deferred<void>(); client.restore.mockRejectedValue(new AuthError('login_required')); mocks.next = client
+    client.startPrivadoLogin.mockImplementation(async (_profile, _holder, current) => { await queued.promise; current(); throw Error('must not reach provider') })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const preparing = controller.prepareLogin(); await flush(); writeMultiMarker(activeMulti(b)); queued.resolve(); await preparing
+    expect(controller.snapshot().phase).toBe('context-changed'); expect(controller.snapshot().pending).toBeNull()
+    expect(localStorage.getItem('ops-v2.browser-context')).toBe(JSON.stringify(activeMulti(b)))
+  })
+  it('does not guess among multiple Privado connections or replace a currently selected account', async () => {
+    const client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await controller.prepareLogin()
+    expect(client.startPrivadoLogin).not.toHaveBeenCalled(); expect(controller.snapshot().self?.actorId).toBe(a.actorId); controller.stop()
+    localStorage.clear(); client.restore.mockRejectedValue(new AuthError('login_required'))
+    client.providers.mockResolvedValue({ profiles: [{ id: 'bank', provider: 'privado', principalKind: 'human' }, { id: 'other', provider: 'privado', principalKind: 'human' }], completionPath: '/auth/complete' })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await controller.prepareLogin()
+    expect(client.startPrivadoLogin).not.toHaveBeenCalled()
+  })
   it.each(['actor', 'pending', 'malformed', 'outage'] as const)('retains explicit feedback for %s bootstrap', async prior => {
     if (prior === 'actor') writeMultiMarker(activeMulti(a))
     if (prior === 'pending') writeMultiMarker(activeMulti(a, { kind: 'privado', mode: 'renew', sourceProfile: 'bank', requestId: '44444444-4444-4444-4444-444444444444', expiresAt: a.expiresAt, expectedActorId: a.actorId, expectedSessionId: a.browserSessionId }))
@@ -168,9 +205,9 @@ describe('document context and flow ownership', () => {
     controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
     expect(controller.snapshot().self).toBeNull(); expect(controller.snapshot().error).not.toBeNull()
   })
-  it('does not hide an application or callback authentication failure as normal signed out', async () => {
+  it('does not hide an application inspect or callback authentication failure as normal signed out', async () => {
     history.replaceState(null, '', '/auth/sso?flow=33333333-3333-3333-3333-333333333333')
-    mocks.inspect.mockResolvedValue({ id: '33333333-3333-3333-3333-333333333333', expiresAt: a.expiresAt, displayName: 'Explorer' })
+    mocks.inspect.mockRejectedValue(new AuthError('login_required'))
     const client = fake(); client.restore.mockRejectedValue(new AuthError('login_required'))
     controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
     expect(controller.snapshot().error).toBe('login_required'); controller.stop(); sessionStorage.clear()
@@ -178,6 +215,53 @@ describe('document context and flow ownership', () => {
     controller = new Controller(fake() as unknown as MultiBrowserAuthClient)
     await controller.start(Promise.resolve({ error: new AuthError('login_required') }))
     expect(controller.snapshot().error).toBe('login_required')
+  })
+  it('prepares a fresh SSO QR only after inspecting the original flow, without confirmation or continuation', async () => {
+    const id = '33333333-3333-3333-3333-333333333333', requestId = '44444444-4444-4444-4444-444444444444'
+    history.replaceState(null, '', '/auth/sso?flow=' + id)
+    const flow = { id, expiresAt: a.expiresAt - 60, displayName: 'Explorer' }; mocks.inspect.mockResolvedValue(flow)
+    const client = fake(); client.restore.mockRejectedValue(new AuthError('login_required')); mocks.next = client
+    client.startPrivadoLogin.mockImplementation(async (_profile, _holder, current) => { current(); return { requestId, expiresAt: a.expiresAt, requestUri: location.origin + '/api/v2/auth/privado/requests/' + requestId } })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await controller.prepareLogin()
+    expect(client.startPrivadoLogin).toHaveBeenCalledTimes(1); expect(controller.snapshot().flow).toBe(flow)
+    expect(controller.snapshot().flow?.expiresAt).toBe(a.expiresAt - 60)
+    expect(client.confirmPrivado).not.toHaveBeenCalled(); expect(mocks.complete).not.toHaveBeenCalled()
+  })
+  it.each(['fresh', 'prior-account'] as const)('rejects a foreign denied account introduced during %s bootstrap before storage-event delivery', async prior => {
+    if (prior === 'prior-account') writeMultiMarker(activeMulti(a))
+    const client = fake(); client.restore.mockImplementation(async () => { writeMultiMarker(deniedMulti(b)); throw new AuthError('login_required') })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await controller.prepareLogin()
+    expect(controller.snapshot().phase).toBe('context-changed'); expect(client.startPrivadoLogin).not.toHaveBeenCalled()
+  })
+  it.each(['empty', 'old-account'] as const)('replaces only its own expired unsigned QR on a new %s entry, without restoring identity', async prior => {
+    const requestId = '44444444-4444-4444-4444-444444444444'
+    writeMultiMarker({ ...deniedMulti(prior === 'old-account' ? a : null), pendingFlow: { kind: 'privado', mode: 'login', requestId,
+      sourceProfile: 'bank', expiresAt: Math.floor(Date.now() / 1000) - 1, expectedActorId: null, expectedSessionId: null } })
+    const client = fake(); client.restore.mockRejectedValue(new AuthError('login_required')); mocks.next = client
+    client.startPrivadoLogin.mockImplementation(async (_profile, _holder, current) => { current(); return { requestId, expiresAt: a.expiresAt, requestUri: location.origin + '/api/v2/auth/privado/requests/' + requestId } })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await controller.prepareLogin()
+    expect(client.startPrivadoLogin).toHaveBeenCalledTimes(1); expect(controller.snapshot().pending?.requestId).toBe(requestId)
+    expect(controller.snapshot().self).toBeNull(); expect(client.confirmPrivado).not.toHaveBeenCalled()
+  })
+  it.each(['live', 'bound', 'renewal', 'azure'] as const)('never automatically replaces an ambiguous %s challenge', async kind => {
+    const requestId = '44444444-4444-4444-4444-444444444444', expiresAt = Math.floor(Date.now() / 1000) + (kind === 'live' ? 60 : -1)
+    const pending = kind === 'azure' ? { kind: 'azure' as const, sourceProfile: 'bank', stateHash: 'sha256:' + 'a'.repeat(64), expiresAt }
+      : { kind: 'privado' as const, mode: kind === 'renewal' ? 'renew' as const : 'login' as const, requestId, sourceProfile: 'bank', expiresAt,
+        expectedActorId: kind === 'bound' || kind === 'renewal' ? a.actorId : null, expectedSessionId: kind === 'renewal' ? a.browserSessionId : null }
+    writeMultiMarker({ ...deniedMulti(a), pendingFlow: pending })
+    const client = fake(); client.restore.mockRejectedValue(new AuthError('login_required')); mocks.next = client
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await controller.prepareLogin()
+    expect(client.startPrivadoLogin).not.toHaveBeenCalled(); expect(controller.snapshot().ordinaryEntry).not.toBe(true)
+    expect(controller.snapshot().error).toBe('login_required')
+  })
+  it('resumes a still-live ordinary QR without creating another request', async () => {
+    const requestId = '44444444-4444-4444-4444-444444444444'
+    writeMultiMarker({ ...deniedMulti(), pendingFlow: { kind: 'privado', mode: 'login', requestId, sourceProfile: 'bank',
+      expiresAt: a.expiresAt, expectedActorId: null, expectedSessionId: null } })
+    const client = fake(); client.restore.mockResolvedValue({ status: 'login_in_progress', provider: 'privado', sourceProfile: 'bank',
+      requestId, requestUri: location.origin + '/api/v2/auth/privado/requests/' + requestId, expiresAt: a.expiresAt } as never)
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start(); await controller.prepareLogin()
+    expect(controller.snapshot().pending?.requestId).toBe(requestId); expect(client.startPrivadoLogin).not.toHaveBeenCalled()
   })
   it('clears an application flow that expires during awaited Continue work without waiting for a timer', async () => {
     const id = '33333333-3333-3333-3333-333333333333'

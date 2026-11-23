@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { LocalDemoDriver, type DemoEnvironment, type DemoPopup } from './localDemoDriver'
+import { canAssistDemoLogin, LocalDemoDriver, type DemoEnvironment, type DemoPopup } from './localDemoDriver'
 import { demoPersonas, demoReady, type DemoConfig, type DemoPersona } from './localDemoProtocol'
 import type { Controller, State } from './controller'
 import type { Candidate } from '../auth/multiProtocol'
 import type { Flow, Self } from './protocol'
 import { writeMultiMarker } from '../auth/multiContext'
-import type { ProofRequired } from '../auth/multiProtocol'
+import type { LoginPending, ProofRequired } from '../auth/multiProtocol'
 const origin = 'https://localhost:8443', wallet = 'https://localhost:9444'
 const config: DemoConfig = { v: 1, testOnly: true, opsOrigin: origin, network: 'polygon:mumbai', issuerDid: 'did:iden3:polygon:mumbai:x11111', verifierDid: 'did:iden3:polygon:mumbai:x22222', personas: demoPersonas.map((id, n) => ({ id, profileId: 'demo-privado', holderDid: 'did:iden3:polygon:mumbai:x' + String(n + 3).repeat(10) })) }
 const future = () => Date.now() / 1000 + 300
@@ -64,6 +64,75 @@ function renewing(persona: DemoPersona = 'admin', options: Controls = {}) {
     pendingFlow: { kind: 'privado', mode: 'renew', requestId: pending.requestId, sourceProfile: pending.sourceProfile, expiresAt: pending.expiresAt, expectedActorId: actorId, expectedSessionId: pending.browserSessionId } })
   return pending
 }
+
+function ordinaryLogin(options: Controls = {}) {
+  f = fixture(options)
+  const pending: LoginPending = { status: 'login_in_progress', provider: 'privado', sourceProfile: 'demo-privado', requestId: '11111111-2222-4333-8444-555555555555',
+    requestUri: origin + '/api/v2/auth/privado/requests/11111111-2222-4333-8444-555555555555', expiresAt: future() }
+  f.set({ phase: 'proof-pending', pending })
+  writeMultiMarker({ version: 2, phase: 'require-login', actorId: null, browserSessionId: null, sourceProfile: null, provider: null,
+    pendingFlow: { kind: 'privado', mode: 'login', requestId: pending.requestId!, sourceProfile: pending.sourceProfile, expiresAt: pending.expiresAt, expectedActorId: null, expectedSessionId: null } })
+  return pending
+}
+
+describe('explicit demo choice may replace only the captured unconfirmed QR login', () => {
+  it.each(demoPersonas)('binds %s to its expected holder after wallet readiness, not on entry', async persona => {
+    const pending = ordinaryLogin(), raw = localStorage.getItem('ops-v2.browser-context'), identity = config.personas.find(p => p.id === persona)!
+    expect(canAssistDemoLogin(f.state())).toBe(true); f.driver.start(persona)
+    expect(f.native.login).not.toHaveBeenCalled(); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.native.confirm).not.toHaveBeenCalled()
+    expect(f.state().pending).toBe(pending)
+    await vi.advanceTimersByTimeAsync(20000)
+    expect(f.state().pending).toBe(pending); expect(localStorage.getItem('ops-v2.browser-context')).toBe(raw); expect(f.popups[0].sent).toEqual([])
+    await f.ready()
+    expect(f.native.login).toHaveBeenCalledTimes(1); expect(f.native.login).toHaveBeenCalledWith(identity.profileId, 'privado', identity.holderDid, raw)
+    expect(f.state().pending).not.toBe(pending)
+    expect(f.popups[0].sent).toEqual([{ v: 1, type: 'prove', nonce: '1'.repeat(64), persona, requestUri: f.state().pending!.requestUri }])
+    f.candidate(persona); await flush(); expect(f.native.confirm).toHaveBeenCalledTimes(1)
+  })
+  it.each(['absent', 'bound', 'request', 'profile', 'expiry', 'uri', 'azure'] as const)('rejects %s ownership before opening a helper', async kind => {
+    const pending = ordinaryLogin(), key = 'ops-v2.browser-context', marker = JSON.parse(localStorage.getItem(key)!)
+    if (kind === 'absent') localStorage.removeItem(key)
+    if (kind === 'bound') marker.pendingFlow.expectedActorId = 'ops:p1:' + 'A'.repeat(43)
+    if (kind === 'request') marker.pendingFlow.requestId = '44444444-4444-4444-4444-444444444444'
+    if (kind === 'profile') marker.pendingFlow.sourceProfile = 'other-profile'
+    if (kind === 'expiry') marker.pendingFlow.expiresAt--
+    if (kind === 'uri') pending.requestUri = 'https://evil.test/api/v2/auth/privado/requests/' + pending.requestId
+    if (kind === 'azure') pending.provider = 'azure'
+    if (kind !== 'absent') localStorage.setItem(key, JSON.stringify(marker))
+    const raw = localStorage.getItem(key); f.driver.start('admin'); await flush()
+    expect(f.popups).toHaveLength(0); expect(f.native.login).not.toHaveBeenCalled(); expect(f.native.cancel).not.toHaveBeenCalled()
+    expect(f.state().pending).toBe(pending); expect(localStorage.getItem(key)).toBe(raw)
+  })
+  it.each(['reference', 'raw-marker', 'candidate', 'profile', 'expiry', 'revision'] as const)('rejects %s changes while wallet setup is waiting', async kind => {
+    const pending = ordinaryLogin(); f.driver.start('admin')
+    if (kind === 'reference') f.set({ pending: { ...pending } })
+    if (kind === 'raw-marker') localStorage.setItem('ops-v2.browser-context', localStorage.getItem('ops-v2.browser-context')! + ' ')
+    if (kind === 'candidate') f.candidate('admin')
+    if (kind === 'profile') pending.sourceProfile = 'other-profile'
+    if (kind === 'expiry') pending.expiresAt++
+    if (kind === 'revision') f.replace({ pending })
+    await f.ready()
+    expect(f.native.login).not.toHaveBeenCalled(); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.native.confirm).not.toHaveBeenCalled(); expect(f.popups[0].sent).toEqual([])
+    expect(f.popups[0].closed).toBe(true)
+  })
+  it('does not replace an existing candidate or a nonmatching demo profile', async () => {
+    ordinaryLogin(); f.candidate('reader'); expect(canAssistDemoLogin(f.state())).toBe(false); f.driver.start('admin'); await flush()
+    expect(f.popups).toHaveLength(0); expect(f.native.login).not.toHaveBeenCalled()
+    f.driver.dispose(); const pending = ordinaryLogin(); pending.sourceProfile = 'other-profile'
+    const marker = JSON.parse(localStorage.getItem('ops-v2.browser-context')!); marker.pendingFlow.sourceProfile = pending.sourceProfile; localStorage.setItem('ops-v2.browser-context', JSON.stringify(marker))
+    f.set({ profiles: [...f.state().profiles, { id: 'other-profile', provider: 'privado', principalKind: 'human' }] })
+    f.driver.start('admin'); await f.ready(); expect(f.native.login).not.toHaveBeenCalled(); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.popups[0].sent).toEqual([])
+  })
+  it.each(['cancel', 'blocked', 'expiry'] as const)('%s preserves the preexisting QR before a replacement starts', async reason => {
+    const pending = ordinaryLogin(), raw = localStorage.getItem('ops-v2.browser-context')
+    if (reason === 'blocked') f.env.open = () => null
+    f.driver.start('admin')
+    if (reason === 'cancel') f.driver.cancel()
+    if (reason === 'expiry') await vi.advanceTimersByTimeAsync(120001)
+    await flush()
+    expect(f.native.login).not.toHaveBeenCalled(); expect(f.native.cancel).not.toHaveBeenCalled(); expect(f.state().pending).toBe(pending); expect(localStorage.getItem('ops-v2.browser-context')).toBe(raw)
+  })
+})
 
 describe('explicit demo assistance owns only the popup for the original renewal', () => {
   it.each(['absent', 'actor', 'family', 'request', 'profile'] as const)('refuses %s marker ownership at the click without opening or changing authentication', async kind => {

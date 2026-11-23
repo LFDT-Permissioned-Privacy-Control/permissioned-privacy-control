@@ -1,6 +1,6 @@
 import { NewMultiClient, MultiBrowserAuthClient } from '../auth/multiClient'
 import { CONTEXT_KEY } from '../auth/context'
-import { multiPair, readMultiMarker, readLoginContext, unchangedLoginContext, type LoginContext } from '../auth/multiContext'
+import { multiPair, readMultiMarker, readLoginContext, unchangedLoginContext, type LoginContext, type MultiMarker } from '../auth/multiContext'
 import { AccessOutcome, Candidate, MultiAccess, MultiSession, Pending, sameSession } from '../auth/multiProtocol'
 import { AuthError, session } from '../auth/protocol'
 import { completeFlow, Flow, FLOW_KEY, inspectFlow, ownSelf, readContinuation, saveContinuation, Self } from './protocol'
@@ -15,10 +15,16 @@ type Profiles = Awaited<ReturnType<MultiBrowserAuthClient['providers']>>
 export interface State {
   phase: Phase; profiles: Profiles['profiles']; self: Self | null; flow: Flow | null
   pending: Pending | null; candidate: Candidate | null; busy: boolean; error: string | null
+  ordinaryEntry?: boolean
 }
 interface Owner { epoch: number; revision: number; operation: number; kind: string; pair: MultiSession | null; abort: AbortController }
 export interface OperationScope extends WalletScope { readonly self: Self }
 class Stale extends Error {}
+function expiredUnboundLogin(marker: MultiMarker | null): boolean {
+  const flow = marker?.pendingFlow
+  return marker?.phase === 'require-login' && flow?.kind === 'privado' && flow.mode === 'login' &&
+    flow.expectedActorId === null && flow.expectedSessionId === null && flow.expiresAt * 1000 <= Date.now()
+}
 
 // One controller per document. No component effect performs restore or owns a
 // token; asynchronous UI results must still own the exact context AND flow.
@@ -38,6 +44,8 @@ export class Controller {
   private tickTimer: ReturnType<typeof setInterval> | undefined
   private expiryTimer: ReturnType<typeof setTimeout> | undefined
   private completing = false
+  private preparedEntry = false
+  private entryContext: LoginContext | undefined
   readonly wallet: WalletController
   private walletRevision = 0
   private walletScopes = new Set<AbortController>()
@@ -129,7 +137,7 @@ export class Controller {
   }
   private changed(): void {
     this.invalidate(); this.selected = null
-    this.set({ phase: 'context-changed', self: null, pending: null, candidate: null, busy: false, error: null })
+    this.set({ phase: 'context-changed', self: null, pending: null, candidate: null, busy: false, error: null, ordinaryEntry: false })
   }
   private owner(kind: string): Owner {
     this.latest.get(kind)?.abort.abort()
@@ -163,7 +171,7 @@ export class Controller {
     if (error instanceof AuthError && error.code === 'session_changed') { this.changed(); return }
     this.set({ phase: error instanceof AuthError && error.code === 'login_required' ? 'anonymous' : 'failed',
       self: null, candidate: null, pending: null, busy: false,
-      error: error instanceof AuthError ? error.code : 'authentication_unavailable' })
+      error: error instanceof AuthError ? error.code : 'authentication_unavailable', ordinaryEntry: false })
   }
   private async work(kind: string, action: (op: Owner) => Promise<void>): Promise<void> {
     const op = this.owner(kind)
@@ -185,7 +193,8 @@ export class Controller {
     document.addEventListener('visibilitychange', this.visibility)
     this.tickTimer = setInterval(this.tick, 1000)
     await this.work('bootstrap', async op => {
-      const initialMarker = readMultiMarker()
+      const initialContext = readLoginContext(), initialMarker = readMultiMarker()
+      unchangedLoginContext(initialContext)
       const providers = await this.client.providers(); this.check(op)
       const admin = adminLocation(location)
       if (!['/login', '/auth/sso', '/auth/azure/callback', providers.completionPath].includes(location.pathname) && !admin) throw new AuthError('invalid_response')
@@ -217,11 +226,31 @@ export class Controller {
         catch (error) {
           this.check(op)
           const empty = (marker: ReturnType<typeof readMultiMarker>) => !marker || marker.phase === 'require-login' && marker.actorId === null && marker.pendingFlow === null
-          // A fresh bootstrap denial is ordinary signed-out state. Do not
-          // relabel a prior identity, app flow, callback or real outage.
-          if (!saved && !callback && (admin || plainLoginLocation(location)) && empty(initialMarker) &&
-            error instanceof AuthError && error.code === 'login_required' && empty(readMultiMarker())) {
-            this.set({ phase: 'anonymous', self: null, pending: null, candidate: null, busy: false, error: null }); return
+          const entryContext = readLoginContext(), current = readMultiMarker()
+          unchangedLoginContext(entryContext)
+          const sameIdentity = !initialMarker?.actorId ? !current?.actorId : !!current?.actorId && sameSession(multiPair(initialMarker), multiPair(current))
+          if (!sameIdentity) throw new AuthError('session_changed')
+          const entry = !callback && (admin || plainLoginLocation(location) || location.pathname === '/auth/sso') &&
+            (!saved || this.state.flow?.id === saved.id && this.state.flow.expiresAt <= saved.expiresAt)
+          // A valid sign-in entry may prepare a challenge without selecting an
+          // identity. Callback/inspect/provider failures keep their feedback.
+          if (entry && entryContext === initialContext && expiredUnboundLogin(initialMarker) && expiredUnboundLogin(current) &&
+            error instanceof AuthError && error.code === 'login_required') {
+            this.entryContext = entryContext
+            this.set({ phase: 'anonymous', self: null, pending: null, candidate: null, busy: false, error: null, ordinaryEntry: true }); return
+          }
+          if (entry && empty(initialMarker) &&
+            error instanceof AuthError && error.code === 'login_required' && empty(current)) {
+            this.entryContext = entryContext
+            this.set({ phase: 'anonymous', self: null, pending: null, candidate: null, busy: false, error: null, ordinaryEntry: true }); return
+          }
+          // A failed restore of an old account is also normal entry. Keep the
+          // denial internally, but only a settled, non-pending marker may
+          // prepare a fresh challenge; active accounts and original app flows stay fenced.
+          if (entry && !initialMarker?.pendingFlow &&
+            error instanceof AuthError && error.code === 'login_required' && current?.phase === 'require-login' && !current.pendingFlow) {
+            this.entryContext = entryContext
+            this.set({ phase: 'anonymous', self: null, pending: null, candidate: null, busy: false, error: 'login_required', ordinaryEntry: true }); return
           }
           throw error
         }
@@ -259,7 +288,7 @@ export class Controller {
   private replace(): boolean {
     if (!this.alive) return false
     this.invalidate(); this.selected = null; this.client = NewMultiClient()
-    this.set({ phase: 'booting', self: null, candidate: null, pending: null, busy: true, error: null })
+    this.set({ phase: 'booting', self: null, candidate: null, pending: null, busy: true, error: null, ordinaryEntry: false })
     return true
   }
   // An explicit user action is the only way a live document adopts a changed
@@ -269,6 +298,28 @@ export class Controller {
     await this.work('accept', async op => {
       const result = await this.client.restore(); this.check(op); await this.outcome(op, result)
     })
+  }
+  // Preparing an unsigned challenge selects no identity. Do this once only on
+  // ordinary entry; only an expired unbound login request may be replaced.
+  prepareLogin = async (): Promise<void> => {
+    if (this.preparedEntry || !this.alive || !this.state.ordinaryEntry || this.state.phase !== 'anonymous' ||
+      this.state.busy || this.state.self || this.state.pending || this.state.candidate ||
+      this.state.flow && this.state.flow.expiresAt * 1000 <= Date.now() ||
+      this.state.error && this.state.error !== 'login_required') return
+    const profiles = this.state.profiles.filter(profile => profile.provider === 'privado')
+    if (profiles.length !== 1) return
+    const context = this.entryContext
+    if (context === undefined) return
+    try {
+      unchangedLoginContext(context)
+      const marker = readMultiMarker()
+      if (marker && (marker.phase !== 'require-login' || marker.pendingFlow && !expiredUnboundLogin(marker))) return
+      unchangedLoginContext(context)
+    } catch (error) { if (error instanceof AuthError && error.code === 'session_changed') this.changed(); return }
+    this.preparedEntry = true
+    // login rechecks these exact bytes under the existing browser lock before
+    // writing a marker. A concurrent sign-in cannot be replaced by this task.
+    await this.login(profiles[0].id, 'privado', undefined, context)
   }
   login = async (profile: string, kind: 'azure' | 'privado', expectedHolderDid?: string, clickedContext?: LoginContext): Promise<void> => {
     if (!this.state.profiles.some(p => p.id === profile && p.provider === kind)) return
@@ -379,7 +430,7 @@ export class Controller {
     const id = this.state.pending?.requestId
     // Cancellation also changes the shared browser marker under its lock.
     // Keep new sign-in gestures disabled until that owned change finishes.
-    this.invalidate(); this.set({ self: null, pending: null, candidate: null, busy: !!id, phase: 'anonymous', error: null })
+    this.invalidate(); this.set({ self: null, pending: null, candidate: null, busy: !!id, phase: 'anonymous', error: null, ordinaryEntry: false })
     if (!id) return
     await this.work('cancel', async op => { await this.client.cancelPrivado(id); this.check(op); this.set({ busy: false }) })
   }
@@ -455,7 +506,7 @@ export class Controller {
   }
   private expireFlow(): void {
     this.invalidate(); sessionStorage.removeItem(FLOW_KEY)
-    this.set({ flow: null, self: null, pending: null, candidate: null, busy: false, phase: 'failed', error: 'flow_expired' })
+    this.set({ flow: null, self: null, pending: null, candidate: null, busy: false, phase: 'failed', error: 'flow_expired', ordinaryEntry: false })
   }
   private navigation = (): void => {
     // Back/Forward inside the ordinary selected-account UI is presentation
@@ -468,7 +519,7 @@ export class Controller {
         if (marker?.phase === 'active' && sameSession(this.selected, multiPair(marker))) { this.retireWallet(); return }
       } catch { /* Invalid shared context falls through to the original deny. */ }
     }
-    this.invalidate(); this.set({ phase: 'failed', self: null, pending: null, candidate: null, busy: false, error: 'login_required' })
+    this.invalidate(); this.set({ phase: 'failed', self: null, pending: null, candidate: null, busy: false, error: 'login_required', ordinaryEntry: false })
   }
   private suspend = (event: PageTransitionEvent): void => {
     this.flushSuspension(this.stop)
@@ -482,7 +533,7 @@ export class Controller {
   stop = (): void => {
     this.alive = false; this.invalidate(); clearInterval(this.tickTimer)
     this.selected = null; this.client = NewMultiClient()
-    this.set({ phase: 'failed', self: null, flow: null, pending: null, candidate: null, busy: false, error: 'login_required' })
+    this.set({ phase: 'failed', self: null, flow: null, pending: null, candidate: null, busy: false, error: 'login_required', ordinaryEntry: false })
     window.removeEventListener('storage', this.storage); window.removeEventListener('pagehide', this.suspend)
     window.removeEventListener('pageshow', this.resume)
     window.removeEventListener('popstate', this.navigation); document.removeEventListener('visibilitychange', this.visibility)

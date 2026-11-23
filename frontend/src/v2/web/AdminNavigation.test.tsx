@@ -33,14 +33,17 @@ it('preserves the V1 default shell, active tabs, disabled tabs and original orga
   expect(screen.getByRole('tab', { name: 'Diagnostics' })).toBeDisabled(); await userEvent.click(screen.getByRole('tab', { name: 'Diagnostics' })); expect(screen.getByLabelText('Current route')).toHaveTextContent('/admin/logs')
   expect(screen.queryByTestId('admin-secondary-row')).not.toBeInTheDocument(); expect(screen.getByRole('button', { name: 'Account menu' })).toBeInTheDocument(); expect(screen.getByText('Existing content slot')).toBeInTheDocument()
 })
-it('puts V2 daily tasks in the existing primary tabs and utilities plus the supplied review action in a separate wrapping row', async () => {
+it('keeps V2 primary tabs, utilities and review together in the same responsive navigation cluster', async () => {
   const review = vi.fn()
   shell({ path: '/admin/identity/profiles?org=' + org, navigation: customNavigation('identity', <button onClick={review}>Review &amp; export</button>) })
   const primary = screen.getByRole('tablist', { name: 'Primary administration' }), secondary = screen.getByRole('navigation', { name: 'More administration' })
   expect(within(primary).getAllByRole('tab').map(tab => tab.getAttribute('aria-label'))).toEqual(['RBAC', 'Identity', 'Compliance', 'Disclosure'])
   expect(within(primary).getByRole('tab', { name: 'Identity' })).toHaveAttribute('aria-selected', 'true')
   expect(within(secondary).getAllByRole('link').map(link => link.textContent)).toEqual(['Access Logs', 'Diagnostics', 'Settings'])
-  expect(screen.getByTestId('admin-secondary-row')).toHaveClass('flex-wrap')
+  const cluster = screen.getByTestId('admin-navigation')
+  expect(cluster).toContainElement(primary); expect(cluster).toContainElement(secondary)
+  expect(cluster).toContainElement(screen.getByRole('button', { name: 'Review & export' }))
+  expect(screen.queryByTestId('admin-secondary-row')).not.toBeInTheDocument()
   expect(within(primary).queryByRole('tab', { name: 'Configuration' })).not.toBeInTheDocument(); expect(within(primary).queryByRole('tab', { name: 'Review & export' })).not.toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: 'Review & export' })); expect(review).toHaveBeenCalledTimes(1)
   await userEvent.click(within(primary).getByRole('tab', { name: 'Compliance' })); expect(screen.getByLabelText('Current route')).toHaveTextContent('/admin/compliance?org=' + org)
@@ -68,4 +71,23 @@ it('keeps disabled custom primary and secondary items inert', async () => {
   expect(screen.getByRole('tab', { name: 'Identity' })).toBeDisabled()
   const settings = screen.getByRole('link', { name: 'Settings' }); expect(settings).toHaveAttribute('aria-disabled', 'true'); expect(settings).not.toHaveAttribute('href')
   await userEvent.click(screen.getByRole('tab', { name: 'Identity' })); expect(screen.getByLabelText('Current route')).toHaveTextContent('/admin/rbac/organizations')
+})
+
+it('preserves arrow navigation between primary tabs and keyboard access to utilities, review and account', async () => {
+  function RoutedShell() {
+    const location = useLocation()
+    const active = location.pathname.includes('/identity/') ? 'identity' : 'rbac'
+    return <AdminLayout navigation={customNavigation(active)} accountMenu={<button>Account menu</button>}><LocationProbe /></AdminLayout>
+  }
+  render(<MemoryRouter initialEntries={['/admin/rbac/organizations']}><RoutedShell /></MemoryRouter>)
+  screen.getByRole('tab', { name: 'RBAC' }).focus()
+  await userEvent.keyboard('{ArrowRight}')
+  expect(screen.getByRole('tab', { name: 'Identity' })).toHaveFocus()
+  expect(screen.getByRole('tab', { name: 'Identity' })).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByLabelText('Current route')).toHaveTextContent('/admin/identity/profiles?org=' + org)
+  for (const label of ['Access Logs', 'Diagnostics', 'Settings']) {
+    await userEvent.tab(); expect(screen.getByRole('link', { name: label })).toHaveFocus()
+  }
+  await userEvent.tab(); expect(screen.getByRole('button', { name: 'Review & export' })).toHaveFocus()
+  await userEvent.tab(); expect(screen.getByRole('button', { name: 'Account menu' })).toHaveFocus()
 })

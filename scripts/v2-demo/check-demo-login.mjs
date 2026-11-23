@@ -34,8 +34,9 @@ assert.ok(['all', 'first-use', 'cancel-then-different-persona'].includes(selecte
 const resultsFile = selectedCase === 'all' ? 'results.json' : selectedCase === 'first-use' ? 'first-use-results.json' : 'cancel-results.json';
 const contexts = [];
 async function context() { const c = await browser.newContext({ ignoreHTTPSErrors: false }); contexts.push(c); return c; }
-async function ownedPage(c, address) {
+async function ownedPage(c, address, onPage = () => {}) {
   const page = await c.newPage(); page.setDefaultTimeout(20000);
+  onPage(page);
   let certificateError = false;
   try { await page.goto(address, { timeout: 15000 }); }
   catch (error) { assert.match(error.message, /ERR_CERT_AUTHORITY_INVALID/); certificateError = true; }
@@ -53,6 +54,7 @@ async function trustedOPS(c) {
   const wallet = await ownedPage(c, runtime.walletOrigin + '/');
   await wallet.close();
   const page = await ownedPage(c, runtime.opsOrigin + '/login');
+  await page.getByTestId('qr-code').waitFor({ state: 'visible' });
   await page.getByTestId('demo-persona-admin').waitFor();
   return page;
 }
@@ -94,7 +96,7 @@ async function finish(page, data, persona) {
 try {
   if (selectedCase === 'all' || selectedCase === 'first-use') {
     stage = 'first-use-certificate-and-demo-entry';
-    const c = await context(), page = await ownedPage(c, runtime.opsOrigin + '/login'), data = observe(page);
+    const c = await context(); let data;
     let nativeStartRequests = 0, walletProofRequests = 0;
     c.on('request', request => {
       if (request.method() !== 'POST') return;
@@ -102,13 +104,15 @@ try {
       if (url.origin === runtime.opsOrigin && url.pathname === '/api/v2/auth/privado/start') nativeStartRequests++;
       if (url.origin === runtime.walletOrigin && url.pathname === '/prove') walletProofRequests++;
     });
+    const page = await ownedPage(c, runtime.opsOrigin + '/login', page => { data = observe(page); });
+    await page.getByTestId('qr-code').waitFor({ state: 'visible' });
     await page.getByTestId('demo-persona-admin').waitFor();
-    assert.equal(await page.getByTestId('manual-wallet-login').getAttribute('open'), null);
+    const entryStarts = nativeStartRequests;
+    assert.equal(entryStarts, 1, 'Ordinary entry prepares exactly one public QR challenge');
+    assert.equal(data.starts.length, 1); assert.equal(data.starts[0].expectedActorId, null);
+    assert.equal(await page.getByTestId('manual-wallet-login').count(), 0);
     assert.equal(await page.getByRole('button', { name: 'Continue with Privado ID', exact: true }).count(), 0);
     assert.equal(await page.getByRole('button', { name: /^Demo (Admin|Deployer|Reader|Outsider)$/ }).count(), 4);
-    await page.getByText('Use a wallet manually', { exact: true }).click();
-    assert.equal(await page.getByRole('button', { name: 'Continue with Privado ID', exact: true }).count(), 1);
-    await page.getByText('Use a wallet manually', { exact: true }).click();
     await page.setViewportSize({ width: 390, height: 844 });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.screenshot({ path: path.join(output, 'first-use-mobile-entry.png'), fullPage: true });
@@ -119,13 +123,53 @@ try {
     // Reproduce a user reading Chrome's warning for longer than the old 15s
     // timeout. No wallet certificate exception was established beforehand.
     await page.waitForTimeout(17000);
-    assert.equal(child.isClosed(), false); assert.equal(nativeStartRequests, 0); assert.equal(walletProofRequests, 0); assert.equal(data.completes.length, 0);
+    assert.equal(child.isClosed(), false); assert.equal(nativeStartRequests, entryStarts); assert.equal(walletProofRequests, 0); assert.equal(data.completes.length, 0);
     await child.locator('#details-button').click(); await child.locator('#proceed-link').click();
     await child.locator('#status').waitFor(); assert.equal(await child.evaluate(() => !!window.opener), true);
     const item = await finish(page, data, 'admin');
     await child.waitForEvent('close', { timeout: 10000 }).catch(() => { assert.equal(child.isClosed(), true); });
-    assert.equal(nativeStartRequests, 1); assert.equal(walletProofRequests, 1); assert.equal(data.starts.length, 1); assert.equal(data.completes.length, 1);
-    results.push({ case: stage, passed: true, ...item, certificateWaitMilliseconds: 17000, nativeStartRequestsBeforeCertificateAcceptance: 0, walletProofRequestsBeforeCertificateAcceptance: 0, nativeStartRequests, walletProofRequests, httpsErrorBypass: false });
+    assert.equal(nativeStartRequests, entryStarts + 1); assert.equal(walletProofRequests, 1); assert.equal(data.starts.length, entryStarts + 1); assert.notEqual(data.starts.at(-1).expectedActorId, null); assert.equal(data.completes.length, 1);
+    results.push({ case: stage, passed: true, ...item, certificateWaitMilliseconds: 17000, publicQRChallenges: entryStarts, nativeStartRequestsBeforeCertificateAcceptance: entryStarts, walletProofRequestsBeforeCertificateAcceptance: 0, nativeStartRequests, walletProofRequests, httpsErrorBypass: false });
+    stage = 'desktop-and-mobile-navigation';
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const geometry = await page.evaluate(() => {
+      const header = document.querySelector('[data-testid="admin-header"]');
+      const ids = ['nav-rbac', 'nav-identity', 'nav-compliance', 'nav-disclosure', 'nav-logs', 'nav-diagnostics', 'nav-settings', 'review-export-action'];
+      const controls = ids.map(id => { const r = document.querySelector('[data-testid="' + id + '"]')?.getBoundingClientRect(); return r ? { id, center: r.y + r.height / 2, right: r.right } : null; });
+      return { controls, headerHeight: header?.getBoundingClientRect().height, overflow: document.documentElement.scrollWidth > innerWidth };
+    });
+    assert.equal(geometry.controls.length, 8); assert.ok(geometry.controls.every(Boolean));
+    assert.ok(Math.max(...geometry.controls.map(x => x.center)) - Math.min(...geometry.controls.map(x => x.center)) <= 2, 'All eight desktop navigation controls share a row');
+    assert.ok(geometry.headerHeight < 90); assert.equal(geometry.overflow, false);
+    await page.screenshot({ path: path.join(output, 'compact-desktop-navigation.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: path.join(output, 'compact-mobile-navigation.png'), fullPage: true });
+    results.push({ case: stage, passed: true, geometry, mobileWidth: 390 });
+    stage = 'expired-account-and-repeat-qr-entry';
+    await c.clearCookies(); await page.reload();
+    await page.getByTestId('qr-code').waitFor({ state: 'visible' });
+    assert.equal(await page.getByText('Your previous sign-in could not be restored.', { exact: false }).count(), 0);
+    const restoredRequest = await page.locator('[data-field=requestUri]').textContent(), beforeReloadStarts = nativeStartRequests;
+    await page.reload(); await page.getByTestId('qr-code').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('[data-field=requestUri]').textContent(), restoredRequest, 'An unexpired QR is resumed exactly');
+    assert.equal(nativeStartRequests, beforeReloadStarts);
+    // Expire only the noncredential selection marker of the actual unsigned
+    // request. This models reopening a tab later; no token or identity is made.
+    await page.evaluate(() => { const key = 'ops-v2.browser-context', marker = JSON.parse(localStorage.getItem(key)); marker.pendingFlow.expiresAt = Math.floor(Date.now() / 1000) - 1; localStorage.setItem(key, JSON.stringify(marker)); });
+    await page.reload(); await page.getByTestId('qr-code').waitFor({ state: 'visible' });
+    assert.notEqual(await page.locator('[data-field=requestUri]').textContent(), restoredRequest);
+    assert.equal(nativeStartRequests, beforeReloadStarts + 1); assert.equal(walletProofRequests, 1); assert.equal(data.completes.length, 1);
+    assert.equal(await page.getByText('Sign in to continue', { exact: true }).count(), 0);
+    await page.screenshot({ path: path.join(output, 'repeat-qr-entry.png'), fullPage: true });
+    results.push({ case: stage, passed: true, liveQRResumed: true, expiredUnsignedQRReplacedOnce: true, noAdditionalProofOrConfirmation: true });
+    stage = 'application-entry-qr';
+    const explorer = await ownedPage(c, runtime.explorerOrigin + '/');
+    await explorer.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await explorer.getByTestId('qr-code').waitFor({ state: 'visible' });
+    assert.equal(await explorer.locator('[data-field=app]').textContent(), 'Explorer');
+    assert.equal(await explorer.getByText('Sign in to continue', { exact: true }).count(), 0);
+    results.push({ case: stage, passed: true, application: 'Explorer', unsignedQRVisible: true });
     await c.close(); console.log('PASS ' + stage);
   }
   if (selectedCase === 'all') {

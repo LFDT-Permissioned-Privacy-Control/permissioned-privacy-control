@@ -97,6 +97,13 @@ Playwright Chromium can be selected with `OPS_TEST_BROWSER_CHANNEL=chromium`.
 They do not install a browser. `make demo-v2-check` performs initial setup and is
 intended for a fresh installation or CI.
 
+Sign-in shows the common Privado QR automatically when there is one approved
+Privado connection. The demo identity buttons remain below it; choosing one
+uses the demo wallet without scanning. An ordinary expired login returns to
+this screen. Provider errors and expired application handoffs still show their
+specific recovery instructions. With multiple Privado connections, choose a
+connection first; Microsoft remains available through an explicit provider switch.
+
 ## The demo scenario
 
 The organization is **Demo Bank** (`demo-bank`), ID

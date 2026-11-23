@@ -29,8 +29,8 @@ it('keeps one demo owner across pending/candidate/selected branches and uses the
   render(<MemoryRouter initialEntries={['/login']}><App /></MemoryRouter>)
   expect(await screen.findByText('Development Only')).toBeInTheDocument()
   expect(screen.getAllByTestId(/^demo-persona-/)).toHaveLength(4)
-  expect(screen.getByTestId('manual-wallet-login')).not.toHaveAttribute('open')
-  for (const manual of screen.getAllByTestId('privado-signin-btn')) expect(manual).not.toBeVisible()
+  expect(screen.queryByTestId('manual-wallet-login')).not.toBeInTheDocument()
+  for (const manual of screen.getAllByTestId('privado-signin-btn')) expect(manual).toBeVisible()
   for (const demo of screen.getAllByTestId(/^demo-persona-/)) expect(demo).toBeVisible()
   fireEvent.click(screen.getByRole('button', { name: 'Demo Admin', exact: true }))
   const uri = open.mock.calls[0][0] as string, nonce = new URL(uri).hash.slice(1)
@@ -45,6 +45,33 @@ it('keeps one demo owner across pending/candidate/selected branches and uses the
   await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/admin/account'))
   expect(controller.confirm).toHaveBeenCalledTimes(1); expect(popup.close).toHaveBeenCalledTimes(1)
   expect(controller.cancel).not.toHaveBeenCalled(); expect(open).toHaveBeenCalledTimes(1)
+})
+
+it('keeps demo choices alongside an existing QR and binds only the explicitly chosen holder', async () => {
+  vi.stubEnv('VITE_OPS_DEMO_WALLET_ORIGIN', wallet)
+  const requestId = '11111111-2222-4333-8444-555555555555', replacement = '22222222-2222-4222-8222-222222222222'
+  const pending = { status: 'login_in_progress', provider: 'privado', sourceProfile: 'demo-privado', requestId, requestUri: location.origin + '/api/v2/auth/privado/requests/' + requestId, expiresAt: now() + 300 } as const
+  let state: State = { phase: 'proof-pending', profiles: [{ id: 'demo-privado', provider: 'privado', principalKind: 'human' }], self: null, flow: null, pending, candidate: null, error: null, busy: false }, revision = 0
+  const listeners = new Set<() => void>(), controller = { snapshot: () => state, subscribe: (fn: () => void) => { listeners.add(fn); return () => listeners.delete(fn) }, get scopeRevision() { return revision },
+    login: vi.fn(async () => { revision++; state = { ...state, pending: { ...pending, requestId: replacement, requestUri: location.origin + '/api/v2/auth/privado/requests/' + replacement } }; listeners.forEach(fn => fn()) }),
+    cancel: vi.fn(), confirm: vi.fn() } as unknown as Controller
+  writeMultiMarker({ version: 2, phase: 'require-login', actorId: null, browserSessionId: null, provider: null, sourceProfile: null,
+    pendingFlow: { kind: 'privado', mode: 'login', requestId, sourceProfile: pending.sourceProfile, expiresAt: pending.expiresAt, expectedActorId: null, expectedSessionId: null } })
+  const raw = localStorage.getItem('ops-v2.browser-context'), popup = { closed: false, close: vi.fn(), postMessage: vi.fn() }
+  const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
+  render(<MemoryRouter><LocalDemoHost controller={controller}>{(slot, active) => <AuthenticationPage controller={controller} demoSlot={slot} demoBusy={active} />}</LocalDemoHost></MemoryRouter>)
+  expect(screen.getByTestId('qr-code')).toBeVisible()
+  for (const button of await screen.findAllByTestId(/^demo-persona-/)) { expect(button).toBeVisible(); expect(button).toBeEnabled() }
+  expect(controller.login).not.toHaveBeenCalled(); expect(controller.cancel).not.toHaveBeenCalled(); expect(open).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Demo Reader', exact: true }))
+  expect(controller.login).not.toHaveBeenCalled(); expect(state.pending).toBe(pending)
+  const nonce = new URL(open.mock.calls[0][0] as string).hash.slice(1)
+  const event = new MessageEvent('message', { origin: wallet, data: { v: 1, type: 'ready', nonce, config: { v: 1, testOnly: true, opsOrigin: location.origin, network: 'polygon:mumbai', issuerDid: 'did:iden3:polygon:mumbai:x1111', verifierDid: 'did:iden3:polygon:mumbai:x2222', personas: rows } } })
+  Object.defineProperty(event, 'source', { value: popup }); act(() => window.dispatchEvent(event))
+  await waitFor(() => expect(popup.postMessage).toHaveBeenCalledTimes(1))
+  expect(controller.login).toHaveBeenCalledWith('demo-privado', 'privado', rows[2].holderDid, raw)
+  expect(popup.postMessage).toHaveBeenCalledWith({ v: 1, type: 'prove', nonce, persona: 'reader', requestUri: state.pending!.requestUri }, wallet)
+  expect(controller.confirm).not.toHaveBeenCalled()
 })
 
 it.each([undefined, 'http://localhost:9444', 'https://evil.test'])('shows a disabled demo picker for invalid compiled wallet address %s without side effects', async address => {
@@ -74,7 +101,7 @@ it('lets a demo renew its owned request and cancel only the helper, preserving t
   const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
   render(<MemoryRouter><LocalDemoHost controller={controller}>{(slot, active) => <AuthenticationPage controller={controller} demoSlot={slot} demoBusy={active} notice={<p>Your draft is kept here while you verify this account.</p>} />}</LocalDemoHost></MemoryRouter>)
   expect(await screen.findByRole('button', { name: 'Demo Admin', exact: true })).toBeVisible()
-  expect(screen.getByTestId('qr-code')).not.toBeVisible()
+  expect(screen.getByTestId('qr-code')).toBeVisible()
   fireEvent.click(screen.getByRole('button', { name: 'Demo Admin', exact: true }))
   const nonce = new URL(open.mock.calls[0][0] as string).hash.slice(1), event = new MessageEvent('message', { origin: wallet, data: { v: 1, type: 'ready', nonce, config: { v: 1, testOnly: true, opsOrigin: location.origin, network: 'polygon:mumbai', issuerDid: 'did:iden3:polygon:mumbai:x1111', verifierDid: 'did:iden3:polygon:mumbai:x2222', personas: rows } } })
   Object.defineProperty(event, 'source', { value: popup }); act(() => window.dispatchEvent(event))

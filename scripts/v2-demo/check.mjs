@@ -61,9 +61,7 @@ async function login(persona, options = {}) {
   stage = persona + '-start-SSO';
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   stage = persona + '-select-native-profile';
-  await page.locator('[data-profile-id="demo-privado"]').waitFor({ state: 'attached' });
-  if (await page.getByTestId('manual-wallet-login').count()) await page.getByText('Use a wallet manually', { exact: true }).click();
-  await page.locator('[data-profile-id="demo-privado"]').click();
+  await page.getByTestId('qr-code').waitFor({ state: 'visible' });
   const request = page.locator('[data-field=requestUri]'); await request.waitFor({ state: 'attached' });
   const requestUri = await request.textContent();
   assert.ok(requestUri.startsWith(runtime.opsOrigin + '/api/v2/auth/privado/requests/'));

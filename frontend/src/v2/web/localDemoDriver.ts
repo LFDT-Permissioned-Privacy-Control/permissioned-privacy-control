@@ -1,4 +1,4 @@
-import type { Candidate, Pending, ProofRequired } from '../auth/multiProtocol'
+import type { Candidate, LoginPending, Pending, ProofRequired } from '../auth/multiProtocol'
 import type { Controller, State } from './controller'
 import type { Flow } from './protocol'
 import { readLoginContext, readMultiMarker, unchangedLoginContext, type LoginContext } from '../auth/multiContext'
@@ -15,7 +15,7 @@ export interface DemoEnvironment {
 }
 interface Intent {
   persona: DemoPersona; nonce: string; popup: DemoPopup | null; flow: Flow | null; flowExpiry?: number
-  initialRevision: number; initialSelf: State['self']; revision: number
+  initialRevision: number; initialSelf: State['self']; initialPending: State['pending']; initialLogin?: LoginPending; revision: number
   clickedContext: LoginContext
   phase: 'ready' | 'starting' | 'proof' | 'confirming' | 'continuing'
   deadline: number; identity?: DemoIdentity; config?: DemoConfig; pending?: Pending; candidate?: Candidate
@@ -26,6 +26,11 @@ const initial: DemoView = { active: false, persona: null, status: '', error: nul
 
 export function canAssistDemoRenewal(state: State): boolean {
   return state.phase === 'proof-pending' && !state.self && !state.error && state.pending?.status === 'proof_required' && state.pending.provider === 'privado' && state.pending.mode === 'renew'
+}
+
+export function canAssistDemoLogin(state: State): boolean {
+  return state.phase === 'proof-pending' && !state.self && !state.candidate && !state.busy && !state.error &&
+    state.pending?.status === 'login_in_progress' && state.pending.provider === 'privado' && !!state.pending.requestId && !!state.pending.requestUri
 }
 
 // The popup carries public proof progress only. Permission/session authority
@@ -49,7 +54,8 @@ export class LocalDemoDriver {
     if (this.disposed || this.intent || !demoOrigin(this.env.walletOrigin)) return
     const state = this.controller.snapshot()
     const renewal = canAssistDemoRenewal(state) ? { ...state.pending as ProofRequired } : undefined
-    if (state.busy || state.pending && !renewal || state.phase === 'booting') return
+    const initialLogin = canAssistDemoLogin(state) ? { ...state.pending as LoginPending } : undefined
+    if (state.busy || state.pending && !renewal && !initialLogin || state.phase === 'booting') return
     const now = Date.now(), flow = state.flow
     if (flow && flow.expiresAt * 1000 <= now) return
     let nonce: string, clickedContext: LoginContext
@@ -60,11 +66,17 @@ export class LocalDemoDriver {
         if (!marker || marker.actorId !== renewal.actorId || marker.browserSessionId !== renewal.browserSessionId || marker.provider !== 'privado' || marker.sourceProfile !== renewal.sourceProfile || request?.kind !== 'privado' || request.mode !== 'renew' || request.requestId !== renewal.requestId || request.sourceProfile !== renewal.sourceProfile || request.expectedActorId !== renewal.actorId || request.expectedSessionId !== renewal.browserSessionId || request.expiresAt !== renewal.expiresAt || renewal.expiresAt * 1000 <= now || !demoRequestURI(renewal.requestUri, renewal.requestId, this.env.origin)) throw Error()
         unchangedLoginContext(clickedContext)
       }
+      if (initialLogin) {
+        const request = readMultiMarker()?.pendingFlow
+        if (request?.kind !== 'privado' || request.mode !== 'login' || request.expectedActorId !== null || request.expectedSessionId !== null || request.requestId !== initialLogin.requestId || request.sourceProfile !== initialLogin.sourceProfile || request.expiresAt !== initialLogin.expiresAt || initialLogin.expiresAt * 1000 <= now || !demoRequestURI(initialLogin.requestUri, initialLogin.requestId, this.env.origin)) throw Error()
+        unchangedLoginContext(clickedContext)
+      }
     } catch { this.set({ error: 'The local demo could not verify ownership of this sign-in. Use the original verification request or start again explicitly.' }); return }
+    const initialExpiry = (renewal ?? initialLogin)?.expiresAt
     const intent: Intent = { persona, nonce, popup: null, flow, flowExpiry: flow?.expiresAt, initialRevision: this.controller.scopeRevision,
       // First use can pause at Chrome's local certificate prompt. This wait
-      // starts no native login and never extends the original app flow.
-      initialSelf: state.self, clickedContext, revision: renewal ? this.controller.scopeRevision : -1, renewal, pending: renewal ? state.pending! : undefined, phase: 'ready', deadline: Math.min(now + 120000, renewal ? renewal.expiresAt * 1000 : Infinity, flow?.expiresAt ? flow.expiresAt * 1000 : Infinity), confirmSent: false }
+      // starts no replacement login and never extends an original request.
+      initialSelf: state.self, initialPending: state.pending, initialLogin, clickedContext, revision: renewal ? this.controller.scopeRevision : -1, renewal, pending: renewal ? state.pending! : undefined, phase: 'ready', deadline: Math.min(now + 120000, initialExpiry ? initialExpiry * 1000 : Infinity, flow?.expiresAt ? flow.expiresAt * 1000 : Infinity), confirmSent: false }
     this.intent = intent
     this.stopMessages = this.env.listen(event => this.message(intent, event))
     this.set({ active: true, persona, renewing: !!renewal, status: 'Connecting to the demo wallet. If its window shows a local certificate warning, accept it to continue.', error: null, cancellable: true })
@@ -80,6 +92,14 @@ export class LocalDemoDriver {
   }
   private sameFlow(i: Intent): boolean { return this.controller.snapshot().flow === i.flow && (!i.flow || i.flow.expiresAt === i.flowExpiry && i.flowExpiry * 1000 > Date.now()) }
   private owned(i: Intent): boolean { return !this.disposed && this.intent === i }
+  private initialLoginPinned(i: Intent): boolean {
+    const saved = i.initialLogin, state = this.controller.snapshot(), pending = state.pending
+    if (!saved) return !state.pending && !state.candidate
+    try { unchangedLoginContext(i.clickedContext) } catch { return false }
+    return canAssistDemoLogin(state) && pending === i.initialPending && pending?.status === 'login_in_progress' &&
+      pending.provider === saved.provider && pending.sourceProfile === saved.sourceProfile && pending.requestId === saved.requestId &&
+      pending.requestUri === saved.requestUri && pending.expiresAt === saved.expiresAt && saved.expiresAt * 1000 > Date.now()
+  }
   private renewalPinned(i: Intent): boolean {
     const saved = i.renewal, state = this.controller.snapshot(), pending = state.pending
     if (!saved) return true
@@ -97,7 +117,7 @@ export class LocalDemoDriver {
       if (!ready) { this.fail(i, 'The demo wallet identity configuration could not be verified.'); return }
       try { unchangedLoginContext(i.clickedContext) } catch { this.fail(i, 'The account changed. Choose a demo identity again.'); return }
       const state = this.controller.snapshot(), identity = ready.config.personas.find(p => p.id === i.persona)!
-      if (Date.now() >= i.deadline || this.controller.scopeRevision !== i.initialRevision || state.self !== i.initialSelf || (i.renewal ? !this.renewalPinned(i) || identity.profileId !== i.renewal.sourceProfile : !!state.pending) || !this.sameFlow(i) || !state.profiles.some(p => p.provider === 'privado' && p.id === identity.profileId)) { this.fail(i, 'The sign-in changed. Start a fresh demo sign-in.'); return }
+      if (Date.now() >= i.deadline || this.controller.scopeRevision !== i.initialRevision || state.self !== i.initialSelf || (i.renewal ? !this.renewalPinned(i) || identity.profileId !== i.renewal.sourceProfile : !this.initialLoginPinned(i) || !!i.initialLogin && identity.profileId !== i.initialLogin.sourceProfile) || !this.sameFlow(i) || !state.profiles.some(p => p.provider === 'privado' && p.id === identity.profileId)) { this.fail(i, 'The sign-in changed. Start a fresh demo sign-in.'); return }
       i.config = ready.config; i.identity = identity
       if (i.renewal) { this.prove(i, i.pending!); return }
       i.phase = 'starting'; i.deadline = Math.min(Date.now() + 25000, i.flow ? i.flow.expiresAt * 1000 : Infinity)
@@ -134,7 +154,7 @@ export class LocalDemoDriver {
     if (!i.popup || i.popup.closed || Date.now() >= i.deadline) { this.fail(i, i.phase === 'ready' ? 'The demo wallet did not connect. Check that it is running and its local certificate is accepted, then try again.' : 'The demo wallet closed or sign-in expired. Start a fresh sign-in.'); return }
     const state = this.controller.snapshot()
     if (i.phase === 'ready') {
-      if (this.controller.scopeRevision !== i.initialRevision || state.self !== i.initialSelf || (i.renewal ? !this.renewalPinned(i) : !!state.pending) || !this.sameFlow(i)) { this.fail(i, 'The sign-in changed. Start a fresh demo sign-in.'); return }
+      if (this.controller.scopeRevision !== i.initialRevision || state.self !== i.initialSelf || (i.renewal ? !this.renewalPinned(i) : !this.initialLoginPinned(i)) || !this.sameFlow(i)) { this.fail(i, 'The sign-in changed. Start a fresh demo sign-in.'); return }
     } else if (i.phase !== 'starting') {
       if (i.phase === 'continuing' && this.controller.scopeRevision === i.revision && state.self === i.confirmedSelf && state.phase === 'selected' && !state.error && state.flow === null) { this.finish(i); return }
       if (!this.context(i)) { this.fail(i, 'The sign-in changed. Start a fresh demo sign-in.'); return }

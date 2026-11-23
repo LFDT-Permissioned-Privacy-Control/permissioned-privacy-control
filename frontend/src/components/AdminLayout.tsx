@@ -131,7 +131,7 @@ export function AdminLayout({ accountMenu, children, disabledTabs = [], showNavi
         <div className="min-h-screen bg-neutral-100" data-testid="admin-app">
         {/* Navigation Header */}
         <header className="bg-white border-b border-neutral-200 shadow-sm sticky top-0 z-40" data-testid="admin-header">
-          <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6">
+          <div className={cn("mx-auto px-4 py-4 sm:px-6", navigation ? "max-w-screen-2xl" : "max-w-7xl")}>
             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-3 lg:flex-nowrap">
               {/* Logo and Title */}
               <div className="flex min-w-0 items-center gap-3" data-testid="admin-logo">
@@ -150,17 +150,30 @@ export function AdminLayout({ accountMenu, children, disabledTabs = [], showNavi
                   the prior "Dashboard" landing tab; its content (system
                   status + test request panel + demo deploy) is dev / ops
                   tooling, not where admins start their day. */}
-              {showNavigation && (navigation ? primaryItems.length > 0 && <Tabs value={navigation.activeId ?? ''} onValueChange={value => {
-                const item = primaryItems.find(item => item.id === value);
-                if (item && !item.disabled) navigate(item.path);
-              }} className="order-last w-full lg:order-none lg:w-auto" data-testid="admin-nav">
-                <TabsList aria-label="Primary administration" className="w-full justify-around lg:w-auto">
-                  {primaryItems.map(item => <TabsTrigger key={item.id} value={item.id} disabled={item.disabled} aria-label={item.label} className="gap-2" data-testid={`nav-${item.id}`}>
-                    {item.icon && <span aria-hidden="true" className="shrink-0 [&>svg]:w-4 [&>svg]:h-4">{item.icon}</span>}
-                    <span className="hidden sm:inline">{item.label}</span>
-                  </TabsTrigger>)}
-                </TabsList>
-              </Tabs> : <Tabs value={activeTab} onValueChange={handleTabChange} className="order-last w-full lg:order-none lg:w-auto" data-testid="admin-nav">
+              {showNavigation && (navigation ? <div className="order-last flex w-full min-w-0 flex-wrap items-center justify-center gap-2 lg:order-none lg:w-auto lg:flex-1" data-testid="admin-navigation">
+                {primaryItems.length > 0 && <Tabs value={navigation.activeId ?? ''} onValueChange={value => {
+                  const item = primaryItems.find(item => item.id === value);
+                  if (item && !item.disabled) navigate(item.path);
+                }} className="w-full sm:w-auto" data-testid="admin-nav">
+                  <TabsList aria-label="Primary administration" className="w-full justify-around sm:w-auto">
+                    {primaryItems.map(item => <TabsTrigger key={item.id} value={item.id} disabled={item.disabled} aria-label={item.label} className="gap-1 px-2" data-testid={`nav-${item.id}`}>
+                      {item.icon && <span aria-hidden="true" className="shrink-0 [&>svg]:w-4 [&>svg]:h-4">{item.icon}</span>}
+                      <span className="hidden sm:inline">{item.label}</span>
+                    </TabsTrigger>)}
+                  </TabsList>
+                </Tabs>}
+                {secondaryItems.length > 0 && <nav aria-label="More administration" className="flex max-w-full flex-wrap items-center justify-center gap-1 rounded-lg bg-neutral-100 p-1">
+                  {secondaryItems.map(item => {
+                    const selected = navigation.activeId === item.id;
+                    const className = cn('inline-flex items-center justify-center gap-1 whitespace-nowrap rounded-md px-2 py-1.5 text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+                      selected ? 'bg-white text-primary shadow-sm' : 'text-neutral-500 hover:text-neutral-700 hover:bg-white/50', item.disabled && 'pointer-events-none opacity-50');
+                    const content = <>{item.icon && <span aria-hidden="true" className="shrink-0 [&>svg]:w-4 [&>svg]:h-4">{item.icon}</span>}<span>{item.label}</span></>;
+                    return item.disabled ? <span key={item.id} role="link" aria-disabled="true" className={className} data-testid={`nav-${item.id}`}>{content}</span>
+                      : <Link key={item.id} to={item.path} aria-current={selected ? 'page' : undefined} className={className} data-testid={`nav-${item.id}`}>{content}</Link>;
+                  })}
+                </nav>}
+                {navigation.action && <div className="flex shrink-0 items-center gap-2">{navigation.action}</div>}
+              </div> : <Tabs value={activeTab} onValueChange={handleTabChange} className="order-last w-full lg:order-none lg:w-auto" data-testid="admin-nav">
                 <TabsList className="w-full justify-around lg:w-auto">
                   <TabsTrigger disabled={disabledTabs.includes('rbac')} title={disabledTabs.includes('rbac') ? 'Not yet available in this UI preview' : undefined} aria-label="RBAC" value="rbac" className="gap-2" data-testid="nav-rbac">
                     <Users className="w-4 h-4" />
@@ -188,19 +201,7 @@ export function AdminLayout({ accountMenu, children, disabledTabs = [], showNavi
               {/* Account Menu */}
               {accountMenu}
             </div>
-            {showNavigation && navigation && (secondaryItems.length > 0 || navigation.action) && <div className="mt-3 flex flex-wrap items-center justify-end gap-3" data-testid="admin-secondary-row">
-              {secondaryItems.length > 0 && <nav aria-label="More administration" className="flex flex-wrap items-center gap-1 rounded-lg bg-neutral-100 p-1">
-                {secondaryItems.map(item => {
-                  const selected = navigation.activeId === item.id;
-                  const className = cn('inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
-                    selected ? 'bg-white text-primary shadow-sm' : 'text-neutral-500 hover:text-neutral-700 hover:bg-white/50', item.disabled && 'pointer-events-none opacity-50');
-                  const content = <>{item.icon && <span aria-hidden="true" className="shrink-0 [&>svg]:w-4 [&>svg]:h-4">{item.icon}</span>}<span>{item.label}</span></>;
-                  return item.disabled ? <span key={item.id} role="link" aria-disabled="true" className={className} data-testid={`nav-${item.id}`}>{content}</span>
-                    : <Link key={item.id} to={item.path} aria-current={selected ? 'page' : undefined} className={className} data-testid={`nav-${item.id}`}>{content}</Link>;
-                })}
-              </nav>}
-              {navigation.action && <div className="flex shrink-0 items-center gap-2">{navigation.action}</div>}
-            </div>}
+
           </div>
         </header>
 

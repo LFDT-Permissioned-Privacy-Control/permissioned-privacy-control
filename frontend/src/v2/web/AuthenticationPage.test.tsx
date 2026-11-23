@@ -9,7 +9,7 @@ import type { ReactNode } from 'react'
 const profile = { id: 'configured-connection', provider: 'privado' as const, principalKind: 'human' as const }
 const anonymous: State = { phase: 'anonymous', profiles: [profile], self: null, flow: null, pending: null, candidate: null, busy: false, error: null }
 function page(state = anonymous, demoSlot?: ReactNode, demoBusy = false) {
-  const controller = { snapshot: () => state, subscribe: () => () => {}, login: vi.fn(), confirm: vi.fn(), cancel: vi.fn(), logout: vi.fn(), continue: vi.fn() }
+  const controller = { snapshot: () => state, subscribe: () => () => {}, login: vi.fn(), prepareLogin: vi.fn(), confirm: vi.fn(), cancel: vi.fn(), logout: vi.fn(), continue: vi.fn() }
   render(<MemoryRouter><AuthenticationPage controller={controller as unknown as Controller} demoSlot={demoSlot} demoBusy={demoBusy} /></MemoryRouter>)
   return controller
 }
@@ -34,6 +34,38 @@ describe('native sign-in with the V1 presentation', () => {
     const actions = screen.getAllByRole('button', { name: 'Continue with Privado ID' })
     expect(actions[0]).toHaveAccessibleDescription('Connection: ' + profile.id)
     expect(actions[1]).toHaveAccessibleDescription('Connection: another-approved-connection')
+  })
+  it('prepares ordinary signed-out entry without presenting an old restore denial as a warning', () => {
+    const controller = page({ ...anonymous, ordinaryEntry: true, error: 'login_required' })
+    expect(controller.prepareLogin).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText('Sign in to continue')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(controller.confirm).not.toHaveBeenCalled()
+    cleanup(); page({ ...anonymous, error: 'login_required' })
+    expect(screen.getByText('Sign in to continue')).toBeInTheDocument()
+  })
+  it('shows the common wallet QR and demo identities together without a collapsed manual-login section', () => {
+    const id = '44444444-4444-4444-4444-444444444444'
+    page({ ...anonymous, phase: 'proof-pending', pending: { status: 'login_in_progress', provider: 'privado', sourceProfile: profile.id,
+      requestId: id, requestUri: location.origin + '/api/v2/auth/privado/requests/' + id, expiresAt: Math.floor(Date.now() / 1000) + 300 } }, <button>Demo Admin</button>)
+    expect(screen.getByTestId('qr-code')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Demo Admin' })).toBeVisible()
+    expect(screen.queryByTestId('manual-wallet-login')).not.toBeInTheDocument()
+  })
+  it('keeps Microsoft reachable by explicitly canceling the unsigned QR, without starting Microsoft automatically', async () => {
+    const id = '44444444-4444-4444-4444-444444444444'
+    let state: State = { ...anonymous, profiles: [profile, { ...profile, id: 'azure-bank', provider: 'azure' }], phase: 'proof-pending',
+      pending: { status: 'login_in_progress', provider: 'privado', sourceProfile: profile.id, requestId: id,
+        requestUri: location.origin + '/api/v2/auth/privado/requests/' + id, expiresAt: Math.floor(Date.now() / 1000) + 300 } }
+    let notify = () => {}
+    const controller = { snapshot: () => state, subscribe: (fn: () => void) => { notify = fn; return () => {} }, login: vi.fn(), prepareLogin: vi.fn(),
+      cancel: vi.fn(async () => { state = { ...state, pending: null, phase: 'anonymous' }; notify() }) }
+    render(<MemoryRouter><AuthenticationPage controller={controller as unknown as Controller} /></MemoryRouter>)
+    expect(screen.getByTestId('qr-code')).toBeVisible(); expect(controller.login).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with Microsoft instead' }))
+    const microsoft = await screen.findByRole('button', { name: 'Continue with Microsoft' })
+    expect(controller.cancel).toHaveBeenCalledTimes(1); expect(controller.login).not.toHaveBeenCalled()
+    fireEvent.click(microsoft); expect(controller.login).toHaveBeenCalledWith('azure-bank', 'azure')
   })
   it('preserves real provider failures and explains actual expiry without an interrupted-app alarm on ordinary entry', () => {
     page({ ...anonymous, phase: 'failed', error: 'authentication_unavailable' })
@@ -81,14 +113,14 @@ describe('native sign-in with the V1 presentation', () => {
     expect(controller.confirm).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Use this identity' })); expect(controller.confirm).toHaveBeenCalledTimes(1)
   })
-  it('prioritizes demo renewal while keeping manual wallet verification and whole-flow cancellation explicit', () => {
+  it('keeps renewal QR visible alongside the demo helper and explicit whole-flow cancellation', () => {
     const id = '44444444-4444-4444-4444-444444444444'
     const controller = page({ ...anonymous, phase: 'proof-pending', pending: { status: 'proof_required', provider: 'privado', sourceProfile: profile.id,
       actorId: 'ops:p1:' + 'A'.repeat(43), browserSessionId: '11111111-1111-1111-1111-111111111111', principalKind: 'human', mode: 'renew', requestId: id,
       requestUri: location.origin + '/api/v2/auth/privado/requests/' + id, expiresAt: Math.floor(Date.now() / 1000) + 300 } }, <button>Demo Admin</button>)
     expect(screen.getByRole('button', { name: 'Demo Admin' })).toBeVisible()
-    expect(screen.getByTestId('manual-wallet-login')).not.toHaveAttribute('open')
-    expect(screen.getByTestId('qr-code')).not.toBeVisible()
+    expect(screen.queryByTestId('manual-wallet-login')).not.toBeInTheDocument()
+    expect(screen.getByTestId('qr-code')).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Continue with Privado ID' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Cancel sign in', exact: true }))
     expect(controller.cancel).toHaveBeenCalledTimes(1)
