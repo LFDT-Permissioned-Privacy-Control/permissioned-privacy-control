@@ -10,7 +10,8 @@ COPY internal/ internal/
 COPY proto/ proto/
 COPY gen/ gen/
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    go build -p=1 -tags production,prover_disabled -o /out/ops-v2-demo-init ./cmd/ops-v2-demo-init
+    go build -p=1 -tags production,prover_disabled -o /out/ops-v2-demo-init ./cmd/ops-v2-demo-init \
+    && go build -p=1 -tags production,prover_disabled -o /out/ops-v2 ./cmd/ops-v2
 
 FROM node:24.22.1-trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
@@ -24,6 +25,7 @@ COPY e2e/playwright/v2-privado-wallet-fixture.mjs e2e/playwright/
 COPY scripts/v2-demo/ scripts/v2-demo/
 COPY deploy/v2-demo/export.sh deploy/v2-demo/explorer-gateway.mjs /opt/v2-demo/
 COPY --from=builder /out/ops-v2-demo-init /usr/local/bin/
+COPY --from=builder /out/ops-v2 /usr/local/bin/
 RUN mkdir -p /demo /circuits && chown node:node /demo /circuits
 USER node
 ENTRYPOINT ["ops-v2-demo-init"]

@@ -32,7 +32,7 @@ const canonicalSourcePages: { id: SourcePageId; section: string; path: string; t
   { id: 'platform-configuration', section: 'settings', path: '/admin/settings', title: 'Settings' },
   { id: 'disclosure-source', section: 'disclosure', path: '/admin/disclosure/rules', title: 'Disclosure rules' },
   { id: 'compliance-source', section: 'compliance', path: '/admin/compliance/policy', title: 'Compliance policy' },
-  { id: 'configuration', section: 'configuration', path: '/admin/configuration', title: 'Review & export' },
+  { id: 'configuration', section: 'rbac', path: '/admin/configuration', title: 'Configurations' },
 ]
 const newSourcePaths = ['/admin/identity/profiles', '/admin/identity/claim-mappings', '/admin/settings', '/admin/disclosure/rules', '/admin/compliance/policy', '/admin/configuration']
 describe('regrouped source navigation', () => {

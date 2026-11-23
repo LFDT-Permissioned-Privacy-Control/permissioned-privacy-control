@@ -16,6 +16,7 @@ import (
 	b "privacy-proxy/internal/identitybroker"
 	"privacy-proxy/internal/identitybroker/azure"
 	"privacy-proxy/internal/identityhttp"
+	"privacy-proxy/internal/operational/configurationviewer"
 	"privacy-proxy/internal/operational/identitysql"
 	"privacy-proxy/internal/operational/identityweb"
 	"privacy-proxy/internal/operational/ssohttp"
@@ -123,6 +124,11 @@ func Open(parent context.Context, c Config) (*Server, error) {
 	if !ok {
 		return fail("broker profile")
 	}
+	viewer, e := configurationviewer.New(configurationviewer.Config{Settings: c.ConfigurationViewer, Snapshot: core, Origin: source.WebOrigin, Clock: time.Now})
+	if e != nil {
+		return fail("configuration viewer settings")
+	}
+	viewer.Register(s.handler)
 	binding := b.ServiceBinding{Environment: brokerSnapshot.Metadata().Environment, DeploymentID: c.Broker.DeploymentID, Origin: source.WebOrigin}
 	ns, e := binding.Namespace(auth.Issuer().Issuer)
 	if e != nil {

@@ -14,6 +14,7 @@ import (
 	"os"
 	"regexp"
 
+	"privacy-proxy/internal/operational/configurationviewer"
 	"privacy-proxy/internal/strictjson"
 )
 
@@ -51,20 +52,21 @@ type SSO struct {
 	Runtime       File   `json:"runtime"`
 }
 type Config struct {
-	APIVersion             string    `json:"apiVersion"`
-	Kind                   string    `json:"kind"`
-	Listen                 string    `json:"listen"`
-	TLSCertificateFile     string    `json:"tlsCertificateFile"`
-	TLSPrivateKeyFile      string    `json:"tlsPrivateKeyFile"`
-	WebDirectory           string    `json:"webDirectory"`
-	ExplorerOrganizationID string    `json:"explorerOrganizationId,omitempty" optional:"true"`
-	Core                   Selection `json:"core"`
-	BrokerSelection        Selection `json:"brokerSelection"`
-	Broker                 Broker    `json:"broker"`
-	Wallet                 Wallet    `json:"wallet"`
-	SSO                    SSO       `json:"sso"`
-	Data                   Data      `json:"data"`
-	Protected              Protected `json:"protected"`
+	APIVersion             string                        `json:"apiVersion"`
+	Kind                   string                        `json:"kind"`
+	Listen                 string                        `json:"listen"`
+	TLSCertificateFile     string                        `json:"tlsCertificateFile"`
+	TLSPrivateKeyFile      string                        `json:"tlsPrivateKeyFile"`
+	WebDirectory           string                        `json:"webDirectory"`
+	ExplorerOrganizationID string                        `json:"explorerOrganizationId,omitempty" optional:"true"`
+	ConfigurationViewer    *configurationviewer.Settings `json:"configurationViewer,omitempty" optional:"true"`
+	Core                   Selection                     `json:"core"`
+	BrokerSelection        Selection                     `json:"brokerSelection"`
+	Broker                 Broker                        `json:"broker"`
+	Wallet                 Wallet                        `json:"wallet"`
+	SSO                    SSO                           `json:"sso"`
+	Data                   Data                          `json:"data"`
+	Protected              Protected                     `json:"protected"`
 }
 
 var envName = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,127}$`)
@@ -130,6 +132,9 @@ func ReadConfig(path, expected string) (Config, error) {
 		return c, ErrInvalid
 	}
 	if c.APIVersion != "ops.server/v2" || c.Kind != "OperationalServer" || c.TLSCertificateFile == "" || c.TLSPrivateKeyFile == "" || c.WebDirectory == "" {
+		return c, ErrInvalid
+	}
+	if c.ConfigurationViewer.Validate() != nil {
 		return c, ErrInvalid
 	}
 	_, port, e := net.SplitHostPort(c.Listen)

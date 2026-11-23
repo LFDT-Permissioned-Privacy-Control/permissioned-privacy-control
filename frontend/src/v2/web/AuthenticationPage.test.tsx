@@ -78,7 +78,7 @@ describe('native sign-in with the V1 presentation', () => {
     page({ ...anonymous, phase: 'selected', self: { actorId: 'ops:p1:' + 'A'.repeat(43), principalKind: 'human', sourceProfile: profile.id,
       sourceProfileDigest: 'sha256:' + 'b'.repeat(64), expiresAt: Math.floor(Date.now() / 1000) - 1,
       organizations: [{ id: '11111111-1111-1111-1111-111111111111', slug: 'bank', name: 'Bank', isOrgAdmin: true, isOrgReadonlyAdmin: false }] } })
-    expect(screen.queryByRole('link', { name: 'Open configuration workspace' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Open configuration viewer' })).not.toBeInTheDocument()
     expect(screen.queryByText('Authentication successful!')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Continue with Privado ID' })).toBeInTheDocument()
   })

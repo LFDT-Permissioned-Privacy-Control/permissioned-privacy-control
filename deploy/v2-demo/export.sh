@@ -1,6 +1,7 @@
 #!/bin/sh
 # This runs offline as root. Serving mounts receive explicit allowlists only;
-# /demo/private (owner DSNs, signing authority and CA key) is never copied.
+# Owner DSNs, signing authority and CA keys are never copied. The viewer receives
+# only the explicitly named public source JSON, on a separate read-only volume.
 set -eu
 copy_file() {
   service=$1
@@ -27,6 +28,26 @@ done
 copy_file wallet wallet.json
 copy_tree ops bundles
 copy_tree ops ops
+if [ -f /demo/private/authoring/core/draft.json ]; then
+  viewer=/exports/configuration-sources
+  mkdir -p "$viewer"
+  chown 1000:1000 "$viewer"
+  stage="$viewer/.stage-$$"
+  previous="$viewer/.previous-$$"
+  mkdir -p "$stage/core" "$stage/broker"
+  for file in draft groups registry execution identity runtime compliance disclosure; do
+    cp "/demo/private/authoring/core/$file.json" "$stage/core/$file.json"
+  done
+  for file in draft groups registry execution identity auth role-context; do
+    cp "/demo/private/authoring/broker/$file.json" "$stage/broker/$file.json"
+  done
+  chown -R 1000:1000 "$stage"
+  # A complete folder is exposed at an absent path. Same-name replacement
+  # withdraws the old folder first; no rename-over-nonempty-dir is assumed.
+  if [ -e "$viewer/current" ]; then mv "$viewer/current" "$previous"; fi
+  mv "$stage" "$viewer/current"
+  if [ -d "$previous" ]; then rm -rf "$previous"; fi
+fi
 copy_tree explorer explorer
 copy_tree observer observer
 copy_file reth genesis.json

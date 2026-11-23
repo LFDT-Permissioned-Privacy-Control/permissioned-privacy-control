@@ -1,6 +1,21 @@
 import { PermissionPill } from '../../components/rbac/ContractPresentation'
 import { abiChoices } from './executionABI'
 import { object, type JSONObject } from './sourceProject'
+export function assertRuleDisplay(rule: JSONObject): void {
+  const bad = () => { throw Error('Unsupported execution rule fields. Inspect the original source file.') }
+  if (typeof rule.selector !== 'string' || typeof rule.storageAddress !== 'string' && typeof rule.targetClass !== 'string') bad()
+  for (const key of ['storageAddress', 'codeAddress', 'targetClass', 'abiDigest', 'callerAddress', 'maxValue']) if (rule[key] !== undefined && typeof rule[key] !== 'string') bad()
+  for (const key of ['minDepth', 'maxDepth']) if (rule[key] !== undefined && (!Number.isSafeInteger(rule[key]) || Number(rule[key]) < 0)) bad()
+  if (rule.allowUpgrade !== undefined && typeof rule.allowUpgrade !== 'boolean' || rule.callTypes !== undefined && (!Array.isArray(rule.callTypes) || rule.callTypes.some(v => typeof v !== 'string'))) bad()
+  if (rule.args !== undefined) {
+    if (!Array.isArray(rule.args)) return bad()
+    for (const raw of rule.args) {
+      const arg = object(raw)
+      if (!Number.isSafeInteger(arg.index) || Number(arg.index) < 0 || arg.uintAtMost !== undefined && typeof arg.uintAtMost !== 'string') bad()
+      if (arg.addressEquals !== undefined) { const match = object(arg.addressEquals); if (typeof match.source !== 'string' || match.value !== undefined && typeof match.value !== 'string') bad() }
+    }
+  }
+}
 export function ruleFunctionLabel(rule: JSONObject, contracts: JSONObject[]): string {
   const code = contracts.find(c => c.address === (rule.codeAddress || rule.storageAddress))
   if (rule.selector === '*') return 'Any input'
@@ -8,13 +23,14 @@ export function ruleFunctionLabel(rule: JSONObject, contracts: JSONObject[]): st
   try { return abiChoices(code?.abi).functions.find(f => f.selector === rule.selector)?.signature ?? 'Unresolved ABI function' } catch { return 'Unresolved ABI function' }
 }
 export function ExecutionRuleDetails({ rule, contracts }: { rule: JSONObject; contracts: JSONObject[] }) {
+  assertRuleDisplay(rule)
   const name = (address: unknown) => { const contract = contracts.find(c => c.address === address); return contract ? `${String(contract.name || contract.id)} · ${String(address)}` : String(address || 'Same as storage contract') }
   const argsValid = rule.args === undefined || Array.isArray(rule.args) && rule.args.every(arg => arg && typeof arg === 'object' && !Array.isArray(arg)), args = argsValid && Array.isArray(rule.args) ? rule.args.map(object) : [], code = contracts.find(c => c.address === (rule.codeAddress || rule.storageAddress))
   let inputs: ReturnType<typeof abiChoices>['functions'][number]['inputs'] = []
   try { inputs = abiChoices(code?.abi).functions.find(f => f.selector === rule.selector)?.inputs ?? [] } catch { /* unresolved source stays visible */ }
   const rows = [
-    ['Target', rule.targetClass ? `Runtime resolved class: ${String(rule.targetClass)}` : name(rule.storageAddress)],
-    ['Executing code', rule.targetClass ? 'Resolved by runtime' : name(rule.codeAddress || rule.storageAddress)],
+    ['Target', rule.targetClass ? `Target class: ${String(rule.targetClass)}` : name(rule.storageAddress)],
+    ['Executing code', rule.targetClass ? 'Determined during runtime evaluation' : name(rule.codeAddress || rule.storageAddress)],
     ['Function / input', ruleFunctionLabel(rule, contracts)], ['Selector', String(rule.selector)], ['Pinned ABI digest', String(rule.abiDigest || 'None for wildcard / empty input')],
     ['Call types', Array.isArray(rule.callTypes) && rule.callTypes.length ? rule.callTypes.join(', ') : 'call, staticcall (native default)'],
     ['Maximum native value', rule.maxValue === undefined ? 'Unbounded' : String(rule.maxValue) + ' wei'], ['Minimum depth', rule.minDepth === undefined ? 'Unbounded' : String(rule.minDepth)], ['Maximum depth', rule.maxDepth === undefined ? 'Unbounded' : String(rule.maxDepth)], ['Immediate caller', rule.callerAddress === undefined ? 'Any immediate caller' : String(rule.callerAddress)], ['Recognized upgrades', rule.allowUpgrade === true ? 'Requires current target-specific upgrade claim' : 'No upgrade exception'],
@@ -27,6 +43,7 @@ export function ExecutionRuleDetails({ rule, contracts }: { rule: JSONObject; co
 }
 
 export function ExecutionRuleSummary({ rule }: { rule: JSONObject }) {
+  assertRuleDisplay(rule)
   const valid = rule.args === undefined || Array.isArray(rule.args) && rule.args.every(arg => arg && typeof arg === 'object' && !Array.isArray(arg))
   const args = valid && Array.isArray(rule.args) ? rule.args.map(object) : []
   return <div className="mt-2 flex flex-wrap gap-1 text-xs">{!valid && <span className="text-warning-dark">Unsupported arguments retained in advanced JSON</span>}{args.map((arg, i) => { const match = arg.addressEquals && typeof arg.addressEquals === 'object' && !Array.isArray(arg.addressEquals) ? object(arg.addressEquals) : null; return <span key={i} className="rounded bg-white px-2 py-1 text-neutral-600">Argument {String(arg.index)}: {match ? 'equals ' + (match.source === 'literal' ? String(match.value) : match.source === 'principal.linked' ? 'principal linked address' : String(match.source)) : arg.uintAtMost !== undefined ? '≤ ' + String(arg.uintAtMost) : 'advanced constraint retained'}{i < args.length - 1 ? ' AND' : ''}</span> })}{rule.maxValue !== undefined && <span className="rounded bg-white px-2 py-1 text-neutral-600">≤ {String(rule.maxValue)} wei</span>}{(rule.minDepth !== undefined || rule.maxDepth !== undefined) && <span className="rounded bg-white px-2 py-1 text-neutral-600">Depth {String(rule.minDepth ?? 'any')}–{String(rule.maxDepth ?? 'any')}</span>}{rule.callerAddress !== undefined && <span className="break-all rounded bg-white px-2 py-1 text-neutral-600">Caller: {String(rule.callerAddress)}</span>}{rule.allowUpgrade === true && <span className="rounded bg-warning-light px-2 py-1 text-warning-dark">Current upgrade claim required</span>}</div>

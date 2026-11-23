@@ -1,10 +1,10 @@
-# Read-only configuration viewer: implementation plan
+# Read-only configuration viewer: implementation specification
 
-This is a plan, not a description of a completed viewer. It implements the
-[recorded product decision](../architecture/configuration-viewer-decision.md).
-The existing application still imports and edits local proposals.
+This document records the scope, architecture and verification requirements
+for the [read-only viewer decision](../architecture/configuration-viewer-decision.md).
+The [operator guide](v2-configuration-viewer.md) describes deployment and use.
 
-## What the user will see
+## User workflow
 
 1. Open RBAC → Configurations. Available server folders appear as tabs.
 2. Open a configuration. The familiar organization/group/contract/rule views
@@ -193,13 +193,13 @@ Keep the Go compiler/validator, external CLI/agent authoring tools and immutable
 runtime loader. Remove a helper only when it is exclusive to the deleted browser
 workflow and has no external publication, demo-fixture or V1 consumer.
 
-### File-level cleanup
+### Removed and adapted code
 
 Frontend paths below are relative to `frontend/src/v2/web/`. Split mixed files
 before deleting their writer helpers; retaining a view means preserving its
 readable presentation, not disabling every field in an editing form.
 
-| Current files | Planned treatment |
+| Files | Treatment |
 | --- | --- |
 | `AdminApp.tsx`, `SourceWorkspacePage.tsx`, `navigation.ts` | Connect server folder selection and read-only views; remove draft guards and Review & export navigation. |
 | `sourceProject.ts`, `workspace.ts` | Extract bounded byte decoding, immutable types and display projections; delete source mutation and browser-picker helpers. |
@@ -255,7 +255,7 @@ implementation changes that deliver the corresponding behavior. Rename the
 workspace guide to reflect viewing and fix its links. Historical evidence stays
 historical; do not relabel old local-import screenshots as folder-backed proof.
 
-## Delivery sequence and review gates
+## Implementation sequence and review gates
 
 1. Record this scope and review the source inventory and access/folder contract.
 2. Implement the read-only backend/transport and read-view state. These can be

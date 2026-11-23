@@ -1,8 +1,8 @@
 # Decision: read-only configuration viewer
 
-Decision recorded: 23 November 2026. Implementation is planned; the current
-browser still contains the local proposal editor described in
-[the existing workspace guide](../implementation/v2-policy-workspace.md).
+Decision recorded: 23 November 2026. The operational Admin viewer implements
+this decision. See the [configuration viewer guide](../implementation/v2-configuration-viewer.md)
+for deployment and use.
 
 ## Product purpose
 

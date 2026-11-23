@@ -134,12 +134,12 @@ try {
     await page.setViewportSize({ width: 1440, height: 900 });
     const geometry = await page.evaluate(() => {
       const header = document.querySelector('[data-testid="admin-header"]');
-      const ids = ['nav-rbac', 'nav-identity', 'nav-compliance', 'nav-disclosure', 'nav-logs', 'nav-diagnostics', 'nav-settings', 'review-export-action'];
+      const ids = ['nav-rbac', 'nav-identity', 'nav-compliance', 'nav-disclosure', 'nav-logs', 'nav-diagnostics', 'nav-settings'];
       const controls = ids.map(id => { const r = document.querySelector('[data-testid="' + id + '"]')?.getBoundingClientRect(); return r ? { id, center: r.y + r.height / 2, right: r.right } : null; });
       return { controls, headerHeight: header?.getBoundingClientRect().height, overflow: document.documentElement.scrollWidth > innerWidth };
     });
-    assert.equal(geometry.controls.length, 8); assert.ok(geometry.controls.every(Boolean));
-    assert.ok(Math.max(...geometry.controls.map(x => x.center)) - Math.min(...geometry.controls.map(x => x.center)) <= 2, 'All eight desktop navigation controls share a row');
+    assert.equal(geometry.controls.length, 7); assert.ok(geometry.controls.every(Boolean));
+    assert.ok(Math.max(...geometry.controls.map(x => x.center)) - Math.min(...geometry.controls.map(x => x.center)) <= 2, 'All desktop navigation controls share a row');
     assert.ok(geometry.headerHeight < 90); assert.equal(geometry.overflow, false);
     await page.screenshot({ path: path.join(output, 'compact-desktop-navigation.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });

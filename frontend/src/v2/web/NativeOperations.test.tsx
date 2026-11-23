@@ -152,7 +152,7 @@ it('readonly administration sees approved settings and cannot create travel-rule
     </MemoryRouter>,
   )
   expect(await screen.findByText('1000 USD')).toBeInTheDocument()
-  expect(screen.getByRole('link', { name: 'Edit a local source proposal' })).toHaveAttribute(
+  expect(screen.getByRole('link', { name: 'View configuration policy' })).toHaveAttribute(
     'href',
     `/admin/compliance/policy?org=${org}`,
   )
@@ -173,7 +173,7 @@ it('keeps a live organization selection in the policy-draft destination', async 
   await screen.findByText('1000 USD')
   await userEvent.selectOptions(screen.getByLabelText('Organization'), other)
   await waitFor(() => expect(s.request.mock.calls.some(([path]) => path.startsWith(`/api/v2/orgs/${other}/compliance/`))).toBe(true))
-  expect(screen.getByRole('link', { name: 'Edit a local source proposal' })).toHaveAttribute('href', `/admin/compliance/policy?org=${other}`)
+  expect(screen.getByRole('link', { name: 'View configuration policy' })).toHaveAttribute('href', `/admin/compliance/policy?org=${other}`)
 })
 
 it.each(['authorized', 'unauthorized'] as const)('retires a pending disclosure list on history navigation to an %s scope', async target => {

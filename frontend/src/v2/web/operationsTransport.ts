@@ -90,7 +90,8 @@ export function operationEndpoint(endpoint: string, method: string): boolean {
       valid = method === 'GET'
       if (action === 'audit') allowed = ['limit', 'cursor']
     }
-  } else if (path === '/api/v2/self/selection' || path === '/health/live' || path === '/health/ready') valid = method === 'GET'
+  } else if (path === '/api/v2/configuration/sources' || /^\/api\/v2\/configuration\/sources\/[a-z0-9][a-z0-9_-]{0,63}$/.test(path)) valid = method === 'GET' && !endpoint.includes('?')
+  else if (path === '/health/live' || path === '/health/ready') valid = method === 'GET'
   else if (new RegExp('^/rpc/' + uuid + '$').test(path))
     valid = method === 'POST' && canonicalUUID(path.slice(5))
   if (!valid || (method !== 'GET' && raw !== '')) return false
@@ -117,6 +118,10 @@ export function operationEndpoint(endpoint: string, method: string): boolean {
   return true
 }
 
+export type SourceResponse = { notModified: true; etag: string } | { notModified: false; etag: string; value: unknown }
+const sourcePoint = (path: string) => /^\/api\/v2\/configuration\/sources\/[a-z0-9][a-z0-9_-]{0,63}$/.test(path)
+const sourceTag = (tag: string | null): tag is string => !!tag && /^"[a-f0-9]{64}"$/.test(tag)
+
 export async function operationRequest(
   token: string,
   endpoint: string,
@@ -124,7 +129,17 @@ export async function operationRequest(
   signal: AbortSignal,
   check: () => void,
 ): Promise<unknown> {
-  const method = options.method ?? 'GET'
+  const method = options.method ?? 'GET', source = sourcePoint(endpoint)
+  const sourceHeaders: Record<string, string> = {}
+  if (options.headers !== undefined) {
+    if (!source) throw Error('Invalid native headers')
+    const headers = new Headers(options.headers)
+    for (const [key, value] of headers) {
+      if (key === 'if-none-match' && sourceTag(value)) sourceHeaders['If-None-Match'] = value
+      else if (key === 'cache-control' && value === 'no-cache') sourceHeaders['Cache-Control'] = value
+      else throw Error('Invalid source request headers')
+    }
+  }
   if (
     !operationEndpoint(endpoint, method) ||
     (options.body !== undefined && typeof options.body !== 'string') ||
@@ -169,18 +184,25 @@ export async function operationRequest(
     headers: {
       Authorization: 'Bearer ' + token,
       Accept: 'application/json',
+      ...sourceHeaders,
       ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
     },
     body: options.body,
     signal: AbortSignal.any([
       signal,
       ...(options.signal ? [options.signal] : []),
-      AbortSignal.timeout(endpoint.startsWith('/rpc/') ? 25000 : 5000),
+      AbortSignal.timeout(source || endpoint.startsWith('/rpc/') ? 25000 : 5000),
     ]),
   })
   check()
   if (response.redirected || response.headers.get('Cache-Control') !== 'no-store')
     throw Error('Invalid native response')
+  const tag = response.headers.get('ETag')
+  if (source && response.status === 304) {
+    if (!sourceTag(tag) || sourceHeaders['If-None-Match'] !== tag) throw Error('Invalid unchanged configuration response')
+    check(); return { notModified: true, etag: tag } satisfies SourceResponse
+  }
+  if (source && response.status === 200 && !sourceTag(tag)) throw Error('Invalid configuration response tag')
   if (endpoint.startsWith('/health/'))
     return { ready: response.status === 204 || response.status === 200, status: response.status }
   if (
@@ -200,7 +222,7 @@ export async function operationRequest(
       check()
       if (next.done) break
       bytes += next.value.byteLength
-      if (bytes > 2 << 20) throw Error('Native response too large')
+      if (bytes > (source ? 90 << 20 : 2 << 20)) throw Error('Native response too large')
       raw += decoder.decode(next.value, { stream: true })
     }
     raw += decoder.decode()
@@ -218,5 +240,5 @@ export async function operationRequest(
   }
   const value: unknown = JSON.parse(raw)
   check()
-  return value
+  return source ? { notModified: false, etag: tag!, value } satisfies SourceResponse : value
 }

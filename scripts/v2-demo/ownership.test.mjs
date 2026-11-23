@@ -23,7 +23,9 @@ test('uninitialized selection has no resources and performs no mutation', async 
   const result = await run([]); assert.equal(result.status, 0); assert.equal(result.stdout.trim(), '0');
 });
 test('exact-name unlabeled volume collision refuses bootstrap reuse', async () => {
-  const result = await run([{ Name: 'test-demo_state', Labels: {} }]); assert.notEqual(result.status, 0); assert.match(result.stderr, /owned by another checkout/);
+  for (const suffix of ['state', 'configuration-sources']) {
+    const result = await run([{ Name: 'test-demo_' + suffix, Labels: {} }]); assert.notEqual(result.status, 0); assert.match(result.stderr, /owned by another checkout/);
+  }
 });
 test('exact-name foreign service collision refuses change', async () => {
   const result = await run([], [{ Name: 'test-demo-ops-1', Config: { Labels: {} } }]); assert.notEqual(result.status, 0); assert.match(result.stderr, /owned by another checkout/);

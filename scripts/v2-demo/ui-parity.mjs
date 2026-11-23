@@ -1,7 +1,10 @@
 // Assertions against the actual native browser and its own authorized API.
 // No mock response, injected identity, policy mutation or address resolver.
 import assert from 'node:assert/strict';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { demoAccount } from '../../tools/v2-demo-wallet/accounts.mjs';
 import { checkViewerCountRendering, checkTransferTypeRendering } from './explorer-data-parity.mjs';
@@ -13,7 +16,7 @@ export async function checkAdminEntry({ users, runtime, outputDirectory, passed 
   const from = new Date(Date.now() - 60000).toISOString().replace(/\.\d{3}Z$/, 'Z');
   const to = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const logs = `/api/v2/orgs/${runtime.organizationId}/access-logs?` + new URLSearchParams({ from, to, limit: '1' });
-  const endpoints = ['/api/v2/self/selection', `/api/v2/orgs/${runtime.organizationId}/compliance/config`, logs,
+  const endpoints = ['/api/v2/configuration/sources', `/api/v2/orgs/${runtime.organizationId}/compliance/config`, logs,
     '/api/v1/disclosure/cases?' + new URLSearchParams({ role: 'data-org-admin', organizationId: runtime.organizationId, limit: '1' }), `/api/v2/orgs/${runtime.organizationId}/diagnostics`];
   for (const name of ['admin', 'deployer', 'reader', 'outsider']) {
     const user = users.get(name), admin = name === 'admin';
@@ -35,7 +38,7 @@ export async function checkAdminEntry({ users, runtime, outputDirectory, passed 
     assert.equal(await user.page.getByTestId('back-to-app-link').count(), admin ? 1 : 0, name + ': dashboard menu');
     await user.page.keyboard.press('Escape');
     await user.page.goto(runtime.opsOrigin + '/admin/rbac/organizations');
-    if (admin) await user.page.getByRole('button', { name: 'Open saved draft', exact: true }).waitFor();
+    if (admin) await user.page.getByTestId('rbac-title').waitFor();
     else {
       for (const target of ['/admin/identity/profiles', '/admin/identity/claim-mappings', '/admin/disclosure/rules', '/admin/compliance/policy', '/admin/settings', '/admin/configuration']) {
         await user.page.goto(runtime.opsOrigin + target);
@@ -81,195 +84,129 @@ export async function checkAdminEntry({ users, runtime, outputDirectory, passed 
   return results;
 }
 
-async function checkAdminNavigation({ user, runtime, sourceDirectory, outputDirectory, passed }) {
+async function openConfiguration(user, runtime, id = 'current') {
+  await user.page.goto(runtime.opsOrigin + '/admin/configuration');
+  await user.page.getByTestId('configuration-source-' + id).click();
+  const roots = user.page.getByLabel('Source root', { exact: true });
+  if (await roots.count()) await roots.selectOption('core');
+  await user.page.getByTestId('workspace-source').waitFor();
+}
+
+async function configurationSnapshot(user, runtime) {
+  const headers = { Authorization: 'Bearer ' + user.access.accessToken };
+  const response = await user.context.request.get(runtime.opsOrigin + '/api/v2/configuration/sources/current', { headers });
+  assert.equal(response.status(), 200, 'The owned demo publishes current source separately from its runtime artifacts');
+  const project = await response.json();
+  assert.equal(project.apiVersion, 'ops.ui-source-package/v1');
+  const core = project.roots.find(root => root.id === 'core'); assert.ok(core);
+  const files = new Map(core.files.map(file => [file.path, Buffer.from(file.dataBase64, 'base64')]));
+  const read = name => { assert.ok(files.has(name), 'Referenced public source ' + name); return JSON.parse(files.get(name).toString('utf8')); };
+  const draft = read('draft.json');
+  return { project, files, read, draft };
+}
+
+async function checkAdminNavigation({ user, runtime, outputDirectory, passed }) {
   const page = user.page, output = path.join(outputDirectory, 'admin-navigation');
   await mkdir(output, { recursive: true, mode: 0o700 });
-  await page.goto(runtime.opsOrigin + '/admin/rbac/organizations');
-  await page.getByLabel('Policy source folder', { exact: true }).setInputFiles(sourceDirectory);
-  await page.getByTestId('workspace-source').waitFor();
-  assert.deepEqual(await page.getByTestId('rbac-tabs').getByRole('tab').allTextContents(), ['Organizations', 'Groups', 'Contracts', 'Execution Policy']);
+  await openConfiguration(user, runtime);
+  assert.deepEqual(await page.getByTestId('rbac-tabs').getByRole('tab').allTextContents(), ['Organizations', 'Groups', 'Contracts', 'Execution Policy', 'Configurations']);
   assert.deepEqual(await page.getByTestId('admin-nav').getByRole('tab').allTextContents(), ['RBAC', 'Identity', 'Compliance', 'Disclosure']);
+  await page.getByRole('tab', { name: 'Organizations', exact: true }).click();
+  await page.getByRole('cell', { name: 'Demo Bank', exact: true }).waitFor();
   await page.screenshot({ path: path.join(output, 'rbac-desktop.png'), fullPage: true, animations: 'disabled' });
   await page.getByRole('tab', { name: 'Identity', exact: true }).click();
   assert.deepEqual(await page.getByTestId('identity-tabs').getByRole('tab').allTextContents(), ['Profiles', 'Claim mappings']);
   assert.equal(await page.getByRole('tab', { name: 'Azure Tenants', exact: true }).count(), 0);
   await page.getByRole('tab', { name: 'Claim mappings', exact: true }).click();
   await page.screenshot({ path: path.join(output, 'identity-desktop.png'), fullPage: true, animations: 'disabled' });
-  await page.getByRole('button', { name: 'Edit local proposal', exact: true }).click();
-  await page.getByRole('tab', { name: 'RBAC', exact: true }).click();
-  await page.getByRole('button', { name: 'New organization', exact: true }).click();
-  await page.getByLabel('Name', { exact: true }).fill('Unfinished navigation test');
-  await page.goBack(); // Leave an open editor by browser history, without canceling it.
-  await page.getByTestId('identity-tabs').waitFor();
-  for (const [section, child] of [['Compliance', 'Policy draft'], ['Disclosure', 'Rules draft']]) {
+  for (const [section, child] of [['Compliance', 'Policy'], ['Disclosure', 'Rules']]) {
     await page.getByRole('tab', { name: section, exact: true }).click();
     await page.getByRole('tab', { name: child, exact: true }).click();
     await page.getByTestId('workspace-source').waitFor();
-    assert.equal(await page.getByRole('tab', { name: child, exact: true }).getAttribute('aria-selected'), 'true');
-    await page.screenshot({ path: path.join(output, section.toLowerCase() + '-draft.png'), fullPage: true, animations: 'disabled' });
+    await page.screenshot({ path: path.join(output, section.toLowerCase() + '-source.png'), fullPage: true, animations: 'disabled' });
   }
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
   assert.equal(await page.getByRole('link', { name: 'Settings', exact: true }).getAttribute('aria-current'), 'page');
   await page.screenshot({ path: path.join(output, 'settings.png'), fullPage: true, animations: 'disabled' });
-  await page.getByRole('button', { name: 'Review & export', exact: true }).click();
-  assert.equal(await page.getByRole('button', { name: 'Export configuration draft', exact: true }).isDisabled(), true);
   await page.getByRole('tab', { name: 'RBAC', exact: true }).click();
-  assert.equal(await page.getByLabel('Name', { exact: true }).inputValue(), 'Unfinished navigation test');
-  await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByRole('tab', { name: 'Organizations', exact: true }).click();
+  await page.getByRole('cell', { name: 'Demo Bank', exact: true }).waitFor();
   for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 844 });
     await page.screenshot({ path: path.join(output, 'rbac-' + width + '.png'), fullPage: true, animations: 'disabled' });
     const layout = await page.evaluate(() => ({ width: innerWidth, content: document.documentElement.scrollWidth }));
-    assert.ok(layout.content <= layout.width, 'Navigation must wrap without horizontal page overflow at ' + width);
-    for (const name of ['RBAC', 'Identity', 'Compliance', 'Disclosure', 'Organizations', 'Groups', 'Contracts', 'Execution Policy']) assert.equal(await page.getByRole('tab', { name, exact: true }).isVisible(), true);
+    assert.ok(layout.content <= layout.width, 'Navigation must fit without horizontal page overflow at ' + width);
+    for (const name of ['RBAC', 'Identity', 'Compliance', 'Disclosure', 'Organizations', 'Groups', 'Contracts', 'Execution Policy', 'Configurations']) assert.equal(await page.getByRole('tab', { name, exact: true }).isVisible(), true);
   }
   await page.setViewportSize({ width: 1280, height: 900 });
-  await page.getByRole('button', { name: 'Review & export', exact: true }).click();
-  assert.equal(await page.getByRole('button', { name: 'Export configuration draft', exact: true }).isEnabled(), true);
-  await page.screenshot({ path: path.join(output, 'review-export.png'), fullPage: true, animations: 'disabled' });
-  await page.getByRole('button', { name: 'Close source', exact: true }).click();
-  await page.goto(runtime.explorerOrigin);
-  await page.locator('[data-field=app-actor]').waitFor();
-  passed('regrouped navigation preserves the imported source and unfinished fields across business sections; desktop/mobile navigation wraps');
-  return { rbacTabs: 4, identityTabs: 2, widths: [1280, 390], unfinishedFormRecovered: true, sourceActivated: false, screenshots: output };
+  await page.goto(runtime.explorerOrigin); await page.locator('[data-field=app-actor]').waitFor();
+  passed('read-only configuration selection survives navigation across business sections; desktop/mobile retain the native layout');
+  return { screenshots: output, selectedSource: 'current', widths: [1280, 390] };
 }
 
-
-// Exercise only an explicitly imported copy of the owned public source. Every
-// unfinished edit is canceled, and the final UI export must retain every input
-// byte. No fixture identity, mocked response or live configuration write is used.
-async function checkSourceAuthoringParity({ user, runtime, sourceDirectory, outputDirectory, passed }) {
-  const page = user.page, output = path.join(outputDirectory, 'source-authoring');
+async function checkReadOnlySourceParity({ user, runtime, outputDirectory, passed }) {
+  const page = user.page, output = path.join(outputDirectory, 'configuration-viewer');
   await mkdir(output, { recursive: true, mode: 0o700 });
-  const readSource = async name => {
-    assert.match(name, /^[a-z0-9][a-z0-9_-]*\.json$/, 'Read only flat public source documents');
-    return JSON.parse(await readFile(path.join(sourceDirectory, name), 'utf8'));
-  };
-  const draft = await readSource('draft.json');
+  const { read, draft } = await configurationSnapshot(user, runtime);
   assert.ok(draft.organizations.some(org => org.id === runtime.organizationId));
   const reference = kind => {
     const ref = draft.documents.find(ref => ref.organizationId === runtime.organizationId && ref.kind === kind);
-    assert.ok(ref, 'Owned source declares ' + kind);
-    return ref.path;
+    assert.ok(ref, 'Owned source declares ' + kind); return ref.path;
   };
-  const groups = (await readSource(reference('groups'))).spec.groups;
-  const registry = (await readSource(reference('contract-registry'))).spec.contracts;
-  const identity = await readSource(draft.identityCatalog.path);
+  const groups = read(reference('groups')).spec.groups, registry = read(reference('contract-registry')).spec.contracts;
+  const identity = read(draft.identityCatalog.path);
   const group = groups.find(group => !group.isOrgAdmin && group.claims.includes('admin')) ?? groups.find(group => !group.isOrgAdmin && group.allowedMethods.length);
   const contract = registry.find(contract => contract.address.toLowerCase() === runtime.targetContract.toLowerCase());
   const profile = identity.profiles[0];
-  const mapping = identity.mappings.find(mapping => mapping.organizationId === runtime.organizationId && mapping.groupIds.length && groups.some(group => !mapping.groupIds.includes(group.id)));
-  assert.ok(group && contract && profile && mapping, 'The real demo public source provides each authoring surface');
-  const mutationRequests = [], palettes = [];
+  const mapping = identity.mappings.find(mapping => mapping.organizationId === runtime.organizationId && mapping.groupIds.length);
+  assert.ok(group && contract && profile && mapping, 'Actual source covers group, contract, identity and mapping views');
+  const execution = read(reference('execution-rules')).spec.policy;
+  const binding = execution.bindings.find(binding => binding.group === group.id);
+  const ruleIndex = binding?.allow.findIndex(rule => rule.storageAddress?.toLowerCase() === contract.address.toLowerCase() && rule.selector === '*');
+  assert.ok(binding && ruleIndex >= 0, 'Actual source binds this group to the registered contract');
+  const rule = binding.allow[ruleIndex];
+  const mutationRequests = [], palettes = [], executionInspections = [];
   const observe = request => {
     const url = new URL(request.url());
     if (url.origin === runtime.opsOrigin && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method()) && /^\/api\/(?:v1|v2)\//.test(url.pathname) && /(?:orgs|configuration|policy|bundle|selection|compliance|disclosure)/.test(url.pathname)) mutationRequests.push({ method: request.method(), path: url.pathname });
   };
-  const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const groupChoice = (dialog, selected) => dialog.getByRole('checkbox', { name: new RegExp('^' + escape(selected.name) + '\\s') });
+  const closeDialog = async () => {
+    const dialog = page.getByRole('dialog').last(), closing = await dialog.elementHandle(); assert.ok(closing);
+    await dialog.getByRole('button', { name: /^Close(?: .+)?$/ }).first().click();
+    await closing.waitForElementState('hidden'); await closing.dispose();
+  };
   async function capture(name, width) {
     await page.screenshot({ path: path.join(output, name + '-' + width + '.png'), fullPage: true, animations: 'disabled' });
     const layout = await page.evaluate(() => ({ width: innerWidth, content: document.documentElement.scrollWidth }));
     assert.ok(layout.content <= layout.width, name + ': no horizontal page overflow at ' + width);
+    assert.equal(await page.getByRole('button', { name: /^(?:Edit local proposal|Review & export|Open saved draft|New organization|Add group|Register contract|Edit mapping|Remove mapping)$/ }).count(), 0, 'Viewer has no authoring controls');
+    assert.equal(await page.locator('input[type=file]').count(), 0, 'No browser source or ABI upload');
   }
-  async function editMode(editing) {
-    // Radix keeps the closing dialog mounted during its exit transition and
-    // temporarily hides the underlying controls from the accessibility tree.
-    await page.getByRole('dialog').waitFor({ state: 'hidden' });
-    const button = page.getByRole('button', { name: editing ? 'Edit local proposal' : 'Inspect proposal', exact: true });
-    if (await button.count()) await button.click();
-    await page.getByRole('button', { name: editing ? 'Inspect proposal' : 'Edit local proposal', exact: true }).waitFor({ state: 'visible' });
-  }
-  const closeDialog = async () => {
-    const dialog = page.getByRole('dialog').last(), closing = await dialog.elementHandle();
-    assert.ok(closing);
-    await dialog.getByRole('button', { name: 'Close', exact: true }).first().click();
-    await closing.waitForElementState('hidden'); // Keep the inner dialog identity after its parent becomes visible.
-    await closing.dispose();
-  };
   async function palette(label, locator) {
-    // Shared V1 Tailwind tokens: primary #8950FA, primary-50 #F5F3FF,
-    // primary-200 #C4A8FD. Poll through transitions before comparing colours.
-    const primary = 'rgb(137, 80, 250)', pale = 'rgb(245, 243, 255)', border = 'rgb(196, 168, 253)';
-    const selected = !label.includes('unselected');
-    const expected = !selected ? {} : label.startsWith('group-access-preset') ? { border: primary, background: pale }
-      : label.startsWith('group-metadata-role') || label.startsWith('mapping-') ? { border, background: pale }
-        : label.startsWith('read-grant-') || label.startsWith('group-readonly-') ? { border: primary } : {};
+    const expected = label.startsWith('read-grant-') ? 'rgb(196, 168, 253)' : 'rgb(137, 80, 250)';
     await locator.evaluate(async (element, expected) => {
       const deadline = performance.now() + 2500;
-      while (performance.now() < deadline) {
-        const style = getComputedStyle(element);
-        if ((!expected.border || style.borderColor === expected.border) && (!expected.background || style.backgroundColor === expected.background)) return;
-        await new Promise(resolve => requestAnimationFrame(resolve));
-      }
+      while (getComputedStyle(element).borderColor !== expected && performance.now() < deadline) await new Promise(resolve => requestAnimationFrame(resolve));
     }, expected);
     const style = await locator.evaluate(element => { const style = getComputedStyle(element); return { background: style.backgroundColor, border: style.borderColor, color: style.color }; });
-    if (expected.border) assert.equal(style.border, expected.border, label + ': V1 selected border');
-    if (expected.background) assert.equal(style.background, expected.background, label + ': V1 selected background');
-    const marker = locator.locator('[data-state="checked"]').first();
-    if (await marker.count()) {
-      await marker.evaluate(async (element, primary) => {
-        const deadline = performance.now() + 2500;
-        while (getComputedStyle(element).backgroundColor !== primary && performance.now() < deadline) await new Promise(resolve => requestAnimationFrame(resolve));
-      }, primary);
-      style.checkedBackground = await marker.evaluate(element => getComputedStyle(element).backgroundColor);
-      assert.equal(style.checkedBackground, primary, label + ': selected marker retains the exact V1 accent color');
-    }
-    palettes.push({ label, ...style });
-    return style;
+    assert.equal(style.border, expected, label + ': retained V1 selected permission border'); palettes.push({ label, ...style });
   }
   page.on('request', observe);
   try {
-    await page.goto(runtime.opsOrigin + '/admin/rbac/groups?org=' + runtime.organizationId);
-    await page.getByLabel('Policy source folder', { exact: true }).setInputFiles(sourceDirectory);
-    await page.getByTestId('workspace-source').waitFor();
+    await openConfiguration(user, runtime);
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 844 });
       await page.getByRole('tab', { name: 'RBAC', exact: true }).click();
       await page.getByRole('tab', { name: 'Groups', exact: true }).click();
-      await editMode(false);
-      let card = page.getByTestId('group-card').filter({ has: page.getByText(group.name, { exact: true }) });
+      const scope = page.getByTestId('org-selector');
+      if (await scope.count() && !(await scope.textContent()).includes('Demo Bank')) { await scope.click(); await page.getByRole('option', { name: /Demo Bank/ }).click(); }
+      const card = page.getByTestId('group-card').filter({ has: page.getByText(group.name, { exact: true }) });
       await card.getByTitle('View declared permissions', { exact: true }).click();
       let dialog = page.getByRole('dialog').last();
       const declaredClaim = group.claims.includes('admin') ? dialog.getByRole('checkbox', { name: 'Execution administrator', exact: true }) : dialog.getByRole('checkbox', { name: group.allowedMethods.find(method => ['eth_call', 'eth_getBalance', 'eth_chainId'].includes(method)), exact: true });
-      assert.equal(await declaredClaim.isChecked(), true);
-      assert.equal(await declaredClaim.isDisabled(), true);
+      assert.equal(await declaredClaim.isChecked(), true); assert.equal(await declaredClaim.isDisabled(), true);
       await palette('group-readonly-' + width, declaredClaim.locator('..'));
-      await capture('group-readonly-permissions', width);
-      await closeDialog();
-      await editMode(true);
-      card = page.getByTestId('group-card').filter({ has: page.getByText(group.name, { exact: true }) });
-      await card.getByTitle('Edit group draft', { exact: true }).click();
-      dialog = page.getByRole('dialog').last();
-      assert.equal(await dialog.getByLabel('Additional method names', { exact: true }).count(), 0, 'Metadata pencil does not open the access editor');
-      await dialog.getByLabel('Description', { exact: true }).fill('Unfinished local parity metadata');
-      const readonly = dialog.getByRole('radio', { name: 'Read-only organization admin', exact: true });
-      await readonly.locator('..').click();
-      assert.equal(await readonly.isChecked(), true);
-      const selectedRole = await palette('group-metadata-role-' + width, readonly.locator('..'));
-      const memberRole = await palette('group-metadata-unselected-' + width, dialog.getByRole('radio', { name: 'Member', exact: true }).locator('..'));
-      assert.notDeepEqual(selectedRole, memberRole, 'Selected and unselected metadata roles are visually distinct');
-      await capture('group-metadata-pencil', width);
-      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
-      await card.getByTitle('Edit access settings', { exact: true }).click();
-      dialog = page.getByRole('dialog').last();
-      assert.equal(await dialog.getByLabel('Name', { exact: true }).count(), 0, 'Access gear does not open the metadata editor');
-      const preset = dialog.getByRole('button', { name: 'Network reader', exact: true });
-      await preset.click();
-      assert.equal(await preset.getAttribute('aria-pressed'), 'true');
-      const selectedPreset = await palette('group-access-preset-' + width, preset);
-      const otherPreset = await palette('group-access-unselected-preset-' + width, dialog.getByRole('button', { name: 'Trace developer', exact: true }));
-      assert.notDeepEqual(selectedPreset, otherPreset, 'Selected preset retains its V1 highlight');
-      await capture('group-access-selected-preset', width);
-      const accountState = dialog.getByRole('checkbox', { name: 'eth_getBalance', exact: true });
-      await accountState.locator('..').click();
-      assert.equal(await accountState.isChecked(), true);
-      assert.equal(await preset.getAttribute('aria-pressed'), 'false', 'A custom method edit removes a misleading preset match');
-      await palette('group-access-method-' + width, accountState.locator('..'));
-      await capture('group-access-custom-method', width);
-      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
-
-      await editMode(false);
+      await capture('group-declared-permissions', width); await closeDialog();
       await page.getByRole('tab', { name: 'Contracts', exact: true }).click();
       const row = page.getByRole('button', { name: contract.name, exact: true }).locator('xpath=ancestor::tr[1]');
       for (const name of ['Address', 'Name', 'ABI', 'Read groups', 'Execution rules']) assert.equal(await page.getByRole('columnheader', { name, exact: true }).isVisible(), true);
@@ -278,90 +215,173 @@ async function checkSourceAuthoringParity({ user, runtime, sourceDirectory, outp
       dialog = page.getByRole('dialog').last();
       await dialog.getByRole('heading', { name: /^Contract functions/ }).waitFor();
       await dialog.getByRole('heading', { name: /^Contract events/ }).waitFor();
-      const viewFunction = contract.abi.find(entry => entry.type === 'function' && entry.stateMutability === 'view' && entry.inputs.length === 0);
-      assert.ok(viewFunction, 'Owned ABI provides a view function for inspection');
+      const viewFunction = contract.abi.find(entry => entry.type === 'function' && entry.stateMutability === 'view' && entry.inputs.length === 0); assert.ok(viewFunction);
       assert.equal(await dialog.getByText(viewFunction.name + '()', { exact: true }).isVisible(), true);
-      assert.equal(await dialog.getByText('view', { exact: true }).first().isVisible(), true);
-      assert.equal(await dialog.getByText('Advanced public ABI JSON', { exact: true }).locator('..').evaluate(element => element.open), false, 'Raw ABI is an advanced disclosure');
-      await capture('contracts-readonly-abi', width);
-      await closeDialog();
+      assert.equal(await dialog.getByText('Advanced public ABI JSON', { exact: true }).locator('..').evaluate(element => element.open), false);
+      await capture('contracts-structured-abi', width); await closeDialog();
       await row.getByRole('button', { name: 'Read grants', exact: true }).click();
       dialog = page.getByRole('dialog').last();
       await dialog.getByRole('heading', { name: 'Groups with read access', exact: true }).waitFor();
       assert.equal(await dialog.getByLabel('Visible to unlock', { exact: true }).isChecked(), contract.allowVisibleToUnlock === true);
-      await capture('contracts-read-grant-cards', width);
-      const grant = contract.readGrants.find(grant => grant.eventRules.mode === 'allowlist') ?? contract.readGrants[0];
-      assert.ok(grant, 'Owned public registry has an existing read grant');
-      const grantGroup = groups.find(group => group.id === grant.groupId);
-      await dialog.getByRole('button', { name: grantGroup.name, exact: true }).click();
+      const grant = contract.readGrants.find(grant => grant.eventRules.mode === 'allowlist') ?? contract.readGrants[0]; assert.ok(grant);
+      await dialog.getByRole('button', { name: groups.find(group => group.id === grant.groupId).name, exact: true }).click();
       const grantDialog = page.getByRole('dialog').last();
       const mode = { all: 'All events visible', none: 'No events visible', allowlist: 'Specific events only' }[grant.eventRules.mode];
-      const selectedMode = grantDialog.getByRole('radio', { name: mode, exact: true });
-      assert.equal(await selectedMode.isChecked(), true); assert.equal(await selectedMode.isDisabled(), true);
-      await palette('read-grant-readonly-mode-' + width, selectedMode.locator('..'));
-      await capture('contracts-readonly-selected-events', width);
-      await closeDialog(); await closeDialog();
-      await editMode(true);
-      await row.getByRole('button', { name: /^ABI ·/ }).click();
+      const selectedMode = grantDialog.getByRole('group', { name: 'Event visibility', exact: true }).getByText(mode, { exact: true }).locator('..');
+      assert.ok((await selectedMode.textContent()).includes('Selected'));
+      await palette('read-grant-readonly-mode-' + width, selectedMode);
+      await capture('contracts-selected-event-rules', width); await closeDialog(); await closeDialog();
+      await page.getByRole('tab', { name: 'Execution Policy', exact: true }).click();
+      await page.getByRole('heading', { name: 'Execution permissions', exact: true }).waitFor();
+      const bindingSection = page.getByRole('heading', { name: group.name, exact: true }).locator('xpath=ancestor::section[1]');
+      await bindingSection.getByRole('link', { name: 'View group permissions', exact: true }).waitFor();
+      assert.ok((await bindingSection.textContent()).includes(contract.name), 'Binding resolves its target to the registered contract name');
+      await bindingSection.getByRole('button', { name: 'Inspect binding', exact: true }).click();
       dialog = page.getByRole('dialog').last();
-      assert.equal(await dialog.getByRole('button', { name: 'Replace ABI file', exact: true }).isVisible(), true);
-      assert.equal(await dialog.getByText('Paste or inspect ABI JSON', { exact: true }).locator('..').evaluate(element => element.open), false);
-      await capture('contracts-upload-first-edit', width);
-      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
-
-      await editMode(false);
+      await dialog.getByRole('heading', { name: 'Native execution inspection', exact: true }).waitFor();
+      await dialog.getByRole('heading', { name: group.name, exact: true }).waitFor();
+      const target = dialog.getByText('Target', { exact: true }).first().locator('..');
+      assert.ok((await target.textContent()).includes(contract.name));
+      assert.ok((await target.textContent()).includes(contract.address));
+      assert.equal((await dialog.getByText('Function / input', { exact: true }).first().locator('..').textContent()).trim(), 'Function / inputAny input');
+      assert.ok((await dialog.getByText('Selector', { exact: true }).first().locator('..').textContent()).includes(rule.selector));
+      assert.equal(await dialog.getByText('Advanced native binding JSON', { exact: true }).locator('..').evaluate(element => element.open), false, 'Binding JSON remains an optional advanced view');
+      await capture('execution-binding-contract-linkage', width); await closeDialog();
+      await bindingSection.getByRole('button', { name: 'Inspect rule', exact: true }).nth(ruleIndex).click();
+      dialog = page.getByRole('dialog').last();
+      await dialog.getByRole('heading', { name: 'Native execution inspection', exact: true }).waitFor();
+      assert.ok((await dialog.getByText('Target', { exact: true }).locator('..').textContent()).includes(contract.name));
+      assert.ok((await dialog.getByText('Executing code', { exact: true }).locator('..').textContent()).includes(contract.address));
+      assert.equal((await dialog.getByText('Function / input', { exact: true }).locator('..').textContent()).trim(), 'Function / inputAny input');
+      assert.equal(await dialog.getByText('Advanced native rule JSON', { exact: true }).locator('..').evaluate(element => element.open), false, 'Rule details do not require raw JSON');
+      await capture('execution-rule-details', width); await closeDialog();
+      executionInspections.push({ width, groupId: binding.group, contract: contract.address, selector: rule.selector, displayedInput: 'Any input' });
       await page.getByRole('tab', { name: 'Identity', exact: true }).click();
       await page.getByRole('tab', { name: 'Profiles', exact: true }).click();
       await page.getByRole('button', { name: profile.name ?? profile.id, exact: true }).click();
       dialog = page.getByRole('dialog').last();
       assert.equal(await dialog.getByText(String(profile.kind), { exact: true }).isVisible(), true);
-      assert.equal(await dialog.getByText('Raw JSON (advanced)', { exact: true }).locator('..').evaluate(element => element.open), false);
       if (profile.allowedCredentialIssuers?.length) assert.equal(await dialog.getByText('Allowed credential issuers', { exact: true }).locator('..').getByText(profile.allowedCredentialIssuers[0], { exact: true }).isVisible(), true);
-      await capture('identity-readable-profile', width);
-      await closeDialog();
+      await capture('identity-readable-profile', width); await closeDialog();
       await page.getByRole('tab', { name: 'Claim mappings', exact: true }).click();
-      await editMode(true);
       const mappingRow = page.getByRole('heading', { name: mapping.id, exact: true }).locator('xpath=ancestor::article[1]');
-      await mappingRow.getByRole('button', { name: 'Edit mapping', exact: true }).click();
-      dialog = page.getByRole('dialog').last();
-      const selectedGroup = groups.find(group => mapping.groupIds.includes(group.id)), unselectedGroup = groups.find(group => !mapping.groupIds.includes(group.id));
-      const selected = groupChoice(dialog, selectedGroup), unselected = groupChoice(dialog, unselectedGroup);
-      assert.equal(await selected.isChecked(), true); assert.equal(await unselected.isChecked(), false);
-      await palette('mapping-selected-group-' + width, selected.locator('..'));
-      await unselected.locator('..').click();
-      assert.equal(await unselected.isChecked(), true);
-      await palette('mapping-additional-group-' + width, unselected.locator('..'));
-      await capture('identity-mapping-selected-groups', width);
-      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
-      await mappingRow.getByRole('button', { name: 'Remove mapping', exact: true }).click();
-      dialog = page.getByRole('dialog').last();
-      assert.ok((await dialog.textContent()).includes('After approval and deployment'));
-      await capture('identity-mapping-removal-confirmation', width);
-      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await mappingRow.waitFor();
+      for (const id of mapping.groupIds) assert.ok((await mappingRow.textContent()).includes(groups.find(group => group.id === id).name), 'Mapping shows the configured group name');
+      await capture('identity-group-linkage', width);
     }
-    await page.setViewportSize({ width: 1280, height: 900 });
-    await page.getByRole('button', { name: 'Review & export', exact: true }).click();
-    const download = page.waitForEvent('download');
-    await page.getByRole('button', { name: 'Export configuration draft', exact: true }).click();
-    const exported = JSON.parse(await readFile(await (await download).path(), 'utf8'));
-    assert.equal(exported.apiVersion, 'ops.ui-source-package/v1'); assert.equal(exported.roots.length, 1);
-    const expectedPaths = new Set(['draft.json', ...draft.documents.map(ref => ref.path), ...['identityCatalog', 'runtimeCatalog', 'disclosureCatalog', 'complianceCatalog', 'authCatalog'].flatMap(key => draft[key] ? [draft[key].path] : [])]);
-    assert.equal(exported.roots[0].files.length, expectedPaths.size);
-    for (const file of exported.roots[0].files) {
-      assert.ok(expectedPaths.delete(file.path), 'Only a referenced public source file is exported');
-      assert.equal(file.dataBase64, (await readFile(path.join(sourceDirectory, file.path))).toString('base64'), 'Canceled edits preserve original source bytes: ' + file.path);
-    }
-    assert.equal(expectedPaths.size, 0);
-    assert.deepEqual(mutationRequests, [], 'Authoring screenshots never write live policy/configuration APIs');
-    await page.getByRole('button', { name: 'Close source', exact: true }).click();
-    await page.getByTestId('workspace-source').waitFor({ state: 'hidden' });
-    await page.goto(runtime.explorerOrigin); await page.locator('[data-field=app-actor]').waitFor();
-    passed('V1 group metadata/access/selected palettes, structured Contracts ABI/read grants and readable Identity/mapping forms at desktop/mobile; canceled drafts export byte-identically without live writes');
-    return { widths: [1280, 390], screenshots: output, palettes, canceledSourceBytesUnchanged: true, liveConfigurationWrites: mutationRequests, sourceActivated: false };
-  } finally {
-    page.off('request', observe);
-    await page.setViewportSize({ width: 1280, height: 900 });
+    assert.deepEqual(mutationRequests, [], 'Inspection never writes configuration/operational policy APIs');
+    passed('read-only V1 permission palettes, structured ABI/read grants, execution binding/rule inspection and identity/group linkage at desktop/mobile without config writes');
+    return { widths: [1280, 390], screenshots: output, palettes, executionInspections, liveConfigurationWrites: mutationRequests, sourceActivated: false };
+  } finally { page.off('request', observe); await page.setViewportSize({ width: 1280, height: 900 }); }
+}
+
+function viewerFixture(action) {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+  const result = spawnSync(path.join(root, 'scripts/v2-demo.sh'), ['viewer-fixture', action], { env: process.env, encoding: 'utf8', timeout: 30_000, maxBuffer: 1 << 20 });
+  assert.equal(result.status, 0, 'External viewer fixture ' + action + ': ' + result.stderr);
+}
+
+async function checkExactPreviewExecution({ user, runtime, output }) {
+  const require = createRequire(new URL('../../tools/v2-test-wallet/package.json', import.meta.url));
+  const { Interface } = require('ethers');
+  const response = await user.context.request.get(runtime.opsOrigin + '/api/v2/configuration/sources/ui-parity-preview', { headers: { Authorization: 'Bearer ' + user.access.accessToken } });
+  assert.equal(response.status(), 200);
+  const project = await response.json(), core = project.roots.find(root => root.id === 'core'); assert.ok(core);
+  const documents = new Map(core.files.map(file => [file.path, JSON.parse(Buffer.from(file.dataBase64, 'base64').toString('utf8'))]));
+  const draft = documents.get('draft.json');
+  const source = kind => documents.get(draft.documents.find(ref => ref.organizationId === runtime.organizationId && ref.kind === kind).path).spec;
+  const groups = source('groups').groups, contracts = source('contract-registry').contracts;
+  const binding = source('execution-rules').policy.bindings.find(binding => binding.allow.some(rule => rule.storageAddress?.toLowerCase() === runtime.targetContract.toLowerCase() && !['*', '0x'].includes(rule.selector)));
+  assert.ok(binding, 'The external preview includes an exact function rule');
+  const ruleIndex = binding.allow.findIndex(rule => rule.storageAddress?.toLowerCase() === runtime.targetContract.toLowerCase() && !['*', '0x'].includes(rule.selector)), rule = binding.allow[ruleIndex];
+  const group = groups.find(group => group.id === binding.group), contract = contracts.find(contract => contract.address.toLowerCase() === (rule.codeAddress || rule.storageAddress).toLowerCase());
+  assert.ok(group && contract); assert.match(rule.abiDigest, /^[0-9a-f]{64}$/);
+  const func = new Interface(contract.abi).getFunction(rule.selector); assert.ok(func);
+  const signature = func.format('sighash'), evidence = [];
+  const page = user.page;
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.getByRole('tab', { name: 'RBAC', exact: true }).click();
+    await page.getByRole('tab', { name: 'Execution Policy', exact: true }).click();
+    const scope = page.getByTestId('org-selector');
+    if (!(await scope.textContent()).includes('Demo Bank preview')) { await scope.click(); await page.getByRole('option', { name: /Demo Bank preview/ }).click(); }
+    const section = page.getByRole('heading', { name: group.name, exact: true }).locator('xpath=ancestor::section[1]');
+    assert.ok((await section.textContent()).includes(contract.name));
+    await section.getByText(signature, { exact: true }).waitFor();
+    const close = async () => { const dialog = page.getByRole('dialog').last(), element = await dialog.elementHandle(); await dialog.getByRole('button', { name: /^Close(?: .+)?$/ }).first().click(); await element.waitForElementState('hidden'); await element.dispose(); };
+    const assertDetails = async (dialog, index) => {
+      const field = name => dialog.getByText(name, { exact: true }).nth(index).locator('..');
+      assert.ok((await field('Target').textContent()).includes(contract.name));
+      assert.ok((await field('Target').textContent()).includes(rule.storageAddress));
+      assert.ok((await field('Executing code').textContent()).includes(rule.codeAddress || rule.storageAddress));
+      assert.ok((await field('Function / input').textContent()).includes(signature));
+      assert.ok((await field('Selector').textContent()).includes(rule.selector));
+      assert.ok((await field('Pinned ABI digest').textContent()).includes(rule.abiDigest));
+    };
+    await section.getByRole('button', { name: 'Inspect binding', exact: true }).click();
+    let dialog = page.getByRole('dialog').last();
+    await dialog.getByRole('heading', { name: group.name, exact: true }).waitFor();
+    await assertDetails(dialog, ruleIndex);
+    await page.screenshot({ path: path.join(output, 'exact-execution-binding-' + width + '.png'), fullPage: true, animations: 'disabled' });
+    await close();
+    await section.getByRole('button', { name: 'Inspect rule', exact: true }).nth(ruleIndex).click();
+    dialog = page.getByRole('dialog').last(); await assertDetails(dialog, 0);
+    await page.screenshot({ path: path.join(output, 'exact-execution-rule-' + width + '.png'), fullPage: true, animations: 'disabled' });
+    const layout = await page.evaluate(() => ({ width: innerWidth, content: document.documentElement.scrollWidth }));
+    assert.ok(layout.content <= layout.width, 'Exact function rule inspection fits at ' + width);
+    await close(); evidence.push({ width, groupId: binding.group, contract: contract.address, function: signature, selector: rule.selector, abiDigest: rule.abiDigest });
   }
+  await page.setViewportSize({ width: 1280, height: 900 });
+  return evidence;
+}
+
+async function checkFolderRefresh({ user, runtime, outputDirectory, passed }) {
+  const page = user.page, output = path.join(outputDirectory, 'configuration-viewer');
+  const sourceBefore = await configurationSnapshot(user, runtime);
+  const selfBefore = await user.context.request.get(runtime.opsOrigin + '/api/v2/self', { headers: { Authorization: 'Bearer ' + user.access.accessToken } });
+  assert.equal(selfBefore.status(), 200); const rolesBefore = (await selfBefore.json()).organizations;
+  viewerFixture('remove');
+  try {
+    await openConfiguration(user, runtime);
+    viewerFixture('add');
+    const preview = page.getByTestId('configuration-source-ui-parity-preview');
+    await preview.waitFor({ timeout: 12000 }); await preview.click();
+    const roots = page.getByLabel('Source root', { exact: true }); if (await roots.count()) await roots.selectOption('core');
+    const exactExecution = await checkExactPreviewExecution({ user, runtime, output });
+    await page.getByRole('tab', { name: 'Organizations', exact: true }).click();
+    await page.getByRole('cell', { name: 'Demo Bank preview', exact: true }).waitFor();
+    await page.getByRole('cell', { name: 'Demo Bank preview', exact: true }).click();
+    const group = page.getByTestId('group-card').filter({ has: page.getByText('Deployer preview', { exact: true }) });
+    await group.getByTitle('View declared permissions', { exact: true }).click();
+    viewerFixture('update');
+    await page.getByRole('heading', { name: 'Deployer preview — declared permissions', exact: true }).waitFor({ state: 'hidden', timeout: 12000 });
+    // A stable-ID inspector either updates to the new record or closes. It may
+    // not keep the old copied object while fresh data is displayed behind it.
+    if (await page.getByRole('dialog').count()) await page.getByRole('dialog').last().getByRole('button', { name: 'Close', exact: true }).click();
+    await page.getByTestId('group-card').getByText('Deployer refreshed', { exact: true }).waitFor({ timeout: 12000 });
+    await page.screenshot({ path: path.join(output, 'external-update.png'), fullPage: true, animations: 'disabled' });
+    viewerFixture('remove');
+    await preview.waitFor({ state: 'hidden', timeout: 12000 });
+    await page.getByTestId('workspace-source').waitFor({ state: 'hidden', timeout: 12000 });
+    assert.equal(await page.getByText('Deployer refreshed', { exact: true }).count(), 0);
+    assert.equal(await page.getByRole('dialog').count(), 0);
+    viewerFixture('add');
+    await preview.waitFor({ timeout: 12000 });
+    assert.equal(await page.getByTestId('workspace-source').count(), 0, 'A reappearing folder does not silently change selection');
+    const selfAfter = await user.context.request.get(runtime.opsOrigin + '/api/v2/self', { headers: { Authorization: 'Bearer ' + user.access.accessToken } });
+    assert.equal(selfAfter.status(), 200); assert.deepEqual((await selfAfter.json()).organizations, rolesBefore, 'Preview data cannot change actual memberships');
+    const sourceAfter = await configurationSnapshot(user, runtime);
+    assert.deepEqual(sourceAfter.project, sourceBefore.project, 'The current source stays byte-identical');
+    passed('external add/update/remove refreshes real tabs and nested views, clears deleted selection, and leaves actual access/current source unchanged');
+    return { externalPublisher: 'viewer-fixture', exactExecution, baseSourceUnchanged: true, rolesUnchanged: true, screenshots: output };
+  } finally { viewerFixture('remove'); }
+}
+
+export async function checkConfigurationViewer({ user, runtime, outputDirectory, passed }) {
+  const navigation = await checkAdminNavigation({ user, runtime, outputDirectory, passed });
+  const inspection = await checkReadOnlySourceParity({ user, runtime, outputDirectory, passed });
+  const refresh = await checkFolderRefresh({ user, runtime, outputDirectory, passed });
+  return { navigation, inspection, refresh };
 }
 
 async function copyVisibleAddress(page, row, expected) {
@@ -526,14 +546,12 @@ async function caseIsolation({ users, runtime, hash, nodeRPC, rpc, bff, screensh
   }
 }
 
-export async function checkNativeUIParity({ users, runtime, privateHash, sharedHash, outputDirectory, sourceDirectory, nodeRPC, rpc, bff, passed }) {
-  assert.ok(sourceDirectory, 'Export the owned demo public source for navigation checks');
+export async function checkNativeUIParity({ users, runtime, privateHash, sharedHash, outputDirectory, nodeRPC, rpc, bff, passed }) {
   assert.notEqual(privateHash, sharedHash, 'Private and explicitly shared scenarios require different transactions');
   assert.equal(new Set(['admin', 'deployer', 'reader', 'outsider'].map(name => users.get(name).access.actorId)).size, 4, 'Proof personas must remain different principals');
   const screenshots = path.join(outputDirectory, 'ui-parity'); await mkdir(screenshots, { recursive: true, mode: 0o700 });
   const adminEntry = await checkAdminEntry({ users, runtime, outputDirectory, passed });
-  const navigation = await checkAdminNavigation({ user: users.get('admin'), runtime, sourceDirectory, outputDirectory, passed });
-  const authoring = await checkSourceAuthoringParity({ user: users.get('admin'), runtime, sourceDirectory, outputDirectory, passed });
+  const configurationViewer = await checkConfigurationViewer({ user: users.get('admin'), runtime, outputDirectory, passed });
   const viewerCounts = await checkViewerCountRendering({ users, runtime, privateHash, screenshots, passed });
   const transferTypes = await checkTransferTypeRendering({ users, runtime, screenshots, passed });
   const cases = [];
@@ -547,5 +565,5 @@ export async function checkNativeUIParity({ users, runtime, privateHash, sharedH
   passed('native V2 API-to-page Mine/My Org/Counterparty/Shared and denied persona matrix');
   const isolation = await caseIsolation({ users, runtime, hash: privateHash, nodeRPC, rpc, bff, screenshots });
   passed('persisted case create/read/revoke leaves ordinary RPC and Explorer unchanged for the recipient and another principal');
-  return { cases, screenshots, isolation, adminEntry, navigation, authoring, viewerCounts, transferTypes, clipboard: 'Real rendered CopyButton with a page-local Clipboard API substitute; OS clipboard untouched', limits: ['The unmapped outsider has no organization; a second-organization browser fixture is not claimed.', 'The Admin case recipient already has ordinary emitter authority. The full-case canary check establishes isolation from another principal (Reader), not an otherwise deprived case recipient.', 'Server reorg acquisition/delivery regressions are separate; this browser run does not mutate chain canonicality.'] };
+  return { cases, screenshots, isolation, adminEntry, configurationViewer, viewerCounts, transferTypes, clipboard: 'Real rendered CopyButton with a page-local Clipboard API substitute; OS clipboard untouched', limits: ['The unmapped outsider has no organization; a second-organization browser fixture is not claimed.', 'The Admin case recipient already has ordinary emitter authority. The full-case canary check establishes isolation from another principal (Reader), not an otherwise deprived case recipient.', 'Server reorg acquisition/delivery regressions are separate; this browser run does not mutate chain canonicality.'] };
 }

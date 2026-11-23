@@ -55,7 +55,7 @@ export class Controller {
   }
   snapshot = (): State => this.state
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener) }
-  // Noncredential document ownership for imported UI drafts. Renewing the same
+  // Noncredential document ownership for private UI views. Renewing the same
   // context preserves it; replacement/logout/suspension invalidates it.
   get scopeRevision(): number { return this.uiRevision }
   ownsScope(revision: number, actor: string): boolean {
@@ -199,7 +199,7 @@ export class Controller {
       const admin = adminLocation(location)
       if (!['/login', '/auth/sso', '/auth/azure/callback', providers.completionPath].includes(location.pathname) && !admin) throw new AuthError('invalid_response')
       this.set({ profiles: providers.profiles })
-      // An explicit workspace visit starts a different task. Never silently
+      // An explicit Admin visit starts a different task. Never silently
       // complete an old application's SSO flow while opening the Admin UI.
       if (admin) sessionStorage.removeItem(FLOW_KEY)
       let saved = admin ? null : readContinuation()

@@ -114,6 +114,43 @@ or deployment context. Review source changes and the exact generated artifact
 in Git; a successful command is not an approval. The runtime loader requires
 `manifest.json` and its listed files, without the authoring `draft.json`.
 
+## Saved source packages and offline scenarios
+
+The separate CLI retains compatibility with `ops.ui-source-package/v1` packages:
+
+```sh
+ops-v2 policy unpack --file ./ops-source-package.json --output ./source-NEW
+```
+
+Each root becomes its own new subdirectory, preserving source bytes. Prepare
+and check each root with its matching profile; unpacking does not approve or
+deploy it. The native Admin configuration viewer no longer creates or imports
+these saved packages.
+
+For an externally prepared `ops.policy-scenario/v1` file, run the actual Go
+reference evaluator against an explicitly pinned artifact:
+
+```sh
+ops-v2 policy simulate --bundle ./artifact-NEW --expected-digest sha256:REVIEWED_DIGEST --environment local --chain-id 31337 --profile catalog-runtime-creation-observed/v1 --consumer delivery --scenario ./scenario.json
+```
+
+Use the intended artifact's profile, consumer, environment and chain rather
+than treating those example flags as universal. The scenario contains `context`
+and `frames`. Context names follow the Go context: required `Org` and `Groups`,
+optional `Signer`, `LinkedAddresses`, `Claims` and `GroupSourceClaims`. Each
+frame names `callType`, `storageAddress`, `codeAddress`, hex `calldata`, exact
+decimal-string `value`, `depth` and `facts`. Optional facts use native Go Frame
+names and cannot repeat the separately named frame fields. No `ReadRecord`
+callback or remote dependency is accepted.
+
+Scenarios are limited to 1 MiB, 256 frames, 256 KiB aggregate calldata, 256
+context/frame group claims and 1,024 linked addresses. The result binds exact
+scenario bytes and manifest digest. It remains hypothetical, unapproved and
+not deployment-verified. It uses operator-supplied assumptions; it does not
+verify a person's current claims, establish node/owner facts, run an EVM call
+or prove Guard equivalence. Production admission acquires its own verified
+facts and observed execution. The Admin viewer has no scenario editor.
+
 ## Edit files locally in the browser
 
 Serve only the static editor assets from the source root:
@@ -151,6 +188,15 @@ can authorize differently during a rolling deployment. Rollback selects a
 previously approved compatible image **and** bundle, not an old binary paired
 with arbitrary new files. These tooling commands do not provide a production
 server launcher, provider qualification or fleet-wide atomic activation.
+
+For a new organization, supply its groups, contract registry, execution policy
+and explicit `compliance.organizations` entry. Core and broker roots need
+matching identity catalogs and organization/group references; keep each root's
+supported profile and broker scaffolding. Runtime `data.nodes` must name
+exactly the Core organizations; `protected.nodes` names exactly the data
+organizations referenced by standing disclosure rules. Coordinate node
+credentials, protected-source plans and expected operational-store state
+externally. Source validation or Admin viewing does not provision them.
 
 ## Verification
 

@@ -181,7 +181,7 @@ function ComplianceResults({
           className="text-sm text-primary self-center"
           to={`/admin/compliance/policy?org=${org}`}
         >
-          Edit a local source proposal
+          View configuration policy
         </Link>
       )}
     </div>
@@ -615,8 +615,7 @@ function CompliancePreview({ scope, base }: { scope: OperationScope; base: strin
   return (
     <Panel title="Preview a signed transaction">
       <p className="mb-4 text-sm text-neutral-500">
-        Checks the current compliance rules and valuation. This does not submit a transaction or
-        simulate a local draft.
+        Checks the running compliance rules and valuation without submitting a transaction.
       </p>
       <form
         className="space-y-4"

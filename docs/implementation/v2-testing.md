@@ -92,6 +92,7 @@ matching SDK dependency directory. No test downloads artifacts implicitly.
 | Guard v1 and submission | Existing `nodeapproval` controls plus native Guard bridge, both modes and post-broadcast error delivery. |
 | Claims and groups | `internal/identity` source bindings, injected-group/stale-age negatives; actual broker login and renewal controls. |
 | Git configuration | `policybundle` cold load, hashes, paths, profile isolation, bounded parsing and detached snapshots. |
+| Admin configuration viewer | Operational reader access/path/expiry/resource controls, retained read-only frontend/privacy tests, and real demo folder add/update/remove with nested-view refresh. |
 | Durable output | Recorder ownership, exposure before response bytes, original deadline/cancellation after commit and recovery barriers. |
 | Native perimeter | `internal/archtest`: no legacy server or optional EVM policy backend in the selected delivery. |
 
@@ -105,3 +106,12 @@ equivalence claim.
 Hosted Microsoft tenant behavior, a particular physical wallet extension and a
 deployed external role issuer require their respective environments. Local
 cryptographic and browser fixtures do not establish those compatibility claims.
+
+For the read-only Admin viewer against an already prepared local demo, run
+`make demo-v2-check-config-viewer`. It uses a real Admin proof and server-folder
+GETs, preserves the original permission/ABI/mapping presentation and checks
+execution bindings and exact function-rule details at desktop and mobile widths.
+It exercises external preview publication/removal without
+changing actual runtime permissions. The fixture publisher and resource
+ownership guards also run in native CI with
+`node --test scripts/v2-demo/configuration-fixture.test.mjs scripts/v2-demo/ownership.test.mjs`.

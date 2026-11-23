@@ -141,12 +141,15 @@ case "${1:-up}" in
     NODE_EXTRA_CA_CERTS="$OPS_V2_DEMO_CONTROL_DIR/ca.crt" node "$ROOT/scripts/v2-demo/check-demo-login.mjs" "$OPS_V2_DEMO_CONTROL_DIR";;
   check-prepared) check_prepared;;
   check-ui-parity) check_prepared ui-parity;;
+  check-config-viewer) check_prepared ui-configuration;;
   check-ui)
     export OPS_TEST_BROWSER_CHANNEL="${OPS_TEST_BROWSER_CHANNEL:-chrome}"
     require_prepared browser
-    UI_SOURCE="$OPS_V2_DEMO_CONTROL_DIR/ui-source-$(node -e 'console.log(Date.now())')"
-    node "$ROOT/scripts/v2-demo/export-config.mjs" "$UI_SOURCE"
-    OPS_DEMO_SOURCE_DIR="$UI_SOURCE/core" node "$ROOT/scripts/v2-demo/check.mjs" "$OPS_V2_DEMO_CONTROL_DIR" ui-preview;;
+    node "$ROOT/scripts/v2-demo/check.mjs" "$OPS_V2_DEMO_CONTROL_DIR" ui-preview;;
+  viewer-fixture)
+    require_prepared
+    case "${2:-}" in add|update|remove) ;; *) echo 'Expected add, update or remove.' >&2; exit 2;; esac
+    compose run --rm --no-deps --entrypoint node bootstrap scripts/v2-demo/configuration-fixture.mjs "$2";;
   info) node "$ROOT/scripts/v2-demo/info.mjs";;
   check-mapping)
     case "${2:-}" in admin|reader) check_prepared "reader-${2}";; *) echo 'Expected admin or reader.' >&2; exit 2;; esac;;

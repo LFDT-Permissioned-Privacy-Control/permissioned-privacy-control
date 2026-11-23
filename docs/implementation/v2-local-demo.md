@@ -44,18 +44,19 @@ This is a finite functional walkthrough, not a load test.
 
 The original Explorer layout and named data pages use native session/data
 adapters, including approved-ABI contract Read and wallet-backed Write controls.
-Admin reuses the original layout, organization forms, group cards and account
-presentation. Its source workspace edits and exports complete file proposals;
-compliance, disclosure, organization access logs and diagnostics use their native APIs.
-The walkthrough proves its listed API/privacy operations. File authoring and
-ordinary wallet setup have separate manual steps and qualification below.
+Admin reuses the original layout, group cards, readable permission/contract
+views and account presentation. Its configuration viewer reads externally
+provisioned public source folders; it does not edit, approve or deploy them.
+Compliance, disclosure, organization access logs and diagnostics use their
+native APIs. External file changes and ordinary wallet setup have separate
+manual steps below.
 
 After the complete walkthrough has created a sample transaction, run
 `make demo-v2-ui-preview` for a headless check of these adapted screens. It
-exports a fresh source copy, performs real Privado login/renewal, imports the
-source into Admin, and saves screenshots and `ui-preview-results.json` under
-`.tmp/v2-demo/<project>/`. It preserves the current demo data and configuration.
-The exported folder is also suitable for the manual Admin steps below.
+performs real Privado login/renewal, opens the server-provided configuration in
+Admin, and saves screenshots and `ui-preview-results.json` under
+`.tmp/v2-demo/<project>/`. It preserves current demo data and configuration; no
+local source folder has to be selected or uploaded.
 The preview includes fresh and repeated signed-out visits, mobile entry,
 identity-proof and confirmation screens, and the original Account cards with
 verified wallet links. Its expiry checks advance only the browser clock past
@@ -75,11 +76,17 @@ functional walkthrough also runs these checks. The unmapped outsider is not a
 second-organization fixture; server canonicality tests cover reorg fences,
 while this UI check does not change the chain's canonical history.
 
-The same command imports the demo's actual public configuration into Admin and
-checks the Group metadata and access dialogs, selected permission colours,
-structured ABI and read-grant views, and Identity details at desktop and mobile
-widths. These edits are canceled, and re-exported source must match the imported
-files exactly. Screenshots are also saved in `source-authoring/`.
+The same command reads the demo's actual public configuration from its separate
+server directory. It checks group permission colours, structured ABI/read grants,
+execution binding/rule details and identity/group linkage at desktop and mobile widths. An external test
+publisher adds, updates and removes a preview folder, proving that tabs, details
+and deleted selections refresh without changing the base source or real roles.
+The preview includes a specific ABI function rule, with selector and ABI pin
+derived by the existing offline Go ABI inspector. Its named group → contract →
+function links and both inspection dialogs are checked at both widths.
+Screenshots are also saved in `configuration-viewer/`. For this focused check
+alone, run `make demo-v2-check-config-viewer`; no sample transaction is
+required.
 
 The parity check also compares the scoped count cards with their actual API
 observation and checks that transfer-type tabs filter at the source and restart
@@ -88,9 +95,10 @@ An empty token feed is recorded as empty, without claiming a populated token
 metadata check. Populated-token authority and long-price layout have separate
 Go integration and component-browser checks.
 
-In Groups, the pencil edits the name, description and organization role; the
-gear opens RPC methods, execution claims and connection references. These are
-local proposals. Git approval and deployment still control live permissions.
+In Groups, the gear opens declared RPC methods, execution claims and connection
+references. They are read-only configuration data. The viewer has no pencil,
+proposal export or approval controls; external review and deployment control
+live permissions.
 
 Prepared commands use installed Chrome by default. An already installed
 Playwright Chromium can be selected with `OPS_TEST_BROWSER_CHANNEL=chromium`.
@@ -127,63 +135,72 @@ requires an external membership assignment, not an OPS Git change.
 
 ## 1. Inspect the bank's configuration
 
-Export the current configuration sources into a **new** directory:
+Open the OPS origin printed by `make demo-v2-info`, followed by `/admin`.
+Complete sign-in or the fresh Privado proof requested on reload using **Demo
+Admin** (or a configured organization admin/read-only admin). Open **RBAC →
+Configurations**, then **current**. Choose **core** or **broker** in **Source
+root**. No local files, folder picker or upload are needed.
 
-```sh
-make demo-v2-export-config CONFIG_DIR=.tmp/demo-policy
-```
+The **Organizations** tab shows Demo Bank. Select its row to open the bank's
+groups, or choose Demo Bank in **Scope** before opening **Groups**. A group's
+gear shows declared permissions. **Contracts** retains structured ABI, read-grant
+and execution links. **Identity** contains readable profiles and claim mappings;
+**Disclosure → Rules**, **Compliance → Policy** and **Settings** show the matching
+source catalogs. The selected folder remains across these pages. The raw public
+JSON can be inspected under **Configurations**.
 
-The command prints the current claim-to-group mappings. It exports an explicit
-allowlist of JSON documents, excluding private state, environment files,
-database credentials and private keys. Policy sources can still be confidential;
-the export does not publish them. Existing directories are not overwritten.
+This display does not assert which files are running on OPS. Opening another
+folder changes only the dashboard. Actual account roles and operational actions
+always come from the verified session and separately approved runtime policy.
+Account menu → **Account** opens the native identity, session, organization and
+linked-address cards.
+
+The demo server mounts a dedicated source volume read-only, separate from its
+runtime artifacts and credentials. **current** contains these public sources:
 
 | File | What it defines |
 | --- | --- |
 | `core/groups.json` | Admin/Deployer/Reader groups, organization-admin flag and allowed RPC methods. |
-| `core/identity.json` | Trusted public identity profiles and verified-fact mappings to those groups. |
-| `core/execution.json` | Native Go execution rules for contract calls and deployments. |
+| `core/identity.json` | Public identity profiles and verified-fact mappings to groups. |
+| `core/execution.json` | Go execution rules for calls and deployments. |
 | `core/registry.json` | Demo contract ABI, read grants and event visibility. |
 | `core/disclosure.json` | Standing rule permitting the Admin's bounded disclosure. |
 | `broker/identity.json`, `broker/auth.json` | Matching identity trust and authentication/proof configuration. |
 
-The local editor in step 6 changes only identity mappings within this bank's
-three existing groups. Other exported files are inspection examples; the helper
-does not apply arbitrary edits to them.
+To watch external folder changes without changing any running permissions, run
+these commands from another terminal while Admin is open:
 
-To inspect them in the familiar Admin UI, open the OPS origin printed by
-`make demo-v2-info`, followed by `/admin`. Complete sign-in or the fresh Privado
-proof requested on reload using **Demo Admin** (or a configured organization
-admin/read-only admin). If shown, choose **Open configuration workspace**.
-Choose **Import source folder** and select the exported parent containing both
-`core` and `broker` (a single `core` root also works for inspection).
-The **Organizations** tab shows Demo Bank. Select its row to open that bank's
-groups, or choose Demo Bank in **Scope** before opening the **Groups** tab.
-You can then inspect Admin, Deployer and Reader. A group's gear button
-shows its declared permissions. This source is a local draft, not a report of
-the revision currently served by every OPS instance. Importing it applies no
-permissions and sends no source files to OPS. Account menu → **Account** opens
-the original identity, session, organization and linked-address cards, backed
-by the native V2 identity and wallet APIs.
+```sh
+./scripts/v2-demo.sh viewer-fixture add
+# A ui-parity-preview tab appears. Select it to see Demo Bank preview.
+./scripts/v2-demo.sh viewer-fixture update
+# The selected view shows Demo Bank refreshed / Deployer refreshed.
+./scripts/v2-demo.sh viewer-fixture remove
+# The tab and selected data disappear; current is not selected automatically.
+```
 
-As Demo Admin, choose **Check this OPS instance** in the source workspace to
-read its selected Core revision and artifact digest. Different draft labels
-are reported explicitly; matching labels still do not compare file contents.
-This checks one OPS instance, not the broker or the whole deployment.
+This isolated publisher changes a preview's organization/group display names and
+replaces its Deployer ledger wildcard with an exact `set(address,uint256)` rule.
+The existing offline `policy abi` tool derives the selector and ABI pin; no
+evaluator, node call or policy activation runs. The publisher retains stable IDs
+and leaves **current**, runtime artifacts, keys,
+wallets, chain data and database state alone. It is a demo command, not a
+product mutation API. See the [configuration viewer guide](v2-configuration-viewer.md)
+for directory layouts, trusted audiences, limits and complete-folder publication.
 
-Choose **Edit local proposal** to create organizations/groups or edit their
-permissions, contracts, read grants and execution rules under **RBAC**.
-**Identity** contains **Profiles** (Azure and Privado) and **Claim mappings**.
-Use **Disclosure → Rules draft**, **Compliance → Policy draft** and **Settings**
-for their configuration documents. Imported files and unfinished form fields
-stay in the same local draft as you move between these sections. **Review & export** compares and exports the complete
-proposal; **Open saved draft** restores those files later without changing the
-running configuration. Run the actual Go
-`policy unpack`, `prepare`, `check` and optional `simulate` commands from the
-[policy workspace guide](v2-policy-workspace.md). New organizations also require
-explicit compliance entries, matching Core/broker identity references, node
-bindings and deployment preparation described there. The browser does not
-activate proposals or provision a new organization's infrastructure.
+If you want a local copy for external editing or the mapping exercise in step
+6, export into a **new** directory:
+
+```sh
+make demo-v2-export-config CONFIG_DIR=./demo-policy
+```
+
+The command exports an explicit JSON allowlist and prints the claim mappings.
+It excludes private state, environment files, DB credentials and private keys.
+Sources can still be confidential; exporting does not publish them. Existing
+directories are not overwritten. The mapping helper in step 6 applies only
+identity mappings among this demo bank's three existing groups. Use the real
+[Go authoring/checking workflow](policy-authoring.md) for other external changes.
 
 ## 2. Sign in as the prepared identities
 
@@ -431,16 +448,16 @@ To demonstrate the claim mapping itself, use the export from step 1. Save a
 rollback copy and optionally track those configuration sources in a local Git repo:
 
 ```sh
-cp .tmp/demo-policy/core/identity.json .tmp/demo-policy-reader.json
-git -C .tmp/demo-policy init
-git -C .tmp/demo-policy add core broker
-git -C .tmp/demo-policy commit -s -m "Record demo bank configuration"
+cp ./demo-policy/core/identity.json ./demo-policy-reader.json
+git -C ./demo-policy init
+git -C ./demo-policy add core broker
+git -C ./demo-policy commit -s -m "Record demo bank configuration"
 ```
 
 Change the verified Reader-role mapping to the existing Admin group:
 
 ```sh
-node --input-type=module - .tmp/demo-policy/core/identity.json <<'JS'
+node --input-type=module - ./demo-policy/core/identity.json <<'JS'
 import fs from 'node:fs';
 const file = process.argv[2];
 const source = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -449,9 +466,9 @@ const reader = source.mappings.find(m => m.id === 'demo-reader');
 reader.groupIds = [...admin.groupIds];
 fs.writeFileSync(file, JSON.stringify(source, null, 2) + '\n');
 JS
-git -C .tmp/demo-policy diff -- core/identity.json
-make demo-v2-check-config IDENTITY_FILE=.tmp/demo-policy/core/identity.json
-make demo-v2-apply-config IDENTITY_FILE=.tmp/demo-policy/core/identity.json
+git -C ./demo-policy diff -- core/identity.json
+make demo-v2-check-config IDENTITY_FILE=./demo-policy/core/identity.json
+make demo-v2-apply-config IDENTITY_FILE=./demo-policy/core/identity.json
 make demo-v2-check-mapping EXPECT=admin
 ```
 
@@ -484,7 +501,7 @@ of a family bound to the previous identity catalog.
 Restore ordinary Reader access:
 
 ```sh
-make demo-v2-apply-config IDENTITY_FILE=.tmp/demo-policy-reader.json
+make demo-v2-apply-config IDENTITY_FILE=./demo-policy-reader.json
 make demo-v2-check-mapping EXPECT=reader
 ```
 

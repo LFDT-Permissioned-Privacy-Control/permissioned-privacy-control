@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"privacy-proxy/internal/operational/configurationviewer"
 )
 
 func TestPinnedRuntimeSelectionIsClosedBeforeOpeningServices(t *testing.T) {
@@ -34,6 +36,24 @@ func TestPinnedRuntimeSelectionIsClosedBeforeOpeningServices(t *testing.T) {
 	for _, bad := range [][]byte{[]byte(strings.Replace(string(raw), `"kind":"OperationalServer"`, `"kind":"OperationalServer","kind":"OperationalServer"`, 1)), []byte(strings.Replace(string(raw), `"kind":"OperationalServer"`, `"kind":"OperationalServer","users":[]`, 1)), append(append([]byte{}, raw...), []byte(`{}`)...)} {
 		if _, err := check(bad); err == nil {
 			t.Fatal("ambiguous or mutable-authority configuration accepted")
+		}
+	}
+	c.ConfigurationViewer = &configurationviewer.Settings{Directory: filepath.Join(t.TempDir(), "not-materialized"), Layout: "folders", Audience: configurationviewer.Audience{OwnerOrganizationIDs: []string{"11111111-1111-1111-1111-111111111111"}}, FolderAudiences: map[string]configurationviewer.Audience{"private-candidate": {}}}
+	viewerRaw, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewerConfig, err := check(viewerRaw)
+	if err != nil || viewerConfig.ConfigurationViewer == nil || viewerConfig.ConfigurationViewer.Directory != c.ConfigurationViewer.Directory {
+		t.Fatal("optional viewer syntax rejected or external directory read during config loading", err)
+	}
+	for _, bad := range []string{
+		strings.Replace(string(viewerRaw), `"layout":"folders"`, `"layout":"guess"`, 1),
+		strings.Replace(string(viewerRaw), `"layout":"folders"`, `"layout":"folders","write":true`, 1),
+		strings.Replace(string(viewerRaw), `"ownerOrganizationIds":["11111111-1111-1111-1111-111111111111"]`, `"ownerOrganizationIds":["admin"]`, 1),
+	} {
+		if _, err := check([]byte(bad)); err == nil {
+			t.Fatal("unsafe viewer deployment setting accepted")
 		}
 	}
 	if err := os.WriteFile(file, raw, 0600); err != nil {

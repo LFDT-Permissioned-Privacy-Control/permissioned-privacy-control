@@ -22,6 +22,7 @@ import (
 	"privacy-proxy/internal/networkidentity"
 	"privacy-proxy/internal/operational/activitysql"
 	"privacy-proxy/internal/operational/admissionsql"
+	"privacy-proxy/internal/operational/configurationviewer"
 	"privacy-proxy/internal/operational/disclosuresql"
 	"privacy-proxy/internal/operational/identitysql"
 	"privacy-proxy/internal/operational/ssosql"
@@ -77,6 +78,7 @@ func Configure(ctx context.Context, root, walletOutput string) error {
 		return fmt.Errorf("approved files: %w", e)
 	}
 	cfg := vs.Config{APIVersion: "ops.server/v2", Kind: "OperationalServer", Listen: fmt.Sprintf("%s:%d", s.listenHost(), s.Ports.OPS), TLSCertificateFile: s.file("tls.crt"), TLSPrivateKeyFile: s.file("tls.key"), WebDirectory: "/app/web", ExplorerOrganizationID: Organization, Core: cs, BrokerSelection: bs}
+	cfg.ConfigurationViewer = &configurationviewer.Settings{Directory: "/configuration-sources", Layout: "folders", Audience: configurationviewer.Audience{OwnerOrganizationIDs: []string{Organization}}}
 	network := networkidentity.Binding{Environment: Environment, ChainID: ChainID, GenesisHash: s.GenesisHash, DeploymentID: Deployment}
 	networkKey, e := network.Key()
 	if e != nil {

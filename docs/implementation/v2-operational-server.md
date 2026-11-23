@@ -19,23 +19,15 @@ Native builds use `production,prover_disabled` and disable CGO. The latter
 disables the unused C proof generator, not the real Go Groth16 verifier. The
 native runtime image contains neither `solc` nor the optional EVM backend.
 
-The central browser adapts the original Admin layout, organization forms,
-group cards and account presentation. Its source workspace supports complete
-Core/broker source import, organization/group and policy editing, comparison,
-export and offline Go validation. Imported files are local proposals, never
-proof of the serving configuration or the person's operational roles. Source
-files remain in document memory; account changes offer export/discard/cancel.
-Renewal hides and locks the draft until the same account is verified again;
-failure, cancellation, account replacement or page closure discards it. See the
-[policy workspace](v2-policy-workspace.md) for validation and operator handoff.
-
-**Check this OPS instance** reads `GET /api/v2/self/selection` using the current
-verified organization-admin or read-only-admin session. It returns only this
-instance's immutable Core manifest digest, source revision, environment, chain,
-profile and evaluator version. It returns no policy documents or secret
-references. The original `/api/v2/self` response is unchanged. Matching draft
-revision labels do not establish equal file contents, broker selection,
-operational readiness or agreement across the fleet.
+The central browser adapts the original Admin layout, organization/group and
+contract inspection, and account presentation. Its [configuration
+viewer](v2-configuration-viewer.md) reads public source folders provisioned on
+the server. **RBAC → Configurations** selects the folder represented throughout
+the dashboard; external changes refresh it automatically. Opening a folder
+changes neither the runtime policy nor the person's actual roles. There is no
+configuration editor, local import/export, comparison, approval, publication
+or running-version comparison. Account changes, expiry and unavailable source
+reads clear protected source data and open inspections.
 
 Separate native pages provide selected compliance settings, travel records,
 disclosure cases and authorized data/audit reads, organization-admin Access Logs
@@ -74,6 +66,7 @@ The main sections are:
 | `data` | Fixed node endpoints and credentials, Guard mode bindings, restricted operational readers/writers, activity spool/source, index binding, cursor/pseudonym keys and pinned read policies. |
 | `protected` | Case-store epoch, historical namespace model era, fixed data-organization node sources and separate administration/render/data-cursor key rings. |
 | `explorerOrganizationId` | Optional validated deployment organization. If omitted, an Explorer request must have exactly one verified mapped organization; ambiguity is denied. |
+| `configurationViewer` | Optional absolute public-source directory, explicit `single`/`folders` layout and trusted whole-project audience. Folder reading stays outside Core and does not activate files. |
 
 DSNs and private keys are supplied through the named environment variables,
 not literal JSON fields or request parameters. Binary keys use canonical
@@ -82,8 +75,11 @@ Node credential headers and approved provider/price-feed secret references
 must match their selected sources.
 
 Startup validates both bundles, pinned policy files, keys, TLS, store bindings
-and concrete adapters before opening the listener. There is no config watcher,
-SQL settings fallback, mutable policy API, user directory or membership table.
+and concrete adapters before opening the listener. Core has no runtime policy
+watcher, SQL settings fallback, mutable policy API, user directory or membership table.
+The optional Admin viewer observes its separate source directory; unreadable
+viewer contents do not make RPC/Core unready. Invalid trusted viewer settings
+are rejected with the rest of the startup configuration.
 Each request derives its groups from verified claims and the selected Git rules.
 Membership evidence is bounded to five minutes; renewal cannot reset the age
 of stale provider evidence.

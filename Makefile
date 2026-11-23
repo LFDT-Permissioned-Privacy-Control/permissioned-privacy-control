@@ -126,7 +126,7 @@ demo-reth-status:
 
 # Production native V2, real Reth/indexer/observer and an explicit public demo
 # identity wallet. Ordinary down preserves state; reset is deliberately separate.
-.PHONY: demo-v2 demo-v2-check demo-v2-resume demo-v2-check-prepared demo-v2-check-login demo-v2-ui-preview demo-v2-ui-parity demo-v2-walkthrough demo-v2-info demo-v2-export-config demo-v2-check-config demo-v2-apply-config demo-v2-check-mapping demo-v2-down demo-v2-reset demo-v2-status demo-v2-logs demo-v2-revoke-reader demo-v2-restore-reader
+.PHONY: demo-v2 demo-v2-check demo-v2-resume demo-v2-check-prepared demo-v2-check-login demo-v2-check-config-viewer demo-v2-ui-preview demo-v2-ui-parity demo-v2-walkthrough demo-v2-info demo-v2-export-config demo-v2-check-config demo-v2-apply-config demo-v2-check-mapping demo-v2-down demo-v2-reset demo-v2-status demo-v2-logs demo-v2-revoke-reader demo-v2-restore-reader
 demo-v2:
 	@./scripts/v2-demo.sh up
 demo-v2-check:
@@ -137,6 +137,8 @@ demo-v2-check-prepared:
 	@./scripts/v2-demo.sh check-prepared
 demo-v2-check-login:
 	@./scripts/v2-demo.sh check-login
+demo-v2-check-config-viewer:
+	@./scripts/v2-demo.sh check-config-viewer
 demo-v2-ui-preview:
 	@./scripts/v2-demo.sh check-ui
 demo-v2-ui-parity:

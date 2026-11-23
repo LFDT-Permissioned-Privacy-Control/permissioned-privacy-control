@@ -1,16 +1,10 @@
-import { SourceAuthoringScope } from './SourceAuthoringScope'
-import { useAuthoringState, useClearAuthoring } from './sourceAuthoring'
-import { Button } from '../../components/ui/button'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
-import { SourceFieldValue, SourceRecordForm, SourceRecords, type SourceField } from './SourceRecords'
+import { SourceFieldValue, SourceRecords, type SourceField } from './SourceRecords'
 import { SourceContracts } from './SourceContracts'
 import { SourceClaimMappings } from './SourceClaimMappings'
 import { SourceComplianceSettings } from './SourceComplianceSettings'
-import { createCatalog, documentValue, object, referenceFiles, rootOf, updateDocument, type JSONObject, type SourceProject } from './sourceProject'
-
-interface Props { project: SourceProject; root: string; organization: string; page: string; editing: boolean; onChange(project: SourceProject): void }
+import { documentValue, object, rootOf, type JSONObject, type SourceProject } from './sourceProject'
+interface Props { project: SourceProject; root: string; organization: string; page: string }
 const field = (key: string, label: string, kind?: SourceField['kind'], optional = false, help?: string): SourceField => ({ key, label, kind, optional, help })
-const uid = () => crypto.randomUUID()
 const profileVariants: Record<string, string[]> = {
   'azure-human/v1': ['tenantId', 'issuer', 'apiAudience', 'clientId', 'delegatedScope', 'factSource'],
   'azure-service/v1': ['tenantId', 'issuer', 'apiAudience', 'allowedClientIds', 'factSource'],
@@ -24,54 +18,40 @@ const profileFields: SourceField[] = [field('id', 'Profile ID'), { ...field('kin
   ...(key === 'factSource' ? { options: ['appRoles', 'groupIds'] } : {}),
 }))]
 const ruleFields: SourceField[] = [field('id', 'Rule ID'), field('dataOrganizationId', 'Data organization ID'), field('viewers', 'Permitted viewers', 'json', false, 'Group references {organizationId,groupId} and/or canonical verified actor IDs.'), field('targets', 'Permitted target actors', 'json'), field('resources', 'Permitted resources', 'list'), field('addresses', 'Address scope', 'json'), field('dataTime', 'Data time interval', 'json'), { ...field('maxLevel', 'Maximum detail'), options: ['redacted', 'pseudonymous', 'full'] }, field('validity', 'Rule validity', 'json'), field('maxCaseSeconds', 'Maximum case seconds', 'number')]
-export function SourceCatalogs(props: Props) {
-  const { project, root, organization, page, editing, onChange } = props, source = rootOf(project, root)
-  const get = (key: string) => source.draft[key] === undefined ? null : { path: String(object(source.draft[key]).path), value: documentValue(project, root, String(object(source.draft[key]).path)) }
-  const save = (path: string, value: JSONObject) => onChange(updateDocument(project, root, path, value))
-  function missing(key: string, title: string, value: JSONObject) { return <div className="space-y-3"><h3 className="text-sm font-medium">{title}</h3><p className="text-sm text-neutral-500">This source root has no {title.toLowerCase()} document. Import the matching complete source or add a local catalog proposal. Its profile and coordinated deployment must support it.</p>{editing && <Button variant="outline" onClick={() => onChange(createCatalog(project, root, key, value))}>Add {title.toLowerCase()} draft</Button>}</div> }
-  if (page === 'contracts') return <SourceContracts project={project} root={root} organization={organization} editing={editing} onChange={onChange} />
+export function SourceCatalogs({ project, root, organization, page }: Props) {
+  const source = rootOf(project, root)
+  const get = (key: string) => source.draft[key] === undefined ? null : documentValue(project, root, String(object(source.draft[key]).path))
+  const missing = (title: string) => <div className="space-y-3"><h3 className="text-sm font-medium">{title}</h3><p className="text-sm text-neutral-500">This configuration root has no {title.toLowerCase()} document.</p></div>
+  if (page === 'contracts') return <SourceContracts project={project} root={root} organization={organization} />
   if (page === 'identity-profiles' || page === 'claim-mappings') {
     const catalog = get('identityCatalog')
-    if (!catalog) return missing('identityCatalog', 'Identity catalog', { apiVersion: 'ops.identity-catalog/v1alpha1', kind: 'IdentityCatalog', issuers: [], profiles: [], mappings: [] })
-    const { path, value } = catalog
-    if (page === 'claim-mappings') return <SourceAuthoringScope id="claim-mappings" path={path}><SourceClaimMappings project={project} root={root} organization={organization} profiles={value.profiles as JSONObject[]} records={value.mappings as JSONObject[]} editing={editing} onChange={mappings => save(path, { ...value, mappings })} /></SourceAuthoringScope>
-    return <div className="space-y-8"><SourceRecords title="Identity profiles" description="Public verification profiles. Select the exact Azure or Privado variant; the Go compiler checks required fields, trust bindings and mutually exclusive variants. No credentials or provider calls are performed here." records={value.profiles} editing={editing} fields={profileFields}
-      defaults={() => ({ id: '', kind: 'azure-human/v1' })} onChange={profiles => save(path, { ...value, profiles })} dependencies={r => [...referenceFiles(project, root, String(r.id), path), ...((value.mappings as JSONObject[]).some(m => m.profileId === r.id) || (value.issuers as JSONObject[]).some(i => Array.isArray(i.allowedProfiles) && i.allowedProfiles.includes(r.id)) ? [path] : [])]} />
-      <SourceRecords title="Assertion issuers" description="Approved public signing keys and allowed profile IDs. Never paste private keys or client secrets." records={value.issuers} editing={editing} fields={[field('id', 'Issuer ID'), field('issuer', 'Issuer'), field('audience', 'Audience'), field('allowedProfiles', 'Allowed profiles', 'list'), field('keys', 'Public JWK keys', 'json', false, 'Public fields only: kid, alg, kty, crv, x. Go rejects unsupported keys.')]} defaults={() => ({ id: '', issuer: '', audience: '', allowedProfiles: [], keys: [] })} onChange={issuers => save(path, { ...value, issuers })} />
+    if (!catalog) return missing('Identity catalog')
+    if (page === 'claim-mappings') return <SourceClaimMappings project={project} root={root} profiles={catalog.profiles as JSONObject[]} records={catalog.mappings as JSONObject[]} />
+    return <div className="space-y-8"><SourceRecords title="Identity profiles" description="Public Azure and Privado verification profiles and trust bindings. No credentials are resolved and no provider calls are made here." records={catalog.profiles} fields={profileFields} />
+      <SourceRecords title="Assertion issuers" description="Public signing keys and allowed verification profile IDs." records={catalog.issuers} fields={[field('id', 'Issuer ID'), field('issuer', 'Issuer'), field('audience', 'Audience'), field('allowedProfiles', 'Allowed profiles', 'list'), field('keys', 'Public JWK keys', 'json')]} />
     </div>
   }
   if (page === 'disclosure-source') {
     const catalog = get('disclosureCatalog')
-    if (!catalog) return missing('disclosureCatalog', 'Standing disclosure rules', { apiVersion: 'ops.disclosure-policy/v1alpha1', kind: 'DisclosurePolicy', rules: [] })
-    return <SourceRecords title="Standing disclosure rules" description="Approved through Git with the source bundle. Case opening uses these limits directly; no customer approve/reject step is added." records={catalog.value.rules} fields={ruleFields} editing={editing}
-      defaults={() => ({ id: uid(), dataOrganizationId: organization, viewers: { groups: [], actors: [] }, targets: { mode: 'actors', actors: [] }, resources: [], addresses: { mode: 'list', values: [] }, dataTime: { start: 0, end: 0 }, maxLevel: 'redacted', validity: { notBefore: 0, expiresAt: 0 }, maxCaseSeconds: 3600 })} onChange={rules => save(catalog.path, { ...catalog.value, rules })} />
+    return catalog ? <SourceRecords title="Standing disclosure rules" description="Source limits for separately authorized disclosure cases. Viewing these rules neither approves them nor changes case permissions." records={catalog.rules} fields={ruleFields} /> : missing('Standing disclosure rules')
   }
   if (page === 'compliance-source') {
     const catalog = get('complianceCatalog')
-    if (!catalog) return missing('complianceCatalog', 'Compliance policy', { apiVersion: 'ops.compliance-policy/v1alpha1', kind: 'CompliancePolicy', organizations: [], sanctions: [] })
-    return <div className="space-y-8"><SourceAuthoringScope id="compliance-settings" path={catalog.path}><SourceComplianceSettings records={catalog.value.organizations as JSONObject[]} organizations={source.draft.organizations} selectedOrganization={organization} editing={editing} onChange={organizations => save(catalog.path, { ...catalog.value, organizations })} /></SourceAuthoringScope>
-      <SourceRecords title="Sanctions" records={catalog.value.sanctions} fields={[field('id', 'Sanction ID'), field('scope', 'Scope'), field('organizationId', 'Organization ID'), field('address', 'Address'), field('reason', 'Reason'), field('source', 'Source')]} editing={editing} defaults={() => ({ id: uid(), scope: 'organization', organizationId: organization, address: '', reason: '', source: '' })} onChange={sanctions => save(catalog.path, { ...catalog.value, sanctions })} /></div>
+    return catalog ? <div className="space-y-8"><SourceComplianceSettings records={catalog.organizations as JSONObject[]} organizations={source.draft.organizations} selectedOrganization={organization} />
+      <SourceRecords title="Sanctions" records={catalog.sanctions} fields={[field('id', 'Sanction ID'), field('scope', 'Scope'), field('organizationId', 'Organization ID'), field('address', 'Address'), field('reason', 'Reason'), field('source', 'Source')]} /></div> : missing('Compliance policy')
   }
   const runtime = get('runtimeCatalog'), broker = get('authCatalog')
   return <div className="space-y-8">
-    {runtime ? <SourceAuthoringScope id="runtime" path={runtime.path}><SettingsForm title="Runtime policy" value={runtime.value} editing={editing} fields={[field('readProfile', 'Read profile'), field('nodeEvidenceProfile', 'Node evidence profile'), field('intraOrgGrantTracing', 'Trace intra-organization grants', 'boolean'), { ...field('rawSubmissionMode', 'Signed submission Guard mode', 'text', true), options: ['guard-v1', 'ops-preflight'] }, field('sharedInfrastructure', 'Shared infrastructure', 'json'), field('addressScopes', 'Address organization scopes', 'json'), field('priceFeed', 'Public price feed bindings', 'json', true)]} onSave={v => save(runtime.path, v)} /></SourceAuthoringScope> : <p className="text-sm text-neutral-500">This source has no runtime catalog. Import the coordinated runtime source before proposing runtime changes.</p>}
-    {broker && <SourceAuthoringScope id="broker" path={broker.path}><SettingsForm title="Authentication broker" value={broker.value} editing={editing} fields={[field('issuerId', 'Assertion issuer ID'), field('accessKeyId', 'Access signing key ID'), field('webOrigin', 'Web origin'), field('completionUri', 'Completion URI'), field('renewalKeys', 'Renewal key environment references', 'json'), field('encryptionKeys', 'Encryption key environment references', 'json')]} onSave={v => save(broker.path, v)} />
-      {(['azureProfiles', 'privadoProfiles', 'privadoNetworks', 'pinnedDocuments'] as const).filter(k => broker.value[k] !== undefined).map(key => <SourceRecords key={key} title={{ azureProfiles: 'Azure provider bindings', privadoProfiles: 'Privado provider bindings', privadoNetworks: 'Privado networks', pinnedDocuments: 'Pinned public documents' }[key]} records={broker.value[key]} editing={editing}
-        fields={key === 'azureProfiles' ? [field('profileId', 'Profile ID'), field('redirectUri', 'Redirect URI', 'text', true), field('clientSecret', 'Client secret environment reference', 'json', true, 'Only {fromEnv:OPS_BROKER_AZURE_...}; never a secret value.')]
+    {runtime ? <SourceSettings title="Runtime policy" value={runtime} fields={[field('readProfile', 'Read profile'), field('nodeEvidenceProfile', 'Node evidence profile'), field('intraOrgGrantTracing', 'Trace intra-organization grants', 'boolean'), field('rawSubmissionMode', 'Signed submission Guard mode'), field('sharedInfrastructure', 'Shared infrastructure', 'json'), field('addressScopes', 'Address organization scopes', 'json'), field('priceFeed', 'Public price feed bindings', 'json')]} /> : missing('Runtime policy')}
+    {broker && <><SourceSettings title="Authentication broker" value={broker} fields={[field('issuerId', 'Assertion issuer ID'), field('accessKeyId', 'Access signing key ID'), field('webOrigin', 'Web origin'), field('completionUri', 'Completion URI'), field('renewalKeys', 'Renewal key environment references', 'json'), field('encryptionKeys', 'Encryption key environment references', 'json')]} />
+      {(['azureProfiles', 'privadoProfiles', 'privadoNetworks', 'pinnedDocuments'] as const).filter(key => broker[key] !== undefined).map(key => <SourceRecords key={key} title={{ azureProfiles: 'Azure provider bindings', privadoProfiles: 'Privado provider bindings', privadoNetworks: 'Privado networks', pinnedDocuments: 'Pinned public documents' }[key]} records={broker[key]}
+        fields={key === 'azureProfiles' ? [field('profileId', 'Profile ID'), field('redirectUri', 'Redirect URI'), field('clientSecret', 'Client secret environment reference', 'json')]
           : key === 'privadoProfiles' ? [field('profileId', 'Profile ID')]
             : key === 'pinnedDocuments' ? [field('url', 'Public context URL'), field('path', 'Local source filename'), field('sha256', 'Exact byte SHA-256')]
-              : [field('network', 'Network'), field('chainId', 'Chain ID'), field('stateContract', 'State contract'), field('rpcUrl', 'RPC URL'), field('allowPrivate', 'Allow configured private network', 'boolean'), field('credential', 'RPC credential environment reference', 'json', true)]}
-        defaults={() => ({})} onChange={rows => save(broker.path, { ...broker.value, [key]: rows })} />)}</SourceAuthoringScope>}
-    <p className="text-xs text-neutral-500">These files contain public trust and environment references only. OPS nodes, SSO clients and runtime read-policy pins are coordinated by the operator; an exported catalog does not activate or test them.</p>
+              : [field('network', 'Network'), field('chainId', 'Chain ID'), field('stateContract', 'State contract'), field('rpcUrl', 'RPC URL'), field('allowPrivate', 'Allow configured private network', 'boolean'), field('credential', 'RPC credential environment reference', 'json')]} />)}</>}
+    <p className="text-xs text-neutral-500">Public trust and environment references are shown as source content. The viewer does not resolve secrets, test providers or change the deployed service.</p>
   </div>
 }
-function SettingsFormContent({ title, value, fields, editing, onSave }: { title: string; value: JSONObject; fields: SourceField[]; editing: boolean; onSave(value: JSONObject): void }) {
-  const clear = useClearAuthoring()
-  const [open, setOpen] = useAuthoringState('open', false)
-  const close = () => { clear('form'); setOpen(false) }
-  return <section className="space-y-3"><div className="flex justify-between items-center gap-3"><h3 className="text-sm font-medium">{title}</h3>{editing && <Button variant="outline" size="sm" onClick={() => setOpen(true)}>Edit {title.toLowerCase()} draft</Button>}</div><dl className="grid gap-3 sm:grid-cols-2">{fields.map(f => <div key={f.key} className="rounded-lg border border-neutral-200 p-3"><dt className="text-xs text-neutral-500">{f.label}</dt><dd className="mt-2 min-w-0"><SourceFieldValue value={value[f.key]} label={f.label} /></dd></div>)}</dl><Dialog open={editing && open} onOpenChange={next => { if (next) setOpen(true); else close() }}><DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{title} draft</DialogTitle></DialogHeader>{editing && <SourceAuthoringScope id="form"><SourceRecordForm value={value} fields={fields} onClose={close} onSave={v => { onSave(v); close() }} /></SourceAuthoringScope>}</DialogContent></Dialog></section>
-}
-
-function SettingsForm(props: Parameters<typeof SettingsFormContent>[0]) {
-  return <SourceAuthoringScope id={'settings:' + props.title}><SettingsFormContent {...props} /></SourceAuthoringScope>
+function SourceSettings({ title, value, fields }: { title: string; value: JSONObject; fields: SourceField[] }) {
+  return <section className="space-y-3"><h3 className="text-sm font-medium">{title}</h3><dl className="grid gap-3 sm:grid-cols-2">{fields.map(field => <div key={field.key} className="rounded-lg border border-neutral-200 p-3"><dt className="text-xs text-neutral-500">{field.label}</dt><dd className="mt-2 min-w-0"><SourceFieldValue value={value[field.key]} label={field.label} /></dd></div>)}</dl></section>
 }

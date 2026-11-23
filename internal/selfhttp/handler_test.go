@@ -79,6 +79,7 @@ func TestActualVerifiedOwnSelfHumanServiceAndStrictIngress(t *testing.T) {
 		{name: "duplicate bearer", want: 401, tokens: []string{"Bearer one", "Bearer two"}},
 		{name: "oversized bearer", want: 401, tokens: []string{"Bearer " + strings.Repeat("a", 16385)}},
 		{name: "cookie is no authority", want: 401, tokens: []string{}},
+		{name: "retired selection path", target: Path + "/selection", want: 404, roles: []string{"Admin"}},
 		{name: "query selector", target: Path + "?actorId=other", want: 400},
 		{name: "force query", target: Path + "?", want: 400},
 		{name: "body selector", body: "x", want: 400},

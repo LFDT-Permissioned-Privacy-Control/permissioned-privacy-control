@@ -14,7 +14,7 @@ export function approvedTokens(value: unknown): ApprovedToken[] {
   // Native prices are valid catalog rows, but cannot be ERC-20 addresses.
   return tokens.filter(token => token.address !== 'native')
 }
-// Operational catalog only. Local source drafts never provide operational units.
+// Operational catalog only. Viewed configuration files never provide operational units.
 export function useApprovedTokens(scope: OperationScope, org: string) {
   const [state, setState] = useState<{ org: string; scope: OperationScope; tokens: ApprovedToken[]; error: string | null }>({ org, scope, tokens: [], error: null })
   useEffect(() => {

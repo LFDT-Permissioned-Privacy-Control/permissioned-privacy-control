@@ -27,7 +27,8 @@ it('accepts only finite native operations and their exact query/method contracts
     [`/api/v1/disclosure/cases?role=data-org-admin&organizationId=${org}&limit=25`, 'GET'],
     [`/api/v1/disclosure/cases/${id}/read`, 'POST'],
     ['/health/ready', 'GET'],
-    ['/api/v2/self/selection', 'GET'],
+    ['/api/v2/configuration/sources', 'GET'],
+    ['/api/v2/configuration/sources/current', 'GET'],
     [`/rpc/${org}`, 'POST'],
   ])
     expect(operationEndpoint(path, method), path).toBe(true)
@@ -38,7 +39,17 @@ it('accepts only finite native operations and their exact query/method contracts
     ['https://evil.test/api', 'GET'],
     ['//evil.test/api', 'GET'],
     ['/api/v1/users', 'GET'],
+    ['/api/v2/self/selection', 'GET'],
     ['/api/v2/self/selection?org=other', 'GET'],
+    ['/api/v2/configuration/sources', 'POST'],
+    ['/api/v2/configuration/sources/current', 'POST'],
+    ['/api/v2/configuration/sources/current', 'DELETE'],
+    ['/api/v2/configuration/sources?path=other', 'GET'],
+    ['/api/v2/configuration/sources/current?', 'GET'],
+    ['/api/v2/configuration/sources/current?refresh=true', 'GET'],
+    ['/api/v2/configuration/sources/../secrets', 'GET'],
+    ['/api/v2/configuration/sources/%63urrent', 'GET'],
+    ['/api/v2/configuration/sources/current/file.json', 'GET'],
     ['/api/v2/self/selection', 'POST'],
     [`/api/v1/disclosure/cases?role=recipient&organizationId=${org}`, 'GET'],
     [`/api/v1/disclosure/cases?limit=1&limit=2`, 'GET'],
@@ -63,7 +74,7 @@ it('keeps the bearer in one fixed same-origin request and preserves business err
     operationRequest(
       'private-test-token',
       `/api/v2/orgs/${org}/compliance/travel-rule-records`,
-      { method: 'POST', body: '{}', headers: { Authorization: 'forbidden' } },
+      { method: 'POST', body: '{}' },
       new AbortController().signal,
       check,
     ),
@@ -182,4 +193,75 @@ it('composes caller cancellation with mandatory scope cancellation for an explic
   caller.abort()
   await expect(request).rejects.toThrow('aborted')
   expect(passed?.aborted).toBe(true)
+})
+
+const sourceEndpoint = '/api/v2/configuration/sources/current', sourceETag = '"' + 'a'.repeat(64) + '"'
+const sourceHeaders = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ETag: sourceETag }
+it('keeps conditional source headers narrow and cannot override native authentication', async () => {
+  const fetch = vi.fn(async () => new Response('{"apiVersion":"ops.ui-source-package/v1","roots":[]}', { headers: sourceHeaders }))
+  vi.stubGlobal('fetch', fetch)
+  await expect(operationRequest('private-token', sourceEndpoint, { headers: { 'If-None-Match': sourceETag, 'Cache-Control': 'no-cache' } }, new AbortController().signal, () => {})).resolves.toMatchObject({ notModified: false, etag: sourceETag })
+  expect(fetch.mock.calls[0][1]).toMatchObject({ credentials: 'same-origin', mode: 'same-origin', redirect: 'error', cache: 'no-store', headers: { Authorization: 'Bearer private-token', 'If-None-Match': sourceETag, 'Cache-Control': 'no-cache' } })
+  fetch.mockClear()
+  for (const [endpoint, headers] of [
+    [sourceEndpoint, { Authorization: 'Bearer attacker' }],
+    [sourceEndpoint, { 'If-None-Match': '*' }],
+    [sourceEndpoint, { 'If-None-Match': 'W/' + sourceETag }],
+    [sourceEndpoint, { 'If-None-Match': sourceETag + ', ' + sourceETag }],
+    [sourceEndpoint, { 'Cache-Control': 'max-age=100' }],
+    [sourceEndpoint, { 'X-Source-Path': '/etc/secret' }],
+    ['/api/v2/configuration/sources', { 'If-None-Match': sourceETag }],
+    [`/api/v2/orgs/${org}/diagnostics`, { 'If-None-Match': sourceETag }],
+  ] as const) await expect(operationRequest('private-token', endpoint, { headers }, new AbortController().signal, () => {})).rejects.toThrow(/headers/)
+  expect(fetch).not.toHaveBeenCalled()
+})
+it('accepts only the exact previously requested source ETag on a bodyless unchanged response', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 304, headers: { 'Cache-Control': 'no-store', ETag: sourceETag } })))
+  await expect(operationRequest('private', sourceEndpoint, { headers: { 'If-None-Match': sourceETag } }, new AbortController().signal, () => {})).resolves.toEqual({ notModified: true, etag: sourceETag })
+  await expect(operationRequest('private', sourceEndpoint, {}, new AbortController().signal, () => {})).rejects.toThrow('unchanged')
+  for (const tag of [undefined, 'invalid', '"' + 'b'.repeat(64) + '"']) {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 304, headers: { 'Cache-Control': 'no-store', ...(tag ? { ETag: tag } : {}) } })))
+    await expect(operationRequest('private', sourceEndpoint, { headers: { 'If-None-Match': sourceETag } }, new AbortController().signal, () => {})).rejects.toThrow('unchanged')
+  }
+})
+it('rechecks original ownership immediately before publishing unchanged source data', async () => {
+  let valid = true
+  const response = new Response(null, { status: 304, headers: { 'Cache-Control': 'no-store', ETag: sourceETag } })
+  const get = response.headers.get.bind(response.headers)
+  vi.spyOn(response.headers, 'get').mockImplementation(name => { if (name === 'ETag') valid = false; return get(name) })
+  vi.stubGlobal('fetch', vi.fn(async () => response))
+  await expect(operationRequest('private', sourceEndpoint, { headers: { 'If-None-Match': sourceETag } }, new AbortController().signal, () => { if (!valid) throw Error('original credential expired') })).rejects.toThrow('original credential expired')
+})
+it('requires a canonical source tag and uncached source response', async () => {
+  for (const headers of [
+    { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+    { ...sourceHeaders, ETag: 'W/' + sourceETag },
+    { ...sourceHeaders, 'Cache-Control': 'public' },
+  ]) {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { headers })))
+    await expect(operationRequest('private', sourceEndpoint, {}, new AbortController().signal, () => {})).rejects.toThrow(/response/)
+  }
+})
+it('allows a large source response without raising the ordinary operation or source-list budget', async () => {
+  const raw = JSON.stringify({ text: 'x'.repeat(3 << 20) })
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, { headers: sourceHeaders })))
+  await expect(operationRequest('private', sourceEndpoint, {}, new AbortController().signal, () => {})).resolves.toMatchObject({ notModified: false, value: { text: 'x'.repeat(3 << 20) } })
+  for (const endpoint of ['/api/v2/configuration/sources', `/api/v2/orgs/${org}/diagnostics`]) {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, { headers: sourceHeaders })))
+    await expect(operationRequest('private', endpoint, {}, new AbortController().signal, () => {})).rejects.toThrow('too large')
+  }
+})
+it('rejects an oversized source stream before decoding or publishing it and cancels the reader', async () => {
+  let canceled = false
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array((90 << 20) + 1)) }, cancel() { canceled = true } }), { headers: sourceHeaders })))
+  await expect(operationRequest('private', sourceEndpoint, {}, new AbortController().signal, () => {})).rejects.toThrow('too large')
+  expect(canceled).toBe(true)
+})
+it('rejects source bytes if the owning credential changes while the response is consumed', async () => {
+  let valid = true
+  const reader = { read: vi.fn(async () => { valid = false; return { done: false, value: new TextEncoder().encode('{"private":"old-owner"}') } }), cancel: vi.fn(async () => {}), releaseLock: vi.fn() }
+  vi.stubGlobal('fetch', vi.fn(async () => ({ redirected: false, status: 200, headers: new Headers(sourceHeaders), body: { getReader: () => reader } })))
+  await expect(operationRequest('private', sourceEndpoint, {}, new AbortController().signal, () => { if (!valid) throw Error('source owner changed') })).rejects.toThrow('source owner changed')
+  expect(reader.cancel).toHaveBeenCalledOnce()
+  expect(reader.releaseLock).toHaveBeenCalledOnce()
 })

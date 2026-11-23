@@ -18,7 +18,7 @@ function DemoControls({ driver, controller, walletOrigin }: { driver: LocalDemoD
     {state.error && <LoginStatus tone="warning" title={native.pending?.status === 'proof_required' ? 'Demo verification stopped' : 'Demo sign-in stopped'}><p>{state.error}</p><a className="mt-2 block text-primary underline underline-offset-2" href={walletOrigin + '/'} target="_blank" rel="noopener noreferrer">Open demo wallet setup</a><p className="mt-2 text-xs">Accept its local certificate if prompted, then return here and choose a demo identity again.</p></LoginStatus>}
     {(!native.candidate || state.active) && <DevelopmentIdentityPicker identities={demoPersonas.map(id => ({ id, name: labels[id], testId: 'demo-persona-' + id }))}
       separated={false} disabled={state.active || native.busy || !!native.pending && !canAssistDemoRenewal(native) && !canAssistDemoLogin(native)} onSelect={id => driver.start(id as DemoPersona)}>
-      <p className="text-xs text-center text-neutral-500">{canAssistDemoRenewal(native) ? 'Choose the same demo identity to verify this session and keep your draft. ' : ''}The demo wallet opens automatically and generates a real proof. No QR scan is needed. Public local test identities only.</p>
+      <p className="text-xs text-center text-neutral-500">{canAssistDemoRenewal(native) ? 'Choose the same demo identity to verify this session. ' : ''}The demo wallet opens automatically and generates a real proof. No QR scan is needed. Public local test identities only.</p>
     </DevelopmentIdentityPicker>}
   </section>
 }
