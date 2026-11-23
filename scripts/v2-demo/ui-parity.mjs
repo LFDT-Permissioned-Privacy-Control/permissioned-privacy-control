@@ -357,7 +357,10 @@ async function checkFolderRefresh({ user, runtime, outputDirectory, passed }) {
     await page.getByRole('heading', { name: 'Deployer preview — declared permissions', exact: true }).waitFor({ state: 'hidden', timeout: 12000 });
     // A stable-ID inspector either updates to the new record or closes. It may
     // not keep the old copied object while fresh data is displayed behind it.
-    if (await page.getByRole('dialog').count()) await page.getByRole('dialog').last().getByRole('button', { name: 'Close', exact: true }).click();
+    // The native dialog has both its standard X and footer Close controls.
+    // Escape closes the current inspection without an ambiguous text selector.
+    await page.keyboard.press('Escape');
+    await page.getByRole('dialog').last().waitFor({ state: 'hidden' });
     await page.getByTestId('group-card').getByText('Deployer refreshed', { exact: true }).waitFor({ timeout: 12000 });
     await page.screenshot({ path: path.join(output, 'external-update.png'), fullPage: true, animations: 'disabled' });
     viewerFixture('remove');

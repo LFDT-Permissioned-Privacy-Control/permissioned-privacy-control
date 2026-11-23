@@ -105,8 +105,9 @@ and shows a simple error. Logout, expiry or account/role changes also clear
 protected content. Unsupported shapes or unsafe numeric values remain available
 as raw source rather than being displayed as a rounded or altered permission.
 
-For coherent multi-file publication, stage a complete folder outside the watched
-directory on the same filesystem, then rename it to an absent candidate path.
+For coherent multi-file publication, stage a complete folder outside the visible
+candidate namespace on the same filesystem, then rename it to an absent candidate
+path. An ignored dot-prefixed staging directory on the source volume is suitable.
 For the same name, withdraw the old folder first, then expose its replacement;
 a brief unavailable view is acceptable. Leave exposed files unchanged when
 coherent observation is required. In-place edits have only best-effort race

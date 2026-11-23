@@ -61,8 +61,9 @@ search it. Compiled `manifest.json` artifacts used by Core are a different
 format; they are not an automatic fallback for the source viewer.
 
 For coherent publication, the external producer prepares a complete candidate
-outside the watched directory on the same filesystem, then renames it to an
-absent candidate path. To replace the same name, withdraw the old folder first;
+outside the visible candidate namespace on the same filesystem, then renames it
+to an absent candidate path. An ignored dot-prefixed staging directory on the
+source volume is suitable. To replace the same name, withdraw the old folder first;
 a brief unavailable view is acceptable. Do not assume a portable atomic rename
 over an existing nonempty directory. Exposed files remain unchanged when a
 coherent observation is required. In-place multi-file edits can be observed
