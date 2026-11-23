@@ -79,7 +79,7 @@ async function finish(page, data, persona) {
     page.waitForURL(url => url.origin === runtime.opsOrigin && ['/admin/account', '/admin/rbac/organizations'].includes(url.pathname), { timeout: 170000 }),
     page.getByText('Demo sign-in stopped', { exact: true }).waitFor({ state: 'visible', timeout: 170000 }).then(() => { throw Error('The demo sign-in UI reported a failure'); }),
   ]);
-  await page.waitForFunction(() => { const text = document.body.textContent?.toLowerCase() ?? ''; return text.includes('ops identity') || text.includes('policy source workspace'); });
+  await page.waitForFunction(() => { const text = document.body.textContent?.toLowerCase() ?? ''; return text.includes('ops identity') || !!document.querySelector('[data-testid="rbac-manager"]'); });
   const until = Date.now() + 10000;
   while ((!data.self || !data.completes.length || !data.candidates.length) && Date.now() < until) await page.waitForTimeout(50);
   const access = data.completes.at(-1), candidate = data.candidates.at(-1), self = data.self;
