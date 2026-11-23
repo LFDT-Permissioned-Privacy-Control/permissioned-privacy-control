@@ -165,11 +165,14 @@ try {
     results.push({ case: stage, passed: true, liveQRResumed: true, expiredUnsignedQRReplacedOnce: true, noAdditionalProofOrConfirmation: true });
     stage = 'application-entry-qr';
     const explorer = await ownedPage(c, runtime.explorerOrigin + '/');
+    const inspected = explorer.waitForResponse(response => new URL(response.url()).origin === runtime.opsOrigin && new URL(response.url()).pathname === '/api/v2/sso/flow' && response.request().method() === 'POST' && response.request().postDataJSON()?.action === 'inspect');
     await explorer.getByRole('button', { name: 'Sign in', exact: true }).click();
+    const inspectedResponse = await inspected; assert.equal(inspectedResponse.status(), 200); const application = await inspectedResponse.json();
     await explorer.getByTestId('qr-code').waitFor({ state: 'visible' });
-    assert.equal(await explorer.locator('[data-field=app]').textContent(), 'Explorer');
+    assert.equal(await explorer.locator('[data-field=app]').textContent(), application.displayName);
+    assert.equal(inspectedResponse.request().postDataJSON().flowId, new URL(explorer.url()).searchParams.get('flow'));
     assert.equal(await explorer.getByText('Sign in to continue', { exact: true }).count(), 0);
-    results.push({ case: stage, passed: true, application: 'Explorer', unsignedQRVisible: true });
+    results.push({ case: stage, passed: true, application: application.displayName, unsignedQRVisible: true });
     await c.close(); console.log('PASS ' + stage);
   }
   if (selectedCase === 'all') {
