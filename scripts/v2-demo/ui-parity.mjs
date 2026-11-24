@@ -122,7 +122,7 @@ async function checkAdminNavigation({ user, runtime, outputDirectory, passed }) 
   for (const [section, child] of [['Compliance', 'Policy'], ['Disclosure', 'Rules']]) {
     await page.getByRole('tab', { name: section, exact: true }).click();
     await page.getByRole('tab', { name: child, exact: true }).click();
-    await page.getByTestId('workspace-source').waitFor();
+    await page.getByTestId('workspace-source').waitFor({ state: 'attached' });
     await page.screenshot({ path: path.join(output, section.toLowerCase() + '-source.png'), fullPage: true, animations: 'disabled' });
   }
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
