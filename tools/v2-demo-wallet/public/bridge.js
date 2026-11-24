@@ -29,7 +29,8 @@ export async function runBridge(win = window, fetcher = fetch) {
   const status = win.document.querySelector('#status')
   const nonce = win.location.hash.slice(1), parent = win.opener
   win.history.replaceState(null, '', '/bridge')
-  let config, timer, used = false, stopped = false, failed = false
+  let config, timer, used = false, stopped = false, failed = false, renewable = false, persona, renewableUntil = 0
+  const seenRequests = new Set()
   const abort = new AbortController()
   const report = text => { status.textContent = text }
   const stop = () => { stopped = true; abort.abort(); if (timer !== undefined) win.clearTimeout(timer); win.removeEventListener('message', receive); win.removeEventListener('pagehide', stop) }
@@ -49,12 +50,16 @@ export async function runBridge(win = window, fetcher = fetch) {
   const receive = event => {
     if (stopped || used || !config || event.source !== parent || event.origin !== config.opsOrigin) return
     const value = event.data
-    if (!keys(value, ['v', 'type', 'nonce', 'persona', 'requestUri']) || value.v !== 1 || value.type !== 'prove' || value.nonce !== nonce || !personas.includes(value.persona) || typeof value.requestUri !== 'string' || value.requestUri.length > 400) return
+    const first = !renewable && seenRequests.size === 0
+    if (!(keys(value, ['v', 'type', 'nonce', 'persona', 'requestUri']) || first && keys(value, ['v', 'type', 'nonce', 'persona', 'requestUri', 'keepAlive']) && value.keepAlive === true) || value.v !== 1 || value.type !== 'prove' || value.nonce !== nonce || !personas.includes(value.persona) || typeof value.requestUri !== 'string' || value.requestUri.length > 400) return
     let uri
     try { uri = new URL(value.requestUri) } catch { return }
     if (uri.origin !== config.opsOrigin || uri.href !== value.requestUri || uri.username || uri.password || uri.search || uri.hash || !/^\/api\/v2\/auth\/privado\/requests\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(uri.pathname) || uri.pathname.endsWith('/00000000-0000-0000-0000-000000000000')) return
+    if (seenRequests.has(uri.href) || seenRequests.size >= 16 || renewable && (value.persona !== persona || Date.now() >= renewableUntil)) return
+    if (first && value.keepAlive === true) { renewable = true; persona = value.persona; renewableUntil = Date.now() + 30 * 60 * 1000 }
+    seenRequests.add(uri.href)
     used = true
-    arm(150000)
+    arm(Math.min(150000, renewable ? renewableUntil - Date.now() : 150000))
     void prove(value)
   }
   const prove = async value => {
@@ -76,7 +81,12 @@ export async function runBridge(win = window, fetcher = fetch) {
           // the browser presented this popup as a foreground tab. Progress
           // never substitutes for Core's verified candidate.
           try { parent.focus() } catch {}
-          stop(); return
+          if (!renewable) { stop(); return }
+          if (Date.now() >= renewableUntil) { stop(); return }
+          used = false
+          report('Demo session active. Keep this window open for automatic re-verification.')
+          arm(renewableUntil - Date.now())
+          return
         }
       }
     } catch {

@@ -4,14 +4,14 @@ import { demoPersonas, demoReady, type DemoConfig, type DemoPersona } from './lo
 import type { Controller, State } from './controller'
 import type { Candidate } from '../auth/multiProtocol'
 import type { Flow, Self } from './protocol'
-import { writeMultiMarker } from '../auth/multiContext'
+import { activeMulti, writeMultiMarker } from '../auth/multiContext'
 import type { LoginPending, ProofRequired } from '../auth/multiProtocol'
 const origin = 'https://localhost:8443', wallet = 'https://localhost:9444'
 const config: DemoConfig = { v: 1, testOnly: true, opsOrigin: origin, network: 'polygon:mumbai', issuerDid: 'did:iden3:polygon:mumbai:x11111', verifierDid: 'did:iden3:polygon:mumbai:x22222', personas: demoPersonas.map((id, n) => ({ id, profileId: 'demo-privado', holderDid: 'did:iden3:polygon:mumbai:x' + String(n + 3).repeat(10) })) }
 const future = () => Date.now() / 1000 + 300
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r }); return { promise, resolve } }
 const flush = async () => { for (let n = 0; n < 20; n++) await Promise.resolve() }
-interface Controls { flow?: Flow; holdLogin?: Promise<void>; holdConfirm?: Promise<void>; holdContinue?: Promise<void>; admin?: boolean; automatic?: boolean }
+interface Controls { flow?: Flow; holdLogin?: Promise<void>; holdConfirm?: Promise<void>; holdContinue?: Promise<void>; admin?: boolean; automatic?: boolean; autoRenew?: boolean }
 function fixture(options: Controls = {}) {
   let state: State = { phase: 'anonymous', profiles: [{ id: 'demo-privado', provider: 'privado', principalKind: 'human' }], self: null, flow: options.flow ?? null, pending: null, candidate: null, busy: false, error: null }
   let revision = 0, serial = 0, message: ((e: MessageEvent) => void) | null = null
@@ -30,13 +30,14 @@ function fixture(options: Controls = {}) {
       const mine = revision, candidate = state.candidate!; set({ busy: true }); if (options.holdConfirm) await options.holdConfirm
       if (mine !== revision) return
       const self: Self = { actorId: candidate.actorId, sourceProfile: candidate.sourceProfile, sourceProfileDigest: 'sha256:' + 'a'.repeat(64), principalKind: 'human', expiresAt: future(), organizations: options.admin ? [{ id: '11111111-1111-1111-1111-111111111111', slug: 'bank', name: 'Bank', isOrgAdmin: true, isOrgReadonlyAdmin: false }] : [] }
+      if (options.autoRenew) writeMultiMarker(activeMulti({ actorId: self.actorId, browserSessionId: '22222222-2222-4222-8222-222222222222', provider: 'privado', sourceProfile: self.sourceProfile }))
       set({ phase: 'selected', busy: !!options.automatic, self, candidate: null, pending: null })
     }),
     continue: vi.fn(async () => { set({ busy: true }); if (options.holdContinue) await options.holdContinue; set({ flow: null, busy: false }) }),
     cancel: vi.fn(async () => { revision++; set({ phase: 'anonymous', self: null, pending: null, candidate: null, busy: false }) }),
   }
   const navigate = vi.fn()
-  const env: DemoEnvironment = { origin, walletOrigin: wallet, nonce: () => String(popups.length + 1).repeat(64), navigate,
+  const env: DemoEnvironment = { origin, walletOrigin: wallet, autoRenew: options.autoRenew, nonce: () => String(popups.length + 1).repeat(64), navigate,
     listen: fn => { events.push('listen'); message = fn; return () => { if (message === fn) message = null } },
     open: () => { events.push('open'); const popup = { closed: false, sent: [] as unknown[], close: vi.fn(function (this: DemoPopup) { this.closed = true }), postMessage(value: unknown, target: string) { expect(target).toBe(wallet); this.sent.push(value) } }; popups.push(popup); return popup },
   }
@@ -325,6 +326,90 @@ describe('one explicit public demo identity owns the normal native login', () =>
     f.driver.start('admin'); await vi.advanceTimersByTimeAsync(5001); await f.ready()
     expect(f.popups[0].closed).toBe(true); expect(f.native.login).not.toHaveBeenCalled()
     expect(f.native.confirm).not.toHaveBeenCalled(); expect(f.native.continue).not.toHaveBeenCalled()
+  })
+})
+
+describe('bounded local demo renewal', () => {
+  async function signIn(options: Controls = {}) {
+    f = fixture(Object.assign(options, { autoRenew: true, admin: true })); f.driver.start('admin'); await f.ready()
+    expect(f.popups[0].sent[0]).toMatchObject({ persona: 'admin', keepAlive: true })
+    f.candidate('admin'); await flush()
+    expect(f.state().phase).toBe('selected'); expect(f.popups[0].closed).toBe(false)
+  }
+  function requireProof(changes: Partial<ProofRequired> = {}) {
+    const pending: ProofRequired = { status: 'proof_required', provider: 'privado', principalKind: 'human', mode: 'renew', sourceProfile: 'demo-privado', actorId: f.state().self!.actorId,
+      browserSessionId: '22222222-2222-4222-8222-222222222222', requestId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', requestUri: origin + '/api/v2/auth/privado/requests/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', expiresAt: future(), ...changes }
+    writeMultiMarker({ version: 2, phase: 'require-login', actorId: pending.actorId, browserSessionId: pending.browserSessionId, sourceProfile: pending.sourceProfile, provider: 'privado', pendingFlow: { kind: 'privado', mode: 'renew', requestId: pending.requestId, sourceProfile: pending.sourceProfile, expiresAt: pending.expiresAt, expectedActorId: pending.actorId, expectedSessionId: pending.browserSessionId } })
+    f.set({ phase: 'proof-pending', self: null, pending, candidate: null }); return pending
+  }
+  it('uses the same window for a fresh, same-session proof and never issues a new login', async () => {
+    await signIn(); const pending = requireProof(); await flush()
+    expect(f.popups).toHaveLength(1); expect(f.popups[0].sent[1]).toEqual({ v: 1, type: 'prove', nonce: '1'.repeat(64), persona: 'admin', requestUri: pending.requestUri })
+    f.candidate('admin'); await flush()
+    expect(f.native.confirm).toHaveBeenCalledTimes(2); expect(f.native.login).toHaveBeenCalledTimes(1)
+    expect(f.state().phase).toBe('selected'); expect(f.popups[0].closed).toBe(false)
+  })
+  it('handles two successive fresh challenges for the same family without another popup or login', async () => {
+    await signIn(); requireProof(); await flush(); f.candidate('admin'); await flush()
+    const requestId = 'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    requireProof({ requestId, requestUri: origin + '/api/v2/auth/privado/requests/' + requestId }); await flush()
+    expect(f.popups).toHaveLength(1); expect(f.popups[0].sent).toHaveLength(3)
+    f.candidate('admin'); await flush()
+    expect(f.native.login).toHaveBeenCalledTimes(1); expect(f.native.confirm).toHaveBeenCalledTimes(3)
+    expect(f.state().phase).toBe('selected'); expect(f.popups[0].closed).toBe(false)
+  })
+  it('does not confirm a renewal proof arriving after the thirty-minute helper deadline', async () => {
+    await signIn(); await vi.advanceTimersByTimeAsync(30 * 60 * 1000 - 1000)
+    requireProof(); await flush(); expect(f.popups[0].sent).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(1201); expect(f.popups[0].closed).toBe(true)
+    f.candidate('admin'); await flush(); expect(f.native.confirm).toHaveBeenCalledTimes(1)
+  })
+  it('does not retry an already-dispatched confirmation after the assistance deadline', async () => {
+    const options: Controls = {}; await signIn(options)
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000 - 1000)
+    requireProof(); await flush()
+    const held = deferred(); options.holdConfirm = held.promise
+    f.candidate('admin'); await flush(); expect(f.native.confirm).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1201); expect(f.popups[0].closed).toBe(true)
+    held.resolve(); await flush()
+    expect(f.native.confirm).toHaveBeenCalledTimes(2); expect(f.popups[0].sent).toHaveLength(2)
+  })
+  it('stops at thirty minutes, on logout and on replacement by a different actor', async () => {
+    for (const reason of ['deadline', 'logout', 'actor'] as const) {
+      await signIn()
+      if (reason === 'deadline') await vi.advanceTimersByTimeAsync(30 * 60 * 1000 + 1)
+      if (reason === 'logout') { f.set({ phase: 'anonymous', self: null }); await flush() }
+      if (reason === 'actor') { writeMultiMarker(activeMulti({ actorId: 'ops:p1:' + 'B'.repeat(42) + 'A', browserSessionId: '22222222-2222-4222-8222-222222222222', provider: 'privado', sourceProfile: 'demo-privado' })); await vi.advanceTimersByTimeAsync(1001) }
+      expect(f.popups[0].closed, reason).toBe(true); expect(f.native.confirm).toHaveBeenCalledTimes(1)
+      f.driver.dispose()
+    }
+  })
+  it('stops instead of proving when the renewal challenge belongs to another family', async () => {
+    await signIn(); requireProof({ browserSessionId: '99999999-9999-4999-8999-999999999999' }); await flush()
+    expect(f.popups[0].closed).toBe(true); expect(f.popups[0].sent).toHaveLength(1); expect(f.native.confirm).toHaveBeenCalledTimes(1)
+  })
+  it.each(['candidate', 'busy'] as const)('does not adopt a renewal already being handled elsewhere: %s', async reason => {
+    await signIn(); requireProof()
+    if (reason === 'candidate') f.candidate('admin')
+    else f.set({ busy: true })
+    await flush()
+    expect(f.popups[0].closed).toBe(true); expect(f.popups[0].sent).toHaveLength(1)
+    expect(f.native.confirm).toHaveBeenCalledTimes(1)
+  })
+  it('stops when the user closes the wallet or the owning document is disposed', async () => {
+    for (const reason of ['close', 'dispose'] as const) {
+      await signIn()
+      if (reason === 'close') { f.popups[0].closed = true; await vi.advanceTimersByTimeAsync(1001) }
+      else f.driver.dispose()
+      expect(f.popups[0].closed).toBe(true)
+      expect(f.native.confirm).toHaveBeenCalledTimes(1)
+      f.driver.dispose()
+    }
+  })
+  it('never confirms a fresh proof for another holder or actor', async () => {
+    await signIn(); requireProof(); await flush()
+    f.candidate('reader'); await flush()
+    expect(f.native.confirm).toHaveBeenCalledTimes(1); expect(f.popups[0].closed).toBe(true)
   })
 })
 

@@ -416,6 +416,30 @@ describe('document context and flow ownership', () => {
     await vi.advanceTimersByTimeAsync(295000)
     expect(client.needAccess).toHaveBeenCalledTimes(1); expect(controller.snapshot().self).toBeNull(); expect(controller.snapshot().phase).toBe('proof-pending')
   })
+  it('the real expiry controller triggers a fresh proof in an already-owned demo wallet', async () => {
+    const client = fake(), id = '44444444-4444-4444-4444-444444444444'
+    const pending = { status: 'proof_required' as const, ...a, mode: 'renew' as const, requestId: id,
+      requestUri: location.origin + '/api/v2/auth/privado/requests/' + id, expiresAt: a.expiresAt + 300 }
+    client.needAccess.mockImplementation(async () => {
+      writeMultiMarker({ ...deniedMulti(a), pendingFlow: { kind: 'privado', mode: 'renew', requestId: id, sourceProfile: a.sourceProfile, expiresAt: pending.expiresAt, expectedActorId: a.actorId, expectedSessionId: a.browserSessionId } })
+      return pending as never
+    })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const popup = { closed: false, close: vi.fn(), postMessage: vi.fn() }
+    const driver = new LocalDemoDriver(controller, { origin: location.origin, walletOrigin: 'https://localhost:9444', nonce: () => 'a'.repeat(64), open: () => popup, listen: () => () => {}, navigate: vi.fn(), autoRenew: true })
+    // Seed only the successfully established window; the expiry timer, refresh,
+    // pending challenge and ownership checks below all run in real controller code.
+    Object.assign(driver, { demoSession: { persona: 'admin', nonce: 'a'.repeat(64), popup,
+      identity: { id: 'admin', profileId: a.sourceProfile, holderDid: 'did:iden3:polygon:mumbai:x3333333333' },
+      config: { network: 'polygon:mumbai' }, actor: a.actorId, session: a.browserSessionId,
+      profileDigest: self(a).sourceProfileDigest, until: Date.now() + 1800000 } })
+    try {
+      await vi.advanceTimersByTimeAsync(295000); await flush()
+      expect(client.needAccess).toHaveBeenCalledTimes(1)
+      expect(controller.snapshot().phase).toBe('proof-pending')
+      expect(popup.postMessage).toHaveBeenCalledWith({ v: 1, type: 'prove', nonce: 'a'.repeat(64), persona: 'admin', requestUri: pending.requestUri }, 'https://localhost:9444')
+    } finally { driver.dispose() }
+  })
   it('stops an expired proof and discards its delayed candidate after explicit cancellation', async () => {
     const client = fake(); mocks.next = client
     client.startPrivadoLogin.mockResolvedValue({ requestId: '44444444-4444-4444-4444-444444444444',

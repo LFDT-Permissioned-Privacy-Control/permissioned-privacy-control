@@ -41,7 +41,7 @@ it('keeps one demo owner across pending/candidate/selected branches and uses the
   await waitFor(() => expect(popup.postMessage).toHaveBeenCalledTimes(1))
   expect(screen.queryByTestId('qr-code')).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Cancel demo sign in' })).toBeInTheDocument()
-  act(() => set({ candidate: { status: 'candidate', requestId: id, sourceProfile: 'demo-privado', holderDid: rows[0].holderDid, network: 'polygon:mumbai', actorId: actor, proofDigest: 'sha256:' + 'a'.repeat(64), verifiedAt: now(), expiresAt: now() + 300 } }))
+  act(() => set({ candidate: { status: 'candidate', requestId: id, sourceProfile: 'demo-privado', holderDid: rows[0].holderDid, network: 'polygon:mumbai', actorId: actor, proofDigest: 'sha256:' + 'a'.repeat(64), verifiedAt: now(), expiresAt: state.pending!.expiresAt } }))
   await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/admin/account'))
   expect(controller.confirm).toHaveBeenCalledTimes(1); expect(popup.close).toHaveBeenCalledTimes(1)
   expect(controller.cancel).not.toHaveBeenCalled(); expect(open).toHaveBeenCalledTimes(1)
@@ -70,7 +70,7 @@ it('keeps demo choices alongside an existing QR and binds only the explicitly ch
   Object.defineProperty(event, 'source', { value: popup }); act(() => window.dispatchEvent(event))
   await waitFor(() => expect(popup.postMessage).toHaveBeenCalledTimes(1))
   expect(controller.login).toHaveBeenCalledWith('demo-privado', 'privado', rows[2].holderDid, raw)
-  expect(popup.postMessage).toHaveBeenCalledWith({ v: 1, type: 'prove', nonce, persona: 'reader', requestUri: state.pending!.requestUri }, wallet)
+  expect(popup.postMessage).toHaveBeenCalledWith({ v: 1, type: 'prove', nonce, persona: 'reader', requestUri: state.pending!.requestUri, keepAlive: true }, wallet)
   expect(controller.confirm).not.toHaveBeenCalled()
 })
 

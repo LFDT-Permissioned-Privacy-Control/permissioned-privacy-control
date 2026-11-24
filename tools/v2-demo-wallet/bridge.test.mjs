@@ -70,6 +70,27 @@ test('uncertain proof POST is not retried, page disposal cannot revive old messa
   f.receive({ data: prove, origin: ops, source: f.parent }); await settle(); assert.equal(f.messages.length, count)
 })
 
+test('explicit local renewal keeps the owner and persona, rejects replay, and stops after thirty minutes', async () => {
+  const originalNow = Date.now; let now = 1000000; Date.now = () => now
+  try {
+    const f = windowFixture(), calls = []
+    await runBridge(f.win, async (url, options) => { calls.push({ url, options }); return url === '/bridge-config' ? json(config) : url === '/prove' ? json({ id: '11111111-2222-4333-8444-555555555555', status: 'working' }, 202) : json({ status: 'submitted' }) })
+    f.receive({ data: { ...prove, keepAlive: true }, origin: ops, source: f.parent }); await settle(); f.fire(750); await settle()
+    assert.equal(calls.filter(c => c.url === '/prove').length, 1)
+    f.receive({ data: prove, origin: ops, source: f.parent }) // old request cannot be replayed
+    const next = { ...prove, requestUri: ops + '/api/v2/auth/privado/requests/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' }
+    f.receive({ data: { ...next, persona: 'reader' }, origin: ops, source: f.parent })
+    f.receive({ data: next, origin: 'https://evil.test', source: f.parent }); await settle()
+    assert.equal(calls.filter(c => c.url === '/prove').length, 1)
+    f.receive({ data: next, origin: ops, source: f.parent }); await settle(); f.fire(750); await settle()
+    assert.equal(calls.filter(c => c.url === '/prove').length, 2)
+    now += 30 * 60 * 1000; f.fire(1800000); await settle()
+    const third = { ...next, requestUri: ops + '/api/v2/auth/privado/requests/bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee' }
+    f.receive({ data: third, origin: ops, source: f.parent }); await settle()
+    assert.equal(calls.filter(c => c.url === '/prove').length, 2)
+  } finally { Date.now = originalNow }
+})
+
 test('oversized or redirect-failed metadata never produces ready or proof work', async () => {
   for (const fetcher of [async () => json({ ...config, oversized: 'x'.repeat(17000) }), async () => { throw Error('certificate/redirect/connection failure') }]) {
     const f = windowFixture(); await runBridge(f.win, fetcher)

@@ -236,6 +236,14 @@ an administrator and Account for other identities. **Cancel demo sign in**
 retires the current attempt; choosing another identity starts a new one. Nothing
 is retried automatically after an uncertain confirmation.
 
+For a direct OPS demo sign-in, keep the demo wallet window open to re-verify
+the same test identity automatically for up to 30 minutes. Closing the wallet,
+signing out, closing the OPS tab or switching accounts stops the helper. OPS
+may briefly show verification while a fresh proof is generated. This uses
+fresh five-minute proofs and tokens; the 30-minute limit is for the demo helper,
+so a token already issued can expire after the helper stops. Explorer/application
+SSO and manually operated wallets keep their normal sign-in and renewal flow.
+
 These buttons are compiled only into the local demo image. A normal V2 build
 keeps the ordinary Privado and Azure login. To inspect the ordinary Privado
 flow in the demo, expand **Use a wallet manually**, choose

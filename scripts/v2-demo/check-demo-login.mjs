@@ -30,8 +30,8 @@ const browser = await chromium.launch({ channel: process.env.OPS_TEST_BROWSER_CH
 const output = path.join(directory, 'demo-login'); await mkdir(output, { recursive: true });
 const results = []; let stage = 'start';
 const selectedCase = process.env.OPS_DEMO_LOGIN_CASE ?? 'all';
-assert.ok(['all', 'first-use', 'cancel-then-different-persona'].includes(selectedCase));
-const resultsFile = selectedCase === 'all' ? 'results.json' : selectedCase === 'first-use' ? 'first-use-results.json' : 'cancel-results.json';
+assert.ok(['all', 'first-use', 'cancel-then-different-persona', 'renewal'].includes(selectedCase));
+const resultsFile = selectedCase === 'all' ? 'results.json' : selectedCase === 'cancel-then-different-persona' ? 'cancel-results.json' : selectedCase + '-results.json';
 const contexts = [];
 async function context() { const c = await browser.newContext({ ignoreHTTPSErrors: false }); contexts.push(c); return c; }
 async function ownedPage(c, address, onPage = () => {}) {
@@ -91,7 +91,7 @@ async function finish(page, data, persona) {
   assert.equal(new URL(page.url()).pathname, admin ? '/admin/rbac/organizations' : '/admin/account');
   assert.equal(data.completes.filter(x => x.sourceProfile === expected.profileId).length, 1);
   await page.screenshot({ path: path.join(output, persona + '-signed-in.png'), fullPage: true, animations: 'disabled' });
-  return { persona, profile: self.sourceProfile, path: new URL(page.url()).pathname, verifiedHolder: candidate.holderDid, popupClosed: true };
+  return { persona, profile: self.sourceProfile, path: new URL(page.url()).pathname, verifiedHolder: candidate.holderDid };
 }
 try {
   if (selectedCase === 'all' || selectedCase === 'first-use') {
@@ -127,7 +127,7 @@ try {
     await child.locator('#details-button').click(); await child.locator('#proceed-link').click();
     await child.locator('#status').waitFor(); assert.equal(await child.evaluate(() => !!window.opener), true);
     const item = await finish(page, data, 'admin');
-    await child.waitForEvent('close', { timeout: 10000 }).catch(() => { assert.equal(child.isClosed(), true); });
+    assert.equal(child.isClosed(), false, 'Direct demo login retains the visible wallet for re-verification');
     assert.equal(nativeStartRequests, entryStarts + 1); assert.equal(walletProofRequests, 1); assert.equal(data.starts.length, entryStarts + 1); assert.notEqual(data.starts.at(-1).expectedActorId, null); assert.equal(data.completes.length, 1);
     results.push({ case: stage, passed: true, ...item, certificateWaitMilliseconds: 17000, publicQRChallenges: entryStarts, nativeStartRequestsBeforeCertificateAcceptance: entryStarts, walletProofRequestsBeforeCertificateAcceptance: 0, nativeStartRequests, walletProofRequests, httpsErrorBypass: false });
     stage = 'desktop-and-mobile-navigation';
@@ -185,13 +185,28 @@ try {
     stage = persona + '-button-only'; const c = await context(), page = await trustedOPS(c), data = observe(page);
     const popup = page.waitForEvent('popup'); await page.getByTestId('demo-persona-' + persona).click(); const child = await popup;
     const item = await finish(page, data, persona);
-    await child.waitForEvent('close', { timeout: 10000 }).catch(() => { assert.equal(child.isClosed(), true); });
+    assert.equal(child.isClosed(), false, 'Direct demo login retains the visible wallet for re-verification');
     results.push({ case: stage, passed: true, ...item, httpsErrorBypass: false }); await c.close(); console.log('PASS ' + stage);
   }
   stage = 'blocked-popup';
   { const c = await context(); await c.addInitScript(() => { window.open = () => null; }); const page = await trustedOPS(c), data = observe(page);
     await page.getByTestId('demo-persona-admin').click(); await page.getByText('The demo wallet could not open. Allow this local popup, then try again.', { exact: true }).waitFor();
     assert.equal(data.starts.length, 0); assert.equal(data.completes.length, 0); results.push({ case: stage, passed: true }); await c.close(); }
+  }
+  if (selectedCase === 'renewal') {
+    stage = 'real-proof-renewal';
+    const c = await context(), page = await trustedOPS(c), data = observe(page);
+    let proofs = 0;
+    c.on('request', request => { if (request.method() === 'POST' && request.url() === runtime.walletOrigin + '/prove') proofs++; });
+    const popup = page.waitForEvent('popup'); await page.getByTestId('demo-persona-admin').click(); const child = await popup;
+    await finish(page, data, 'admin');
+    assert.equal(child.isClosed(), false); const actor = data.self.actorId, first = data.candidates.at(-1).requestId;
+    const timeout = Date.now() + 360000;
+    while (data.completes.length < 2 && Date.now() < timeout) await page.waitForTimeout(1000);
+    assert.ok(data.completes.length >= 2, 'a second real proof must complete before timeout');
+    assert.ok(proofs >= 2, 'the wallet must generate a fresh proof');
+    assert.notEqual(data.candidates.at(-1).requestId, first); assert.equal(data.completes.at(-1).actorId, actor);
+    assert.equal(child.isClosed(), false); results.push({ case: stage, passed: true, proofs, sameActor: true }); await c.close();
   }
   if (selectedCase === 'all' || selectedCase === 'cancel-then-different-persona') {
   stage = 'cancel-then-different-persona';
