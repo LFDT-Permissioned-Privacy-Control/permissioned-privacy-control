@@ -59,7 +59,12 @@ folders: /etc/ops/public-configurations/current/core/draft.json
 ```
 
 With `folders`, each immediate child is a configuration tab. Named `core` and
-`broker` roots stay inside one configuration and have their own root selector.
+`broker` roots stay inside one configuration. Core contains access rules and
+policies; broker contains sign-in and identity verification settings. Source
+files offer a root selector when there is more than one root. Structured views
+select the relevant source automatically, offering a choice when several
+sources can provide the requested information. Settings can expose both core
+runtime policy and broker sign-in settings.
 The viewer reads `draft.json` and exactly its referenced public JSON documents,
 including explicitly pinned broker contexts. Compiled runtime `manifest.json`
 artifacts are a separate format and are not a fallback. There is no recursive

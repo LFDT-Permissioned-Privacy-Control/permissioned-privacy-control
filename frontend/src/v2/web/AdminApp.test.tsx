@@ -52,10 +52,33 @@ describe('file-backed read-only Admin',()=>{
  it('retains the broker root and reopens current raw bytes when external source updates',async()=>{
   const envelope=await fixtureEnvelope(),h=await harness('/admin/configuration');await screen.findByTestId('workspace-source')
   expect(screen.getByText('Raw configuration behind the Organizations, Groups, Contracts and Policies views.')).toBeInTheDocument()
-  const multi={...envelope,roots:[{...envelope.roots[0],id:'core'},{...envelope.roots[0],id:'broker'}]};h.source(multi);await h.refresh()
+  const multi={...envelope,roots:[{...envelope.roots[0],id:'core'},{...structuredClone(envelope.roots[0]),id:'broker'}]};h.source(multi);await h.refresh()
   fireEvent.change(screen.getByLabelText('Source root'),{target:{value:'broker'}});await userEvent.click(screen.getByRole('button',{name:'groups.json'}));expect(screen.getByLabelText('Source groups.json')).toHaveTextContent('Deployer')
   const next=structuredClone(multi);next.roots[1].files.find(f=>f.path==='groups.json')!.dataBase64=btoa(atob(next.roots[1].files.find(f=>f.path==='groups.json')!.dataBase64).replace('Deployer','Updated broker group'))
   h.source(next);await h.refresh();expect(screen.getByLabelText('Source root')).toHaveValue('broker');expect(screen.getByLabelText('Source groups.json')).toHaveTextContent('Updated broker group')
+  expect(screen.getByText(/Core contains access rules and policies/)).toBeInTheDocument()
+  h.navigate('/admin/rbac/organizations');await screen.findByText('Bank',{exact:true});expect(screen.getByLabelText('Source root')).toHaveValue('broker')
+  h.navigate('/admin/configuration');expect(screen.getByLabelText('Source root')).toHaveValue('broker')
+ })
+ it('does not show a root selector for a single source',async()=>{
+  const h=await harness('/admin/configuration');await screen.findByTestId('workspace-source');expect(screen.queryByLabelText('Source root')).not.toBeInTheDocument();h.unmount()
+ })
+ it('shows runtime and broker settings from their respective roots',async()=>{
+  const docs=fixtureDocuments(), core=await fixtureEnvelope({'draft.json':{...docs['draft.json'],runtimeCatalog:{path:'runtime.json'}},'runtime.json':{apiVersion:'ops.runtime-policy/v1alpha1',kind:'RuntimePolicy',readProfile:'demo-read'}})
+  const broker=await fixtureEnvelope({'draft.json':{...docs['draft.json'],authCatalog:{path:'auth.json'}},'auth.json':{apiVersion:'ops.auth-broker/v1alpha1',kind:'AuthBroker',issuerId:'demo-issuer'}})
+  const h=await harness('/admin/settings');h.source({...core,roots:[{...core.roots[0],id:'core'},{...broker.roots[0],id:'broker'}]});await h.refresh()
+  expect(screen.getByText('demo-read')).toBeInTheDocument();fireEvent.change(screen.getByLabelText('Source root'),{target:{value:'broker'}})
+  expect(screen.getByText('demo-issuer')).toBeInTheDocument();expect(screen.getByText('Authentication broker')).toBeInTheDocument();expect(screen.queryByText(/no runtime policy document/i)).not.toBeInTheDocument()
+ })
+ it('offers distinct identity catalogs even when one is named broker',async()=>{
+  const docs=fixtureDocuments(), core=await fixtureEnvelope(), broker=await fixtureEnvelope({'identity.json':{...docs['identity.json'],profiles:[{...docs['identity.json'].profiles[0],id:'broker-staff'}]}})
+  const h=await harness('/admin/identity/profiles');h.source({...core,roots:[{...core.roots[0],id:'core'},{...broker.roots[0],id:'broker'}]});await h.refresh()
+  expect(screen.getByRole('button',{name:'bank-staff'})).toBeInTheDocument();fireEvent.change(screen.getByLabelText('Source root'),{target:{value:'broker'}});expect(screen.getByRole('button',{name:'broker-staff'})).toBeInTheDocument()
+ })
+ it('offers roots with organizations even when they have no documents',async()=>{
+  const docs=fixtureDocuments(), core=await fixtureEnvelope(), other=await fixtureEnvelope({'draft.json':{...docs['draft.json'],organizations:[{id:org,slug:'other',name:'Other Bank'}],documents:[]}})
+  const h=await harness('/admin/rbac/organizations');await screen.findByText('Bank',{exact:true});h.source({...core,roots:[{...core.roots[0],id:'core'},{...other.roots[0],id:'other',files:other.roots[0].files.filter(f=>['draft.json','identity.json'].includes(f.path))}]});await h.refresh()
+  fireEvent.change(screen.getByLabelText('Source root'),{target:{value:'other'}});expect(screen.getByText('Other Bank',{exact:true})).toBeInTheDocument()
  })
  it('clears a removed selected folder and does not auto-select the remaining folder or its later reappearance',async()=>{
   const h=await harness();await screen.findByText('Bank',{exact:true});h.list.sources.push({id:'other',label:'Other'});await h.refresh();h.list.sources.shift();await h.refresh()

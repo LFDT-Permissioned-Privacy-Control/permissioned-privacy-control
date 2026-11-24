@@ -16,16 +16,30 @@ import type { ConfigurationViewer, ConfigurationView } from './configurationView
 export function SourceWorkspacePage({ viewer, view }: { viewer: ConfigurationViewer; view: ConfigurationView }) {
   const location = useLocation(), navigate = useNavigate(), project = view.project
   const [rootID, setRoot] = useSourceViewState('root', ''), [sourcePath, setSourcePath] = useSourceViewState('source-file', 'draft.json')
-  const root = project?.roots.find(r => r.id === rootID) ?? project?.roots.find(r => r.id === 'core') ?? project?.roots[0]
-  useEffect(() => { if (project && rootID && !project.roots.some(r => r.id === rootID)) setRoot('') }, [project, rootID])
-  useEffect(() => { if (root && !root.files.some(file => file.path === sourcePath)) setSourcePath('draft.json') }, [root, sourcePath])
-  const orgID = new URLSearchParams(location.search).get('org') ?? '', selectedOrg = root?.draft.organizations.find(o => o.id === orgID)
   const page = getSourcePage(location.pathname) ?? getSourcePage('/admin')!, presentation = sourceSections[page.section]
+  const roots = project?.roots ?? []
+  const relevant = roots.filter(r => page.id === 'configuration' || (page.id === 'platform-configuration' ? r.draft.runtimeCatalog !== undefined || r.draft.authCatalog !== undefined : page.section === 'identity' ? r.draft.identityCatalog !== undefined : page.section === 'compliance' ? r.draft.complianceCatalog !== undefined : page.section === 'disclosure' ? r.draft.disclosureCatalog !== undefined : page.id === 'organizations' ? r.draft.organizations.length > 0 : r.draft.documents.some(d => d.kind === (page.id === 'groups' ? 'groups' : page.id === 'contracts' ? 'contract-registry' : 'execution-rules'))))
+  // Suppress a duplicate broker view only when its relevant source bytes and
+  // organization scope match core. Different sources remain selectable.
+  const core = relevant.find(r => r.id === 'core')
+  const relevantBytes = (r: typeof roots[number]) => {
+    const key = page.section === 'identity' ? 'identityCatalog' : page.section === 'compliance' ? 'complianceCatalog' : page.section === 'disclosure' ? 'disclosureCatalog' : null
+    // Structured policy screens cross-reference organizations, groups and
+    // contracts; include every policy document to avoid hiding differences.
+    const refs = key ? [r.draft[key], ...(page.id === 'claim-mappings' ? r.draft.documents : [])] : r.draft.documents
+    const paths = refs.map(ref => ref && typeof ref === 'object' && 'path' in ref ? String(ref.path) : '')
+    return JSON.stringify([r.draft.organizations, refs, paths.map(path => r.files.find(file => file.path === path)?.originalText ?? null)])
+  }
+  const choices = page.id !== 'configuration' && page.id !== 'platform-configuration' && core ? relevant.filter(r => r.id !== 'broker' || relevantBytes(r) !== relevantBytes(core)) : relevant
+  const root = choices.find(r => r.id === rootID) ?? core ?? choices[0] ?? roots.find(r => r.id === 'core') ?? roots[0]
+  useEffect(() => { if (project && rootID && !project.roots.some(r => r.id === rootID)) setRoot('') }, [project, rootID])
+  useEffect(() => { if (page.id === 'configuration' && root && !root.files.some(file => file.path === sourcePath)) setSourcePath('draft.json') }, [page.id, root, sourcePath])
+  const orgID = new URLSearchParams(location.search).get('org') ?? '', selectedOrg = root?.draft.organizations.find(o => o.id === orgID)
   const tabs = page.section === 'rbac' || page.section === 'identity' ? sourcePages.filter(p => p.section === page.section) : []
   const go = (id: SourcePageId, organization = orgID) => navigate(sourcePagePath(id) + (organization ? '?org=' + organization : ''))
   const showScope = page.id !== 'configuration' && (page.section === 'rbac' || page.id === 'claim-mappings' || page.section === 'disclosure' || page.section === 'compliance')
   const sourceIssue = project && root ? sourceDisplayIssue(project, root.id) : null
-  const openSource = (path?: string) => { if (path) setSourcePath(path); go('configuration') }
+  const openSource = (path?: string) => { if (root) setRoot(root.id); if (path) setSourcePath(path); go('configuration') }
   let content: ReactNode = null
   if (project && root) {
     if (page.id === 'configuration') {
@@ -39,7 +53,7 @@ export function SourceWorkspacePage({ viewer, view }: { viewer: ConfigurationVie
   return <Card className="animate-fade-in" data-testid="rbac-manager"><CardHeader className="pb-4"><div className="flex flex-wrap items-center justify-between gap-4"><div className="flex items-center gap-3"><div className="w-10 h-10 rounded-lg bg-primary-50 flex items-center justify-center"><Shield className="w-5 h-5 text-primary" /></div><div><CardTitle className="text-lg" data-testid="rbac-title">{presentation.title}</CardTitle><p className="text-sm text-neutral-500 mt-0.5">{presentation.description}</p></div></div>{showScope && <div className="flex w-full min-w-0 items-center gap-3 sm:w-auto"><span className="shrink-0 text-sm text-neutral-500">Scope:</span><Select value={selectedOrg?.id ?? ''} onValueChange={id => go(page.id, id)} disabled={!root?.draft.organizations.length}><SelectTrigger className="min-w-0 w-full sm:w-[280px]" aria-label="Select organization scope" data-testid="org-selector"><SelectValue placeholder="Select organization" /></SelectTrigger><SelectContent>{root?.draft.organizations.map(org => <SelectItem key={org.id} value={org.id}><span className="flex gap-2 items-center"><Building2 className="w-4 h-4" />{org.name}<span className="text-xs text-neutral-400">({org.slug})</span></span></SelectItem>)}</SelectContent></Select></div>}</div></CardHeader><CardContent className="pt-0">
     <section aria-label="Configurations" className="mb-5 space-y-3 rounded-lg border border-neutral-200 bg-neutral-50 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="flex items-center gap-2 text-sm font-medium"><FolderOpen className="h-4 w-4 text-primary" />Configurations</h3><p className="mt-1 text-xs text-neutral-500">Read configurations supplied by your operator. Choosing a folder changes this view; configuration changes and approvals happen externally.</p></div><Button size="sm" variant="outline" disabled={view.busy} onClick={() => void viewer.refresh(true)}><RefreshCw className={'mr-2 h-4 w-4' + (view.busy ? ' animate-spin' : '')} />Refresh</Button></div>
       {view.sources.length > 0 && <Tabs value={view.selected ?? ''} onValueChange={viewer.select} aria-label="Available configurations"><TabsList className="h-auto max-w-full flex-wrap justify-start">{view.sources.map(source => <TabsTrigger value={source.id} key={source.id} data-testid={'configuration-source-' + source.id}>{source.label}</TabsTrigger>)}</TabsList></Tabs>}
-      {project && root && <div className="text-xs text-neutral-500" data-testid="workspace-source">{project.roots.length > 1 && <label className="flex items-center gap-2">Source root<select aria-label="Source root" className="rounded border border-neutral-300 bg-white p-1" value={root.id} onChange={event => { setRoot(event.target.value); setSourcePath('draft.json') }}>{project.roots.map(r => <option key={r.id}>{r.id}</option>)}</select></label>}</div>}
+      {project && root && <div className="text-xs text-neutral-500" data-testid="workspace-source">{choices.length > 1 && <div className="space-y-1"><label className="flex items-center gap-2">Source root<select aria-label="Source root" className="rounded border border-neutral-300 bg-white p-1" value={root.id} onChange={event => { setRoot(event.target.value); setSourcePath('draft.json') }}>{choices.map(r => <option key={r.id} value={r.id}>{r.id === 'core' ? 'Core — permissions and policies' : r.id === 'broker' ? 'Broker — sign-in settings' : r.id}</option>)}</select></label>{choices.some(r => r.id === 'core' || r.id === 'broker') && <p>Core contains access rules and policies. Broker contains settings for signing in and verifying identities. These are configuration files, not separate environments.</p>}</div>}</div>}
       {view.error && <p role="alert" className="text-sm text-error-dark">{view.error}</p>}
     </section>
     {tabs.length > 0 && <Tabs value={page.id} onValueChange={id => go(id as SourcePageId)} data-testid={`${page.section}-tabs`}><TabsList className="mb-5 flex h-auto w-full flex-wrap justify-start">{tabs.map(p => <TabsTrigger value={p.id} key={p.id} data-testid={`tab-${p.id}`}>{p.title}</TabsTrigger>)}</TabsList></Tabs>}
