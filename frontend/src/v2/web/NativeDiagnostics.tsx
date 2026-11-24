@@ -30,7 +30,7 @@ export function NativeDiagnostics({ scope }: { scope: OperationScope }) {
       <NativeHealth scope={scope} />
       <TaskError message={task.error} />
       <Panel title="Test request">
-        <p className="mb-4 text-sm text-neutral-500">For a signed transaction, <Link to="/admin/account" className="font-medium text-primary hover:underline">set up your wallet and RPC connection</Link>. This tester checks reads and estimates with your own verified identity.</p>
+        <p className="mb-4 text-sm text-neutral-500">For a signed transaction, <Link to="/account" className="font-medium text-primary hover:underline">set up your wallet and RPC connection</Link>. This tester checks reads and estimates with your own verified identity.</p>
         <form
           className="space-y-4"
           onSubmit={(e) => {

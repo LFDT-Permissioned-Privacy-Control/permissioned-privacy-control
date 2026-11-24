@@ -110,8 +110,11 @@ describe('file-backed read-only Admin',()=>{
   expect(screen.queryByText('Bank',{exact:true})).not.toBeInTheDocument();expect(screen.queryByTestId('workspace-source')).not.toBeInTheDocument()
  })
  it('keeps the own-account/wallet page available without organization admin roles',async()=>{
-  const state=initial();state.self={...state.self!,organizations:[]};await harness('/admin/account',state)
+  const state=initial();state.self={...state.self!,organizations:[]};await harness('/account',state)
   expect(screen.getByTestId('account-identity')).toHaveTextContent(state.self.actorId);expect(screen.getByRole('button',{name:'Refresh session'})).toBeEnabled();expect(screen.getByRole('heading',{name:'Linked Addresses'})).toBeInTheDocument();expect(screen.getByTestId('account-organizations')).toHaveTextContent('No organizations');expect(screen.queryByTestId('admin-nav')).not.toBeInTheDocument()
+ })
+ it('provides RPC command examples without exposing a token',async()=>{
+  await harness('/account');expect(screen.getByText(/cast balance <address>/)).toBeInTheDocument();expect(screen.getByText(/curl '/)).toHaveTextContent('eth_blockNumber');expect(screen.getByText(/ethers.FetchRequest/)).toHaveTextContent('Bearer <token>')
  })
  it.each(['/admin','/admin/rbac','/admin/rbac/organizations','/admin/rbac/configuration','/admin/configuration','/admin/identity/profiles','/admin/identity/claim-mappings','/admin/settings','/admin/disclosure/rules','/admin/compliance/policy','/admin/compliance','/admin/disclosure','/disclosures','/admin/logs','/admin/diagnostics'])('denies member console entry at%s without mounting or fetching protected content',async path=>{
   const state=initial();state.self!.organizations[0].isOrgAdmin=false;const h=await harness(path,state)
@@ -125,7 +128,7 @@ describe('file-backed read-only Admin',()=>{
   const h=await harness('/admin/compliance');expect(screen.getByText('Operational page fixture')).toBeInTheDocument();const state=initial();state.self!.organizations[0].isOrgAdmin=false;h.replace(state);expect(screen.getByRole('heading',{name:'Access Denied'})).toBeInTheDocument();expect(protectedRenders.every(Boolean)).toBe(true)
  })
  it.each([['Copy access token','token'],['Copy Authorization header','header'],['Copy for Foundry','foundry']] as const)('keeps explicit Account credential action%s',async(label,format)=>{
-  const h=await harness('/admin/account');await userEvent.click(screen.getByRole('button',{name:label}));expect(h.mock.copyOwnRPCCredential).toHaveBeenCalledWith(format);expect(screen.getByRole('button',{name:'Copied'})).toBeInTheDocument()
+  const h=await harness('/account');await userEvent.click(screen.getByRole('button',{name:label}));expect(h.mock.copyOwnRPCCredential).toHaveBeenCalledWith(format);expect(screen.getByRole('button',{name:'Copied'})).toBeInTheDocument()
  })
 })
 it('polls visible configurations, pauses while hidden or on operational pages, and refreshes on focus',async()=>{

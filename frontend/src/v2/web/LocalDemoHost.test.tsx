@@ -24,7 +24,7 @@ it('keeps one demo owner across pending/candidate/selected branches and uses the
   const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
   function App() {
     const current = useSyncExternalStore(controller.subscribe, controller.snapshot), path = useLocation()
-    return <LocalDemoHost controller={controller}>{(slot, active) => <><output data-testid="path">{path.pathname}</output>{current.phase === 'selected' && path.pathname === '/admin/account' ? <p>Verified account</p> : <AuthenticationPage controller={controller} demoSlot={slot} demoBusy={active} />}</>}</LocalDemoHost>
+    return <LocalDemoHost controller={controller}>{(slot, active) => <><output data-testid="path">{path.pathname}</output>{current.phase === 'selected' && path.pathname === '/account' ? <p>Verified account</p> : <AuthenticationPage controller={controller} demoSlot={slot} demoBusy={active} />}</>}</LocalDemoHost>
   }
   render(<MemoryRouter initialEntries={['/login']}><App /></MemoryRouter>)
   expect(await screen.findByText('Development Only')).toBeInTheDocument()
@@ -42,7 +42,7 @@ it('keeps one demo owner across pending/candidate/selected branches and uses the
   expect(screen.queryByTestId('qr-code')).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Cancel demo sign in' })).toBeInTheDocument()
   act(() => set({ candidate: { status: 'candidate', requestId: id, sourceProfile: 'demo-privado', holderDid: rows[0].holderDid, network: 'polygon:mumbai', actorId: actor, proofDigest: 'sha256:' + 'a'.repeat(64), verifiedAt: now(), expiresAt: state.pending!.expiresAt } }))
-  await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/admin/account'))
+  await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/account'))
   expect(controller.confirm).toHaveBeenCalledTimes(1); expect(popup.close).toHaveBeenCalledTimes(1)
   expect(controller.cancel).not.toHaveBeenCalled(); expect(open).toHaveBeenCalledTimes(1)
 })

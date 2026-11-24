@@ -65,7 +65,7 @@ export function AuthenticationPage({ controller, demoSlot, demoBusy = false, not
       {selected && state.self && !demoBusy && <div className="space-y-5">
         <LoginStatus tone="success" title="Authentication successful!">{state.flow ? 'Confirm this account to continue to the application.' : 'Your account is ready.'}</LoginStatus>
         <div className="rounded-lg bg-neutral-50 p-3"><p className="text-xs text-neutral-400 uppercase tracking-wide mb-1">OPS identity</p><p data-field="actorId" className="break-all font-mono text-xs text-neutral-700">{state.self.actorId}</p></div>
-        {state.flow ? <Button className="w-full" disabled={state.busy} onClick={() => void controller.continue()}>{state.busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}{state.busy ? 'Continuing…' : 'Continue to application'}</Button> : <><Button asChild className="w-full"><Link to="/admin/account">Open account</Link></Button>{hasAdminRole(state.self) && <Button asChild variant="outline" className="w-full"><Link to="/admin/rbac/organizations">Open configuration viewer</Link></Button>}</>}
+        {state.flow ? <Button className="w-full" disabled={state.busy} onClick={() => void controller.continue()}>{state.busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}{state.busy ? 'Continuing…' : 'Continue to application'}</Button> : <><Button asChild className="w-full"><Link to="/account">Open account</Link></Button>{hasAdminRole(state.self) && <Button asChild variant="outline" className="w-full"><Link to="/admin/rbac/organizations">Open configuration viewer</Link></Button>}</>}
         <Button variant="ghost" size="sm" className="w-full" disabled={state.busy} onClick={() => void controller.logout()}>Sign out of OPS</Button>
       </div>}
       {state.pending && !demoBusy && <div className="space-y-6" aria-label="Pending authentication">
@@ -81,7 +81,7 @@ export function AuthenticationPage({ controller, demoSlot, demoBusy = false, not
       {(canChoose || demoBusy || demoRenewal || demoLogin) && demoSlot}
       {demoRenewal && demoBusy && <Button variant="ghost" size="sm" disabled={state.busy} className="w-full" onClick={() => void controller.cancel()}>Cancel sign in</Button>}
       {canChoose && <>{demoSlot && providerTabs}{providerPanel}</>}
-      {switching && state.self && !state.pending && <Button asChild variant="ghost" size="sm" className="w-full"><Link to="/admin/account">Keep current account</Link></Button>}
+      {switching && state.self && !state.pending && <Button asChild variant="ghost" size="sm" className="w-full"><Link to="/account">Keep current account</Link></Button>}
     </LoginCard>
     {active === 'privado' && !selected && !demoSlot && <div className="mt-6 text-center"><p className="text-sm text-neutral-700">Don't have Privado ID? <a href="https://docs.privado.id/docs/wallet/wallet-app/privadoid-app/" target="_blank" rel="noopener noreferrer" className="text-primary underline underline-offset-2 hover:text-primary-300">Download the wallet</a></p></div>}
   </LoginFrame>

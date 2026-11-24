@@ -297,7 +297,7 @@ describe('document context and flow ownership', () => {
     expect(controller.snapshot().busy).toBe(false); expect(controller.snapshot().error).toBe('flow_expired')
     expect(mocks.complete).not.toHaveBeenCalled(); expect(sessionStorage.getItem(FLOW_KEY)).toBeNull()
   })
-  it.each(['/admin', '/admin/account', '/admin/rbac', '/admin/rbac/organizations', '/admin/rbac/groups?org=11111111-1111-1111-1111-111111111111'])(
+  it.each(['/account', '/admin', '/admin/account', '/admin/rbac', '/admin/rbac/organizations', '/admin/rbac/groups?org=11111111-1111-1111-1111-111111111111'])(
     'restores on the exact native Admin entry %s without resuming a saved application', async path => {
       history.replaceState(null, '', path)
       sessionStorage.setItem(FLOW_KEY, JSON.stringify({ version: 1, phase: 'pending', id: '33333333-3333-3333-3333-333333333333', expiresAt: a.expiresAt }))
@@ -314,10 +314,10 @@ describe('document context and flow ownership', () => {
       expect(controller.snapshot().phase).toBe('failed'); expect(controller.snapshot().self).toBeNull()
       expect(client.restore).not.toHaveBeenCalled(); expect(mocks.own).not.toHaveBeenCalled()
     })
-  it('retains selected context across exact Admin Back/Forward and retires wallet work', async () => {
+  it.each(['/account', '/admin/rbac/groups?org=11111111-1111-1111-1111-111111111111'])('retains selected context across Back/Forward to %s and retires wallet work', async path => {
     const client = fake(); controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
     const retire = vi.spyOn(controller.wallet, 'cancel'), scope = controller.scopeRevision
-    history.pushState(null, '', '/admin/rbac/groups?org=11111111-1111-1111-1111-111111111111')
+    history.pushState(null, '', path)
     window.dispatchEvent(new PopStateEvent('popstate'))
     expect(controller.snapshot().self?.actorId).toBe(a.actorId); expect(controller.scopeRevision).toBe(scope)
     expect(retire).toHaveBeenCalledTimes(1); expect(client.restore).toHaveBeenCalledTimes(1)

@@ -3,7 +3,7 @@ import { sourcePages } from './navigation'
 
 const sourcePaths = [...sourcePages.map(page => page.path), ...sourcePages.map(page => '/admin/rbac/' + page.id), '/admin/rbac/azure-tenants']
 const operationalPages = ['/admin/compliance', '/admin/disclosure', '/admin/disclosures', '/admin/logs', '/admin/diagnostics', '/disclosures']
-const adminPages = new Set(['/admin', '/admin/account', '/admin/rbac', ...sourcePaths, ...operationalPages])
+const adminPages = new Set(['/account', '/admin', '/admin/account', '/admin/rbac', ...sourcePaths, ...operationalPages])
 const scopedPages = new Set(['/admin/rbac', ...sourcePaths, ...operationalPages])
 
 // Match the server's exact page/query contract. No return URL, encoded alias,

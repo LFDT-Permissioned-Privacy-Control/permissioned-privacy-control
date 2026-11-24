@@ -25,7 +25,7 @@ export async function checkAdminEntry({ users, runtime, outputDirectory, passed 
     const self = await selfResponse.json();
     assert.equal(self.actorId, user.access.actorId);
     assert.equal(self.organizations.some(org => org.isOrgAdmin === true || org.isOrgReadonlyAdmin === true), admin, name + ': live organization role');
-    await user.page.goto(runtime.opsOrigin + '/admin/account');
+    await user.page.goto(runtime.opsOrigin + '/account');
     await user.page.getByTestId('account-identity').waitFor();
     assert.ok((await user.page.getByTestId('account-identity').textContent()).includes(self.actorId), name + ': own account actor matches verified Self');
     for (const org of self.organizations) {

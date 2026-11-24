@@ -235,7 +235,7 @@ describe('one explicit public demo identity owns the normal native login', () =>
     f.receive({ v: 1, type: 'status', nonce: '1'.repeat(64), status: 'submitted' }); await flush(); expect(f.native.confirm).not.toHaveBeenCalled()
     f.candidate(persona); await flush()
     expect(f.native.confirm).toHaveBeenCalledTimes(1); expect(f.native.continue).not.toHaveBeenCalled()
-    expect(f.navigate).toHaveBeenCalledWith(persona === 'reader' ? '/admin/rbac/organizations' : '/admin/account')
+    expect(f.navigate).toHaveBeenCalledWith(persona === 'reader' ? '/admin/rbac/organizations' : '/account')
     expect(f.popups[0].closed).toBe(true); expect(f.driver.snapshot().active).toBe(false)
   })
   it('ignores a foreign window/origin and rejects substituted metadata before native start', async () => {

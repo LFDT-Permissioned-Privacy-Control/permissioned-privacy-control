@@ -76,7 +76,7 @@ function observe(page) {
 async function finish(page, data, persona) {
   const expected = metadata.personas.find(p => p.id === persona);
   await Promise.race([
-    page.waitForURL(url => url.origin === runtime.opsOrigin && ['/admin/account', '/admin/rbac/organizations'].includes(url.pathname), { timeout: 170000 }),
+    page.waitForURL(url => url.origin === runtime.opsOrigin && ['/account', '/admin/rbac/organizations'].includes(url.pathname), { timeout: 170000 }),
     page.getByText('Demo sign-in stopped', { exact: true }).waitFor({ state: 'visible', timeout: 170000 }).then(() => { throw Error('The demo sign-in UI reported a failure'); }),
   ]);
   await page.waitForFunction(() => { const text = document.body.textContent?.toLowerCase() ?? ''; return text.includes('ops identity') || !!document.querySelector('[data-testid="rbac-manager"]'); });
@@ -88,7 +88,7 @@ async function finish(page, data, persona) {
   assert.equal(candidate.holderDid, expected.holderDid); assert.equal(candidate.network, metadata.network);
   assert.equal(candidate.actorId, access.actorId); assert.equal(self.actorId, access.actorId); assert.equal(self.sourceProfile, expected.profileId);
   const admin = self.organizations.some(org => org.isOrgAdmin || org.isOrgReadonlyAdmin);
-  assert.equal(new URL(page.url()).pathname, admin ? '/admin/rbac/organizations' : '/admin/account');
+  assert.equal(new URL(page.url()).pathname, admin ? '/admin/rbac/organizations' : '/account');
   assert.equal(data.completes.filter(x => x.sourceProfile === expected.profileId).length, 1);
   await page.screenshot({ path: path.join(output, persona + '-signed-in.png'), fullPage: true, animations: 'disabled' });
   return { persona, profile: self.sourceProfile, path: new URL(page.url()).pathname, verifiedHolder: candidate.holderDid };

@@ -128,7 +128,7 @@ func pagePath(value string) bool {
 // operation authority still belong to the native client and API handlers.
 // Keep this list exact: an unknown API or legacy path must never become a SPA.
 var adminPages = []string{
-	"/admin", "/admin/account", "/admin/rbac", "/admin/rbac/organizations", "/admin/rbac/groups",
+	"/account", "/admin", "/admin/account", "/admin/rbac", "/admin/rbac/organizations", "/admin/rbac/groups",
 	"/admin/rbac/contracts", "/admin/rbac/execution-policy", "/admin/rbac/configuration",
 	"/admin/rbac/identity-profiles", "/admin/rbac/claim-mappings", "/admin/rbac/azure-tenants", "/admin/rbac/platform-configuration",
 	"/admin/rbac/disclosure-source", "/admin/rbac/compliance-source",
@@ -150,7 +150,7 @@ func adminQuery(value, raw string, force bool) bool {
 	if raw == "" {
 		return !force
 	}
-	if !adminPage(value) || value == "/admin" || value == "/admin/account" {
+	if !adminPage(value) || value == "/admin" || value == "/admin/account" || value == "/account" {
 		return false
 	}
 	// A single canonical organization selector is the only accepted query.

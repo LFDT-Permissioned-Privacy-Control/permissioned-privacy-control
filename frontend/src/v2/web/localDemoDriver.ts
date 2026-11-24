@@ -197,7 +197,7 @@ export class LocalDemoDriver {
       if (this.owned(i)) this.finish(i)
     } else {
       if (i.renewal) { this.finish(i, !!this.demoSession); return }
-      const target = self.organizations.some(o => o.isOrgAdmin || o.isOrgReadonlyAdmin) ? '/admin/rbac/organizations' : '/admin/account'
+      const target = self.organizations.some(o => o.isOrgAdmin || o.isOrgReadonlyAdmin) ? '/admin/rbac/organizations' : '/account'
       let retain = false
       if (i.keepAlive && i.keepUntil && i.keepUntil > Date.now() && i.popup && i.identity && i.config) {
         const marker = readMultiMarker()
