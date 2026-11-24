@@ -29,6 +29,14 @@ it('keeps organization administration separate from execution admin implication 
   expect(screen.queryByText('Implied by admin')).not.toBeInTheDocument()
   expect(screen.getByRole('checkbox', { name: 'eth_chainId' })).toBeChecked()
 })
+it('shows trace and transaction capabilities as recognized methods without hiding unknown names', () => {
+  render(<SourcePermissionChoices methods={['debug_traceTransaction', 'eth_sendTransaction', 'custom_rpc']} claims={[]} isAdmin={false} />)
+  expect(screen.getByRole('checkbox', { name: 'debug_traceTransaction' })).toBeChecked()
+  expect(screen.getByRole('checkbox', { name: 'eth_sendTransaction' })).toBeChecked()
+  expect(screen.getByText('Additional configured methods · 1')).toBeInTheDocument()
+  expect(screen.getByText('custom_rpc')).toBeInTheDocument()
+  expect(screen.getByText(/permission is also used for signed raw submission/)).toBeInTheDocument()
+})
 const org = '11111111-1111-1111-1111-111111111111', groupID = '33333333-3333-3333-3333-333333333333'
 async function sourceProject(patch: JSONObject = {}) {
   const group = { id: groupID, slug: 'readers', name: 'Readers', description: 'Native proposal', isOrgAdmin: false, isOrgReadonlyAdmin: false, verboseErrors: false, allowedMethods: ['eth_call', 'custom_rpc', 'eth_newFilter'], claims: ['deploy', 'future-claim'], rpcCredential: { fromEnv: 'BANK_RPC', futureReference: { preserved: true } }, futureGroup: true, ...patch }
