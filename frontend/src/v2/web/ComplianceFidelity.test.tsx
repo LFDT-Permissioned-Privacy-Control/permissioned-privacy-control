@@ -21,6 +21,47 @@ function scope() {
   return { identity: { actor, expires: Date.now() / 1000 + 300 }, request, check: vi.fn(), signal: new AbortController().signal, self: { organizations: [org, org2].map((id, i) => ({ id, name: 'Bank ' + i, isOrgAdmin: true, isOrgReadonlyAdmin: false })) } } as unknown as OperationScope & { request: typeof request }
 }
 afterEach(cleanup)
+it('reports a failed log fetch without presenting an empty history and retries successfully', async () => {
+  const s = scope(), original = s.request.getMockImplementation()!
+  let fail = true
+  s.request.mockImplementation(async (path, options) => {
+    if (path.includes('/events') && fail) throw new TypeError('Failed to fetch')
+    return original(path, options)
+  })
+  render(<MemoryRouter initialEntries={['/?org=' + org]}><NativeCompliance scope={s} /></MemoryRouter>)
+  await screen.findByText('0 usd')
+  await userEvent.click(screen.getByRole('button', { name: 'Compliance logs' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Could not load compliance logs')
+  expect(screen.queryByText('No records in this scope.')).not.toBeInTheDocument()
+  expect(screen.queryByText(/End of the available records/)).not.toBeInTheDocument()
+  fail = false
+  await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  expect(await screen.findAllByRole('button', { name: 'View details' })).toHaveLength(3)
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
+it('retires open event details and history footer while a failed refresh is retried', async () => {
+  const s = scope(), original = s.request.getMockImplementation()!
+  let mode: 'ok' | 'fail' | 'held' = 'ok', resolve!: (value: unknown) => void
+  s.request.mockImplementation(async (path, options) => {
+    if (path.includes('/events') && mode === 'fail') throw new TypeError('Failed to fetch')
+    if (path.includes('/events') && mode === 'held') return new Promise(done => { resolve = done })
+    return original(path, options)
+  })
+  render(<MemoryRouter initialEntries={['/?org=' + org]}><NativeCompliance scope={s} /></MemoryRouter>)
+  await screen.findByText('0 usd'); await userEvent.click(screen.getByRole('button', { name: 'Compliance logs' }))
+  await userEvent.click((await screen.findAllByRole('button', { name: 'View details' }))[0])
+  expect(screen.getByRole('dialog')).toHaveTextContent('matched-0')
+  mode = 'fail'; fireEvent.click(screen.getByRole('button', { name: 'Refresh', hidden: true }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Could not load compliance logs')
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  mode = 'held'; await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  await waitFor(() => expect(resolve).toBeTypeOf('function'))
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(screen.queryByText(/End of the available records/)).not.toBeInTheDocument()
+  resolve(await original('/events'))
+  expect(await screen.findAllByRole('button', { name: 'View details' })).toHaveLength(3)
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+})
 it('opens allowed, blocked and monitored decision evidence without issuing extra reads; zero is evidence', async () => {
   const s = scope()
   render(<MemoryRouter initialEntries={['/?org=' + org]}><NativeCompliance scope={s} /></MemoryRouter>)

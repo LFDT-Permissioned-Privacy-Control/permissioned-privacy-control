@@ -139,6 +139,7 @@ function ComplianceResults({
     [eventDetail, setEventDetail] = useState<{ scope: OperationScope; value: ObjectValue }>()
   const base = `/api/v2/orgs/${org}/compliance/`
   const load = async (next = '', number = 1) => {
+    if (tab === 'events') setEventDetail(undefined)
     const page = tab === 'travel-rule-records' || tab === 'events'
     const query = new URLSearchParams({ limit: '25' })
     if (next) query.set('cursor', next)
@@ -188,7 +189,7 @@ function ComplianceResults({
   )
   return (
     <div className="space-y-4">
-      <TaskError message={task.error} />
+      <TaskError message={tab === 'events' && task.error === 'Failed to fetch' ? 'Could not load compliance logs. Check your connection and select Refresh to try again.' : task.error} />
       <Panel title={tabs.find(([id]) => id === tab)?.[1] ?? tab} actions={actions}>
         {source && (
           <p className="mb-4 break-all text-xs text-neutral-500">
@@ -282,7 +283,7 @@ function ComplianceResults({
             refresh={load}
           />
         )}
-        {tab === 'events' && (
+        {tab === 'events' && !task.error && (
           <>
             <DataTable
               loading={task.busy}
@@ -314,7 +315,7 @@ function ComplianceResults({
             </p>
           </>
         )}
-        {(tab === 'events' || tab === 'travel-rule-records') && <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-neutral-500">Page {pageNumber}{cursor ? ' · More records available' : ' · End of the available records'}</p><div className="flex gap-2"><Button variant="outline" disabled={task.busy || !visited.some(value => value.number === pageNumber - 1)} onClick={() => { const previous = visited.find(value => value.number === pageNumber - 1); if (previous) void task.run(() => load(previous.cursor, previous.number)) }}>Previous page</Button><Button variant="outline" disabled={task.busy || !cursor} onClick={() => void task.run(() => load(cursor, pageNumber + 1))}>Next page</Button></div>{visited[0]?.number > 1 && <p className="w-full text-xs text-neutral-500">Up to 10 visited page positions are kept in this tab. Refresh starts again at page 1.</p>}</div>}
+        {(tab === 'events' && !task.error && !task.busy || tab === 'travel-rule-records') && <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-neutral-500">Page {pageNumber}{cursor ? ' · More records available' : ' · End of the available records'}</p><div className="flex gap-2"><Button variant="outline" disabled={task.busy || !visited.some(value => value.number === pageNumber - 1)} onClick={() => { const previous = visited.find(value => value.number === pageNumber - 1); if (previous) void task.run(() => load(previous.cursor, previous.number)) }}>Previous page</Button><Button variant="outline" disabled={task.busy || !cursor} onClick={() => void task.run(() => load(cursor, pageNumber + 1))}>Next page</Button></div>{visited[0]?.number > 1 && <p className="w-full text-xs text-neutral-500">Up to 10 visited page positions are kept in this tab. Refresh starts again at page 1.</p>}</div>}
       </Panel>
     </div>
   )
