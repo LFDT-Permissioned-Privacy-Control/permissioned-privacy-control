@@ -24,7 +24,7 @@ export function Panel({
   children: ReactNode
 }) {
   return (
-    <Card>
+    <Card className="min-w-0 max-w-full">
       <CardHeader>
         <div className="flex items-center justify-between gap-3">
           <CardTitle className="text-lg">{title}</CardTitle>
@@ -129,7 +129,7 @@ export function DataTable({
 }) {
   if (loading) return <p role="status" className="py-8 text-center text-sm text-neutral-500">Loading…</p>
   return (
-    <div className="overflow-x-auto">
+    <div className="min-w-0 max-w-full overflow-x-auto">
       <Table>
         <TableHeader>
           <TableRow>
@@ -142,7 +142,7 @@ export function DataTable({
           {items.map((row, index) => (
             <TableRow key={String(row.id ?? row.caseId ?? row.eventId ?? index)}>
               {columns.map((column) => (
-                <TableCell key={column.key} className="max-w-xs break-words">
+                <TableCell key={column.key} className="max-w-xs break-all">
                   {column.render ? column.render(row) : optionalText(row[column.key]) || '—'}
                 </TableCell>
               ))}
