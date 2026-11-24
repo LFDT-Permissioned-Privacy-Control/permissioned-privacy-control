@@ -633,17 +633,25 @@ function CaseDetail({
             ['Purpose', selected.purpose],
             ['Legal basis', selected.legalBasis],
             ['Recipient', selected.recipientActorId],
+            ['Created by', selected.creatorActorId],
             ['Privacy level', selected.scope.level],
+            ['Created', instant(selected.createdAt)],
             ['Expires', instant(selected.expiresAt)],
+            ...(selected.status === 'revoked' ? [['Revoked', selected.revokedAt === undefined ? 'Not available' : instant(selected.revokedAt)]] : []),
             ['Data begins', instant(selected.scope.dataTime.start)],
             ['Data ends (inclusive)', instant(selected.scope.dataTime.end)],
           ].map(([label, value]) => (
             <div key={label}>
               <dt className="text-xs text-neutral-500">{label}</dt>
-              <dd className="mt-1 flex items-center gap-1 break-all">{value}{(label === 'Case ID' || label === 'Recipient') && <CopyValue value={value} label={'Copy ' + label.toLowerCase()} />}</dd>
+              <dd className="mt-1 flex items-center gap-1 break-all">{value}{(label === 'Case ID' || label === 'Recipient' || label === 'Created by') && <CopyValue value={value} label={'Copy ' + label.toLowerCase()} />}</dd>
             </div>
           ))}
         </dl>
+        <div className="mt-4 space-y-3 text-sm">
+          <div><p className="text-xs text-neutral-500">Target identities</p><ul className="mt-1 space-y-1">{selected.scope.targetActors.map(actor => <li key={actor} className="break-all font-mono text-xs">{actor}</li>)}</ul></div>
+          <div><p className="text-xs text-neutral-500">Permitted data</p><div className="mt-1 flex flex-wrap gap-1">{selected.scope.resources.map(resource => <Badge key={resource} variant="outline">{resourceOptions.find(option => option.value === resource)?.label ?? resource}</Badge>)}</div></div>
+          <div><p className="text-xs text-neutral-500">Wallet scope</p><p className="mt-1">{selected.scope.addresses.mode === 'list' ? 'Only the specified eligible wallets linked to the target identities.' : 'All eligible wallets linked to the target identities.'}</p><p className="mt-1 text-xs text-neutral-500">Wallet scope applies to wallet-based data; eligibility is checked using current verified wallet links.</p>{selected.scope.addresses.mode === 'list' && <ul className="mt-1 space-y-1">{selected.scope.addresses.values.map(address => <li key={address} className="break-all font-mono text-xs">{address}</li>)}</ul>}</div>
+        </div>
         {!recipient && (
           <p className="mt-4 text-sm text-neutral-500">
             Organization administration can inspect case metadata. Only its authorized recipient can

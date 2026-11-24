@@ -58,6 +58,7 @@ export interface NativeCase {
   version: number
   createdAt: number
   expiresAt: number
+  revokedAt?: number
   originalRuleDigest: string
   originalBundleDigest: string
 }
@@ -102,6 +103,7 @@ export function caseRecord(value: unknown): NativeCase {
     throw Error('Invalid case scope')
   instant(v.createdAt)
   instant(v.expiresAt)
+  if (v.revokedAt !== undefined) instant(v.revokedAt)
   return v as unknown as NativeCase
 }
 export function casePage(value: unknown): {

@@ -62,12 +62,18 @@ type CaseResponse struct {
 	Version              int64                  `json:"version"`
 	CreatedAt            int64                  `json:"createdAt"`
 	ExpiresAt            int64                  `json:"expiresAt"`
+	RevokedAt            *int64                 `json:"revokedAt,omitempty"`
 	OriginalRuleDigest   string                 `json:"originalRuleDigest"`
 	OriginalBundleDigest string                 `json:"originalBundleDigest"`
 }
 
 func (c Case) Response() CaseResponse {
-	return CaseResponse{c.ID, c.RuleID, c.RecipientActor, c.CreatorActor, c.DataOrg, c.Scope, c.Reference, c.Purpose, c.LegalBasis, c.Status, c.Version, c.CreatedAt.Unix(), c.ExpiresAt.Unix(), c.OriginalRuleDigest, c.OriginalBundleDigest}
+	var revokedAt *int64
+	if c.RevokedAt != nil {
+		value := c.RevokedAt.Unix()
+		revokedAt = &value
+	}
+	return CaseResponse{c.ID, c.RuleID, c.RecipientActor, c.CreatorActor, c.DataOrg, c.Scope, c.Reference, c.Purpose, c.LegalBasis, c.Status, c.Version, c.CreatedAt.Unix(), c.ExpiresAt.Unix(), revokedAt, c.OriginalRuleDigest, c.OriginalBundleDigest}
 }
 
 type EventSummary struct {
@@ -120,6 +126,9 @@ func allLowerHex(s string) bool {
 	return true
 }
 func ValidEpoch(s string) bool { return disclosurepolicy.Text(s, 128) }
+func validRevocationTime(at *time.Time) bool {
+	return at != nil && at.Unix() >= 0 && at.Unix() <= disclosurepolicy.MaxUnixSeconds
+}
 
 // ValidateCase is repeated on SQL reads. A writable DB row is not accepted as
 // a loosely decoded policy/grant object. Byte limits precede adapter decoding.
@@ -136,7 +145,7 @@ func ValidateCase(c Case) error {
 			return ErrInvalid
 		}
 	case "revoked":
-		if c.RevokedAt == nil || !identity.ValidActorID(c.RevokedBy) || !disclosurepolicy.Text(c.RevokeReason, 2048) {
+		if !validRevocationTime(c.RevokedAt) || !identity.ValidActorID(c.RevokedBy) || !disclosurepolicy.Text(c.RevokeReason, 2048) {
 			return ErrInvalid
 		}
 	default:

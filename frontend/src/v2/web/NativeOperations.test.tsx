@@ -94,6 +94,19 @@ function scope(role: 'admin' | 'readonly' | 'member' = 'admin') {
   } as unknown as OperationScope & { request: typeof request }
 }
 afterEach(() => cleanup())
+it('shows an administrator the case targets, resources, wallet scope and recorded dates', async () => {
+  const s = scope('readonly'), target = 'ops:p1:' + 'C'.repeat(43), recipient = 'ops:p1:' + 'B'.repeat(43), wallet = '0x' + '1'.repeat(40)
+  const item = { ...currentCase, recipientActorId: recipient, status: 'revoked', revokedAt: now - 10, scope: { ...currentCase.scope, targetActors: [target], resources: ['transactions', 'events'], addresses: { mode: 'list', values: [wallet] } } }
+  s.request.mockImplementation(async path => path.includes('?') ? { items: [item], nextCursor: '', scanComplete: true } : item)
+  render(<MemoryRouter><NativeDisclosures scope={s} /></MemoryRouter>)
+  await userEvent.selectOptions(await screen.findByLabelText('Case view'), 'data-org-admin')
+  await userEvent.click(await screen.findByRole('button', { name: 'Open case' }))
+  const dialog = within(await screen.findByRole('dialog', { name: 'Disclosure case details' }))
+  expect(dialog.getByText(target)).toBeVisible(); expect(dialog.getByText(wallet)).toBeVisible()
+  expect(dialog.getAllByText('Transactions').length).toBeGreaterThan(0); expect(dialog.getAllByText('Events').length).toBeGreaterThan(0)
+  expect(dialog.getByText('Only the specified eligible wallets linked to the target identities.')).toBeVisible()
+  expect(dialog.getByText('Created')).toBeVisible(); expect(dialog.getByText('Revoked', { selector: 'dt' })).toBeVisible()
+})
 it('restores read-only organization case inspection without exposing management or recipient reads', async () => {
   const s = scope('readonly'), anotherRecipient = 'ops:p1:' + 'B'.repeat(43)
   s.request.mockImplementation(async path => path.endsWith('/audit?limit=25') ? { items: [], nextCursor: '', scanComplete: true } : path.includes('?') ? { items: [{ ...currentCase, recipientActorId: anotherRecipient }], nextCursor: '', scanComplete: true } : { ...currentCase, recipientActorId: anotherRecipient })
