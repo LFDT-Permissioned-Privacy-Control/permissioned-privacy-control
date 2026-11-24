@@ -17,6 +17,13 @@ commands](policy-authoring.md) when preparing files for deployment.
 Wallet linking, disclosure cases, compliance records, Access Logs and diagnostics
 are separate operational features and keep their real authorization rules.
 
+Group permission inspection obtains method names from the running OPS
+instance's policy catalog. The catalog lists names that policies can assign,
+including aliases; it does not guarantee that every RPC handler is enabled.
+The configuration being inspected may target another deployment or version, so
+its declared names remain visible even when absent from this instance's catalog.
+If the catalog cannot be read, the UI still shows the configured names.
+
 ## Configure the server directory
 
 Add the optional viewer section to the trusted operational server configuration

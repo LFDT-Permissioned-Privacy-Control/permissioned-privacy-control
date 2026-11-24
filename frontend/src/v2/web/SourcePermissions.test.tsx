@@ -5,12 +5,13 @@ import { afterEach, expect, it } from 'vitest'
 import { SourcePermissionChoices, matchingNativePreset, NATIVE_METHODS } from './SourcePermissions'
 import { SourceOrganizations } from './SourceOrganizations'
 import { documentValue, loadSourceProject, type JSONObject } from './sourceProject'
+const testCatalog = { status: 'ready' as const, catalog: { version: 'test/v1', methods: NATIVE_METHODS.map(name => ({ name, canonical: name })) } }
 afterEach(cleanup)
 const networkReader = ['eth_chainId', 'eth_blockNumber', 'net_version', 'net_listening', 'eth_gasPrice', 'eth_feeHistory']
 it('renders selected, unselected and implied checks plus a matching preset in read-only inspection with no editing controls', async () => {
-  render(<SourcePermissionChoices methods={[...networkReader, 'custom_rpc']} claims={['admin', 'future-claim']} isAdmin={false} />)
+  render(<SourcePermissionChoices catalog={testCatalog} methods={[...networkReader, 'custom_rpc']} claims={['admin', 'future-claim']} isAdmin={false} />)
   const preset = screen.getByRole('group', { name: 'Network reader' })
-  expect(preset).toHaveAttribute('data-state', 'selected'); expect(preset).toHaveClass('border-primary', 'bg-primary-50')
+  expect(preset).toHaveAttribute('data-state', 'unselected')
   expect(screen.getAllByRole('checkbox')).toHaveLength(NATIVE_METHODS.length + 3)
   expect(screen.getAllByRole('checkbox').every(input => input.hasAttribute('disabled'))).toBe(true)
   expect(screen.getByRole('checkbox', { name: 'eth_chainId' })).toBeChecked(); expect(screen.getByRole('checkbox', { name: 'eth_accounts' })).not.toBeChecked()
@@ -22,7 +23,7 @@ it('renders selected, unselected and implied checks plus a matching preset in re
   await userEvent.click(preset); expect(screen.getByRole('checkbox', { name: 'eth_accounts' })).not.toBeChecked()
 })
 it('keeps organization administration separate from execution admin implication in inspection', () => {
-  render(<SourcePermissionChoices methods={networkReader} claims={[]} isAdmin />)
+  render(<SourcePermissionChoices catalog={testCatalog} methods={networkReader} claims={[]} isAdmin />)
   expect(screen.getByText('Execution claims · 0 declared')).toBeInTheDocument()
   expect(screen.getByText(/Organization admin groups declare an empty claims list/)).toBeInTheDocument()
   expect(screen.queryByRole('checkbox', { name: 'Execution administrator' })).not.toBeInTheDocument()
@@ -30,10 +31,10 @@ it('keeps organization administration separate from execution admin implication 
   expect(screen.getByRole('checkbox', { name: 'eth_chainId' })).toBeChecked()
 })
 it('shows trace and transaction capabilities as recognized methods without hiding unknown names', () => {
-  render(<SourcePermissionChoices methods={['debug_traceTransaction', 'eth_sendTransaction', 'custom_rpc']} claims={[]} isAdmin={false} />)
+  render(<SourcePermissionChoices catalog={testCatalog} methods={['debug_traceTransaction', 'eth_sendTransaction', 'custom_rpc']} claims={[]} isAdmin={false} />)
   expect(screen.getByRole('checkbox', { name: 'debug_traceTransaction' })).toBeChecked()
   expect(screen.getByRole('checkbox', { name: 'eth_sendTransaction' })).toBeChecked()
-  expect(screen.getByText('Additional configured methods · 1')).toBeInTheDocument()
+  expect(screen.getByText('Other configured methods · 1')).toBeInTheDocument()
   expect(screen.getByText('custom_rpc')).toBeInTheDocument()
   expect(screen.getByText(/permission is also used for signed raw submission/)).toBeInTheDocument()
 })
@@ -47,14 +48,37 @@ async function sourceProject(patch: JSONObject = {}) {
 it('uses the same selection states from the real source inspection dialog while keeping the imported proposal unchanged', async () => {
   const project = await sourceProject({ allowedMethods: [...networkReader, 'custom_rpc'], claims: ['admin'] })
   const before = documentValue(project, 'source', 'groups.json')
-  render(<SourceOrganizations project={project} root="source" organization={org} groupsPage onOrganization={() => {}} />)
+  render(<SourceOrganizations catalog={testCatalog} project={project} root="source" organization={org} groupsPage onOrganization={() => {}} />)
   await userEvent.click(screen.getByTitle('View declared permissions'))
   const dialog = screen.getByRole('dialog')
-  expect(within(dialog).getByRole('group', { name: 'Network reader' })).toHaveAttribute('data-state', 'selected')
+  expect(within(dialog).getByRole('group', { name: 'Network reader' })).toHaveAttribute('data-state', 'unselected')
   expect(within(dialog).getByRole('checkbox', { name: 'eth_chainId' })).toBeChecked(); expect(within(dialog).getByRole('checkbox', { name: 'eth_accounts' })).not.toBeChecked()
   expect(within(dialog).getByRole('checkbox', { name: 'Deploy contracts' })).toBeDisabled(); expect(within(dialog).getAllByText('Implied by admin')).toHaveLength(2)
   expect(within(dialog).queryByRole('button', { name: 'Save group draft' })).not.toBeInTheDocument()
   expect(documentValue(project, 'source', 'groups.json')).toEqual(before)
 })
 
-it('matches a preset from known methods while retaining additional names', () => { expect(matchingNativePreset([...networkReader, 'private_*'])).toBe('Network reader'); expect(matchingNativePreset(['eth_accounts'])).toBeNull() })
+it('matches a preset from known methods while retaining additional names', () => { expect(matchingNativePreset([...networkReader, 'private_*'])).toBeNull(); expect(matchingNativePreset(['eth_accounts'])).toBeNull() })
+
+
+it('uses all names supplied by the running catalog and preserves preview-only names', () => {
+  const catalog = { status: 'ready' as const, catalog: { version: 'test/v2', methods: [
+    { name: 'eth_call', canonical: 'eth_call' }, { name: 'bank_call', canonical: 'eth_call' },
+    { name: 'chain_newFeature', canonical: 'chain_newFeature' },
+  ] } }
+  render(<SourcePermissionChoices catalog={catalog} methods={['bank_call', 'chain_newFeature', 'preview_only']} claims={[]} isAdmin={false} />)
+  expect(screen.getByRole('checkbox', { name: 'bank_call' })).toBeChecked()
+  expect(screen.getByText('alias of eth_call')).toBeInTheDocument()
+  expect(screen.getByRole('checkbox', { name: 'chain_newFeature' })).toBeChecked()
+  expect(screen.getByText('Other catalog methods')).toBeInTheDocument()
+  expect(screen.getByText('preview_only')).toBeInTheDocument()
+  expect(screen.getByText(/viewed configuration may target another instance/)).toBeInTheDocument()
+})
+it('shows every configured name when the running catalog is unavailable or empty', () => {
+  const { rerender } = render(<SourcePermissionChoices catalog={{ status: 'unavailable' }} methods={['eth_call', 'private_rpc']} claims={[]} isAdmin={false} />)
+  expect(screen.getByText(/method catalog is unavailable/)).toBeInTheDocument()
+  expect(screen.getByText('eth_call')).toBeInTheDocument(); expect(screen.getByText('private_rpc')).toBeInTheDocument()
+  rerender(<SourcePermissionChoices catalog={{ status: 'ready', catalog: { version: 'test', methods: [] } }} methods={['eth_call', 'private_rpc']} claims={[]} isAdmin={false} />)
+  expect(screen.queryByText(/method catalog is unavailable/)).not.toBeInTheDocument()
+  expect(screen.getByText('Other configured methods · 2')).toBeInTheDocument()
+})

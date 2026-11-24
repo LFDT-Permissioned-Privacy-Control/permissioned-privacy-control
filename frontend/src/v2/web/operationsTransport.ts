@@ -90,7 +90,8 @@ export function operationEndpoint(endpoint: string, method: string): boolean {
       valid = method === 'GET'
       if (action === 'audit') allowed = ['limit', 'cursor']
     }
-  } else if (path === '/api/v2/configuration/sources' || /^\/api\/v2\/configuration\/sources\/[a-z0-9][a-z0-9_-]{0,63}$/.test(path)) valid = method === 'GET' && !endpoint.includes('?')
+  } else if (path === '/api/v2/method-catalog') valid = method === 'GET' && !endpoint.includes('?')
+  else if (path === '/api/v2/configuration/sources' || /^\/api\/v2\/configuration\/sources\/[a-z0-9][a-z0-9_-]{0,63}$/.test(path)) valid = method === 'GET' && !endpoint.includes('?')
   else if (path === '/health/live' || path === '/health/ready') valid = method === 'GET'
   else if (new RegExp('^/rpc/' + uuid + '$').test(path))
     valid = method === 'POST' && canonicalUUID(path.slice(5))

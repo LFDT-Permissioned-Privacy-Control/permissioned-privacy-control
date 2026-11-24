@@ -4,11 +4,12 @@ import { OperationHTTPError } from './operationsTransport'
 import type { Controller, State } from './controller'
 import { fixtureEnvelope, org } from './configurationFixtures.test-support'
 const tag='"'+'a'.repeat(64)+'"', nextTag='"'+'b'.repeat(64)+'"'
+const catalog={version:'rpc-method-catalog/v1',methods:[{name:'eth_call',canonical:'eth_call'},{name:'bank_call',canonical:'eth_call'}]}
 const initial=():State=>({phase:'selected',busy:false,flow:null,pending:null,candidate:null,error:null,profiles:[],self:{actorId:'ops:p1:'+'A'.repeat(43),principalKind:'human',sourceProfile:'staff',sourceProfileDigest:'sha256:'+'a'.repeat(64),expiresAt:Math.floor(Date.now()/1000)+300,organizations:[{id:org,name:'Serving Bank',slug:'bank',isOrgAdmin:true,isOrgReadonlyAdmin:false}]}})
 async function harness() {
  let state=initial(), revision=0, owns=true
  const envelope=await fixtureEnvelope(), list={sources:[{id:'current',label:'Current'}]}
- const request=vi.fn(async(endpoint:string,_options?:RequestInit):Promise<unknown>=>endpoint.endsWith('/sources')?list:{notModified:false,etag:tag,value:envelope})
+ const request=vi.fn(async(endpoint:string,_options?:RequestInit):Promise<unknown>=>endpoint.endsWith('/sources')?list:endpoint.endsWith('/method-catalog')?catalog:{notModified:false,etag:tag,value:envelope})
  const controller={snapshot:()=>state,get scopeRevision(){return revision},ownsScope:()=>owns&&state.phase==='selected'&&!!state.self&&state.self.expiresAt*1000>Date.now(),captureOperations:vi.fn(async(signal:AbortSignal)=>{
   const original=state.self,rev=revision
   const check=()=>{if(signal.aborted||rev!==revision||state.self!==original||!owns||!state.self||state.self.expiresAt*1000<=Date.now())throw Error('retired ownership')}
@@ -19,6 +20,28 @@ async function harness() {
 }
 afterEach(()=>{vi.useRealTimers()})
 describe('authenticated current configuration view',()=>{
+ it('loads policy method catalog and source with one owned scope, keeping preview methods independent',async()=>{
+  const h=await harness();await h.viewer.refresh()
+  expect(h.controller.captureOperations).toHaveBeenCalledTimes(1)
+  expect(h.request.mock.calls.map(call=>call[0])).toEqual(['/api/v2/configuration/sources','/api/v2/method-catalog','/api/v2/configuration/sources/current'])
+  expect(h.viewer.snapshot().methodCatalog).toEqual({status:'ready',catalog})
+  expect(h.viewer.snapshot().project).not.toBeNull()
+  await h.viewer.refresh();expect(h.controller.captureOperations).toHaveBeenCalledTimes(2)
+  expect(h.request.mock.calls.filter(call=>call[0]==='/api/v2/method-catalog')).toHaveLength(1)
+ })
+ it('retains exact source if catalog is unavailable and retries it on refresh',async()=>{
+  const h=await harness();h.request.mockImplementation(async endpoint=>endpoint.endsWith('/sources')?h.list:endpoint.endsWith('/method-catalog')?Promise.reject(Error('offline')):{notModified:false,etag:tag,value:h.envelope})
+  await h.viewer.refresh();expect(h.viewer.snapshot().project).not.toBeNull();expect(h.viewer.snapshot().methodCatalog.status).toBe('unavailable')
+  h.request.mockImplementation(async endpoint=>endpoint.endsWith('/sources')?h.list:endpoint.endsWith('/method-catalog')?catalog:{notModified:true,etag:tag})
+  await h.viewer.refresh();expect(h.viewer.snapshot().methodCatalog).toEqual({status:'ready',catalog});expect(h.viewer.snapshot().project).not.toBeNull()
+ })
+ it('cannot publish delayed policy catalog after account change',async()=>{
+  const h=await harness();let finish!:(value:unknown)=>void
+  h.request.mockImplementation(async endpoint=>endpoint.endsWith('/sources')?h.list:endpoint.endsWith('/method-catalog')?new Promise(resolve=>{finish=resolve}):{notModified:false,etag:tag,value:h.envelope})
+  const pending=h.viewer.refresh();await vi.waitFor(()=>expect(finish).toBeTypeOf('function'));h.replace({...h.state(),phase:'anonymous',self:null},true);finish(catalog);await pending
+  expect(h.viewer.snapshot().methodCatalog.status).toBe('loading');expect(h.viewer.snapshot().project).toBeNull()
+ })
+
  it('opens a single source, retains observation/root state on304 and preserves it across valid updates',async()=>{
   const h=await harness();await h.viewer.refresh();const before=h.viewer.snapshot();expect(before.selected).toBe('current');expect(before.project).not.toBeNull()
   h.viewer.setViewState('/root','broker',before.observation)

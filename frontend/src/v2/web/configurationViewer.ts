@@ -2,13 +2,14 @@ import type { Controller, OperationScope } from './controller'
 import { hasAdminRole } from './adminAccess'
 import { decodeSourceProject, type SourceProject } from './sourceProject'
 import { OperationHTTPError, type SourceResponse } from './operationsTransport'
+import { parseMethodCatalog, type MethodCatalogState } from './methodCatalog'
 
 export interface ConfigurationSource { id: string; label: string }
 export interface ConfigurationView {
   sources: ConfigurationSource[]; selected: string | null; project: SourceProject | null
-  busy: boolean; error: string | null; observation: number; viewState: Readonly<Record<string, unknown>>
+  busy: boolean; error: string | null; methodCatalog: MethodCatalogState; observation: number; viewState: Readonly<Record<string, unknown>>
 }
-const empty = (): ConfigurationView => ({ sources: [], selected: null, project: null, busy: false, error: null, observation: 0, viewState: {} })
+const empty = (): ConfigurationView => ({ sources: [], selected: null, project: null, busy: false, error: null, methodCatalog: { status: 'loading' }, observation: 0, viewState: {} })
 const sourcePath = '/api/v2/configuration/sources'
 function sources(value: unknown): ConfigurationSource[] {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).join() !== 'sources') throw Error('The configuration list is invalid.')
@@ -80,6 +81,12 @@ export class ConfigurationViewer {
     try {
       scope = await this.controller.captureOperations(abort.signal); check()
       const available = sources(await scope.request(sourcePath)); check(); readingCatalog = false
+      // The same operation scope is shared with the source read: separate
+      // warm-ups can retire each other when polling overlaps an open dialog.
+      if (this.state.methodCatalog.status !== 'ready') {
+        try { const catalog = parseMethodCatalog(await scope.request('/api/v2/method-catalog')); check(); this.publish({ methodCatalog: { status: 'ready', catalog } }) }
+        catch { check(); this.publish({ methodCatalog: { status: 'unavailable' } }) }
+      }
       let selected = this.state.selected
       if (selected && !available.some(source => source.id === selected)) {
         this.tag = null; selected = null

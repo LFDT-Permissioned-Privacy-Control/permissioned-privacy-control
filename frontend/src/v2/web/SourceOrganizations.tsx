@@ -8,14 +8,15 @@ import { Input } from '../../components/ui/input'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import { SourceViewScope, useSourceViewState } from './sourceViewState'
 import { SourcePermissionChoices } from './SourcePermissions'
+import type { MethodCatalogState } from './methodCatalog'
 import { groupsOf, rootOf, type SourceProject } from './sourceProject'
 
-interface Props { project: SourceProject; root: string; organization: string; groupsPage: boolean; onOrganization(id: string, groups?: boolean): void }
+interface Props { catalog?: MethodCatalogState; project: SourceProject; root: string; organization: string; groupsPage: boolean; onOrganization(id: string, groups?: boolean): void }
 export function SourceOrganizations(props: Props) {
   const scope = `organizations:${props.root}:${props.organization}:${props.groupsPage}`
   return <SourceViewScope key={scope} id={scope}><OrganizationsContent {...props} /></SourceViewScope>
 }
-function OrganizationsContent({ project, root, organization, groupsPage, onOrganization }: Props) {
+function OrganizationsContent({ project, root, organization, groupsPage, onOrganization, catalog }: Props) {
   const selected = rootOf(project, root), org = selected.draft.organizations.find(o => o.id === organization)
   const [search, setSearch] = useSourceViewState('search', ''), [pageOffset, setPageOffset] = useSourceViewState('page-offset', 0)
   const [inspectedID, setInspectedID] = useState<string | null>(null)
@@ -36,7 +37,7 @@ function OrganizationsContent({ project, root, organization, groupsPage, onOrgan
     <Pagination total={total} limit={pageSize} offset={offset} onPageChange={setPageOffset} />
     <Dialog open={!!inspected} onOpenChange={open => { if (!open) setInspectedID(null) }}><DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{inspected?.name} — declared permissions</DialogTitle></DialogHeader>
       {inspected && <div className="space-y-4"><p className="text-sm text-neutral-500">Declared configuration permissions; effective access also depends on verified current claims and contract/execution rules.</p><p>{inspected.description}</p>
-        <SourcePermissionChoices methods={inspected.allowedMethods} claims={inspected.claims} isAdmin={inspected.isOrgAdmin} />
+        <SourcePermissionChoices catalog={catalog} methods={inspected.allowedMethods} claims={inspected.claims} isAdmin={inspected.isOrgAdmin} />
         <dl className="rounded-lg border border-neutral-200 p-3 text-sm space-y-2"><div><dt className="font-medium">Verbose errors</dt><dd>{inspected.verboseErrors ? 'Enabled' : 'Disabled'}</dd></div>{inspected.rpcCredential?.fromEnv && <div><dt className="font-medium">RPC credential environment reference</dt><dd className="font-mono break-all">{inspected.rpcCredential.fromEnv}</dd></div>}</dl>
         <div className="flex justify-end"><Button variant="outline" onClick={() => setInspectedID(null)}>Close</Button></div>
       </div>}

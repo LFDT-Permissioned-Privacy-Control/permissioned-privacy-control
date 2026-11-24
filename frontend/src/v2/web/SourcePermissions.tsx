@@ -2,6 +2,7 @@ import { useId } from 'react'
 import { Check, Code, Server, ShieldCheck, Wallet } from 'lucide-react'
 import { PermissionCheck, PermissionCount, permissionClaimClasses, permissionMethodClasses, permissionPresetClasses } from '../../components/rbac/PermissionSelectionView'
 import { Badge } from '../../components/ui/badge'
+import type { MethodCatalogState, MethodEntry } from './methodCatalog'
 
 // Names verified against rpcexecution metadata/state/history handlers and
 // rpcengine call/client_trace/utility/raw dispatch. These choices are assistance,
@@ -25,18 +26,22 @@ export const EXECUTION_CLAIMS = [
   { id: 'upgrade', name: 'Upgrade contracts', description: 'Upgrade authority where the native evaluator requires it. The matching execution rule must also allow upgrades.' },
 ] as const
 export function matchingNativePreset(methods: readonly string[]) {
-  const selected = new Set(methods.filter(m => NATIVE_METHODS.includes(m)))
+  const selected = new Set(methods)
   return NATIVE_PRESETS.find(p => p.methods.length === selected.size && p.methods.every(m => selected.has(m)))?.name ?? null
 }
 const presetIcons = [Server, Wallet, Code, ShieldCheck]
-export function SourcePermissionChoices({ methods, claims, isAdmin }: { methods: string[]; claims: string[]; isAdmin: boolean }) {
+export function SourcePermissionChoices({ methods, claims, isAdmin, catalog = { status: 'unavailable' } }: { methods: string[]; claims: string[]; isAdmin: boolean; catalog?: MethodCatalogState }) {
   const id = useId()
-  const unknown = methods.filter(m => !NATIVE_METHODS.includes(m)), customClaims = claims.filter(c => !EXECUTION_CLAIMS.some(v => v.id === c))
+  const entries = catalog.status === 'ready' ? catalog.catalog.methods : []
+  const catalogNames = new Set(entries.map(entry => entry.name))
+  const additional = methods.filter(method => !catalogNames.has(method))
+  const sectionFor = (entry: MethodEntry) => NATIVE_METHOD_SECTIONS.findIndex(section => (section.methods as readonly string[]).includes(entry.canonical))
+  const customClaims = claims.filter(c => !EXECUTION_CLAIMS.some(v => v.id === c))
   const matchingPreset = matchingNativePreset(methods), adminDeclared = claims.includes('admin')
   return <div className="space-y-5">
     <fieldset className="space-y-2">
       <legend className="text-sm font-medium text-neutral-700">Permission presets</legend>
-      <p className="text-xs text-neutral-500">Matching preset for the declared methods. Additional methods are shown separately.</p>
+      <p className="text-xs text-neutral-500">Matching preset for the full set of declared methods.</p>
       <div className="grid gap-3 sm:grid-cols-2">
         {NATIVE_PRESETS.map((p, i) => {
           const selected = matchingPreset === p.name, Icon = presetIcons[i]
@@ -64,15 +69,19 @@ export function SourcePermissionChoices({ methods, claims, isAdmin }: { methods:
         {!!customClaims.length && <div className="space-y-2"><p className="text-xs text-neutral-500">Additional declared claims</p><div className="flex flex-wrap gap-2">{customClaims.map(c => <Badge key={c} variant="outline" className="border-primary-200 bg-primary-50 text-primary">{c}</Badge>)}</div></div>}
       </>}
     </fieldset>
-    <fieldset className="space-y-4"><legend className="text-sm font-medium text-neutral-700">RPC methods · <span className="text-xs px-2 py-0.5 rounded-full bg-primary-50 text-primary">{methods.length} selected</span> · {NATIVE_METHODS.length} listed methods</legend>
-      {NATIVE_METHOD_SECTIONS.map(s => {
-        const selected = s.methods.filter(m => methods.includes(m)).length
-        return <details key={s.name} open className="rounded-lg border border-neutral-200"><summary className="p-3 text-sm font-medium text-neutral-700 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-lg"><span className="inline-flex items-center gap-2"><span>{s.name}</span><PermissionCount selected={selected} total={s.methods.length} label={`${s.name}: ${selected} of ${s.methods.length} selected`} /></span></summary>
-          <div className="px-3 pb-2"><p className="text-xs text-neutral-500">{s.description}</p></div>
-          <div className="grid gap-1.5 p-3 border-t border-neutral-200 sm:grid-cols-2">{s.methods.map(m => <label key={m} className={permissionMethodClasses(false)}><input className="sr-only" type="checkbox" aria-label={m} checked={methods.includes(m)} disabled /><PermissionCheck checked={methods.includes(m)} /><span className="text-xs font-mono text-neutral-700 truncate" title={m}>{m}</span></label>)}</div>
-        </details>
+    <fieldset className="space-y-4"><legend className="text-sm font-medium text-neutral-700">RPC methods · <span className="text-xs px-2 py-0.5 rounded-full bg-primary-50 text-primary">{methods.length} selected</span></legend>
+      <p className="text-xs text-neutral-500">{catalog.status === 'ready' ? 'Method names from this running OPS instance’s policy catalog. Availability also depends on its configured runtime and node.' : catalog.status === 'loading' ? 'Loading this OPS instance’s method catalog…' : 'The running OPS method catalog is unavailable. All configured method names are shown below.'}</p>
+      {catalog.status === 'ready' && NATIVE_METHOD_SECTIONS.map((section, index) => {
+        const rows = entries.filter(entry => sectionFor(entry) === index), selected = rows.filter(entry => methods.includes(entry.name)).length
+        if (!rows.length) return null
+        return <details key={section.name} open className="rounded-lg border border-neutral-200"><summary className="p-3 text-sm font-medium text-neutral-700 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-lg"><span className="inline-flex items-center gap-2"><span>{section.name}</span><PermissionCount selected={selected} total={rows.length} label={`${section.name}: ${selected} of ${rows.length} selected`} /></span></summary><div className="px-3 pb-2"><p className="text-xs text-neutral-500">{section.description}</p></div><div className="grid gap-1.5 p-3 border-t border-neutral-200 sm:grid-cols-2">{rows.map(entry => <MethodRow key={entry.name} entry={entry} selected={methods.includes(entry.name)} />)}</div></details>
       })}
-      {!!unknown.length && <div className="rounded-lg border border-neutral-200 p-3 space-y-2"><h4 className="text-sm font-medium">Additional configured methods · {unknown.length}</h4><p className="text-xs text-neutral-500">These methods are outside the grouped list above. Their presence here does not indicate whether the running service supports them.</p><div className="flex flex-wrap gap-2">{unknown.map(m => <Badge key={m} variant="outline" className="border-primary-200 bg-primary-50 text-primary">{m}</Badge>)}</div></div>}
+      {catalog.status === 'ready' && entries.some(entry => sectionFor(entry) === -1) && <details open className="rounded-lg border border-neutral-200"><summary className="p-3 text-sm font-medium text-neutral-700">Other catalog methods</summary><div className="grid gap-1.5 p-3 border-t border-neutral-200 sm:grid-cols-2">{entries.filter(entry => sectionFor(entry) === -1).map(entry => <MethodRow key={entry.name} entry={entry} selected={methods.includes(entry.name)} />)}</div></details>}
+      {!!additional.length && <div className="rounded-lg border border-neutral-200 p-3 space-y-2"><h4 className="text-sm font-medium">{catalog.status === 'ready' ? 'Other configured methods' : 'Configured methods'} · {additional.length}</h4><p className="text-xs text-neutral-500">{catalog.status === 'ready' ? 'These names are in the viewed configuration but not in this running instance’s catalog. The viewed configuration may target another instance.' : 'These names are taken directly from the viewed configuration.'}</p><div className="flex flex-wrap gap-2">{additional.map(m => <Badge key={m} variant="outline" className="border-primary-200 bg-primary-50 text-primary">{m}</Badge>)}</div></div>}
     </fieldset>
   </div>
+}
+
+function MethodRow({ entry, selected }: { entry: MethodEntry; selected: boolean }) {
+  return <label className={permissionMethodClasses(false)}><input className="sr-only" type="checkbox" aria-label={entry.name} checked={selected} disabled /><PermissionCheck checked={selected} /><span className="text-xs font-mono text-neutral-700 truncate" title={entry.name}>{entry.name}</span>{entry.canonical !== entry.name && <span className="text-xs text-neutral-500">alias of {entry.canonical}</span>}</label>
 }

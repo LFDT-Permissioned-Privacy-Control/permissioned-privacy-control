@@ -21,6 +21,10 @@ import (
 )
 
 const Path = "/api/v2/self"
+
+// MethodCatalogPath exposes names accepted by the running policy catalog to
+// administrators. A catalog entry does not guarantee an RPC handler is active.
+const MethodCatalogPath = "/api/v2/method-catalog"
 const MaxResponseBytes = 512 << 10
 const MaxOrganizations = 256
 
@@ -137,6 +141,7 @@ func canonicalHostname(host string) bool {
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle(Path, h)
+	mux.Handle(MethodCatalogPath, h)
 }
 func fail(w http.ResponseWriter, status int, code string) {
 	w.WriteHeader(status)
@@ -149,7 +154,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if r.URL.Path != Path {
+	if r.URL.Path != Path && r.URL.Path != MethodCatalogPath {
 		fail(w, 404, "not_found")
 		return
 	}
@@ -194,6 +199,49 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	view, err := h.factory.Build(token)
 	if err != nil {
 		fail(w, 401, "invalid_access")
+		return
+	}
+	if r.URL.Path == MethodCatalogPath {
+		if view.Kind() != identity.Human {
+			fail(w, 403, "forbidden")
+			return
+		}
+		admin := false
+		for _, id := range view.OrgIDs() {
+			org, ok := view.Org(id)
+			admin = admin || ok && (org.IsOrgAdmin() || org.IsOrgReadonlyAdmin())
+		}
+		if !admin {
+			fail(w, 403, "forbidden")
+			return
+		}
+		methods := h.snapshot.Methods()
+		if len(methods) > 4096 {
+			fail(w, 503, "catalog_unavailable")
+			return
+		}
+		type methodEntry struct {
+			Name      string `json:"name"`
+			Canonical string `json:"canonical"`
+		}
+		names := make([]methodEntry, 0, len(methods))
+		for _, method := range methods {
+			names = append(names, methodEntry{method.Name, method.Canonical})
+		}
+		payload := struct {
+			Version string        `json:"version"`
+			Methods []methodEntry `json:"methods"`
+		}{h.snapshot.Metadata().MethodCatalogVersion, names}
+		var body bytes.Buffer
+		if json.NewEncoder(&body).Encode(payload) != nil || body.Len() > MaxResponseBytes || ctx.Err() != nil {
+			fail(w, 503, "catalog_unavailable")
+			return
+		}
+		if view.RequireLive() != nil {
+			fail(w, 401, "invalid_access")
+			return
+		}
+		_, _ = w.Write(body.Bytes())
 		return
 	}
 	profile, digest := view.SourceProfile()

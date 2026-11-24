@@ -10,6 +10,8 @@ import { Controller } from './controller'
 import { FLOW_KEY } from './protocol'
 import { AuthError } from '../auth/protocol'
 import { LocalDemoDriver } from './localDemoDriver'
+import { ConfigurationViewer } from './configurationViewer'
+import { fixtureEnvelope, org } from './configurationFixtures.test-support'
 
 const mocks = vi.hoisted(() => ({ next: null as unknown, own: vi.fn(), inspect: vi.fn(), complete: vi.fn(), wallet: vi.fn(), operation: vi.fn() }))
 vi.mock('../auth/multiClient', () => ({ NewMultiClient: () => mocks.next }))
@@ -47,6 +49,25 @@ beforeEach(() => {
 })
 afterEach(() => { controller?.stop(); delete (window as unknown as { ethereum?: unknown }).ethereum; vi.useRealTimers(); vi.unstubAllGlobals() })
 describe('document context and flow ownership', () => {
+  it('shares one real operation scope for catalog and source when polling overlaps', async () => {
+    const client = fake(), held = deferred<unknown>(), envelope = await fixtureEnvelope(), tag = '"' + 'a'.repeat(64) + '"'
+    mocks.own.mockImplementation(async v => ({ ...self(v), organizations: [{ id: org, name: 'Bank', slug: 'bank', isOrgAdmin: true, isOrgReadonlyAdmin: false }] }))
+    mocks.operation.mockImplementation(async (_token, endpoint: string) => {
+      if (endpoint === '/api/v2/configuration/sources') return { sources: [{ id: 'current', label: 'Current' }] }
+      if (endpoint === '/api/v2/method-catalog') return held.promise
+      return { notModified: false, etag: tag, value: envelope }
+    })
+    controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
+    const viewer = new ConfigurationViewer(controller); viewer.setActive(true)
+    const first = viewer.refresh(); await flush()
+    expect(mocks.operation.mock.calls.map(call => call[1])).toContain('/api/v2/method-catalog')
+    await viewer.refresh() // 2-second poll while the catalog request is still pending.
+    held.resolve({ version: 'v1', methods: [{ name: 'eth_call', canonical: 'eth_call' }] }); await first
+    expect(viewer.snapshot().methodCatalog.status).toBe('ready')
+    expect(viewer.snapshot().project).not.toBeNull()
+    expect(controller.snapshot().phase).toBe('selected')
+  })
+
   it('owns native operation replies by the original verified session and rejects delayed or aborted delivery', async () => {
     const client = fake(), response = deferred<unknown>(), abort = new AbortController()
     controller = new Controller(client as unknown as MultiBrowserAuthClient); await controller.start()
