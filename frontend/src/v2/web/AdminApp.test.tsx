@@ -57,7 +57,8 @@ describe('file-backed read-only Admin',()=>{
   const next=structuredClone(multi);next.roots[1].files.find(f=>f.path==='groups.json')!.dataBase64=btoa(atob(next.roots[1].files.find(f=>f.path==='groups.json')!.dataBase64).replace('Deployer','Updated broker group'))
   h.source(next);await h.refresh();expect(screen.getByLabelText('Source root')).toHaveValue('broker');expect(screen.getByLabelText('Source groups.json')).toHaveTextContent('Updated broker group')
   expect(screen.getByText(/Core contains access rules and policies/)).toBeInTheDocument()
-  h.navigate('/admin/rbac/organizations');await screen.findByText('Bank',{exact:true});expect(screen.getByLabelText('Source root')).toHaveValue('broker')
+  h.navigate('/admin/rbac/organizations');await screen.findByText('Bank',{exact:true});expect(screen.queryByLabelText('Source root')).not.toBeInTheDocument()
+  h.navigate('/admin/rbac/contracts');expect(screen.queryByLabelText('Source root')).not.toBeInTheDocument()
   h.navigate('/admin/configuration');expect(screen.getByLabelText('Source root')).toHaveValue('broker')
  })
  it('does not show a root selector for a single source',async()=>{

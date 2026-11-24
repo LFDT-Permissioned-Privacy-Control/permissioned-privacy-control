@@ -19,8 +19,9 @@ export function SourceWorkspacePage({ viewer, view }: { viewer: ConfigurationVie
   const page = getSourcePage(location.pathname) ?? getSourcePage('/admin')!, presentation = sourceSections[page.section]
   const roots = project?.roots ?? []
   const relevant = roots.filter(r => page.id === 'configuration' || (page.id === 'platform-configuration' ? r.draft.runtimeCatalog !== undefined || r.draft.authCatalog !== undefined : page.section === 'identity' ? r.draft.identityCatalog !== undefined : page.section === 'compliance' ? r.draft.complianceCatalog !== undefined : page.section === 'disclosure' ? r.draft.disclosureCatalog !== undefined : page.id === 'organizations' ? r.draft.organizations.length > 0 : r.draft.documents.some(d => d.kind === (page.id === 'groups' ? 'groups' : page.id === 'contracts' ? 'contract-registry' : 'execution-rules'))))
-  // Suppress a duplicate broker view only when its relevant source bytes and
-  // organization scope match core. Different sources remain selectable.
+  // RBAC uses Core when available: Broker may contain placeholder policy
+  // documents needed for its bundle, not permissions enforced by Core.
+  // For other structured views suppress only genuinely identical sources.
   const core = relevant.find(r => r.id === 'core')
   const relevantBytes = (r: typeof roots[number]) => {
     const key = page.section === 'identity' ? 'identityCatalog' : page.section === 'compliance' ? 'complianceCatalog' : page.section === 'disclosure' ? 'disclosureCatalog' : null
@@ -30,7 +31,7 @@ export function SourceWorkspacePage({ viewer, view }: { viewer: ConfigurationVie
     const paths = refs.map(ref => ref && typeof ref === 'object' && 'path' in ref ? String(ref.path) : '')
     return JSON.stringify([r.draft.organizations, refs, paths.map(path => r.files.find(file => file.path === path)?.originalText ?? null)])
   }
-  const choices = page.id !== 'configuration' && page.id !== 'platform-configuration' && core ? relevant.filter(r => r.id !== 'broker' || relevantBytes(r) !== relevantBytes(core)) : relevant
+  const choices = page.section === 'rbac' && page.id !== 'configuration' && core ? relevant.filter(r => r.id !== 'broker') : page.id !== 'configuration' && page.id !== 'platform-configuration' && core ? relevant.filter(r => r.id !== 'broker' || relevantBytes(r) !== relevantBytes(core)) : relevant
   const root = choices.find(r => r.id === rootID) ?? core ?? choices[0] ?? roots.find(r => r.id === 'core') ?? roots[0]
   useEffect(() => { if (project && rootID && !project.roots.some(r => r.id === rootID)) setRoot('') }, [project, rootID])
   useEffect(() => { if (page.id === 'configuration' && root && !root.files.some(file => file.path === sourcePath)) setSourcePath('draft.json') }, [page.id, root, sourcePath])
