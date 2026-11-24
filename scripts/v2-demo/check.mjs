@@ -343,7 +343,7 @@ async function checkUIPreview(user) {
   if (!await page.getByTestId('rbac-title').count()) await page.getByRole('link', { name: 'Open configuration viewer', exact: true }).click();
   await page.getByTestId('rbac-title').waitFor();
   stage = 'ui-preview-server-source';
-  await page.getByRole('tab', { name: 'Configurations', exact: true }).click();
+  await page.getByRole('tab', { name: 'Source files', exact: true }).click();
   await page.getByTestId('configuration-source-current').click();
   const roots = page.getByLabel('Source root', { exact: true });
   if (await roots.count()) await roots.selectOption('core');

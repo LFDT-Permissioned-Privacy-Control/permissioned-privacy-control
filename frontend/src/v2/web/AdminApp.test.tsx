@@ -44,13 +44,14 @@ describe('file-backed read-only Admin',()=>{
  })
  it('groups configuration tabs under RBAC and preserves the selected folder across identity and settings navigation',async()=>{
   const h=await harness();await screen.findByText('Bank',{exact:true})
-  expect(within(screen.getByTestId('rbac-tabs')).getAllByRole('tab').map(t=>t.textContent)).toEqual(['Organizations','Groups','Contracts','Execution Policy','Configurations'])
+  expect(within(screen.getByTestId('rbac-tabs')).getAllByRole('tab').map(t=>t.textContent)).toEqual(['Organizations','Groups','Contracts','Execution Policy','Source files'])
   await userEvent.click(screen.getByRole('tab',{name:'Identity'}));expect(screen.getByTestId('identity-tabs')).toHaveTextContent('Profiles');await screen.findByRole('button',{name:'bank-staff'})
   expect(screen.getByTestId('configuration-source-current')).toHaveAttribute('aria-selected','true');await userEvent.click(screen.getByRole('tab',{name:'Claim mappings'}));expect(screen.getByText('staff-reader')).toBeInTheDocument()
   await userEvent.click(screen.getByRole('link',{name:'Settings'}));expect(screen.getByTestId('configuration-source-current')).toHaveAttribute('aria-selected','true');expect(screen.queryByText('Review & export')).not.toBeInTheDocument();h.unmount()
  })
  it('retains the broker root and reopens current raw bytes when external source updates',async()=>{
   const envelope=await fixtureEnvelope(),h=await harness('/admin/configuration');await screen.findByTestId('workspace-source')
+  expect(screen.getByText('Raw configuration behind the Organizations, Groups, Contracts and Policies views.')).toBeInTheDocument()
   const multi={...envelope,roots:[{...envelope.roots[0],id:'core'},{...envelope.roots[0],id:'broker'}]};h.source(multi);await h.refresh()
   fireEvent.change(screen.getByLabelText('Source root'),{target:{value:'broker'}});await userEvent.click(screen.getByRole('button',{name:'groups.json'}));expect(screen.getByLabelText('Source groups.json')).toHaveTextContent('Deployer')
   const next=structuredClone(multi);next.roots[1].files.find(f=>f.path==='groups.json')!.dataBase64=btoa(atob(next.roots[1].files.find(f=>f.path==='groups.json')!.dataBase64).replace('Deployer','Updated broker group'))

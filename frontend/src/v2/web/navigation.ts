@@ -20,7 +20,7 @@ export const sourcePages: readonly SourcePage[] = [
   { id: 'platform-configuration', section: 'settings', path: '/admin/settings', title: 'Settings', description: 'Runtime policy and authentication broker source settings' },
   { id: 'disclosure-source', section: 'disclosure', path: '/admin/disclosure/rules', title: 'Disclosure rules', description: 'Standing source rules used by separately authorized disclosure cases' },
   { id: 'compliance-source', section: 'compliance', path: '/admin/compliance/policy', title: 'Compliance policy', description: 'Configured compliance settings, token prices and address thresholds' },
-  { id: 'configuration', section: 'rbac', path: '/admin/configuration', title: 'Configurations', description: 'Select and inspect server configuration folders' },
+  { id: 'configuration', section: 'rbac', path: '/admin/configuration', title: 'Source files', description: 'Raw configuration behind the visual views' },
 ]
 const pagesByPath = new Map(sourcePages.map(page => [page.path, page]))
 for (const page of sourcePages) pagesByPath.set('/admin/rbac/' + page.id, page)

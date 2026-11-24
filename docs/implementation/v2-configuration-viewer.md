@@ -1,11 +1,10 @@
 # Admin configuration viewer
 
-Admin shows configuration files supplied by an external system. Open **RBAC →
-Configurations**, then choose a folder. Organizations, groups, contracts,
+Admin shows configuration files supplied by an external system. Open **RBAC** and choose a folder in **Configurations**. Organizations, groups, contracts,
 permissions, execution rules and identity mappings follow that configuration
 throughout the dashboard. Choose another folder to inspect a different setup.
 The structured views keep the normal Admin presentation; the original public
-JSON files are also available for read-only inspection.
+JSON files are also available for read-only inspection under **Source files**.
 
 Opening a folder changes only the display. It does not approve or deploy files,
 change the running policy or grant the current person any privileges. Admin has

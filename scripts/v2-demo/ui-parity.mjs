@@ -109,7 +109,7 @@ async function checkAdminNavigation({ user, runtime, outputDirectory, passed }) 
   const page = user.page, output = path.join(outputDirectory, 'admin-navigation');
   await mkdir(output, { recursive: true, mode: 0o700 });
   await openConfiguration(user, runtime);
-  assert.deepEqual(await page.getByTestId('rbac-tabs').getByRole('tab').allTextContents(), ['Organizations', 'Groups', 'Contracts', 'Execution Policy', 'Configurations']);
+  assert.deepEqual(await page.getByTestId('rbac-tabs').getByRole('tab').allTextContents(), ['Organizations', 'Groups', 'Contracts', 'Execution Policy', 'Source files']);
   assert.deepEqual(await page.getByTestId('admin-nav').getByRole('tab').allTextContents(), ['RBAC', 'Identity', 'Compliance', 'Disclosure']);
   await page.getByRole('tab', { name: 'Organizations', exact: true }).click();
   await page.getByRole('cell', { name: 'Demo Bank', exact: true }).waitFor();
@@ -136,7 +136,7 @@ async function checkAdminNavigation({ user, runtime, outputDirectory, passed }) 
     await page.screenshot({ path: path.join(output, 'rbac-' + width + '.png'), fullPage: true, animations: 'disabled' });
     const layout = await page.evaluate(() => ({ width: innerWidth, content: document.documentElement.scrollWidth }));
     assert.ok(layout.content <= layout.width, 'Navigation must fit without horizontal page overflow at ' + width);
-    for (const name of ['RBAC', 'Identity', 'Compliance', 'Disclosure', 'Organizations', 'Groups', 'Contracts', 'Execution Policy', 'Configurations']) assert.equal(await page.getByRole('tab', { name, exact: true }).isVisible(), true);
+    for (const name of ['RBAC', 'Identity', 'Compliance', 'Disclosure', 'Organizations', 'Groups', 'Contracts', 'Execution Policy', 'Source files']) assert.equal(await page.getByRole('tab', { name, exact: true }).isVisible(), true);
   }
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(runtime.explorerOrigin); await page.locator('[data-field=app-actor]').waitFor();
