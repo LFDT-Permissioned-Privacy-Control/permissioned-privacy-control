@@ -99,7 +99,7 @@ matching SDK dependency directory. No test downloads artifacts implicitly.
 V2 intentionally replaces customer-consent disclosure administration and mutable
 configuration/user-directory APIs. Their V1 tests still describe the legacy
 delivery; V2 uses standing Git rules and operational checked/audited cases.
-Partior captured participants and live `recordParty` rules are outside this
+Deployment-specific captured participants and live `recordParty` rules are outside this
 delivery. This checklist is not a percentage or an assertion-by-assertion
 equivalence claim.
 

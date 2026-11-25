@@ -33,7 +33,7 @@ source evidence fails the read rather than silently reporting an empty history.
 This is **events from disclosed transactions**, not all activity involving a
 customer. A relayer's transaction does not qualify merely because a customer's
 address appears in a topic or encoded payload. There is no heuristic participant
-detection, live `recordParty` lookup or Partior participant registry.
+detection, live `recordParty` lookup or deployment-specific participant registry.
 
 ## Payload and privacy
 

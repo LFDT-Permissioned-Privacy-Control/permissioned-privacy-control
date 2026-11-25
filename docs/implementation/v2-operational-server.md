@@ -249,8 +249,8 @@ Both Guard v1 transaction modes retain their existing approval lifetime and
 used-approval rules. Native access lists are conservative usable lists, checked
 again with the exact returned list; they need not match an optimized backend
 list byte for byte. Node signing requires side-effect-free
-`eth_signTransaction`; there is no send-first fallback. Partior's captured
-participant workflow and live `recordParty` rules are excluded from this
+`eth_signTransaction`; there is no send-first fallback. Deployment-specific captured
+participant workflows and live `recordParty` rules are excluded from this
 delivery. The optional EVM policy backend remains separate from native V2.
 
 ## Rollout and recovery
