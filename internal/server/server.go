@@ -987,6 +987,9 @@ func NewWithVerifier(cfg *config.Config, verifier PrivadoVerifier) (*Server, err
 		AuditLogParams:            cfg.AuditLogParams,
 		AuditBuffer:               procAuditBuffer,
 		VisibilityKick:            s.visibilityReconciler.Kick,
+
+		GetLogsParticipantBatchSize: cfg.GetLogsParticipantBatchSize,
+
 		EthCallTracing: &EthCallTracingConfig{
 			Enabled: cfg.RuntimeTracingEthCallEnabled,
 			Timeout: cfg.EthCallTraceTimeout,

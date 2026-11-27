@@ -78,6 +78,7 @@ The proxy operates in **UTC**. The backend container image sets `TZ=UTC`, and th
 <EnvTable vars={[
   { name: "PORT", default: "8080", description: "Server listen port" },
   { name: "NODE_URL", default: "http://localhost:8545", description: "Target Ethereum node URL" },
+  { name: "GET_LOGS_PARTICIPANT_BATCH_SIZE", default: "100", description: "Maximum calls per upstream transaction lookup batch used by eth_getLogs. Use a positive integer at or below your RPC provider's batch limit. The total lookup ceiling is 256 transactions per log response." },
   { name: "DATABASE_URL", default: "postgres://postgres:postgres@localhost:5432/privacy_proxy?sslmode=disable", description: "PostgreSQL connection string" },
   { name: "ENVIRONMENT", default: "development", description: "Set to production or development" },
   { name: "BASE_URL", default: "http://localhost:8080", description: "Public URL for auth callbacks" },

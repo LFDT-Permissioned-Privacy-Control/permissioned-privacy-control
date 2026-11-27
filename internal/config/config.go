@@ -222,10 +222,17 @@ func (e *ExtraRPCNamespaces) Passthrough() []string {
 	return out
 }
 
+// DefaultGetLogsParticipantBatchSize is the default number of calls per upstream participant batch.
+const DefaultGetLogsParticipantBatchSize = 100
+
 type Config struct {
 	Version     string // Set by cmd/server/main.go from build-time constant
 	NodeURL     string
 	DatabaseURL string
+
+	// GetLogsParticipantBatchSize limits calls per upstream participant lookup batch.
+	GetLogsParticipantBatchSize int
+
 	// DB connection pool sizing (RD-1112). DBMaxIdleConns defaults to
 	// DBMaxOpenConns to avoid connection churn; size DBMaxOpenConns so N
 	// replicas stay under Postgres max_connections.
@@ -750,6 +757,11 @@ func Load() *Config {
 		panic(fmt.Sprintf("RPC_API_KEY_HEADER %q is invalid: must match ^[A-Za-z0-9-]+$", rpcAPIKeyHeader))
 	}
 
+	getLogsBatchSize, err := strconv.Atoi(getEnv("GET_LOGS_PARTICIPANT_BATCH_SIZE", strconv.Itoa(DefaultGetLogsParticipantBatchSize)))
+	if err != nil || getLogsBatchSize < 1 {
+		panic("GET_LOGS_PARTICIPANT_BATCH_SIZE must be a positive integer")
+	}
+
 	dbMaxOpen := getEnvInt("DB_MAX_OPEN_CONNS", 50)
 	dbMaxIdle := getEnvInt("DB_MAX_IDLE_CONNS", dbMaxOpen) // default = MaxOpen to avoid connection churn
 	dbConnMaxLifetime := parseDurationEnv("DB_CONN_MAX_LIFETIME", 5*time.Minute)
@@ -774,6 +786,7 @@ func Load() *Config {
 
 	return &Config{
 		NodeURL:                             getEnv("NODE_URL", "http://localhost:8545"),
+		GetLogsParticipantBatchSize:         getLogsBatchSize,
 		DatabaseURL:                         databaseURL,
 		DBMaxOpenConns:                      dbMaxOpen,
 		DBMaxIdleConns:                      dbMaxIdle,
