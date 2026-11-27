@@ -186,6 +186,9 @@ func (c *IncludedClient) AcquireIncluded(ctx context.Context, wanted common.Hash
 			outputBytes += len(r.Output)
 		}
 		proof.creations = append(proof.creations, IncludedCreationRecord{Record: i, Parent: parent, Depth: r.Depth, Kind: string(r.Kind), Address: r.StorageAddress.Value, AddressKnown: r.StorageAddress.Known, Creator: r.From, Caller: r.CallerAddress.Value, CallerKnown: r.CallerAddress.Known, InputHash: crypto.Keccak256Hash(r.Input), Value: "0x" + r.Value.Text(16), OutputHash: crypto.Keccak256Hash(r.Output), OutputLength: len(r.Output), Failed: r.Failed(), AncestorFailed: r.AncestorFailed})
+		if helper, ok := executionfacts.Create3HelperRecord(records, i); ok {
+			proof.creations[len(proof.creations)-1].Create3Helper = helper + 1
+		}
 	}
 	seen := map[common.Address]bool{}
 	totalCode := 0

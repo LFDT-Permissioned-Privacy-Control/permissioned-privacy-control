@@ -13,6 +13,7 @@ import (
 
 const RuntimeCreationIntentAPIVersion = "ops.runtime-policy/v1alpha6"
 const FactoryCreationSubtree = "same-namespace-creation-subtree"
+const FactoryCreationSubtreeWithCreate3 = "same-namespace-creation-subtree-with-create3"
 const MaxCreationFactories = 64
 
 // FactoryAttribution is an explicit admission-time attribution scope. Merely
@@ -27,6 +28,10 @@ type FactoryAttribution struct {
 
 type CreationAttribution struct {
 	Factories []FactoryAttribution `json:"factories"`
+}
+
+func ValidFactoryAttributionScope(scope string) bool {
+	return scope == FactoryCreationSubtree || scope == FactoryCreationSubtreeWithCreate3
 }
 
 // RuntimeCreationIntentSource is deliberately a new closed wire shape. Older
@@ -94,7 +99,7 @@ func (b *catalogBuilder) normalizeCreationFactories(shared []SharedInfrastructur
 	seen := map[common.Address]bool{}
 	for i := range entries {
 		e := &entries[i]
-		if len(e.Address) != 42 || !strings.HasPrefix(e.Address, "0x") || !common.IsHexAddress(e.Address) || e.Scope != FactoryCreationSubtree {
+		if len(e.Address) != 42 || !strings.HasPrefix(e.Address, "0x") || !common.IsHexAddress(e.Address) || !ValidFactoryAttributionScope(e.Scope) {
 			return bad()
 		}
 		a := common.HexToAddress(e.Address)

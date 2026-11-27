@@ -136,6 +136,95 @@ func TestCreationIntentFactoryScopeStopsAtForeignCallWithoutCreation(t *testing.
 	})
 }
 
+func TestFactoryDeploymentWithSameTransactionCall(t *testing.T) {
+	// Match the V1 demo CREATE3Factory: CREATE2 installs a helper whose
+	// runtime performs CREATE when the factory calls it with the child initcode.
+	proxyInit := common.FromHex("0x67363d3d37363d34f03d5260086018f3")
+	proxy := crypto.CreateAddress2(common.HexToAddress(addressA), [32]byte{1}, crypto.Keccak256(proxyInit))
+	final := crypto.CreateAddress(proxy, 1)
+	for _, pattern := range []string{"CREATE", "CREATE2", "CREATE3", "CREATE3-legacy-scope", "CREATE3-unrecognized-helper"} {
+		for _, allowTransientCall := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/deployment-context=%t", pattern, allowTransientCall), func(t *testing.T) {
+				f := creationIntentRuntimeFixture()
+				isCreate3 := pattern != "CREATE" && pattern != "CREATE2"
+				if isCreate3 && pattern != "CREATE3-legacy-scope" {
+					f.creationAttribution.Factories[0].Scope = policybundle.FactoryCreationSubtreeWithCreate3
+				}
+				if !allowTransientCall {
+					// An ordinary org rule, even with a wildcard selector,
+					// cannot stand in for permission on newly deployed code.
+					rules := f.bindings[0].Allow
+					f.bindings[0].Allow = append(rules[:len(rules)-1], lifecycleRule("org", policycore.CallTypeCall))
+				}
+				target := createdAddress
+				if isCreate3 {
+					target = proxy.Hex()
+				}
+				n := &node{pre: map[string]any{target: map[string]any{}}}
+				if isCreate3 {
+					n.pre[final.Hex()] = map[string]any{}
+				}
+				n.mutate = func(root map[string]any) {
+					create := creationFrame(addressA, target)
+					create["type"] = pattern
+					call := intentCallFrame(addressA, target, []any{})
+					if isCreate3 {
+						create["type"] = "CREATE2"
+						create["input"], create["output"] = "0x"+common.Bytes2Hex(proxyInit), "0x363d3d37363d34f0"
+						if pattern == "CREATE3-unrecognized-helper" {
+							create["output"] = "0x6000"
+						}
+						initCode := creationFrame(target, final.Hex())
+						call["input"], call["calls"] = initCode["input"], []any{initCode}
+					}
+					root["calls"] = []any{create, call}
+				}
+				intentCheck(t, f, n, func(engine *nativeadmission.Engine, _ *runtimepolicy.Factory, view *runtimepolicy.View, exec *rpcexecution.CallExecution, wallets nativeadmission.WalletSnapshot) {
+					approval, err := engine.CheckSignedWithCreationPlan(t.Context(), view, orgA, exec, wallets)
+					if !allowTransientCall {
+						if err == nil || approval != nil {
+							t.Fatal("fresh-contract call was allowed without deployment-context permission")
+						}
+						return
+					}
+					if err != nil || approval == nil || approval.Plan() == nil {
+						t.Fatal("authorized factory deployment failed", err)
+					}
+					plan := approval.Plan()
+					decoded, err := admission.DecodeCreationPlan(plan.Encoded(), admission.Digest(plan.Digest()))
+					if err != nil {
+						t.Fatal("journal rejected the admitted plan", err)
+					}
+					entries := decoded.Entries
+					want := []common.Address{common.HexToAddress(target)}
+					kinds := []string{pattern}
+					if isCreate3 {
+						want, kinds = append(want, final), []string{"CREATE2", "CREATE"}
+					}
+					if len(entries) != len(want) {
+						t.Fatalf("captured %d creations, want %d", len(entries), len(want))
+					}
+					for i, entry := range entries {
+						root := 0
+						if isCreate3 && i == 1 {
+							root = -1
+							if pattern == "CREATE3" {
+								root = 1
+								if len(decoded.FactoryRoots) != 2 || decoded.FactoryRoots[1].Create3Helper != 1 {
+									t.Fatal("plan did not bind the final birth to the helper")
+								}
+							}
+						}
+						if entry.Address != want[i] || entry.Kind != kinds[i] || entry.Namespace != orgA || entry.FactoryRoot != root {
+							t.Errorf("creation %d differs from the expected ownership plan: %+v", i, entry)
+						}
+					}
+				})
+			})
+		}
+	}
+}
+
 func TestCreationIntentDeniedLaterFrameNeverExposesApprovedPlan(t *testing.T) {
 	for _, kind := range []string{"CALL", "SELFDESTRUCT"} {
 		t.Run(kind, func(t *testing.T) {

@@ -45,6 +45,8 @@ type CreationEntry struct {
 type CreationFactoryRoot struct {
 	Entry       int `json:"x"`
 	Declaration int `json:"d"`
+	// Create3Helper is the one-based plan entry of the CREATE2 helper.
+	Create3Helper int `json:"h,omitempty" optional:"true"`
 }
 
 type CreationPlanData struct {
@@ -207,6 +209,7 @@ func (n *Engine) captureCreations(ctx context.Context, v *runtimepolicy.View, or
 	scopes := make([]activeScope, len(records))
 	nearest := make([]int, len(records))
 	declarations := map[common.Address]int{}
+	create3Helpers := map[int]int{} // trace ordinal to qualified helper entry
 	for i, r := range records {
 		if ctx.Err() != nil || v.RequireLive() != nil {
 			return false
@@ -243,6 +246,17 @@ func (n *Engine) captureCreations(ctx context.Context, v *runtimepolicy.View, or
 					scope = activeScope{root: len(d.FactoryRoots), org: factory.OrganizationID}
 					d.FactoryRoots = append(d.FactoryRoots, CreationFactoryRoot{Entry: entryIndex, Declaration: declaration})
 					entry.FactoryRoot = scope.root
+					if r.Kind == executionfacts.Create2 && factory.Scope == policybundle.FactoryCreationSubtreeWithCreate3 {
+						create3Helpers[i] = entryIndex
+					}
+				}
+			}
+			if helperRecord, ok := executionfacts.Create3HelperRecord(records, i); ok && entry.FactoryRoot < 0 {
+				if helperEntry, qualified := create3Helpers[helperRecord]; qualified &&
+					d.Entries[helperEntry].Namespace == planned[i].org && planned[i-1].org == planned[i].org {
+					helperRoot := d.FactoryRoots[d.Entries[helperEntry].FactoryRoot]
+					entry.FactoryRoot = len(d.FactoryRoots)
+					d.FactoryRoots = append(d.FactoryRoots, CreationFactoryRoot{Entry: entryIndex, Declaration: helperRoot.Declaration, Create3Helper: helperEntry + 1})
 				}
 			}
 			d.Entries = append(d.Entries, entry)

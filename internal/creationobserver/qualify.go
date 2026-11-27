@@ -312,6 +312,16 @@ func matchCreations(work *WorkSnapshot, actual []rpcexecution.IncludedCreationRe
 				if froot.Entry < 0 || froot.Entry >= len(mapped) || mapped[froot.Entry] < 0 || froot.Declaration < 0 || froot.Declaration >= len(p.Declarations) || e.Namespace != p.Declarations[froot.Declaration].OrganizationID {
 					continue
 				}
+				if froot.Create3Helper > 0 {
+					if froot.Create3Helper > len(mapped) {
+						continue
+					}
+					helper := mapped[froot.Create3Helper-1]
+					final := byRecord[mapped[froot.Entry]]
+					if helper < 0 || !byRecord[helper].Survives || !final.Survives || final.Create3Helper != helper+1 {
+						continue
+					}
+				}
 			}
 			b := birthTemplates[record]
 			qualification, hashWork, err := associationDigest(proof, b, r.Seed, i, r.Kind, matches[r.Plan].paths[i], 2000000-workUsed)

@@ -9,7 +9,10 @@ constructors and source accessors reject it.
 
 The runtime document adds required `creationAttribution: {"factories": []}`.
 An empty list is valid. Each optional declaration contains exactly `address`,
-`organizationId`, `codeHash` and `scope: "same-namespace-creation-subtree"`.
+`organizationId`, `codeHash` and `scope`. Use
+`same-namespace-creation-subtree` for ordinary factory attribution or
+`same-namespace-creation-subtree-with-create3` to also recognize the V1 demo's
+CREATE3 helper.
 At most 64 unique factories are accepted. Each must have a current explicit
 registry owner matching its organization and a nonzero runtime hash. Shared
 infrastructure and precompiles cannot be factories. An address scope alone is
@@ -37,6 +40,37 @@ no actor or wallet. One reference covers the complete eligible factory-root set.
 Inherited scope stops at any foreign-organization frame, including an ordinary
 CALL, and resumes for unaffected siblings. A separately qualified factory can
 start its own scope. A proxy runtime pin does not freeze implementation/storage.
+
+### CREATE3 and initialization in the same transaction
+
+A `create` rule covers the `CREATE` and `CREATE2` opcodes. A subsequent call
+to a freshly created contract in the same transaction needs its own
+`deployment-context` permission. A proxy constructor's `DELEGATECALL` needs
+a rule that names the implementation in `codeAddress`. Factory attribution
+does not grant any of these execution permissions.
+
+CREATE3 is a factory pattern. The factory deploys the known helper via
+`CREATE2`, calls it, and the helper deploys the final contract via `CREATE`.
+With the CREATE3 scope enabled, OPS records a separate factory root for the
+final creation if the trace shows these three consecutive frames in the same
+transaction.
+It checks the factory's approved runtime pin, the helper's exact initcode and
+runtime, a direct call by the same factory in the same frame, and the
+helper's nonce-one child address. The helper forwards exactly the call's
+input and value to `CREATE`. The handoff attributes that final contract only.
+
+The creation observer independently recognizes the sequence in the mined trace
+and checks that both the helper and final contract survived. If the sequence
+does not match, the extra factory attribution is withheld. Ordinary subtree
+attribution and the existing transaction and grant checks still apply.
+Other helper bytecode and factory patterns need their own explicit support.
+Once the observer records ownership, an approved org-wide rule can match the
+new contract. Factory attribution by itself creates no registry entry or
+group grant.
+
+Upgrade the serving processes and creation observers before enabling this
+scope. Existing factory declarations and plans retain their meaning. The new
+scope and its journal entries require a build that understands CREATE3.
 
 These are admission-time intents. They establish neither actual inclusion nor
 historical ownership or individual-deployer permission. A simulation does not

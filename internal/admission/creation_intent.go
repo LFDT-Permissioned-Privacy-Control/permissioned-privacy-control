@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"privacy-proxy/internal/creationfacts"
 	"privacy-proxy/internal/nativeadmission"
 	"privacy-proxy/internal/policybundle"
@@ -136,7 +137,7 @@ func decodeCreationPlan(raw []byte, digest Digest, captured bool) (nativeadmissi
 	seen := map[common.Address]bool{}
 	for _, f := range p.Declarations {
 		a, err := ParseAddress(f.Address)
-		if err != nil || f.Address != AddressString(a) || a == (common.Address{}) || seen[a] || policycore.IsPraguePrecompile(a) || !ValidUUID(f.OrganizationID) || f.Scope != policybundle.FactoryCreationSubtree || len(f.CodeHash) != 66 || f.CodeHash != strings.ToLower(f.CodeHash) {
+		if err != nil || f.Address != AddressString(a) || a == (common.Address{}) || seen[a] || policycore.IsPraguePrecompile(a) || !ValidUUID(f.OrganizationID) || !policybundle.ValidFactoryAttributionScope(f.Scope) || len(f.CodeHash) != 66 || f.CodeHash != strings.ToLower(f.CodeHash) {
 			return p, ErrInvalid
 		}
 		h, err := hex.DecodeString(strings.TrimPrefix(f.CodeHash, "0x"))
@@ -163,8 +164,31 @@ func decodeCreationPlan(raw []byte, digest Digest, captured bool) (nativeadmissi
 				return p, ErrInvalid
 			}
 			f := p.Declarations[r.Declaration]
-			if f.OrganizationID != e.Namespace || p.Entries[r.Entry].Creator != common.HexToAddress(f.Address) || p.Entries[r.Entry].FactoryRoot != e.FactoryRoot {
+			root := p.Entries[r.Entry]
+			if f.OrganizationID != e.Namespace || root.FactoryRoot != e.FactoryRoot || r.Create3Helper < 0 {
 				return p, ErrInvalid
+			}
+			if r.Create3Helper == 0 {
+				if root.Creator != common.HexToAddress(f.Address) {
+					return p, ErrInvalid
+				}
+			} else {
+				helperIndex := r.Create3Helper - 1
+				if f.Scope != policybundle.FactoryCreationSubtreeWithCreate3 || helperIndex >= r.Entry || r.Entry != j {
+					return p, ErrInvalid
+				}
+				helper := p.Entries[helperIndex]
+				// Earlier entries have already passed the root bounds checks.
+				if helper.Kind != "CREATE2" || helper.Namespace != root.Namespace || helper.Creator != common.HexToAddress(f.Address) ||
+					helper.Address != root.Creator || root.Address != crypto.CreateAddress(helper.Address, 1) ||
+					root.Kind != "CREATE" || helper.CreationParent != root.CreationParent || helper.Depth+1 != root.Depth ||
+					helper.Record+2 != root.Record || helper.FactoryRoot < 0 {
+					return p, ErrInvalid
+				}
+				h := p.FactoryRoots[helper.FactoryRoot]
+				if h.Entry != helperIndex || h.Declaration != r.Declaration || h.Create3Helper != 0 {
+					return p, ErrInvalid
+				}
 			}
 			ancestor := j
 			for ancestor >= 0 && ancestor != r.Entry {

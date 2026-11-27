@@ -114,6 +114,20 @@ or deployment context. Review source changes and the exact generated artifact
 in Git; a successful command is not an approval. The runtime loader requires
 `manifest.json` and its listed files, without the authoring `draft.json`.
 
+## Nested calls and factory deployments
+
+Every execution frame needs a matching rule. To carry over V1's default
+same-org behavior for ordinary nested calls, an organization can use a rule
+with `targetClass: "org"`, `selector: "*"`, `minDepth: 1` and
+`callTypes: ["call", "staticcall"]` for the relevant groups. Groups that
+need less access can use specific target addresses and methods.
+
+For a proxy's `delegatecall`, name the proxy as the storage address and the
+approved implementation as the code address. A proxy constructor can use a
+`deployment-context` rule that names the implementation. See
+[creation intent journal](native-creation-intent.md#create3-and-initialization-in-the-same-transaction)
+for same-transaction initialization and the opt-in CREATE3 factory scope.
+
 ## Saved source packages and offline scenarios
 
 The separate CLI retains compatibility with `ops.ui-source-package/v1` packages:

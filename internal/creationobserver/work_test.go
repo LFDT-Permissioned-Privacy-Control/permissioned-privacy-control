@@ -251,3 +251,63 @@ func TestUniqueIncludedCreationAncestryAndIndependentAuthority(t *testing.T) {
 		})
 	}
 }
+
+func TestCreate3AttributionRequiresMinedHelperHandoff(t *testing.T) {
+	raw := testStoredWork(t)
+	p, err := a.DecodeCapturedCreationPlan(raw.Plans[0].Payload, raw.Plans[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Declarations[0].Scope = policybundle.FactoryCreationSubtreeWithCreate3
+	helper := &p.Entries[0]
+	helper.Kind = "CREATE2"
+	final := *helper
+	final.Address = crypto.CreateAddress(helper.Address, 1)
+	final.Creator, final.Caller = helper.Address, helper.Address
+	final.Kind, final.Depth, final.Record, final.FactoryRoot = "CREATE", 2, 3, 1
+	p.Entries = append(p.Entries, final)
+	p.FactoryRoots = append(p.FactoryRoots, nativeadmission.CreationFactoryRoot{Entry: 1, Declaration: 0, Create3Helper: 1})
+	payload, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := a.Digest(nativeadmission.CapturedCreationPlanDigest(payload))
+	plan := &raw.Plans[0]
+	plan.Payload, plan.Digest, plan.EntryCount = payload, digest, 2
+	ref := &raw.References[0]
+	ref.Plan = digest
+	ref.Seed = (a.CreationIntent{PlanDigest: digest, Factory: true, Anchor: rpcexecution.Anchor{Hash: ref.Anchor.Hash, Number: ref.Anchor.Number, Timestamp: ref.Anchor.Timestamp, Profile: ref.Profile}}).SeedDigest("FACTORY")
+	s, err := CompileStoredWork(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mined := func(e nativeadmission.CreationEntry, index int) rpcexecution.IncludedCreationRecord {
+		return rpcexecution.IncludedCreationRecord{Record: index, Parent: -1, Depth: e.Depth, Kind: e.Kind,
+			Address: e.Address, Creator: e.Creator, Caller: e.Caller, AddressKnown: true, CallerKnown: true,
+			InputHash: e.InputHash, Value: e.Value, OutputHash: crypto.Keccak256Hash([]byte{0x60, 0}), OutputLength: 2, Survives: true}
+	}
+	for _, tc := range []struct {
+		name       string
+		handoff    int
+		helperLive bool
+		want       int
+	}{
+		{"verified at different record numbers", 5, true, 2},
+		{"no handoff", 0, true, 1},
+		{"wrong helper", 6, true, 1},
+		{"helper did not survive", 5, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := []rpcexecution.IncludedCreationRecord{mined(p.Entries[0], 4), mined(final, 6)}
+			actual[0].Survives = tc.helperLive
+			actual[1].Create3Helper = tc.handoff
+			d, err := matchCreations(s, actual, common.HexToHash("0x999"), s.before.State.Head, 0)
+			if err != nil || len(d.Associations) != tc.want {
+				t.Fatalf("got %d factory associations, want %d: %v", len(d.Associations), tc.want, err)
+			}
+			if tc.want == 2 && (d.Associations[1].Record != 6 || d.Associations[1].FactoryRoot != 1) {
+				t.Fatal("final creation did not use the mined handoff")
+			}
+		})
+	}
+}

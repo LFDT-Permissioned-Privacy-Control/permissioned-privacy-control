@@ -44,6 +44,10 @@ type IncludedCreationRecord struct {
 	OutputHash                       common.Hash
 	OutputLength                     int
 	Failed, AncestorFailed, Survives bool
+	// Create3Helper is the one-based mined trace record of the verified helper.
+	// It is derived from the opaque proof's trace without changing the existing
+	// creation proof digest for a transaction already observed by an older worker.
+	Create3Helper int `json:"-"`
 }
 type IncludedSelfRecord struct {
 	Record, Parent, Depth  int
