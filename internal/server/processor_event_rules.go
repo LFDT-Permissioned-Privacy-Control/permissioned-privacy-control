@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
+	"slices"
 	"strings"
 
+	"privacy-proxy/internal/config"
+	"privacy-proxy/internal/proxy"
 	"privacy-proxy/internal/rbac"
 )
 
@@ -254,90 +258,115 @@ func (p *JSONRPCProcessor) buildVisibleToUnlockableMap(ctx context.Context, view
 	return rbac.UnlockableContracts(ctx, p.rbacAccessCtrl, viewerDID, contractAddrs)
 }
 
-// participantResolveMaxTxs caps how many unique transactions an eth_getLogs
-// response may reference before RD-1162 participant admission is skipped for
-// that response. Resolving senders costs one batched upstream round trip whose
-// payload grows with the unique-tx count; beyond the cap we fall back to
-// pre-RD-1162 behaviour (address/event-rule/visibleTo only) rather than issue an
-// unbounded batch. Skips are logged.
+// participantResolveMaxTxs bounds the total upstream lookup work for one eth_getLogs response.
 const participantResolveMaxTxs = 256
 
-// buildParticipantTxHashes resolves, for an eth_getLogs response, the set of the
-// response's transaction hashes (lowercase) that the caller participated in —
-// their linked address is the tx `from` or `to` (RD-1162). FilterEventLogs uses
-// this to admit logs of the caller's own transactions even when the event
-// carries no address of theirs, bounded there by contract-grant access.
-//
-// Log entries do not carry the sender, so each unique tx hash is resolved via a
-// single batched eth_getTransactionByHash call to the upstream node (bypassing
-// the client-facing batch rejection — this is a proxy→node call). Returns an
-// empty map (never nil-panics on lookup) when the caller has no linked
-// addresses, there are no tx hashes, the unique-tx count exceeds
-// participantResolveMaxTxs, or the upstream resolution fails — all fail toward
-// the pre-RD-1162 filtering, never toward over-exposure.
-func (p *JSONRPCProcessor) buildParticipantTxHashes(addrs []string, responseBody []byte) map[string]bool {
-	out := map[string]bool{}
+// buildParticipantTxHashes resolves which transactions in an eth_getLogs
+// response involve a linked address as from or to. The event filter uses this
+// to admit the caller's own transaction logs subject to the contract grant.
+// A failed chunk discards all participant results; the other visibility rules
+// still apply.
+func (p *JSONRPCProcessor) buildParticipantTxHashes(ctx context.Context, addrs []string, responseBody []byte) map[string]bool {
+	participants := make(map[string]bool)
 	if len(addrs) == 0 || p.proxy == nil {
-		return out
+		return participants
 	}
 	hashes := extractTxHashesFromResponse(responseBody)
 	if len(hashes) == 0 {
-		return out
+		return participants
 	}
 	if len(hashes) > participantResolveMaxTxs {
 		slog.Warn("RD-1162: getLogs response references too many txs to resolve senders; skipping participant admission",
 			"unique_txs", len(hashes), "cap", participantResolveMaxTxs)
-		return out
+		return participants
 	}
 
 	addrSet := make(map[string]bool, len(addrs))
-	for _, a := range addrs {
-		addrSet[strings.ToLower(a)] = true
+	for _, addr := range addrs {
+		addrSet[strings.ToLower(addr)] = true
 	}
 
-	// One batched eth_getTransactionByHash for all unique hashes. Results are
-	// matched by the returned tx's own hash, so batch ordering is irrelevant.
-	batch := make([]map[string]any, 0, len(hashes))
-	for i, h := range hashes {
-		batch = append(batch, map[string]any{
-			"jsonrpc": "2.0",
-			"method":  "eth_getTransactionByHash",
-			"params":  []any{h},
-			"id":      i,
-		})
+	batchSize := p.getLogsParticipantBatchSize
+	if batchSize < 1 {
+		batchSize = config.DefaultGetLogsParticipantBatchSize
 	}
-	reqBody, err := json.Marshal(batch)
-	if err != nil {
-		return out
+	// The chunks share the timeout previously available to a single lookup.
+	ctx, cancel := context.WithTimeout(ctx, proxy.DefaultTimeout)
+	defer cancel()
+	for chunk := range slices.Chunk(hashes, batchSize) {
+		if !p.addParticipantBatch(ctx, chunk, addrSet, participants) {
+			clear(participants)
+			break
+		}
 	}
-	respBody, _, err := p.proxy.Forward(reqBody)
+	return participants
+}
+
+type participantLookupTx struct {
+	Hash string `json:"hash"`
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// A null result means the transaction was unavailable. A missing result
+// means the upstream returned an incomplete response.
+type participantLookupResult struct {
+	present bool
+	tx      *participantLookupTx
+}
+
+func (r *participantLookupResult) UnmarshalJSON(data []byte) error {
+	r.present = true
+	return json.Unmarshal(data, &r.tx)
+}
+
+func (p *JSONRPCProcessor) addParticipantBatch(ctx context.Context, hashes []string, addrs, participants map[string]bool) bool {
+	requests := make([]proxy.JSONRPCRequest, len(hashes))
+	for i, hash := range hashes {
+		requests[i] = proxy.JSONRPCRequest{JSONRPC: "2.0", Method: "eth_getTransactionByHash", Params: []any{hash}, ID: i}
+	}
+	body, err := json.Marshal(requests)
 	if err != nil {
-		slog.Warn("RD-1162: failed to resolve tx senders for participant admission", "error", err)
-		return out
+		return false
+	}
+	body, status, err := p.proxy.ForwardContext(ctx, body)
+	if err != nil || status != http.StatusOK {
+		slog.Warn("RD-1162: failed to resolve tx senders for participant admission", "status", status, "error", err)
+		return false
 	}
 
-	var results []struct {
-		Result *struct {
-			Hash string `json:"hash"`
-			From string `json:"from"`
-			To   string `json:"to"`
-		} `json:"result"`
+	var replies []struct {
+		JSONRPC string                  `json:"jsonrpc"`
+		ID      *int                    `json:"id"`
+		Error   *proxy.RPCError         `json:"error"`
+		Result  participantLookupResult `json:"result"`
 	}
-	if err := json.Unmarshal(respBody, &results); err != nil {
-		slog.Warn("RD-1162: failed to parse tx-sender batch response", "error", err)
-		return out
+	if err := json.Unmarshal(body, &replies); err != nil || len(replies) != len(hashes) {
+		slog.Warn("RD-1162: invalid tx-sender batch response", "error", err)
+		return false
 	}
-	for _, r := range results {
-		if r.Result == nil {
+	seen := make([]bool, len(hashes))
+	for _, reply := range replies {
+		if reply.JSONRPC != "2.0" || reply.ID == nil || *reply.ID < 0 || *reply.ID >= len(hashes) ||
+			seen[*reply.ID] || reply.Error != nil || !reply.Result.present {
+			slog.Warn("RD-1162: invalid tx-sender batch reply")
+			return false
+		}
+		id := *reply.ID
+		seen[id] = true
+		tx := reply.Result.tx
+		if tx == nil {
 			continue
 		}
-		from := strings.ToLower(r.Result.From)
-		to := strings.ToLower(r.Result.To)
-		if addrSet[from] || (to != "" && addrSet[to]) {
-			out[strings.ToLower(r.Result.Hash)] = true
+		if !strings.EqualFold(tx.Hash, hashes[id]) {
+			slog.Warn("RD-1162: tx-sender batch reply hash differs from request")
+			return false
+		}
+		if addrs[strings.ToLower(tx.From)] || addrs[strings.ToLower(tx.To)] {
+			participants[hashes[id]] = true
 		}
 	}
-	return out
+	return true
 }
 
 // extractTxHashesFromResponse extracts unique transaction hashes from a JSON-RPC

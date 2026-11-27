@@ -55,3 +55,34 @@ func TestLoadPoolAndTransportEnvOverrides(t *testing.T) {
 		t.Errorf("NodeMaxConnsPerHost = 200, got %d", cfg.NodeMaxConnsPerHost)
 	}
 }
+
+func TestLoadGetLogsParticipantBatchSize(t *testing.T) {
+	resetFileConfig(t)
+	t.Setenv("CONFIG_FILE", "")
+	t.Setenv("GET_LOGS_PARTICIPANT_BATCH_SIZE", "")
+	if got := Load().GetLogsParticipantBatchSize; got != 100 {
+		t.Errorf("default batch size = %d, want 100", got)
+	}
+
+	t.Setenv("CONFIG_FILE", writeConfigFile(t, "version = 1\nGET_LOGS_PARTICIPANT_BATCH_SIZE = 80\n"))
+	if got := Load().GetLogsParticipantBatchSize; got != 80 {
+		t.Errorf("TOML batch size = %d, want 80", got)
+	}
+
+	t.Setenv("GET_LOGS_PARTICIPANT_BATCH_SIZE", "25")
+	if got := Load().GetLogsParticipantBatchSize; got != 25 {
+		t.Errorf("environment batch size = %d, want 25", got)
+	}
+
+	for _, value := range []string{"0", "-1", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("GET_LOGS_PARTICIPANT_BATCH_SIZE", value)
+			defer func() {
+				if got := recover(); got != "GET_LOGS_PARTICIPANT_BATCH_SIZE must be a positive integer" {
+					t.Errorf("invalid setting gave %v, want a configuration error", got)
+				}
+			}()
+			Load()
+		})
+	}
+}

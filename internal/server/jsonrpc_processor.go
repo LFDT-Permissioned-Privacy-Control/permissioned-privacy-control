@@ -49,6 +49,8 @@ type JSONRPCProcessor struct {
 	traceValidator    *rbac.TraceValidator
 	complianceChecker *compliance.Checker
 
+	getLogsParticipantBatchSize int
+
 	// Enhanced audit fields
 	enhancedLogger EnhancedAccessLogger
 	hashChain      *audit.HashChain
@@ -253,6 +255,8 @@ type JSONRPCProcessorConfig struct {
 	ConcurrencyLimiter *middleware.ConcurrencyLimiter
 	DefaultRPCAPIKey   string
 
+	GetLogsParticipantBatchSize int
+
 	// Optional send-path runtime tracing (nil = tracing-dependent methods
 	// keep their no-tracer behavior).
 	RuntimeTracer  *tracer.RuntimeTracer
@@ -319,6 +323,8 @@ func NewJSONRPCProcessor(cfg JSONRPCProcessorConfig) *JSONRPCProcessor {
 		visibilityKick:         cfg.VisibilityKick,
 		readProfile:            cfg.ReadProfile,
 		ethCallTraceTimeout:    5 * time.Second,
+
+		getLogsParticipantBatchSize: cfg.GetLogsParticipantBatchSize,
 	}
 	// RD-915 env install. Wire-level safe-by-default: a nil config keeps
 	// tracing ON.
@@ -1220,9 +1226,9 @@ func (p *JSONRPCProcessor) applyResponseFilter(ctx context.Context, req *Process
 		// batched upstream eth_getTransactionByHash (a no-op when the caller has
 		// no linked addresses or the unique-tx count exceeds the cap). The
 		// strict event predicate ignores participation (RD-1299), so the
-		// upstream batch is skipped there.
+		// upstream lookups are skipped there.
 		if !p.readProfile.Strict() {
-			if participants := p.buildParticipantTxHashes(addrs, responseBody); len(participants) > 0 {
+			if participants := p.buildParticipantTxHashes(ctx, addrs, responseBody); len(participants) > 0 {
 				if visCtx == nil {
 					visCtx = &rbac.TxVisibilityContext{ViewerDID: req.UserID}
 				}

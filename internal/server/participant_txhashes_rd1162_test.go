@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -91,7 +92,7 @@ func TestBuildParticipantTxHashes_ResolvesParticipants_RD1162(t *testing.T) {
 		{"address": contract, "topics": []string{"0xevt"}, "transactionHash": txCalldata},
 	})
 
-	got := p.buildParticipantTxHashes([]string{user}, resp)
+	got := p.buildParticipantTxHashes(t.Context(), []string{user}, resp)
 	if !got[txFrom] {
 		t.Errorf("tx with from=user must be a participant tx")
 	}
@@ -122,7 +123,7 @@ func TestBuildParticipantTxHashes_FailClosed_RD1162(t *testing.T) {
 
 	t.Run("no linked addresses -> empty (upstream not consulted)", func(t *testing.T) {
 		p := &JSONRPCProcessor{readProfile: rbac.ReadProfileStandard, proxy: proxy.New("http://127.0.0.1:1")}
-		if got := p.buildParticipantTxHashes(nil, resp); len(got) != 0 {
+		if got := p.buildParticipantTxHashes(t.Context(), nil, resp); len(got) != 0 {
 			t.Errorf("want empty, got %v", got)
 		}
 	})
@@ -132,7 +133,7 @@ func TestBuildParticipantTxHashes_FailClosed_RD1162(t *testing.T) {
 		url := down.URL
 		down.Close() // connection refused on Forward
 		p := &JSONRPCProcessor{readProfile: rbac.ReadProfileStandard, proxy: proxy.New(url)}
-		if got := p.buildParticipantTxHashes([]string{user}, resp); len(got) != 0 {
+		if got := p.buildParticipantTxHashes(t.Context(), []string{user}, resp); len(got) != 0 {
 			t.Errorf("want empty on upstream error, got %v", got)
 		}
 	})
@@ -143,7 +144,7 @@ func TestBuildParticipantTxHashes_FailClosed_RD1162(t *testing.T) {
 		}))
 		defer srv.Close()
 		p := &JSONRPCProcessor{readProfile: rbac.ReadProfileStandard, proxy: proxy.New(srv.URL)}
-		if got := p.buildParticipantTxHashes([]string{user}, resp); len(got) != 0 {
+		if got := p.buildParticipantTxHashes(t.Context(), []string{user}, resp); len(got) != 0 {
 			t.Errorf("want empty on unparseable response, got %v", got)
 		}
 	})
@@ -161,7 +162,7 @@ func TestBuildParticipantTxHashes_FailClosed_RD1162(t *testing.T) {
 		srv := fakeTxByHashNode(t, allTxs)
 		defer srv.Close()
 		p := &JSONRPCProcessor{readProfile: rbac.ReadProfileStandard, proxy: proxy.New(srv.URL)}
-		if got := p.buildParticipantTxHashes([]string{user}, getLogsRPCResponse(manyLogs)); len(got) != 0 {
+		if got := p.buildParticipantTxHashes(t.Context(), []string{user}, getLogsRPCResponse(manyLogs)); len(got) != 0 {
 			t.Errorf("over-cap response must skip participant resolution and return empty, got %d", len(got))
 		}
 	})
@@ -200,7 +201,7 @@ func TestGetLogsParticipantPath_AddresslessOwnTxLogAdmitted_RD1162(t *testing.T)
 		{"address": granted, "topics": []string{eventTopic0, recordKey}, "data": "0x", "transactionHash": txOther},
 	})
 
-	participants := p.buildParticipantTxHashes([]string{user}, resp)
+	participants := p.buildParticipantTxHashes(t.Context(), []string{user}, resp)
 	visCtx := &rbac.TxVisibilityContext{ParticipantTxHashes: participants}
 	got := FilterLogsWithEventRules(rbac.ReadProfileStandard, resp, []string{user}, perms, &testABIProviderServer{}, visCtx, nil)
 
@@ -217,5 +218,96 @@ func TestGetLogsParticipantPath_AddresslessOwnTxLogAdmitted_RD1162(t *testing.T)
 	}
 	if !strings.EqualFold(out.Result[0].TransactionHash, txMine) {
 		t.Errorf("admitted log should belong to the participant's own tx %s, got %s", txMine, out.Result[0].TransactionHash)
+	}
+}
+
+func TestGetLogsParticipantLookupBatches_RD1643(t *testing.T) {
+	const user = "0xabc1234567890123456789012345678901234567"
+	const contract = "0xcontract0000000000000000000000000000001"
+	eventTopic := "0x" + strings.Repeat("b", 64)
+	logs := make([]map[string]any, 0, participantResolveMaxTxs+1)
+	for i := range participantResolveMaxTxs {
+		logs = append(logs, map[string]any{
+			"address": contract, "topics": []string{eventTopic}, "data": "0x", "transactionHash": fmt.Sprintf("0x%064x", i),
+		})
+	}
+	// A second log from the same transaction must not create another lookup.
+	logs = append(logs, logs[0])
+	response := getLogsRPCResponse(logs)
+
+	for _, tt := range []struct {
+		name          string
+		configured    int
+		upstreamLimit int
+		failBatch     int
+		missingResult bool
+		wantSizes     []int
+		wantLogs      int
+	}{
+		{"default limit", 0, 100, 0, false, []int{100, 100, 56}, len(logs)},
+		{"smaller limit", 80, 80, 0, false, []int{80, 80, 80, 16}, len(logs)},
+		{"later batch fails", 0, 100, 2, false, []int{100, 100}, 0},
+		{"later batch missing a result", 0, 100, 2, true, []int{100, 100}, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			batchSizes := make(chan int, participantResolveMaxTxs)
+			node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var batch []proxy.JSONRPCRequest
+				if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				batchSizes <- len(batch)
+				fail := len(batchSizes) == tt.failBatch
+				if len(batch) > tt.upstreamLimit || (fail && !tt.missingResult) {
+					w.WriteHeader(http.StatusRequestEntityTooLarge)
+					return
+				}
+				replies := make([]proxy.JSONRPCResponse, 0, len(batch))
+				// Reverse the replies to verify that reply order does not matter.
+				for i := len(batch) - 1; i >= 0; i-- {
+					req := batch[i]
+					replies = append(replies, proxy.JSONRPCResponse{
+						JSONRPC: "2.0", ID: req.ID,
+						Result: map[string]any{"hash": req.Params[0], "from": user, "to": contract},
+					})
+				}
+				if fail && tt.missingResult {
+					replies[0].Result = nil
+				}
+				if err := json.NewEncoder(w).Encode(replies); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer node.Close()
+
+			p := NewJSONRPCProcessor(JSONRPCProcessorConfig{
+				Proxy: proxy.New(node.URL), GetLogsParticipantBatchSize: tt.configured,
+			})
+			participants := p.buildParticipantTxHashes(t.Context(), []string{user}, response)
+			var sizes []int
+			for len(batchSizes) > 0 {
+				sizes = append(sizes, <-batchSizes)
+			}
+			if !slices.Equal(sizes, tt.wantSizes) {
+				t.Errorf("batch sizes = %v, want %v", sizes, tt.wantSizes)
+			}
+
+			perms := &rbac.EffectivePermissions{ContractAccess: map[string]rbac.ContractAccess{
+				contract: {Claims: []rbac.Claim{}},
+			}}
+			visCtx := &rbac.TxVisibilityContext{ParticipantTxHashes: participants}
+			filtered := FilterLogsWithEventRules(rbac.ReadProfileStandard, response, []string{user}, perms, &testABIProviderServer{}, visCtx, nil)
+			var got struct {
+				Result []json.RawMessage `json:"result"`
+			}
+			if err := json.Unmarshal(filtered, &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Result) != tt.wantLogs {
+				t.Errorf("got %d visible logs, want %d", len(got.Result), tt.wantLogs)
+			}
+		})
 	}
 }
